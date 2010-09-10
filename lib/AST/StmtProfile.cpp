@@ -36,7 +36,7 @@ namespace {
     void VisitStmt(Stmt *S);
 
 #define STMT(Node, Base) void Visit##Node(Node *S);
-#include "clang/AST/StmtNodes.def"
+#include "clang/AST/StmtNodes.inc"
 
     /// \brief Visit a declaration that is referenced within an expression
     /// or statement.
@@ -211,9 +211,11 @@ void StmtProfiler::VisitExpr(Expr *S) {
 
 void StmtProfiler::VisitDeclRefExpr(DeclRefExpr *S) {
   VisitExpr(S);
-  VisitNestedNameSpecifier(S->getQualifier());
+  if (!Canonical)
+    VisitNestedNameSpecifier(S->getQualifier());
   VisitDecl(S->getDecl());
-  VisitTemplateArguments(S->getTemplateArgs(), S->getNumTemplateArgs());
+  if (!Canonical)
+    VisitTemplateArguments(S->getTemplateArgs(), S->getNumTemplateArgs());
 }
 
 void StmtProfiler::VisitPredefinedExpr(PredefinedExpr *S) {
@@ -261,6 +263,34 @@ void StmtProfiler::VisitUnaryOperator(UnaryOperator *S) {
   ID.AddInteger(S->getOpcode());
 }
 
+void StmtProfiler::VisitOffsetOfExpr(OffsetOfExpr *S) {
+  VisitType(S->getTypeSourceInfo()->getType());
+  unsigned n = S->getNumComponents();
+  for (unsigned i = 0; i < n; ++i) {
+    const OffsetOfExpr::OffsetOfNode& ON = S->getComponent(i);
+    ID.AddInteger(ON.getKind());
+    switch (ON.getKind()) {
+    case OffsetOfExpr::OffsetOfNode::Array:
+      // Expressions handled below.
+      break;
+
+    case OffsetOfExpr::OffsetOfNode::Field:
+      VisitDecl(ON.getField());
+      break;
+
+    case OffsetOfExpr::OffsetOfNode::Identifier:
+      ID.AddPointer(ON.getFieldName());
+      break;
+        
+    case OffsetOfExpr::OffsetOfNode::Base:
+      // These nodes are implicit, and therefore don't need profiling.
+      break;
+    }
+  }
+  
+  VisitExpr(S);
+}
+
 void StmtProfiler::VisitSizeOfAlignOfExpr(SizeOfAlignOfExpr *S) {
   VisitExpr(S);
   ID.AddBoolean(S->isSizeOf());
@@ -279,7 +309,8 @@ void StmtProfiler::VisitCallExpr(CallExpr *S) {
 void StmtProfiler::VisitMemberExpr(MemberExpr *S) {
   VisitExpr(S);
   VisitDecl(S->getMemberDecl());
-  VisitNestedNameSpecifier(S->getQualifier());
+  if (!Canonical)
+    VisitNestedNameSpecifier(S->getQualifier());
   ID.AddBoolean(S->isArrow());
 }
 
@@ -294,7 +325,7 @@ void StmtProfiler::VisitCastExpr(CastExpr *S) {
 
 void StmtProfiler::VisitImplicitCastExpr(ImplicitCastExpr *S) {
   VisitCastExpr(S);
-  ID.AddBoolean(S->isLvalueCast());
+  ID.AddInteger(S->getValueKind());
 }
 
 void StmtProfiler::VisitExplicitCastExpr(ExplicitCastExpr *S) {
@@ -400,9 +431,219 @@ void StmtProfiler::VisitBlockDeclRefExpr(BlockDeclRefExpr *S) {
   VisitDecl(S->getDecl());
   ID.AddBoolean(S->isByRef());
   ID.AddBoolean(S->isConstQualAdded());
+  if (S->getCopyConstructorExpr())
+    Visit(S->getCopyConstructorExpr());
 }
 
+static Stmt::StmtClass DecodeOperatorCall(CXXOperatorCallExpr *S,
+                                          UnaryOperatorKind &UnaryOp,
+                                          BinaryOperatorKind &BinaryOp) {
+  switch (S->getOperator()) {
+  case OO_None:
+  case OO_New:
+  case OO_Delete:
+  case OO_Array_New:
+  case OO_Array_Delete:
+  case OO_Arrow:
+  case OO_Call:
+  case OO_Conditional:
+  case NUM_OVERLOADED_OPERATORS:
+    llvm_unreachable("Invalid operator call kind");
+    return Stmt::ArraySubscriptExprClass;
+      
+  case OO_Plus:
+    if (S->getNumArgs() == 1) {
+      UnaryOp = UO_Plus;
+      return Stmt::UnaryOperatorClass;
+    }
+    
+    BinaryOp = BO_Add;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_Minus:
+    if (S->getNumArgs() == 1) {
+      UnaryOp = UO_Minus;
+      return Stmt::UnaryOperatorClass;
+    }
+    
+    BinaryOp = BO_Sub;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Star:
+    if (S->getNumArgs() == 1) {
+      UnaryOp = UO_Minus;
+      return Stmt::UnaryOperatorClass;
+    }
+    
+    BinaryOp = BO_Sub;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Slash:
+    BinaryOp = BO_Div;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_Percent:
+    BinaryOp = BO_Rem;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Caret:
+    BinaryOp = BO_Xor;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Amp:
+    if (S->getNumArgs() == 1) {
+      UnaryOp = UO_AddrOf;
+      return Stmt::UnaryOperatorClass;
+    }
+    
+    BinaryOp = BO_And;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_Pipe:
+    BinaryOp = BO_Or;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Tilde:
+    UnaryOp = UO_Not;
+    return Stmt::UnaryOperatorClass;
+
+  case OO_Exclaim:
+    UnaryOp = UO_LNot;
+    return Stmt::UnaryOperatorClass;
+
+  case OO_Equal:
+    BinaryOp = BO_Assign;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Less:
+    BinaryOp = BO_LT;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_Greater:
+    BinaryOp = BO_GT;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_PlusEqual:
+    BinaryOp = BO_AddAssign;
+    return Stmt::CompoundAssignOperatorClass;
+
+  case OO_MinusEqual:
+    BinaryOp = BO_SubAssign;
+    return Stmt::CompoundAssignOperatorClass;
+
+  case OO_StarEqual:
+    BinaryOp = BO_MulAssign;
+    return Stmt::CompoundAssignOperatorClass;
+
+  case OO_SlashEqual:
+    BinaryOp = BO_DivAssign;
+    return Stmt::CompoundAssignOperatorClass;
+
+  case OO_PercentEqual:
+    BinaryOp = BO_RemAssign;
+    return Stmt::CompoundAssignOperatorClass;
+
+  case OO_CaretEqual:
+    BinaryOp = BO_XorAssign;
+    return Stmt::CompoundAssignOperatorClass;
+    
+  case OO_AmpEqual:
+    BinaryOp = BO_AndAssign;
+    return Stmt::CompoundAssignOperatorClass;
+    
+  case OO_PipeEqual:
+    BinaryOp = BO_OrAssign;
+    return Stmt::CompoundAssignOperatorClass;
+      
+  case OO_LessLess:
+    BinaryOp = BO_Shl;
+    return Stmt::BinaryOperatorClass;
+    
+  case OO_GreaterGreater:
+    BinaryOp = BO_Shr;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_LessLessEqual:
+    BinaryOp = BO_ShlAssign;
+    return Stmt::CompoundAssignOperatorClass;
+    
+  case OO_GreaterGreaterEqual:
+    BinaryOp = BO_ShrAssign;
+    return Stmt::CompoundAssignOperatorClass;
+
+  case OO_EqualEqual:
+    BinaryOp = BO_EQ;
+    return Stmt::BinaryOperatorClass;
+    
+  case OO_ExclaimEqual:
+    BinaryOp = BO_NE;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_LessEqual:
+    BinaryOp = BO_LE;
+    return Stmt::BinaryOperatorClass;
+    
+  case OO_GreaterEqual:
+    BinaryOp = BO_GE;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_AmpAmp:
+    BinaryOp = BO_LAnd;
+    return Stmt::BinaryOperatorClass;
+    
+  case OO_PipePipe:
+    BinaryOp = BO_LOr;
+    return Stmt::BinaryOperatorClass;
+
+  case OO_PlusPlus:
+    UnaryOp = S->getNumArgs() == 1? UO_PreInc 
+                                  : UO_PostInc;
+    return Stmt::UnaryOperatorClass;
+
+  case OO_MinusMinus:
+    UnaryOp = S->getNumArgs() == 1? UO_PreDec
+                                  : UO_PostDec;
+    return Stmt::UnaryOperatorClass;
+
+  case OO_Comma:
+    BinaryOp = BO_Comma;
+    return Stmt::BinaryOperatorClass;
+
+
+  case OO_ArrowStar:
+    BinaryOp = BO_PtrMemI;
+    return Stmt::BinaryOperatorClass;
+      
+  case OO_Subscript:
+    return Stmt::ArraySubscriptExprClass;
+  }
+  
+  llvm_unreachable("Invalid overloaded operator expression");
+}
+                               
+
 void StmtProfiler::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *S) {
+  if (S->isTypeDependent()) {
+    // Type-dependent operator calls are profiled like their underlying
+    // syntactic operator.
+    UnaryOperatorKind UnaryOp = UO_Extension;
+    BinaryOperatorKind BinaryOp = BO_Comma;
+    Stmt::StmtClass SC = DecodeOperatorCall(S, UnaryOp, BinaryOp);
+    
+    ID.AddInteger(SC);
+    for (unsigned I = 0, N = S->getNumArgs(); I != N; ++I)
+      Visit(S->getArg(I));
+    if (SC == Stmt::UnaryOperatorClass)
+      ID.AddInteger(UnaryOp);
+    else if (SC == Stmt::BinaryOperatorClass || 
+             SC == Stmt::CompoundAssignOperatorClass)
+      ID.AddInteger(BinaryOp);
+    else
+      assert(SC == Stmt::ArraySubscriptExprClass);
+                    
+    return;
+  }
+  
   VisitCallExpr(S);
   ID.AddInteger(S->getOperator());
 }
@@ -483,7 +724,7 @@ void StmtProfiler::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *S) {
   VisitCXXConstructExpr(S);
 }
 
-void StmtProfiler::VisitCXXZeroInitValueExpr(CXXZeroInitValueExpr *S) {
+void StmtProfiler::VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *S) {
   VisitExpr(S);
 }
 
@@ -516,14 +757,19 @@ void StmtProfiler::VisitCXXPseudoDestructorExpr(CXXPseudoDestructorExpr *S) {
   VisitType(S->getDestroyedType());
 }
 
-void
-StmtProfiler::VisitUnresolvedLookupExpr(UnresolvedLookupExpr *S) {
+void StmtProfiler::VisitOverloadExpr(OverloadExpr *S) {
   VisitExpr(S);
   VisitNestedNameSpecifier(S->getQualifier());
   VisitName(S->getName());
   ID.AddBoolean(S->hasExplicitTemplateArgs());
   if (S->hasExplicitTemplateArgs())
-    VisitTemplateArguments(S->getTemplateArgs(), S->getNumTemplateArgs());
+    VisitTemplateArguments(S->getExplicitTemplateArgs().getTemplateArgs(),
+                           S->getExplicitTemplateArgs().NumTemplateArgs);
+}
+
+void
+StmtProfiler::VisitUnresolvedLookupExpr(UnresolvedLookupExpr *S) {
+  VisitOverloadExpr(S);
 }
 
 void StmtProfiler::VisitUnaryTypeTraitExpr(UnaryTypeTraitExpr *S) {

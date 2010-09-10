@@ -18,10 +18,13 @@ add_clang_library(clangAST
   DeclPrinter.cpp
   DeclTemplate.cpp
   Expr.cpp
+  ExprClassification.cpp
   ExprConstant.cpp
   ExprCXX.cpp
   FullExpr.cpp
   InheritViz.cpp
+  ItaniumCXXABI.cpp
+  MicrosoftCXXABI.cpp
   NestedNameSpecifier.cpp
   ParentMap.cpp
   RecordLayout.cpp
@@ -39,4 +42,5 @@ add_clang_library(clangAST
   TypePrinter.cpp
   )
 
-add_dependencies(clangAST ClangDiagnosticAST)
+add_dependencies(clangAST ClangARMNeon ClangAttrClasses ClangAttrList 
+                 ClangAttrImpl ClangDiagnosticAST ClangDeclNodes ClangStmtNodes)

@@ -21,6 +21,11 @@ StoreManager::StoreManager(GRStateManager &stateMgr)
   : ValMgr(stateMgr.getValueManager()), StateMgr(stateMgr),
     MRMgr(ValMgr.getRegionManager()), Ctx(stateMgr.getContext()) {}
 
+Store StoreManager::EnterStackFrame(const GRState *state,
+                                    const StackFrameContext *frame) {
+  return state->getStore();
+}
+
 const MemRegion *StoreManager::MakeElementRegion(const MemRegion *Base,
                                               QualType EleTy, uint64_t index) {
   SVal idx = ValMgr.makeArrayIndex(index);
@@ -78,7 +83,7 @@ const MemRegion *StoreManager::CastRegion(const MemRegion *R, QualType CastToTy)
   // Handle casts from compatible types.
   if (R->isBoundable())
     if (const TypedRegion *TR = dyn_cast<TypedRegion>(R)) {
-      QualType ObjTy = Ctx.getCanonicalType(TR->getValueType(Ctx));
+      QualType ObjTy = Ctx.getCanonicalType(TR->getValueType());
       if (CanonPointeeTy == ObjTy)
         return R;
     }
@@ -91,7 +96,8 @@ const MemRegion *StoreManager::CastRegion(const MemRegion *R, QualType CastToTy)
     case MemRegion::StackArgumentsSpaceRegionKind:
     case MemRegion::HeapSpaceRegionKind:
     case MemRegion::UnknownSpaceRegionKind:
-    case MemRegion::GlobalsSpaceRegionKind: {
+    case MemRegion::NonStaticGlobalSpaceRegionKind:
+    case MemRegion::StaticGlobalSpaceRegionKind: {
       assert(0 && "Invalid region cast");
       break;
     }
@@ -138,7 +144,7 @@ const MemRegion *StoreManager::CastRegion(const MemRegion *R, QualType CastToTy)
       // FIXME: Handle symbolic raw offsets.
 
       const ElementRegion *elementR = cast<ElementRegion>(R);
-      const RegionRawOffset &rawOff = elementR->getAsRawOffset();
+      const RegionRawOffset &rawOff = elementR->getAsArrayOffset();
       const MemRegion *baseR = rawOff.getRegion();
 
       // If we cannot compute a raw offset, throw up our hands and return
@@ -153,7 +159,7 @@ const MemRegion *StoreManager::CastRegion(const MemRegion *R, QualType CastToTy)
         // check to see if type we are casting to is the same as the base
         // region.  If so, just return the base region.
         if (const TypedRegion *TR = dyn_cast<TypedRegion>(baseR)) {
-          QualType ObjTy = Ctx.getCanonicalType(TR->getValueType(Ctx));
+          QualType ObjTy = Ctx.getCanonicalType(TR->getValueType());
           QualType CanonPointeeTy = Ctx.getCanonicalType(PointeeTy);
           if (CanonPointeeTy == ObjTy)
             return baseR;
@@ -216,7 +222,7 @@ SVal StoreManager::CastRetrievedVal(SVal V, const TypedRegion *R,
 
   if (performTestOnly) {  
     // Automatically translate references to pointers.
-    QualType T = R->getValueType(Ctx);
+    QualType T = R->getValueType();
     if (const ReferenceType *RT = T->getAs<ReferenceType>())
       T = Ctx.getPointerType(RT->getPointeeType());
     
@@ -230,17 +236,6 @@ SVal StoreManager::CastRetrievedVal(SVal V, const TypedRegion *R,
     return ValMgr.getSValuator().EvalCastNL(*NL, castTy);
   
   return V;
-}
-
-Store StoreManager::InvalidateRegions(Store store,
-                                      const MemRegion * const *I,
-                                      const MemRegion * const *End,
-                                      const Expr *E, unsigned Count,
-                                      InvalidatedSymbols *IS) {
-  for ( ; I != End ; ++I)
-    store = InvalidateRegion(store, *I, E, Count, IS);
-  
-  return store;
 }
 
 SVal StoreManager::getLValueFieldOrIvar(const Decl* D, SVal Base) {
@@ -289,10 +284,6 @@ SVal StoreManager::getLValueElement(QualType elementType, SVal Offset,
   if (Base.isUnknownOrUndef() || isa<loc::ConcreteInt>(Base))
     return Base;
 
-  // Only handle integer offsets... for now.
-  if (!isa<nonloc::ConcreteInt>(Offset))
-    return UnknownVal();
-
   const MemRegion* BaseRegion = cast<loc::MemRegionVal>(Base).getRegion();
 
   // Pointer of any type can be cast and used as array base.
@@ -321,6 +312,19 @@ SVal StoreManager::getLValueElement(QualType elementType, SVal Offset,
     return UnknownVal();
 
   const llvm::APSInt& BaseIdxI = cast<nonloc::ConcreteInt>(BaseIdx).getValue();
+
+  // Only allow non-integer offsets if the base region has no offset itself.
+  // FIXME: This is a somewhat arbitrary restriction. We should be using
+  // SValuator here to add the two offsets without checking their types.
+  if (!isa<nonloc::ConcreteInt>(Offset)) {
+    if (isa<ElementRegion>(BaseRegion->StripCasts()))
+      return UnknownVal();
+
+    return loc::MemRegionVal(MRMgr.getElementRegion(elementType, Offset,
+                                                    ElemR->getSuperRegion(),
+                                                    Ctx));
+  }
+
   const llvm::APSInt& OffI = cast<nonloc::ConcreteInt>(Offset).getValue();
   assert(BaseIdxI.isSigned());
 

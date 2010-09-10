@@ -1,4 +1,4 @@
-// RUN: %clang -fsyntax-only -verify %s
+// RUN: %clang_cc1 -fsyntax-only -verify %s
 
 namespace test0 {
   namespace ns0 {
@@ -31,3 +31,4 @@ namespace test1 {
     using test1::foo;
   }
 }
+

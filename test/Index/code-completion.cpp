@@ -15,9 +15,9 @@ struct Z : X, Y {
   double member;
   operator int() const;
 };
-
+struct W { };
 struct Z get_Z();
-
+namespace N { }
 void test_Z() {
   // RUN: c-index-test -code-completion-at=%s:23:11 %s | FileCheck -check-prefix=CHECK-MEMBER %s
   get_Z().member = 17;
@@ -31,6 +31,10 @@ int& overloaded(Z z, int second);
 void test_overloaded() {
   // RUN: c-index-test -code-completion-at=%s:33:18 %s | FileCheck -check-prefix=CHECK-OVERLOAD %s
   overloaded(Z(), 0);
+}
+
+Z::operator int() const {
+  return 0;
 }
 
 // CHECK-MEMBER: FieldDecl:{ResultType double}{TypedText member}
@@ -52,3 +56,12 @@ void test_overloaded() {
 // CHECK-OVERLOAD: NotImplemented:{ResultType int &}{Text overloaded}{LeftParen (}{Text Z z}{Comma , }{CurrentParameter int second}{RightParen )}
 // CHECK-OVERLOAD: NotImplemented:{ResultType float &}{Text overloaded}{LeftParen (}{Text int i}{Comma , }{CurrentParameter long second}{RightParen )}
 // CHECK-OVERLOAD: NotImplemented:{ResultType double &}{Text overloaded}{LeftParen (}{Text float f}{Comma , }{CurrentParameter int second}{RightParen )}
+
+// RUN: c-index-test -code-completion-at=%s:37:10 %s | FileCheck -check-prefix=CHECK-EXPR %s
+// CHECK-EXPR: NotImplemented:{TypedText int} (65)
+// CHECK-EXPR: NotImplemented:{TypedText long} (65)
+// CHECK-EXPR: FieldDecl:{ResultType double}{TypedText member} (10)
+// CHECK-EXPR: FieldDecl:{ResultType int}{Text X::}{TypedText member} (5)
+// CHECK-EXPR: FieldDecl:{ResultType float}{Text Y::}{TypedText member} (11)
+// CHECK-EXPR: FunctionDecl:{ResultType void}{TypedText memfunc}{LeftParen (}{Optional {Placeholder int i}}{RightParen )} (22)
+// CHECK-EXPR: NotImplemented:{TypedText N}{Text ::} (75)

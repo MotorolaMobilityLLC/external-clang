@@ -14,7 +14,25 @@
 
 // The format of this database matches clang/Basic/Builtins.def.
 
-// FIXME: This is just a placeholder. NEON intrinsics should be listed here.
+// In libgcc
+BUILTIN(__clear_cache, "v.", "")
 BUILTIN(__builtin_thread_pointer, "v*", "")
+
+// Saturating arithmetic
+BUILTIN(__builtin_arm_qadd, "iii", "nc")
+BUILTIN(__builtin_arm_qsub, "iii", "nc")
+BUILTIN(__builtin_arm_ssat, "iiUi", "nc")
+BUILTIN(__builtin_arm_usat, "UiUiUi", "nc")
+
+// VFP
+BUILTIN(__builtin_arm_get_fpscr, "Ui", "nc")
+BUILTIN(__builtin_arm_set_fpscr, "vUi", "nc")
+BUILTIN(__builtin_arm_vcvtr_f, "ffi", "nc")
+BUILTIN(__builtin_arm_vcvtr_d, "fdi", "nc")
+
+// NEON
+#define GET_NEON_BUILTINS
+#include "clang/Basic/arm_neon.inc"
+#undef GET_NEON_BUILTINS
 
 #undef BUILTIN

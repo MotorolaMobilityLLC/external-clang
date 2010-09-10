@@ -13,7 +13,7 @@
 
 #include "clang/CodeGen/ModuleBuilder.h"
 #include "CodeGenModule.h"
-#include "clang/CodeGen/CodeGenOptions.h"
+#include "clang/Frontend/CodeGenOptions.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/Expr.h"
@@ -88,6 +88,13 @@ namespace {
         return;
 
       Builder->EmitTentativeDefinition(D);
+    }
+
+    virtual void HandleVTable(CXXRecordDecl *RD, bool DefinitionRequired) {
+      if (Diags.hasErrorOccurred())
+        return;
+
+      Builder->EmitVTable(RD, DefinitionRequired);
     }
   };
 }

@@ -22,6 +22,7 @@
 #include "CGCall.h"
 #include "CGCXX.h"
 #include "CGVTables.h"
+#include "CGCXXABI.h"
 #include "CodeGenTypes.h"
 #include "GlobalDecl.h"
 #include "Mangle.h"
@@ -74,6 +75,25 @@ namespace CodeGen {
   class CGObjCRuntime;
   class MangleBuffer;
   
+  struct OrderGlobalInits {
+    unsigned int priority;
+    unsigned int lex_order;
+    OrderGlobalInits(unsigned int p, unsigned int l) 
+      : priority(p), lex_order(l) {}
+    
+    bool operator==(const OrderGlobalInits &RHS) const {
+      return priority == RHS.priority &&
+             lex_order == RHS.lex_order;
+    }
+    
+    bool operator<(const OrderGlobalInits &RHS) const {
+      if (priority < RHS.priority)
+        return true;
+      
+      return priority == RHS.priority && lex_order < RHS.lex_order;
+    }
+  };
+  
 /// CodeGenModule - This class organizes the cross-function state that is used
 /// while generating LLVM code.
 class CodeGenModule : public BlockModule {
@@ -89,8 +109,8 @@ class CodeGenModule : public BlockModule {
   const llvm::TargetData &TheTargetData;
   mutable const TargetCodeGenInfo *TheTargetCodeGenInfo;
   Diagnostic &Diags;
+  CGCXXABI &ABI;
   CodeGenTypes Types;
-  MangleContext MangleCtx;
 
   /// VTables - Holds information about C++ vtables.
   CodeGenVTables VTables;
@@ -129,6 +149,10 @@ class CodeGenModule : public BlockModule {
   /// priorities to be emitted when the translation unit is complete.
   CtorList GlobalDtors;
 
+  /// MangledDeclNames - A map of canonical GlobalDecls to their mangled names.
+  llvm::DenseMap<GlobalDecl, llvm::StringRef> MangledDeclNames;
+  llvm::BumpPtrAllocator MangledNamesAllocator;
+  
   std::vector<llvm::Constant*> Annotations;
 
   llvm::StringMap<llvm::Constant*> CFConstantStringMap;
@@ -139,9 +163,21 @@ class CodeGenModule : public BlockModule {
   /// before main.
   std::vector<llvm::Constant*> CXXGlobalInits;
 
+  /// When a C++ decl with an initializer is deferred, null is
+  /// appended to CXXGlobalInits, and the index of that null is placed
+  /// here so that the initializer will be performed in the correct
+  /// order.
+  llvm::DenseMap<const Decl*, unsigned> DelayedCXXInitPosition;
+  
+  /// - Global variables with initializers whose order of initialization
+  /// is set by init_priority attribute.
+  
+  llvm::SmallVector<std::pair<OrderGlobalInits, llvm::Function*>, 8> 
+    PrioritizedCXXGlobalInits;
+
   /// CXXGlobalDtors - Global destructor functions and arguments that need to
   /// run on termination.
-  std::vector<std::pair<llvm::Constant*,llvm::Constant*> > CXXGlobalDtors;
+  std::vector<std::pair<llvm::WeakVH,llvm::Constant*> > CXXGlobalDtors;
 
   /// CFConstantStringClassRef - Cached reference to the class for constant
   /// strings. This value has type int * but is actually an Obj-C class pointer.
@@ -155,6 +191,21 @@ class CodeGenModule : public BlockModule {
   void createObjCRuntime();
 
   llvm::LLVMContext &VMContext;
+
+  /// @name Cache for Blocks Runtime Globals
+  /// @{
+
+  const VarDecl *NSConcreteGlobalBlockDecl;
+  const VarDecl *NSConcreteStackBlockDecl;
+  llvm::Constant *NSConcreteGlobalBlock;
+  llvm::Constant *NSConcreteStackBlock;
+
+  const FunctionDecl *BlockObjectAssignDecl;
+  const FunctionDecl *BlockObjectDisposeDecl;
+  llvm::Constant *BlockObjectAssign;
+  llvm::Constant *BlockObjectDispose;
+
+  /// @}
 public:
   CodeGenModule(ASTContext &C, const CodeGenOptions &CodeGenOpts,
                 llvm::Module &M, const llvm::TargetData &TD, Diagnostic &Diags);
@@ -175,6 +226,9 @@ public:
   /// been configured.
   bool hasObjCRuntime() { return !!Runtime; }
 
+  /// getCXXABI() - Return a reference to the configured C++ ABI.
+  CGCXXABI &getCXXABI() { return ABI; }
+
   llvm::Value *getStaticLocalDeclAddress(const VarDecl *VD) {
     return StaticLocalDeclMap[VD];
   }
@@ -189,12 +243,14 @@ public:
   const LangOptions &getLangOptions() const { return Features; }
   llvm::Module &getModule() const { return TheModule; }
   CodeGenTypes &getTypes() { return Types; }
-  MangleContext &getMangleContext() { return MangleCtx; }
+  MangleContext &getMangleContext() {
+    return ABI.getMangleContext();
+  }
   CodeGenVTables &getVTables() { return VTables; }
   Diagnostic &getDiags() const { return Diags; }
   const llvm::TargetData &getTargetData() const { return TheTargetData; }
   llvm::LLVMContext &getLLVMContext() { return VMContext; }
-  const TargetCodeGenInfo &getTargetCodeGenInfo() const;
+  const TargetCodeGenInfo &getTargetCodeGenInfo();
   bool isTargetDarwin() const;
 
   /// getDeclVisibilityMode - Compute the visibility of the decl \arg D.
@@ -203,6 +259,11 @@ public:
   /// setGlobalVisibility - Set the visibility for the given LLVM
   /// GlobalValue.
   void setGlobalVisibility(llvm::GlobalValue *GV, const Decl *D) const;
+
+  /// setTypeVisibility - Set the visibility for the given global
+  /// value which holds information about a type.
+  void setTypeVisibility(llvm::GlobalValue *GV, const CXXRecordDecl *D,
+                         bool IsForRTTI) const;
 
   llvm::Constant *GetAddrOfGlobal(GlobalDecl GD) {
     if (isa<CXXConstructorDecl>(GD.getDecl()))
@@ -232,7 +293,7 @@ public:
 
   /// GetAddrOfRTTIDescriptor - Get the address of the RTTI descriptor 
   /// for the given type.
-  llvm::Constant *GetAddrOfRTTIDescriptor(QualType Ty);
+  llvm::Constant *GetAddrOfRTTIDescriptor(QualType Ty, bool ForEH = false);
 
   /// GetAddrOfThunk - Get the address of the thunk for the given global decl.
   llvm::Constant *GetAddrOfThunk(GlobalDecl GD, const ThunkInfo &Thunk);
@@ -244,7 +305,8 @@ public:
   /// a class. Returns null if the offset is 0. 
   llvm::Constant *
   GetNonVirtualBaseClassOffset(const CXXRecordDecl *ClassDecl,
-                               const CXXBaseSpecifierArray &BasePath);
+                               CastExpr::path_const_iterator PathBegin,
+                               CastExpr::path_const_iterator PathEnd);
   
   /// GetStringForStringLiteral - Return the appropriate bytes for a string
   /// literal, properly padded to match the literal type. If only the address of
@@ -330,7 +392,9 @@ public:
 
   /// AddCXXDtorEntry - Add a destructor and object to add to the C++ global
   /// destructor function.
-  void AddCXXDtorEntry(llvm::Constant *DtorFn, llvm::Constant *Object);
+  void AddCXXDtorEntry(llvm::Constant *DtorFn, llvm::Constant *Object) {
+    CXXGlobalDtors.push_back(std::make_pair(DtorFn, Object));
+  }
 
   /// CreateRuntimeFunction - Create a new runtime function with the specified
   /// type and name.
@@ -340,6 +404,16 @@ public:
   /// specified type and name.
   llvm::Constant *CreateRuntimeVariable(const llvm::Type *Ty,
                                         llvm::StringRef Name);
+
+  ///@name Custom Blocks Runtime Interfaces
+  ///@{
+
+  llvm::Constant *getNSConcreteGlobalBlock();
+  llvm::Constant *getNSConcreteStackBlock();
+  llvm::Constant *getBlockObjectAssign();
+  llvm::Constant *getBlockObjectDispose();
+
+  ///@}
 
   void UpdateCompletedType(const TagDecl *TD) {
     // Make sure that this type is translated.
@@ -359,8 +433,6 @@ public:
 
   llvm::Constant *EmitAnnotateAttr(llvm::GlobalValue *GV,
                                    const AnnotateAttr *AA, unsigned LineNo);
-
-  llvm::Constant *EmitPointerToDataMember(const FieldDecl *FD);
 
   /// ErrorUnsupported - Print out an error that codegen doesn't support the
   /// specified stmt yet.
@@ -393,9 +465,13 @@ public:
   /// which only apply to a function definintion.
   void SetLLVMFunctionAttributesForDefinition(const Decl *D, llvm::Function *F);
 
-  /// ReturnTypeUsesSret - Return true iff the given type uses 'sret' when used
+  /// ReturnTypeUsesSRet - Return true iff the given type uses 'sret' when used
   /// as a return type.
-  bool ReturnTypeUsesSret(const CGFunctionInfo &FI);
+  bool ReturnTypeUsesSRet(const CGFunctionInfo &FI);
+
+  /// ReturnTypeUsesSret - Return true iff the given type uses 'fpret' when used
+  /// as a return type.
+  bool ReturnTypeUsesFPRet(QualType ResultType);
 
   /// ConstructAttributeList - Get the LLVM attributes and calling convention to
   /// use for a particular function type.
@@ -411,28 +487,19 @@ public:
                               AttributeListType &PAL,
                               unsigned &CallingConv);
 
-  void getMangledName(MangleBuffer &Buffer, GlobalDecl D);
-  void getMangledName(MangleBuffer &Buffer, const NamedDecl *ND);
-  void getMangledCXXCtorName(MangleBuffer &Buffer,
-                             const CXXConstructorDecl *D,
-                             CXXCtorType Type);
-  void getMangledCXXDtorName(MangleBuffer &Buffer,
-                             const CXXDestructorDecl *D,
-                             CXXDtorType Type);
+  llvm::StringRef getMangledName(GlobalDecl GD);
+  void getMangledName(GlobalDecl GD, MangleBuffer &Buffer, const BlockDecl *BD);
 
   void EmitTentativeDefinition(const VarDecl *D);
 
-  enum GVALinkage {
-    GVA_Internal,
-    GVA_C99Inline,
-    GVA_CXXInline,
-    GVA_StrongExternal,
-    GVA_TemplateInstantiation,
-    GVA_ExplicitTemplateInstantiation
-  };
+  void EmitVTable(CXXRecordDecl *Class, bool DefinitionRequired);
 
   llvm::GlobalVariable::LinkageTypes
   getFunctionLinkage(const FunctionDecl *FD);
+
+  void setFunctionLinkage(const FunctionDecl *FD, llvm::GlobalValue *V) {
+    V->setLinkage(getFunctionLinkage(FD));
+  }
 
   /// getVTableLinkage - Return the appropriate linkage for the vtable, VTT,
   /// and type information of the given class.
@@ -482,6 +549,7 @@ private:
   void EmitGlobalVarDefinition(const VarDecl *D);
   void EmitAliasDefinition(GlobalDecl GD);
   void EmitObjCPropertyImplementations(const ObjCImplementationDecl *D);
+  void EmitObjCIvarInitializations(ObjCImplementationDecl *D);
 
   // C++ related functions.
 
@@ -541,6 +609,8 @@ private:
   /// EmitLLVMUsed - Emit the llvm.used metadata used to force
   /// references to global which may otherwise be optimized out.
   void EmitLLVMUsed(void);
+
+  void EmitDeclMetadata();
 
   /// MayDeferGeneration - Determine if the given decl can be emitted
   /// lazily; this is only relevant for definitions. The given decl

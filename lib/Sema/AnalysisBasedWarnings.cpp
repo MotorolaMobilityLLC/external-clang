@@ -13,9 +13,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Sema.h"
-#include "AnalysisBasedWarnings.h"
+#include "clang/Sema/AnalysisBasedWarnings.h"
+#include "clang/Sema/SemaInternal.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/AST/DeclObjC.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/StmtObjC.h"
@@ -54,8 +56,13 @@ static void CheckUnreachable(Sema &S, AnalysisContext &AC) {
 // Check for missing return value.
 //===----------------------------------------------------------------------===//
 
-enum ControlFlowKind { NeverFallThrough = 0, MaybeFallThrough = 1,
-  AlwaysFallThrough = 2, NeverFallThroughOrReturn = 3 };
+enum ControlFlowKind {
+  UnknownFallThrough,
+  NeverFallThrough,
+  MaybeFallThrough,
+  AlwaysFallThrough,
+  NeverFallThroughOrReturn
+};
 
 /// CheckFallThrough - Check that we don't fall off the end of a
 /// Statement that should return a value.
@@ -68,9 +75,7 @@ enum ControlFlowKind { NeverFallThrough = 0, MaybeFallThrough = 1,
 /// will return.
 static ControlFlowKind CheckFallThrough(AnalysisContext &AC) {
   CFG *cfg = AC.getCFG();
-  if (cfg == 0)
-    // FIXME: This should be NeverFallThrough
-    return NeverFallThroughOrReturn;
+  if (cfg == 0) return UnknownFallThrough;
 
   // The CFG leaves in dead things, and we don't want the dead code paths to
   // confuse us, so we mark all live things first.
@@ -147,7 +152,8 @@ static ControlFlowKind CheckFallThrough(AnalysisContext &AC) {
 
     bool NoReturnEdge = false;
     if (CallExpr *C = dyn_cast<CallExpr>(S)) {
-      if (B.succ_begin()[0] != &cfg->getExit()) {
+      if (std::find(B.succ_begin(), B.succ_end(), &cfg->getExit())
+            == B.succ_end()) {
         HasAbnormalEdge = true;
         continue;
       }
@@ -160,6 +166,19 @@ static ControlFlowKind CheckFallThrough(AnalysisContext &AC) {
         if (VD->hasAttr<NoReturnAttr>()) {
           NoReturnEdge = true;
           HasFakeEdge = true;
+        }
+      }
+    }
+    // FIXME: Remove this hack once temporaries and their destructors are
+    // modeled correctly by the CFG.
+    if (CXXExprWithTemporaries *E = dyn_cast<CXXExprWithTemporaries>(S)) {
+      for (unsigned I = 0, N = E->getNumTemporaries(); I != N; ++I) {
+        const FunctionDecl *FD = E->getTemporary(I)->getDestructor();
+        if (FD->hasAttr<NoReturnAttr>() ||
+            FD->getType()->getAs<FunctionType>()->getNoReturnAttr()) {
+          NoReturnEdge = true;
+          HasFakeEdge = true;
+          break;
         }
       }
     }
@@ -179,6 +198,8 @@ static ControlFlowKind CheckFallThrough(AnalysisContext &AC) {
   // accurate, such functions should be marked as noreturn.
   return AlwaysFallThrough;
 }
+
+namespace {
 
 struct CheckFallThroughDiagnostics {
   unsigned diag_MaybeFallThrough_HasNoReturn;
@@ -249,6 +270,8 @@ struct CheckFallThroughDiagnostics {
   }
 };
 
+}
+
 /// CheckFallThroughForFunctionDef - Check that we don't fall off the end of a
 /// function that should return a value.  Check that we don't fall off the end
 /// of a noreturn function.  We assume that functions and blocks not marked
@@ -289,6 +312,9 @@ static void CheckFallThroughForBody(Sema &S, const Decl *D, const Stmt *Body,
   // FIXME: Function try block
   if (const CompoundStmt *Compound = dyn_cast<CompoundStmt>(Body)) {
     switch (CheckFallThrough(AC)) {
+      case UnknownFallThrough:
+        break;
+
       case MaybeFallThrough:
         if (HasNoReturn)
           S.Diag(Compound->getRBracLoc(),
@@ -344,28 +370,27 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   //     don't bother trying.
   // (2) The code already has problems; running the analysis just takes more
   //     time.
-  if (S.getDiagnostics().hasErrorOccurred())
+  Diagnostic &Diags = S.getDiagnostics();
+
+  if (Diags.hasErrorOccurred() || Diags.hasFatalErrorOccurred())
     return;
 
   // Do not do any analysis for declarations in system headers if we are
   // going to just ignore them.
-  if (S.getDiagnostics().getSuppressSystemWarnings() &&
+  if (Diags.getSuppressSystemWarnings() &&
       S.SourceMgr.isInSystemHeader(D->getLocation()))
     return;
 
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
-    // For function templates, class templates and member function templates
-    // we'll do the analysis at instantiation time.
-    if (FD->isDependentContext())
-      return;
-  }
+  // For code in dependent contexts, we'll do this at instantiation time.
+  if (cast<DeclContext>(D)->isDependentContext())
+    return;
 
   const Stmt *Body = D->getBody();
   assert(Body);
 
   // Don't generate EH edges for CallExprs as we'd like to avoid the n^2
   // explosion for destrutors that can result and the compile time hit.
-  AnalysisContext AC(D, false);
+  AnalysisContext AC(D, 0, false);
 
   // Warning: check missing 'return'
   if (P.enableCheckFallThrough) {
@@ -378,4 +403,22 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   // Warning: check for unreachable code
   if (P.enableCheckUnreachable)
     CheckUnreachable(S, AC);
+}
+
+void clang::sema::
+AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
+                                     const BlockExpr *E) {
+  return IssueWarnings(P, E->getBlockDecl(), E->getType());
+}
+
+void clang::sema::
+AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
+                                     const ObjCMethodDecl *D) {
+  return IssueWarnings(P, D, QualType());
+}
+
+void clang::sema::
+AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
+                                     const FunctionDecl *D) {
+  return IssueWarnings(P, D, QualType());
 }

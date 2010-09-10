@@ -42,11 +42,11 @@ void f() {
   t3(C()); // expected-error {{allocation of an object of abstract type 'C'}}
 }
 
-C e1[2]; // expected-error {{variable type 'C' is an abstract class}}
-C (*e2)[2]; // expected-error {{variable type 'C' is an abstract class}}
-C (**e3)[2]; // expected-error {{variable type 'C' is an abstract class}}
+C e1[2]; // expected-error {{array of abstract class type 'C'}}
+C (*e2)[2]; // expected-error {{array of abstract class type 'C'}}
+C (**e3)[2]; // expected-error {{array of abstract class type 'C'}}
 
-void t4(C c[2]); // expected-error {{parameter type 'C' is an abstract class}}
+void t4(C c[2]); // expected-error {{array of abstract class type 'C'}}
 
 void t5(void (*)(C)); // expected-error {{parameter type 'C' is an abstract class}}
 
@@ -67,20 +67,23 @@ class F {
   virtual void f() = 0; // expected-note {{pure virtual function 'f'}}
 };
 
+// Diagnosing in these cases is prohibitively expensive.  We still
+// diagnose at the function definition, of course.
+
 class Abstract;
 
-void t7(Abstract a); // expected-error {{parameter type 'Abstract' is an abstract class}}
+void t7(Abstract a);
 
 void t8() {
-  void h(Abstract a); // expected-error {{parameter type 'Abstract' is an abstract class}}
+  void h(Abstract a);
 }
 
 namespace N {
-void h(Abstract a); // expected-error {{parameter type 'Abstract' is an abstract class}}
+void h(Abstract a);
 }
 
 class Abstract {
-  virtual void f() = 0; // expected-note {{pure virtual function 'f'}}
+  virtual void f() = 0;
 };
 
 // <rdar://problem/6854087>
@@ -169,3 +172,80 @@ namespace PureImplicit {
   D y;
 }
 
+namespace test1 {
+  struct A {
+    virtual void foo() = 0;
+  };
+
+  struct B : A {
+    using A::foo;
+  };
+
+  struct C : B {
+    void foo();
+  };
+
+  void test() {
+    C c;
+  }
+}
+
+// rdar://problem/8302168
+namespace test2 {
+  struct X1 {
+    virtual void xfunc(void) = 0;  // expected-note {{pure virtual function}}
+    void g(X1 parm7);        // expected-error {{parameter type 'test2::X1' is an abstract class}}
+    void g(X1 parm8[2]);     // expected-error {{array of abstract class type 'test2::X1'}}
+  };
+
+  template <int N>
+  struct X2 {
+    virtual void xfunc(void) = 0;  // expected-note {{pure virtual function}}
+    void g(X2 parm10);        // expected-error {{parameter type 'X2<N>' is an abstract class}}
+    void g(X2 parm11[2]);     // expected-error {{array of abstract class type 'X2<N>'}}
+  };
+}
+
+namespace test3 {
+  struct A { // expected-note {{not complete until}}
+    A x; // expected-error {{field has incomplete type}}
+    virtual void abstract() = 0;
+  };
+
+  struct B { // expected-note {{not complete until}}
+    virtual void abstract() = 0;
+    B x; // expected-error {{field has incomplete type}}
+  };
+
+  struct C {
+    static C x; // expected-error {{abstract class}}
+    virtual void abstract() = 0; // expected-note {{pure virtual function}}
+  };
+
+  struct D {
+    virtual void abstract() = 0; // expected-note {{pure virtual function}}
+    static D x; // expected-error {{abstract class}}
+  };
+}
+
+namespace test4 {
+  template <class T> struct A {
+    A x; // expected-error {{abstract class}}
+    virtual void abstract() = 0; // expected-note {{pure virtual function}}
+  };
+
+  template <class T> struct B {
+    virtual void abstract() = 0; // expected-note {{pure virtual function}}
+    B x; // expected-error {{abstract class}}
+  };
+
+  template <class T> struct C {
+    static C x; // expected-error {{abstract class}}
+    virtual void abstract() = 0; // expected-note {{pure virtual function}}
+  };
+
+  template <class T> struct D {
+    virtual void abstract() = 0; // expected-note {{pure virtual function}}
+    static D x; // expected-error {{abstract class}}
+  };
+}

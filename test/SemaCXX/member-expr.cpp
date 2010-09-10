@@ -72,3 +72,46 @@ namespace test4 {
     y.f(17);
   }
 }
+
+namespace test5 {
+  struct A {
+    template <class T> void foo();
+  };
+
+  void test0(int x) {
+    x.A::foo<int>(); // expected-error {{'int' is not a structure or union}}
+  }
+
+  void test1(A *x) {
+    x.A::foo<int>(); // expected-error {{'test5::A *' is a pointer}}
+  }
+
+  void test2(A &x) {
+    x->A::foo<int>(); // expected-error {{'test5::A' is not a pointer}}
+  }
+}
+
+namespace PR7508 {
+  struct A {
+    struct CleanupScope {};
+    void PopCleanupBlock();
+  };
+
+  void foo(A &a) {
+    a.PopCleanupScope(); // expected-error{{no member named 'PopCleanupScope' in 'PR7508::A'}}
+  }
+}
+
+namespace rdar8231724 {
+  namespace N {
+    template<typename T> struct X1;
+    int i;
+  }
+
+  struct X { };
+  struct Y : X { };
+
+  void f(Y *y) {
+    y->N::X1<int>; // expected-error{{'rdar8231724::N::X1' is not a member of class 'rdar8231724::Y'}}
+  }
+}

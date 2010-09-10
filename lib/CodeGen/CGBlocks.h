@@ -73,22 +73,12 @@ class BlockModule : public BlockBase {
   CodeGenTypes &getTypes() { return Types; }
   const llvm::TargetData &getTargetData() const { return TheTargetData; }
 public:
-  llvm::Constant *getNSConcreteGlobalBlock();
-  llvm::Constant *getNSConcreteStackBlock();
   int getGlobalUniqueCount() { return ++Block.GlobalUniqueCount; }
   const llvm::Type *getBlockDescriptorType();
 
   const llvm::Type *getGenericBlockLiteralType();
 
   llvm::Constant *GetAddrOfGlobalBlock(const BlockExpr *BE, const char *);
-
-  /// NSConcreteGlobalBlock - Cached reference to the class pointer for global
-  /// blocks.
-  llvm::Constant *NSConcreteGlobalBlock;
-
-  /// NSConcreteStackBlock - Cached reference to the class poinnter for stack
-  /// blocks.
-  llvm::Constant *NSConcreteStackBlock;
 
   const llvm::Type *BlockDescriptorType;
   const llvm::Type *GenericBlockLiteralType;
@@ -97,9 +87,7 @@ public:
     int GlobalUniqueCount;
   } Block;
 
-  llvm::Value *BlockObjectAssign;
-  llvm::Value *BlockObjectDispose;
-  const llvm::Type *PtrToInt8Ty;
+  const llvm::PointerType *PtrToInt8Ty;
 
   std::map<uint64_t, llvm::Constant *> AssignCache;
   std::map<uint64_t, llvm::Constant *> DestroyCache;
@@ -108,9 +96,7 @@ public:
               CodeGenTypes &T, CodeGenModule &CodeGen)
     : Context(C), TheModule(M), TheTargetData(TD), Types(T),
       CGM(CodeGen), VMContext(M.getContext()),
-      NSConcreteGlobalBlock(0), NSConcreteStackBlock(0), BlockDescriptorType(0),
-      GenericBlockLiteralType(0),
-      BlockObjectAssign(0), BlockObjectDispose(0) {
+      BlockDescriptorType(0), GenericBlockLiteralType(0) {
     Block.GlobalUniqueCount = 0;
     PtrToInt8Ty = llvm::Type::getInt8PtrTy(M.getContext());
   }
@@ -121,13 +107,14 @@ public:
 
 class BlockFunction : public BlockBase {
   CodeGenModule &CGM;
-  CodeGenFunction &CGF;
   ASTContext &getContext() const;
 
 protected:
   llvm::LLVMContext &VMContext;
 
 public:
+  CodeGenFunction &CGF;
+
   const llvm::PointerType *PtrToInt8Ty;
   struct HelperInfo {
     int index;
@@ -148,26 +135,6 @@ public:
     BLOCK_BYREF_CURRENT_MAX = 256
   };
 
-  /// BlockInfo - Information to generate a block literal.
-  struct BlockInfo {
-    /// BlockLiteralTy - The type of the block literal.
-    const llvm::Type *BlockLiteralTy;
-
-    /// Name - the name of the function this block was created for, if any.
-    const char *Name;
-
-    /// ByCopyDeclRefs - Variables from parent scopes that have been imported
-    /// into this block.
-    llvm::SmallVector<const BlockDeclRefExpr *, 8> DeclRefs;
-
-    BlockInfo(const llvm::Type *blt, const char *n)
-      : BlockLiteralTy(blt), Name(n) {
-      // Skip asm prefix, if any.
-      if (Name && Name[0] == '\01')
-        ++Name;
-    }
-  };
-
   CGBuilderTy &Builder;
 
   BlockFunction(CodeGenModule &cgm, CodeGenFunction &cgf, CGBuilderTy &B);
@@ -179,19 +146,31 @@ public:
   /// characters.
   CharUnits BlockAlign;
 
-  /// getBlockOffset - Allocate an offset for the ValueDecl from a
-  /// BlockDeclRefExpr in a block literal (BlockExpr).
-  CharUnits getBlockOffset(const BlockDeclRefExpr *E);
+  /// getBlockOffset - Allocate a location within the block's storage
+  /// for a value with the given size and alignment requirements.
+  CharUnits getBlockOffset(CharUnits Size, CharUnits Align);
 
   /// BlockHasCopyDispose - True iff the block uses copy/dispose.
   bool BlockHasCopyDispose;
 
-  /// BlockDeclRefDecls - Decls from BlockDeclRefExprs in apperance order
-  /// in a block literal.  Decls without names are used for padding.
-  llvm::SmallVector<const Expr *, 8> BlockDeclRefDecls;
+  /// BlockLayout - The layout of the block's storage, represented as
+  /// a sequence of expressions which require such storage.  The
+  /// expressions can be:
+  /// - a BlockDeclRefExpr, indicating that the given declaration
+  ///   from an enclosing scope is needed by the block;
+  /// - a DeclRefExpr, which always wraps an anonymous VarDecl with
+  ///   array type, used to insert padding into the block; or
+  /// - a CXXThisExpr, indicating that the C++ 'this' value should
+  ///   propagate from the parent to the block.
+  /// This is a really silly representation.
+  llvm::SmallVector<const Expr *, 8> BlockLayout;
 
   /// BlockDecls - Offsets for all Decls in BlockDeclRefExprs.
-  std::map<const Decl*, CharUnits> BlockDecls;
+  llvm::DenseMap<const Decl*, CharUnits> BlockDecls;
+  
+  /// BlockCXXThisOffset - The offset of the C++ 'this' value within
+  /// the block structure.
+  CharUnits BlockCXXThisOffset;
 
   ImplicitParamDecl *BlockStructDecl;
   ImplicitParamDecl *getBlockStructDecl() { return BlockStructDecl; }
@@ -214,8 +193,6 @@ public:
   llvm::Constant *BuildbyrefDestroyHelper(const llvm::Type *T, int flag,
                                           unsigned Align);
 
-  llvm::Value *getBlockObjectAssign();
-  llvm::Value *getBlockObjectDispose();
   void BuildBlockRelease(llvm::Value *DeclPtr, int flag = BLOCK_FIELD_IS_BYREF);
 
   bool BlockRequiresCopying(QualType Ty)

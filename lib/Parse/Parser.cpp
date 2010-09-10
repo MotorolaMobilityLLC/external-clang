@@ -13,38 +13,45 @@
 
 #include "clang/Parse/Parser.h"
 #include "clang/Parse/ParseDiagnostic.h"
-#include "clang/Parse/DeclSpec.h"
-#include "clang/Parse/Scope.h"
-#include "clang/Parse/Template.h"
+#include "clang/Sema/DeclSpec.h"
+#include "clang/Sema/Scope.h"
+#include "clang/Sema/ParsedTemplate.h"
 #include "llvm/Support/raw_ostream.h"
 #include "RAIIObjectsForParser.h"
 #include "ParsePragma.h"
 using namespace clang;
 
-Parser::Parser(Preprocessor &pp, Action &actions)
+Parser::Parser(Preprocessor &pp, Sema &actions)
   : CrashInfo(*this), PP(pp), Actions(actions), Diags(PP.getDiagnostics()),
     GreaterThanIsOperator(true), ColonIsSacred(false),
     TemplateParameterDepth(0) {
   Tok.setKind(tok::eof);
-  CurScope = 0;
+  Actions.CurScope = 0;
   NumCachedScopes = 0;
   ParenCount = BracketCount = BraceCount = 0;
-  ObjCImpDecl = DeclPtrTy();
+  ObjCImpDecl = 0;
 
   // Add #pragma handlers. These are removed and destroyed in the
   // destructor.
-  PackHandler.reset(new
-          PragmaPackHandler(&PP.getIdentifierTable().get("pack"), actions));
-  PP.AddPragmaHandler(0, PackHandler.get());
+  AlignHandler.reset(new PragmaAlignHandler(actions));
+  PP.AddPragmaHandler(AlignHandler.get());
 
-  UnusedHandler.reset(new
-          PragmaUnusedHandler(&PP.getIdentifierTable().get("unused"), actions,
-                              *this));
-  PP.AddPragmaHandler(0, UnusedHandler.get());
+  GCCVisibilityHandler.reset(new PragmaGCCVisibilityHandler(actions));
+  PP.AddPragmaHandler("GCC", GCCVisibilityHandler.get());
 
-  WeakHandler.reset(new
-          PragmaWeakHandler(&PP.getIdentifierTable().get("weak"), actions));
-  PP.AddPragmaHandler(0, WeakHandler.get());
+  OptionsHandler.reset(new PragmaOptionsHandler(actions));
+  PP.AddPragmaHandler(OptionsHandler.get());
+
+  PackHandler.reset(new PragmaPackHandler(actions));
+  PP.AddPragmaHandler(PackHandler.get());
+
+  UnusedHandler.reset(new PragmaUnusedHandler(actions, *this));
+  PP.AddPragmaHandler(UnusedHandler.get());
+
+  WeakHandler.reset(new PragmaWeakHandler(actions));
+  PP.AddPragmaHandler(WeakHandler.get());
+      
+  PP.setCodeCompletionHandler(*this);
 }
 
 /// If a crash happens while the parser is active, print out a line indicating
@@ -134,7 +141,7 @@ SourceLocation Parser::MatchRHSPunctuation(tok::TokenKind RHSTok,
 /// returned.
 bool Parser::ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned DiagID,
                               const char *Msg, tok::TokenKind SkipToTok) {
-  if (Tok.is(ExpectedTok)) {
+  if (Tok.is(ExpectedTok) || Tok.is(tok::code_completion)) {
     ConsumeAnyToken();
     return false;
   }
@@ -189,7 +196,11 @@ bool Parser::SkipUntil(const tok::TokenKind *Toks, unsigned NumToks,
     case tok::eof:
       // Ran out of tokens.
       return false;
-
+        
+    case tok::code_completion:
+      ConsumeToken();
+      return false;
+        
     case tok::l_paren:
       // Recursively skip properly-nested parens.
       ConsumeParen();
@@ -252,25 +263,25 @@ bool Parser::SkipUntil(const tok::TokenKind *Toks, unsigned NumToks,
 void Parser::EnterScope(unsigned ScopeFlags) {
   if (NumCachedScopes) {
     Scope *N = ScopeCache[--NumCachedScopes];
-    N->Init(CurScope, ScopeFlags);
-    CurScope = N;
+    N->Init(getCurScope(), ScopeFlags);
+    Actions.CurScope = N;
   } else {
-    CurScope = new Scope(CurScope, ScopeFlags);
+    Actions.CurScope = new Scope(getCurScope(), ScopeFlags);
   }
-  CurScope->setNumErrorsAtStart(Diags.getNumErrors());
+  getCurScope()->setNumErrorsAtStart(Diags.getNumErrors());
 }
 
 /// ExitScope - Pop a scope off the scope stack.
 void Parser::ExitScope() {
-  assert(CurScope && "Scope imbalance!");
+  assert(getCurScope() && "Scope imbalance!");
 
   // Inform the actions module that this scope is going away if there are any
   // decls in it.
-  if (!CurScope->decl_empty())
-    Actions.ActOnPopScope(Tok.getLocation(), CurScope);
+  if (!getCurScope()->decl_empty())
+    Actions.ActOnPopScope(Tok.getLocation(), getCurScope());
 
-  Scope *OldScope = CurScope;
-  CurScope = OldScope->getParent();
+  Scope *OldScope = getCurScope();
+  Actions.CurScope = OldScope->getParent();
 
   if (NumCachedScopes == ScopeCacheSize)
     delete OldScope;
@@ -287,31 +298,39 @@ void Parser::ExitScope() {
 
 Parser::~Parser() {
   // If we still have scopes active, delete the scope tree.
-  delete CurScope;
-
+  delete getCurScope();
+  Actions.CurScope = 0;
+  
   // Free the scope cache.
   for (unsigned i = 0, e = NumCachedScopes; i != e; ++i)
     delete ScopeCache[i];
 
   // Remove the pragma handlers we installed.
-  PP.RemovePragmaHandler(0, PackHandler.get());
+  PP.RemovePragmaHandler(AlignHandler.get());
+  AlignHandler.reset();
+  PP.RemovePragmaHandler("GCC", GCCVisibilityHandler.get());
+  GCCVisibilityHandler.reset();
+  PP.RemovePragmaHandler(OptionsHandler.get());
+  OptionsHandler.reset();
+  PP.RemovePragmaHandler(PackHandler.get());
   PackHandler.reset();
-  PP.RemovePragmaHandler(0, UnusedHandler.get());
+  PP.RemovePragmaHandler(UnusedHandler.get());
   UnusedHandler.reset();
-  PP.RemovePragmaHandler(0, WeakHandler.get());
+  PP.RemovePragmaHandler(WeakHandler.get());
   WeakHandler.reset();
+  PP.clearCodeCompletionHandler();
 }
 
 /// Initialize - Warm up the parser.
 ///
 void Parser::Initialize() {
+  // Create the translation unit scope.  Install it as the current scope.
+  assert(getCurScope() == 0 && "A scope is already active?");
+  EnterScope(Scope::DeclScope);
+  Actions.ActOnTranslationUnitScope(getCurScope());
+
   // Prime the lexer look-ahead.
   ConsumeToken();
-
-  // Create the translation unit scope.  Install it as the current scope.
-  assert(CurScope == 0 && "A scope is already active?");
-  EnterScope(Scope::DeclScope);
-  Actions.ActOnTranslationUnitScope(Tok.getLocation(), CurScope);
 
   if (Tok.is(tok::eof) &&
       !getLang().CPlusPlus)  // Empty source file is an extension in C
@@ -364,7 +383,7 @@ void Parser::ParseTranslationUnit() {
     /*parse them all*/;
 
   ExitScope();
-  assert(CurScope == 0 && "Scope imbalance!");
+  assert(getCurScope() == 0 && "Scope imbalance!");
 }
 
 /// ParseExternalDeclaration:
@@ -389,8 +408,11 @@ void Parser::ParseTranslationUnit() {
 ///           ';'
 ///
 /// [C++0x/GNU] 'extern' 'template' declaration
-Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr) {
-  DeclPtrTy SingleDecl;
+Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr,
+                                                        ParsingDeclSpec *DS) {
+  ParenBraceBracketBalancer BalancerRAIIObj(*this);
+  
+  Decl *SingleDecl = 0;
   switch (Tok.getKind()) {
   case tok::semi:
     if (!getLang().CPlusPlus0x)
@@ -418,14 +440,14 @@ Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr)
       Diag(Attr.Range.getBegin(), diag::err_attributes_not_allowed)
         << Attr.Range;
 
-    OwningExprResult Result(ParseSimpleAsm());
+    ExprResult Result(ParseSimpleAsm());
 
     ExpectAndConsume(tok::semi, diag::err_expected_semi_after,
                      "top-level asm block");
 
     if (Result.isInvalid())
       return DeclGroupPtrTy();
-    SingleDecl = Actions.ActOnFileScopeAsmDecl(Tok.getLocation(), move(Result));
+    SingleDecl = Actions.ActOnFileScopeAsmDecl(Tok.getLocation(), Result.get());
     break;
   }
   case tok::at:
@@ -444,10 +466,10 @@ Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr)
     SingleDecl = ParseObjCMethodDefinition();
     break;
   case tok::code_completion:
-      Actions.CodeCompleteOrdinaryName(CurScope, 
-                                   ObjCImpDecl? Action::CCC_ObjCImplementation
-                                              : Action::CCC_Namespace);
-    ConsumeToken();
+      Actions.CodeCompleteOrdinaryName(getCurScope(), 
+                                   ObjCImpDecl? Sema::PCC_ObjCImplementation
+                                              : Sema::PCC_Namespace);
+    ConsumeCodeCompletionToken();
     return ParseExternalDeclaration(Attr);
   case tok::kw_using:
   case tok::kw_namespace:
@@ -460,6 +482,15 @@ Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr)
       SourceLocation DeclEnd;
       return ParseDeclaration(Declarator::FileContext, DeclEnd, Attr);
     }
+
+  case tok::kw_inline:
+    if (getLang().CPlusPlus0x && NextToken().is(tok::kw_namespace)) {
+      // Inline namespaces
+      SourceLocation DeclEnd;
+      return ParseDeclaration(Declarator::FileContext, DeclEnd, Attr);
+    }
+    goto dont_know;
+
   case tok::kw_extern:
     if (getLang().CPlusPlus && NextToken().is(tok::kw_template)) {
       // Extern templates
@@ -469,14 +500,16 @@ Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr)
       return Actions.ConvertDeclToDeclGroup(
                   ParseExplicitInstantiation(ExternLoc, TemplateLoc, DeclEnd));
     }
-
     // FIXME: Detect C++ linkage specifications here?
-
-    // Fall through to handle other declarations or function definitions.
+    goto dont_know;
 
   default:
+  dont_know:
     // We can't tell whether this is a function-definition or declaration yet.
-    return ParseDeclarationOrFunctionDefinition(Attr.AttrList);
+    if (DS)
+      return ParseDeclarationOrFunctionDefinition(*DS, Attr.AttrList);
+    else
+      return ParseDeclarationOrFunctionDefinition(Attr.AttrList);
   }
 
   // This routine returns a DeclGroup, if the thing we parsed only contains a
@@ -486,7 +519,7 @@ Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr)
 
 /// \brief Determine whether the current token, if it occurs after a
 /// declarator, continues a declaration or declaration list.
-bool Parser::isDeclarationAfterDeclarator() {
+bool Parser::isDeclarationAfterDeclarator() const {
   return Tok.is(tok::equal) ||      // int X()=  -> not a function def
     Tok.is(tok::comma) ||           // int X(),  -> not a function def
     Tok.is(tok::semi)  ||           // int X();  -> not a function def
@@ -498,12 +531,17 @@ bool Parser::isDeclarationAfterDeclarator() {
 
 /// \brief Determine whether the current token, if it occurs after a
 /// declarator, indicates the start of a function definition.
-bool Parser::isStartOfFunctionDefinition() {
+bool Parser::isStartOfFunctionDefinition(const ParsingDeclarator &Declarator) {
+  assert(Declarator.getTypeObject(0).Kind == DeclaratorChunk::Function &&
+         "Isn't a function declarator");
   if (Tok.is(tok::l_brace))   // int X() {}
     return true;
   
-  if (!getLang().CPlusPlus)
-    return isDeclarationSpecifier();   // int X(f) int f; {}
+  // Handle K&R C argument lists: int X(f) int f; {}
+  if (!getLang().CPlusPlus &&
+      Declarator.getTypeObject(0).Fun.isKNRPrototype()) 
+    return isDeclarationSpecifier();
+  
   return Tok.is(tok::colon) ||         // X() : Base() {} (used for ctors)
          Tok.is(tok::kw_try);          // X() try { ... }
 }
@@ -538,7 +576,7 @@ Parser::ParseDeclarationOrFunctionDefinition(ParsingDeclSpec &DS,
   // declaration-specifiers init-declarator-list[opt] ';'
   if (Tok.is(tok::semi)) {
     ConsumeToken();
-    DeclPtrTy TheDecl = Actions.ParsedFreeStandingDeclSpec(CurScope, DS);
+    Decl *TheDecl = Actions.ParsedFreeStandingDeclSpec(getCurScope(), AS, DS);
     DS.complete(TheDecl);
     return Actions.ConvertDeclToDeclGroup(TheDecl);
   }
@@ -562,7 +600,7 @@ Parser::ParseDeclarationOrFunctionDefinition(ParsingDeclSpec &DS,
     if (DS.SetTypeSpecType(DeclSpec::TST_unspecified, AtLoc, PrevSpec, DiagID))
       Diag(AtLoc, DiagID) << PrevSpec;
 
-    DeclPtrTy TheDecl;
+    Decl *TheDecl = 0;
     if (Tok.isObjCAtKeyword(tok::objc_protocol))
       TheDecl = ParseObjCAtProtocolDeclaration(AtLoc, DS.getAttributes());
     else
@@ -576,7 +614,7 @@ Parser::ParseDeclarationOrFunctionDefinition(ParsingDeclSpec &DS,
   if (Tok.is(tok::string_literal) && getLang().CPlusPlus &&
       DS.getStorageClassSpec() == DeclSpec::SCS_extern &&
       DS.getParsedSpecifiers() == DeclSpec::PQ_StorageClassSpecifier) {
-    DeclPtrTy TheDecl = ParseLinkage(DS, Declarator::FileContext);
+    Decl *TheDecl = ParseLinkage(DS, Declarator::FileContext);
     return Actions.ConvertDeclToDeclGroup(TheDecl);
   }
 
@@ -604,7 +642,7 @@ Parser::ParseDeclarationOrFunctionDefinition(AttributeList *Attr,
 /// [C++] function-definition: [C++ 8.4]
 ///         decl-specifier-seq[opt] declarator function-try-block
 ///
-Parser::DeclPtrTy Parser::ParseFunctionDefinition(ParsingDeclarator &D,
+Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
                                      const ParsedTemplateInfo &TemplateInfo) {
   const DeclaratorChunk &FnTypeInfo = D.getTypeObject(0);
   assert(FnTypeInfo.Kind == DeclaratorChunk::Function &&
@@ -626,7 +664,7 @@ Parser::DeclPtrTy Parser::ParseFunctionDefinition(ParsingDeclarator &D,
   // If this declaration was formed with a K&R-style identifier list for the
   // arguments, parse declarations for all of the args next.
   // int foo(a,b) int a; float b; {}
-  if (!FTI.hasPrototype && FTI.NumArgs != 0)
+  if (FTI.isKNRPrototype())
     ParseKNRParamDeclarations(D);
 
   // We should have either an opening brace or, in a C++ constructor,
@@ -640,7 +678,7 @@ Parser::DeclPtrTy Parser::ParseFunctionDefinition(ParsingDeclarator &D,
 
     // If we didn't find the '{', bail out.
     if (Tok.isNot(tok::l_brace))
-      return DeclPtrTy();
+      return 0;
   }
 
   // Enter a scope for the function body.
@@ -648,13 +686,13 @@ Parser::DeclPtrTy Parser::ParseFunctionDefinition(ParsingDeclarator &D,
 
   // Tell the actions module that we have entered a function definition with the
   // specified Declarator for the function.
-  DeclPtrTy Res = TemplateInfo.TemplateParams?
-      Actions.ActOnStartOfFunctionTemplateDef(CurScope,
-                              Action::MultiTemplateParamsArg(Actions,
+  Decl *Res = TemplateInfo.TemplateParams?
+      Actions.ActOnStartOfFunctionTemplateDef(getCurScope(),
+                              MultiTemplateParamsArg(Actions,
                                           TemplateInfo.TemplateParams->data(),
                                          TemplateInfo.TemplateParams->size()),
                                               D)
-    : Actions.ActOnStartOfFunctionDef(CurScope, D);
+    : Actions.ActOnStartOfFunctionDef(getCurScope(), D);
 
   // Break out of the ParsingDeclarator context before we parse the body.
   D.complete(Res);
@@ -673,7 +711,7 @@ Parser::DeclPtrTy Parser::ParseFunctionDefinition(ParsingDeclarator &D,
 
     // Recover from error.
     if (!Tok.is(tok::l_brace)) {
-      Actions.ActOnFinishFunctionBody(Res, Action::StmtArg(Actions));
+      Actions.ActOnFinishFunctionBody(Res, 0);
       return Res;
     }
   } else
@@ -739,8 +777,8 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
       }
 
       // Ask the actions module to compute the type for this declarator.
-      Action::DeclPtrTy Param =
-        Actions.ActOnParamDeclarator(CurScope, ParmDeclarator);
+      Decl *Param =
+        Actions.ActOnParamDeclarator(getCurScope(), ParmDeclarator);
 
       if (Param &&
           // A missing identifier has already been diagnosed.
@@ -796,7 +834,7 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
   }
 
   // The actions module must verify that all arguments were declared.
-  Actions.ActOnFinishKNRParamDeclarations(CurScope, D, Tok.getLocation());
+  Actions.ActOnFinishKNRParamDeclarations(getCurScope(), D, Tok.getLocation());
 }
 
 
@@ -806,13 +844,13 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
 /// [GNU] asm-string-literal:
 ///         string-literal
 ///
-Parser::OwningExprResult Parser::ParseAsmStringLiteral() {
+Parser::ExprResult Parser::ParseAsmStringLiteral() {
   if (!isTokenStringLiteral()) {
     Diag(Tok, diag::err_expected_string_literal);
     return ExprError();
   }
 
-  OwningExprResult Res(ParseStringLiteralExpression());
+  ExprResult Res(ParseStringLiteralExpression());
   if (Res.isInvalid()) return move(Res);
 
   // TODO: Diagnose: wide string literal in 'asm'
@@ -825,7 +863,7 @@ Parser::OwningExprResult Parser::ParseAsmStringLiteral() {
 /// [GNU] simple-asm-expr:
 ///         'asm' '(' asm-string-literal ')'
 ///
-Parser::OwningExprResult Parser::ParseSimpleAsm(SourceLocation *EndLoc) {
+Parser::ExprResult Parser::ParseSimpleAsm(SourceLocation *EndLoc) {
   assert(Tok.is(tok::kw_asm) && "Not an asm!");
   SourceLocation Loc = ConsumeToken();
 
@@ -846,7 +884,7 @@ Parser::OwningExprResult Parser::ParseSimpleAsm(SourceLocation *EndLoc) {
 
   Loc = ConsumeParen();
 
-  OwningExprResult Result(ParseAsmStringLiteral());
+  ExprResult Result(ParseAsmStringLiteral());
 
   if (Result.isInvalid()) {
     SkipUntil(tok::r_paren, true, true);
@@ -898,7 +936,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
     //            simple-template-id
     SourceLocation TypenameLoc = ConsumeToken();
     CXXScopeSpec SS;
-    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/0, false))
+    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/ParsedType(), false))
       return true;
     if (!SS.isSet()) {
       Diag(Tok.getLocation(), diag::err_expected_qualified_after_typename);
@@ -908,7 +946,8 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
     TypeResult Ty;
     if (Tok.is(tok::identifier)) {
       // FIXME: check whether the next token is '<', first!
-      Ty = Actions.ActOnTypenameType(TypenameLoc, SS, *Tok.getIdentifierInfo(),
+      Ty = Actions.ActOnTypenameType(getCurScope(), TypenameLoc, SS, 
+                                     *Tok.getIdentifierInfo(),
                                      Tok.getLocation());
     } else if (Tok.is(tok::annot_template_id)) {
       TemplateIdAnnotation *TemplateId
@@ -923,8 +962,9 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
       assert(Tok.is(tok::annot_typename) &&
              "AnnotateTemplateIdTokenAsType isn't working properly");
       if (Tok.getAnnotationValue())
-        Ty = Actions.ActOnTypenameType(TypenameLoc, SS, SourceLocation(),
-                                       Tok.getAnnotationValue());
+        Ty = Actions.ActOnTypenameType(getCurScope(), TypenameLoc, SS, 
+                                       SourceLocation(),
+                                       getTypeAnnotation(Tok));
       else
         Ty = true;
     } else {
@@ -935,7 +975,7 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
 
     SourceLocation EndLoc = Tok.getLastLoc();
     Tok.setKind(tok::annot_typename);
-    Tok.setAnnotationValue(Ty.isInvalid()? 0 : Ty.get());
+    setTypeAnnotation(Tok, Ty.isInvalid() ? ParsedType() : Ty.get());
     Tok.setAnnotationEndLoc(EndLoc);
     Tok.setLocation(TypenameLoc);
     PP.AnnotateCachedTokens(Tok);
@@ -947,17 +987,18 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
 
   CXXScopeSpec SS;
   if (getLang().CPlusPlus)
-    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/0, EnteringContext))
+    if (ParseOptionalCXXScopeSpecifier(SS, ParsedType(), EnteringContext))
       return true;
 
   if (Tok.is(tok::identifier)) {
     // Determine whether the identifier is a type name.
-    if (TypeTy *Ty = Actions.getTypeName(*Tok.getIdentifierInfo(),
-                                         Tok.getLocation(), CurScope, &SS)) {
+    if (ParsedType Ty = Actions.getTypeName(*Tok.getIdentifierInfo(),
+                                            Tok.getLocation(), getCurScope(),
+                                            &SS)) {
       // This is a typename. Replace the current token in-place with an
       // annotation type token.
       Tok.setKind(tok::annot_typename);
-      Tok.setAnnotationValue(Ty);
+      setTypeAnnotation(Tok, Ty);
       Tok.setAnnotationEndLoc(Tok.getLocation());
       if (SS.isNotEmpty()) // it was a C++ qualified type name.
         Tok.setLocation(SS.getBeginLoc());
@@ -980,10 +1021,13 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
       TemplateTy Template;
       UnqualifiedId TemplateName;
       TemplateName.setIdentifier(Tok.getIdentifierInfo(), Tok.getLocation());
+      bool MemberOfUnknownSpecialization;
       if (TemplateNameKind TNK
-            = Actions.isTemplateName(CurScope, SS, TemplateName, 
-                                     /*ObjectType=*/0, EnteringContext,
-                                     Template)) {
+          = Actions.isTemplateName(getCurScope(), SS,
+                                   /*hasTemplateKeyword=*/false, TemplateName,
+                                   /*ObjectType=*/ ParsedType(),
+                                   EnteringContext,
+                                   Template, MemberOfUnknownSpecialization)) {
         // Consume the identifier.
         ConsumeToken();
         if (AnnotateTemplateIdToken(Template, TNK, &SS, TemplateName)) {
@@ -1050,7 +1094,7 @@ bool Parser::TryAnnotateCXXScopeToken(bool EnteringContext) {
          "Cannot be a type or scope token!");
 
   CXXScopeSpec SS;
-  if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/0, EnteringContext))
+  if (ParseOptionalCXXScopeSpecifier(SS, ParsedType(), EnteringContext))
     return true;
   if (SS.isEmpty())
     return false;
@@ -1071,9 +1115,54 @@ bool Parser::TryAnnotateCXXScopeToken(bool EnteringContext) {
   return false;
 }
 
+void Parser::CodeCompletionRecovery() {
+  for (Scope *S = getCurScope(); S; S = S->getParent()) {
+    if (S->getFlags() & Scope::FnScope) {
+      Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_RecoveryInFunction);
+      return;
+    }
+    
+    if (S->getFlags() & Scope::ClassScope) {
+      Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_Class);
+      return;
+    }
+  }
+  
+  Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_Namespace);
+}
+
 // Anchor the Parser::FieldCallback vtable to this translation unit.
 // We use a spurious method instead of the destructor because
 // destroying FieldCallbacks can actually be slightly
 // performance-sensitive.
 void Parser::FieldCallback::_anchor() {
+}
+
+// Code-completion pass-through functions
+
+void Parser::CodeCompleteDirective(bool InConditional) {
+  Actions.CodeCompletePreprocessorDirective(InConditional);
+}
+
+void Parser::CodeCompleteInConditionalExclusion() {
+  Actions.CodeCompleteInPreprocessorConditionalExclusion(getCurScope());
+}
+
+void Parser::CodeCompleteMacroName(bool IsDefinition) {
+  Actions.CodeCompletePreprocessorMacroName(IsDefinition);
+}
+
+void Parser::CodeCompletePreprocessorExpression() { 
+  Actions.CodeCompletePreprocessorExpression();
+}
+
+void Parser::CodeCompleteMacroArgument(IdentifierInfo *Macro,
+                                       MacroInfo *MacroInfo,
+                                       unsigned ArgumentIndex) {
+  Actions.CodeCompletePreprocessorMacroArgument(getCurScope(), Macro, MacroInfo, 
+                                                ArgumentIndex);
+}
+
+void Parser::CodeCompleteNaturalLanguage() {
+  Actions.CodeCompleteNaturalLanguage();
 }

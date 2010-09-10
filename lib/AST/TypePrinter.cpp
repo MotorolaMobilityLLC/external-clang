@@ -29,7 +29,7 @@ namespace {
 
   public:
     explicit TypePrinter(const PrintingPolicy &Policy) : Policy(Policy) { }
-    
+
     void Print(QualType T, std::string &S);
     void AppendScope(DeclContext *DC, std::string &S);
     void PrintTag(TagDecl *T, std::string &S);
@@ -227,12 +227,13 @@ void TypePrinter::PrintDependentSizedExtVector(
 }
 
 void TypePrinter::PrintVector(const VectorType *T, std::string &S) { 
-  if (T->isAltiVec()) {
-    if (T->isPixel())
+  if (T->getAltiVecSpecific() != VectorType::NotAltiVec) {
+    if (T->getAltiVecSpecific() == VectorType::Pixel)
       S = "__vector __pixel " + S;
     else {
       Print(T->getElementType(), S);
-      S = "__vector " + S;
+      S = ((T->getAltiVecSpecific() == VectorType::Bool)
+           ? "__vector __bool " : "__vector ") + S;
     }
   } else {
     // FIXME: We prefer to print the size directly here, but have no way
@@ -294,6 +295,9 @@ void TypePrinter::PrintFunctionProto(const FunctionProtoType *T,
     break;
   case CC_X86FastCall:
     S += " __attribute__((fastcall))";
+    break;
+  case CC_X86ThisCall:
+    S += " __attribute__((thiscall))";
     break;
   }
   if (Info.getNoReturn())
@@ -449,15 +453,16 @@ void TypePrinter::PrintTag(TagDecl *D, std::string &InnerString) {
       if (!HasKindDecoration)
         OS << " " << D->getKindName();
 
-      PresumedLoc PLoc = D->getASTContext().getSourceManager().getPresumedLoc(
-        D->getLocation());
-      OS << " at " << PLoc.getFilename()
-         << ':' << PLoc.getLine()
-         << ':' << PLoc.getColumn();
+      if (D->getLocation().isValid()) {
+        PresumedLoc PLoc = D->getASTContext().getSourceManager().getPresumedLoc(
+          D->getLocation());
+        OS << " at " << PLoc.getFilename()
+           << ':' << PLoc.getLine()
+           << ':' << PLoc.getColumn();
+      }
     }
     
     OS << '>';
-    OS.flush();
   }
 
   // If this is a class template specialization, print the template
@@ -495,16 +500,6 @@ void TypePrinter::PrintRecord(const RecordType *T, std::string &S) {
 
 void TypePrinter::PrintEnum(const EnumType *T, std::string &S) { 
   PrintTag(T->getDecl(), S);
-}
-
-void TypePrinter::PrintElaborated(const ElaboratedType *T, std::string &S) { 
-  Print(T->getUnderlyingType(), S);
-
-  // We don't actually make these in C, but the language options
-  // sometimes lie to us -- for example, if someone calls
-  // QualType::getAsString().  Just suppress the redundant tag if so.
-  if (Policy.LangOpts.CPlusPlus)
-    S = std::string(T->getNameForTagKind(T->getTagKind())) + ' ' + S;  
 }
 
 void TypePrinter::PrintTemplateTypeParm(const TemplateTypeParmType *T, 
@@ -549,13 +544,17 @@ void TypePrinter::PrintInjectedClassName(const InjectedClassNameType *T,
   PrintTemplateSpecialization(T->getInjectedTST(), S);
 }
 
-void TypePrinter::PrintQualifiedName(const QualifiedNameType *T, 
-                                     std::string &S) { 
+void TypePrinter::PrintElaborated(const ElaboratedType *T, std::string &S) {
   std::string MyString;
   
   {
     llvm::raw_string_ostream OS(MyString);
-    T->getQualifier()->print(OS, Policy);
+    OS << TypeWithKeyword::getKeywordName(T->getKeyword());
+    if (T->getKeyword() != ETK_None)
+      OS << " ";
+    NestedNameSpecifier* Qualifier = T->getQualifier();
+    if (Qualifier)
+      Qualifier->print(OS, Policy);
   }
   
   std::string TypeStr;
@@ -575,26 +574,37 @@ void TypePrinter::PrintDependentName(const DependentNameType *T, std::string &S)
   
   {
     llvm::raw_string_ostream OS(MyString);
-    switch (T->getKeyword()) {
-    case ETK_None: break;
-    case ETK_Typename: OS << "typename "; break;
-    case ETK_Class: OS << "class "; break;
-    case ETK_Struct: OS << "struct "; break;
-    case ETK_Union: OS << "union "; break;
-    case ETK_Enum: OS << "enum "; break;
-    }
+    OS << TypeWithKeyword::getKeywordName(T->getKeyword());
+    if (T->getKeyword() != ETK_None)
+      OS << " ";
     
     T->getQualifier()->print(OS, Policy);
     
-    if (const IdentifierInfo *Ident = T->getIdentifier())
-      OS << Ident->getName();
-    else if (const TemplateSpecializationType *Spec = T->getTemplateId()) {
-      Spec->getTemplateName().print(OS, Policy, true);
-      OS << TemplateSpecializationType::PrintTemplateArgumentList(
-                                                            Spec->getArgs(),
-                                                            Spec->getNumArgs(),
+    OS << T->getIdentifier()->getName();
+  }
+  
+  if (S.empty())
+    S.swap(MyString);
+  else
+    S = MyString + ' ' + S;
+}
+
+void TypePrinter::PrintDependentTemplateSpecialization(
+        const DependentTemplateSpecializationType *T, std::string &S) { 
+  std::string MyString;
+  {
+    llvm::raw_string_ostream OS(MyString);
+  
+    OS << TypeWithKeyword::getKeywordName(T->getKeyword());
+    if (T->getKeyword() != ETK_None)
+      OS << " ";
+    
+    T->getQualifier()->print(OS, Policy);    
+    OS << T->getIdentifier()->getName();
+    OS << TemplateSpecializationType::PrintTemplateArgumentList(
+                                                            T->getArgs(),
+                                                            T->getNumArgs(),
                                                             Policy);
-    }
   }
   
   if (S.empty())
@@ -607,23 +617,35 @@ void TypePrinter::PrintObjCInterface(const ObjCInterfaceType *T,
                                      std::string &S) { 
   if (!S.empty())    // Prefix the basic type, e.g. 'typedefname X'.
     S = ' ' + S;
-  
+
   std::string ObjCQIString = T->getDecl()->getNameAsString();
-  if (T->getNumProtocols()) {
-    ObjCQIString += '<';
-    bool isFirst = true;
-    for (ObjCInterfaceType::qual_iterator I = T->qual_begin(), 
-                                          E = T->qual_end(); 
-         I != E; ++I) {
-      if (isFirst)
-        isFirst = false;
-      else
-        ObjCQIString += ',';
-      ObjCQIString += (*I)->getNameAsString();
-    }
-    ObjCQIString += '>';
-  }
   S = ObjCQIString + S;
+}
+
+void TypePrinter::PrintObjCObject(const ObjCObjectType *T,
+                                  std::string &S) {
+  if (T->qual_empty())
+    return Print(T->getBaseType(), S);
+
+  std::string tmp;
+  Print(T->getBaseType(), tmp);
+  tmp += '<';
+  bool isFirst = true;
+  for (ObjCObjectType::qual_iterator
+         I = T->qual_begin(), E = T->qual_end(); I != E; ++I) {
+    if (isFirst)
+      isFirst = false;
+    else
+      tmp += ',';
+    tmp += (*I)->getNameAsString();
+  }
+  tmp += '>';
+
+  if (!S.empty()) {
+    tmp += ' ';
+    tmp += S;
+  }
+  std::swap(tmp, S);
 }
 
 void TypePrinter::PrintObjCObjectPointer(const ObjCObjectPointerType *T, 

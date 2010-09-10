@@ -14,6 +14,7 @@
 // CXX0X:#define __DEPRECATED 1
 // CXX0X:#define __GNUG__
 // CXX0X:#define __GXX_EXPERIMENTAL_CXX0X__ 1
+// CXX0X:#define __GXX_RTTI 1
 // CXX0X:#define __GXX_WEAK__ 1
 // CXX0X:#define __cplusplus 199711L
 // CXX0X:#define __private_extern__ extern
@@ -23,6 +24,7 @@
 // 
 // CXX98:#define __DEPRECATED 1
 // CXX98:#define __GNUG__
+// CXX98:#define __GXX_RTTI 1
 // CXX98:#define __GXX_WEAK__ 1
 // CXX98:#define __cplusplus 199711L
 // CXX98:#define __private_extern__ extern
@@ -48,6 +50,10 @@
 // COMMON:#define __STDC__ 1
 // COMMON:#define __VERSION__
 // COMMON:#define __clang__ 1
+// COMMON:#define __clang_major__ {{[0-9]+}}
+// COMMON:#define __clang_minor__ {{[0-9]+}}
+// COMMON:#define __clang_patchlevel__ {{[0-9]+}}
+// COMMON:#define __clang_version__
 // COMMON:#define __llvm__ 1
 //
 // 
@@ -68,9 +74,10 @@
 // C94:#define __STDC_VERSION__ 199409L
 //
 // 
-// RUN: %clang_cc1 -fms-extensions -E -dM < /dev/null | FileCheck -check-prefix MSEXT %s
+// RUN: %clang_cc1 -fms-extensions -triple i686-pc-win32 -E -dM < /dev/null | FileCheck -check-prefix MSEXT %s
 //
 // MSEXT-NOT:#define __STDC__
+// MSEXT:#define _INTEGRAL_MAX_BITS 64
 // MSEXT:#define __int16 __INT16_TYPE__
 // MSEXT:#define __int32 __INT32_TYPE__
 // MSEXT:#define __int64 __INT64_TYPE__
@@ -111,11 +118,20 @@
 // SCHAR-NOT:#define __UNSIGNED_CHAR__
 // SCHAR:#define __clang__ 1
 //
+// RUN: %clang_cc1 -E -dM -fshort-wchar < /dev/null | FileCheck -check-prefix SHORTWCHAR %s
+//
+// SHORTWCHAR: #define __SIZEOF_WCHAR_T__ 2
+// SHORTWCHAR: #define __WCHAR_MAX__ 65535U
+// SHORTWCHAR: #define __WCHAR_TYPE__ unsigned short
+// SHORTWCHAR: #define __WCHAR_WIDTH__ 16
+//
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=arm-none-none < /dev/null | FileCheck -check-prefix ARM %s
 //
 // ARM:#define __APCS_32__ 1
 // ARM:#define __ARMEL__ 1
 // ARM:#define __ARM_ARCH_6J__ 1
+// ARM:#define __CHAR16_TYPE__ unsigned short
+// ARM:#define __CHAR32_TYPE__ unsigned int
 // ARM:#define __CHAR_BIT__ 8
 // ARM:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
 // ARM:#define __DBL_DIG__ 15
@@ -181,6 +197,18 @@
 // ARM:#define __SCHAR_MAX__ 127
 // ARM:#define __SHRT_MAX__ 32767
 // ARM:#define __SIG_ATOMIC_WIDTH__ 32
+// ARM:#define __SIZEOF_DOUBLE__ 8
+// ARM:#define __SIZEOF_FLOAT__ 4
+// ARM:#define __SIZEOF_INT__ 4
+// ARM:#define __SIZEOF_LONG_DOUBLE__ 8
+// ARM:#define __SIZEOF_LONG_LONG__ 8
+// ARM:#define __SIZEOF_LONG__ 4
+// ARM:#define __SIZEOF_POINTER__ 4
+// ARM:#define __SIZEOF_PTRDIFF_T__ 4
+// ARM:#define __SIZEOF_SHORT__ 2
+// ARM:#define __SIZEOF_SIZE_T__ 4
+// ARM:#define __SIZEOF_WCHAR_T__ 4
+// ARM:#define __SIZEOF_WINT_T__ 4
 // ARM:#define __SIZE_TYPE__ unsigned int
 // ARM:#define __SIZE_WIDTH__ 32
 // ARM:#define __THUMB_INTERWORK__ 1
@@ -201,6 +229,8 @@
 // BFIN:#define __ADSPLPBLACKFIN__ 1
 // BFIN:#define __BFIN 1
 // BFIN:#define __BFIN__ 1
+// BFIN:#define __CHAR16_TYPE__ unsigned short
+// BFIN:#define __CHAR32_TYPE__ unsigned int
 // BFIN:#define __CHAR_BIT__ 8
 // BFIN:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
 // BFIN:#define __DBL_DIG__ 15
@@ -264,6 +294,18 @@
 // BFIN:#define __SCHAR_MAX__ 127
 // BFIN:#define __SHRT_MAX__ 32767
 // BFIN:#define __SIG_ATOMIC_WIDTH__ 32
+// BFIN:#define __SIZEOF_DOUBLE__ 8
+// BFIN:#define __SIZEOF_FLOAT__ 4
+// BFIN:#define __SIZEOF_INT__ 4
+// BFIN:#define __SIZEOF_LONG_DOUBLE__ 8
+// BFIN:#define __SIZEOF_LONG_LONG__ 8
+// BFIN:#define __SIZEOF_LONG__ 4
+// BFIN:#define __SIZEOF_POINTER__ 4
+// BFIN:#define __SIZEOF_PTRDIFF_T__ 4
+// BFIN:#define __SIZEOF_SHORT__ 2
+// BFIN:#define __SIZEOF_SIZE_T__ 4
+// BFIN:#define __SIZEOF_WCHAR_T__ 4
+// BFIN:#define __SIZEOF_WINT_T__ 4
 // BFIN:#define __SIZE_TYPE__ long unsigned int
 // BFIN:#define __SIZE_WIDTH__ 32
 // BFIN:#define __UINTMAX_TYPE__ long long unsigned int
@@ -279,6 +321,8 @@
 //
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=i386-none-none < /dev/null | FileCheck -check-prefix I386 %s
 //
+// I386:#define __CHAR16_TYPE__ unsigned short
+// I386:#define __CHAR32_TYPE__ unsigned int
 // I386:#define __CHAR_BIT__ 8
 // I386:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
 // I386:#define __DBL_DIG__ 15
@@ -345,6 +389,18 @@
 // I386:#define __SCHAR_MAX__ 127
 // I386:#define __SHRT_MAX__ 32767
 // I386:#define __SIG_ATOMIC_WIDTH__ 32
+// I386:#define __SIZEOF_DOUBLE__ 8
+// I386:#define __SIZEOF_FLOAT__ 4
+// I386:#define __SIZEOF_INT__ 4
+// I386:#define __SIZEOF_LONG_DOUBLE__ 12
+// I386:#define __SIZEOF_LONG_LONG__ 8
+// I386:#define __SIZEOF_LONG__ 4
+// I386:#define __SIZEOF_POINTER__ 4
+// I386:#define __SIZEOF_PTRDIFF_T__ 4
+// I386:#define __SIZEOF_SHORT__ 2
+// I386:#define __SIZEOF_SIZE_T__ 4
+// I386:#define __SIZEOF_WCHAR_T__ 4
+// I386:#define __SIZEOF_WINT_T__ 4
 // I386:#define __SIZE_TYPE__ unsigned int
 // I386:#define __SIZE_WIDTH__ 32
 // I386:#define __UINTMAX_TYPE__ long long unsigned int
@@ -364,6 +420,8 @@
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=msp430-none-none < /dev/null | FileCheck -check-prefix MSP430 %s
 //
 // MSP430:#define MSP430 1
+// MSP430:#define __CHAR16_TYPE__ unsigned short
+// MSP430:#define __CHAR32_TYPE__ unsigned int
 // MSP430:#define __CHAR_BIT__ 8
 // MSP430:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
 // MSP430:#define __DBL_DIG__ 15
@@ -427,6 +485,18 @@
 // MSP430:#define __SCHAR_MAX__ 127
 // MSP430:#define __SHRT_MAX__ 32767
 // MSP430:#define __SIG_ATOMIC_WIDTH__ 32
+// MSP430:#define __SIZEOF_DOUBLE__ 8
+// MSP430:#define __SIZEOF_FLOAT__ 4
+// MSP430:#define __SIZEOF_INT__ 2
+// MSP430:#define __SIZEOF_LONG_DOUBLE__ 8
+// MSP430:#define __SIZEOF_LONG_LONG__ 8
+// MSP430:#define __SIZEOF_LONG__ 4
+// MSP430:#define __SIZEOF_POINTER__ 2
+// MSP430:#define __SIZEOF_PTRDIFF_T__ 2
+// MSP430:#define __SIZEOF_SHORT__ 2
+// MSP430:#define __SIZEOF_SIZE_T__ 2
+// MSP430:#define __SIZEOF_WCHAR_T__ 2
+// MSP430:#define __SIZEOF_WINT_T__ 2
 // MSP430:#define __SIZE_TYPE__ unsigned int
 // MSP430:#define __SIZE_WIDTH__ 16
 // MSP430:#define __UINTMAX_TYPE__ long unsigned int
@@ -440,6 +510,8 @@
 //
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=pic16-none-none < /dev/null | FileCheck -check-prefix PIC16 %s
 //
+// PIC16:#define __CHAR16_TYPE__ unsigned short
+// PIC16:#define __CHAR32_TYPE__ unsigned int
 // PIC16:#define __CHAR_BIT__ 8
 // PIC16:#define __DBL_DENORM_MIN__ 1.40129846e-45F
 // PIC16:#define __DBL_DIG__ 6
@@ -503,6 +575,18 @@
 // PIC16:#define __SCHAR_MAX__ 127
 // PIC16:#define __SHRT_MAX__ 32767
 // PIC16:#define __SIG_ATOMIC_WIDTH__ 32
+// PIC16:#define __SIZEOF_DOUBLE__ 4
+// PIC16:#define __SIZEOF_FLOAT__ 4
+// PIC16:#define __SIZEOF_INT__ 2
+// PIC16:#define __SIZEOF_LONG_DOUBLE__ 4
+// PIC16:#define __SIZEOF_LONG_LONG__ 4
+// PIC16:#define __SIZEOF_LONG__ 4
+// PIC16:#define __SIZEOF_POINTER__ 2
+// PIC16:#define __SIZEOF_PTRDIFF_T__ 2
+// PIC16:#define __SIZEOF_SHORT__ 2
+// PIC16:#define __SIZEOF_SIZE_T__ 2
+// PIC16:#define __SIZEOF_WCHAR_T__ 2
+// PIC16:#define __SIZEOF_WINT_T__ 2
 // PIC16:#define __SIZE_TYPE__ unsigned int
 // PIC16:#define __SIZE_WIDTH__ 16
 // PIC16:#define __UINTMAX_TYPE__ long unsigned int
@@ -531,6 +615,8 @@
 // PPC64:#define _BIG_ENDIAN 1
 // PPC64:#define _LP64 1
 // PPC64:#define __BIG_ENDIAN__ 1
+// PPC64:#define __CHAR16_TYPE__ unsigned short
+// PPC64:#define __CHAR32_TYPE__ unsigned int
 // PPC64:#define __CHAR_BIT__ 8
 // PPC64:#define __CHAR_UNSIGNED__ 1
 // PPC64:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
@@ -600,6 +686,18 @@
 // PPC64:#define __SCHAR_MAX__ 127
 // PPC64:#define __SHRT_MAX__ 32767
 // PPC64:#define __SIG_ATOMIC_WIDTH__ 32
+// PPC64:#define __SIZEOF_DOUBLE__ 8
+// PPC64:#define __SIZEOF_FLOAT__ 4
+// PPC64:#define __SIZEOF_INT__ 4
+// PPC64:#define __SIZEOF_LONG_DOUBLE__ 8
+// PPC64:#define __SIZEOF_LONG_LONG__ 8
+// PPC64:#define __SIZEOF_LONG__ 8
+// PPC64:#define __SIZEOF_POINTER__ 8
+// PPC64:#define __SIZEOF_PTRDIFF_T__ 8
+// PPC64:#define __SIZEOF_SHORT__ 2
+// PPC64:#define __SIZEOF_SIZE_T__ 8
+// PPC64:#define __SIZEOF_WCHAR_T__ 4
+// PPC64:#define __SIZEOF_WINT_T__ 4
 // PPC64:#define __SIZE_TYPE__ long unsigned int
 // PPC64:#define __SIZE_WIDTH__ 64
 // PPC64:#define __UINTMAX_TYPE__ long unsigned int
@@ -617,6 +715,8 @@
 // PPC:#define _ARCH_PPC 1
 // PPC:#define _BIG_ENDIAN 1
 // PPC:#define __BIG_ENDIAN__ 1
+// PPC:#define __CHAR16_TYPE__ unsigned short
+// PPC:#define __CHAR32_TYPE__ unsigned int
 // PPC:#define __CHAR_BIT__ 8
 // PPC:#define __CHAR_UNSIGNED__ 1
 // PPC:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
@@ -685,6 +785,18 @@
 // PPC:#define __SCHAR_MAX__ 127
 // PPC:#define __SHRT_MAX__ 32767
 // PPC:#define __SIG_ATOMIC_WIDTH__ 32
+// PPC:#define __SIZEOF_DOUBLE__ 8
+// PPC:#define __SIZEOF_FLOAT__ 4
+// PPC:#define __SIZEOF_INT__ 4
+// PPC:#define __SIZEOF_LONG_DOUBLE__ 8
+// PPC:#define __SIZEOF_LONG_LONG__ 8
+// PPC:#define __SIZEOF_LONG__ 4
+// PPC:#define __SIZEOF_POINTER__ 4
+// PPC:#define __SIZEOF_PTRDIFF_T__ 4
+// PPC:#define __SIZEOF_SHORT__ 2
+// PPC:#define __SIZEOF_SIZE_T__ 4
+// PPC:#define __SIZEOF_WCHAR_T__ 4
+// PPC:#define __SIZEOF_WINT_T__ 4
 // PPC:#define __SIZE_TYPE__ long unsigned int
 // PPC:#define __SIZE_WIDTH__ 32
 // PPC:#define __UINTMAX_TYPE__ long long unsigned int
@@ -698,6 +810,8 @@
 //
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=s390x-none-none -fno-signed-char < /dev/null | FileCheck -check-prefix S390X %s
 //
+// S390X:#define __CHAR16_TYPE__ unsigned short
+// S390X:#define __CHAR32_TYPE__ unsigned int
 // S390X:#define __CHAR_BIT__ 8
 // S390X:#define __CHAR_UNSIGNED__ 1
 // S390X:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
@@ -732,7 +846,7 @@
 // S390X:#define __INT16_TYPE__ short
 // S390X:#define __INT32_TYPE__ int
 // S390X:#define __INT64_C_SUFFIX__ L
-// S390X:#define __INT64_TYPE__ long int
+// S390X:#define __INT64_TYPE__ long long int
 // S390X:#define __INT8_TYPE__ char
 // S390X:#define __INTMAX_MAX__ 9223372036854775807LL
 // S390X:#define __INTMAX_TYPE__ long long int
@@ -762,6 +876,18 @@
 // S390X:#define __SCHAR_MAX__ 127
 // S390X:#define __SHRT_MAX__ 32767
 // S390X:#define __SIG_ATOMIC_WIDTH__ 32
+// S390X:#define __SIZEOF_DOUBLE__ 8
+// S390X:#define __SIZEOF_FLOAT__ 4
+// S390X:#define __SIZEOF_INT__ 4
+// S390X:#define __SIZEOF_LONG_DOUBLE__ 8
+// S390X:#define __SIZEOF_LONG_LONG__ 8
+// S390X:#define __SIZEOF_LONG__ 8
+// S390X:#define __SIZEOF_POINTER__ 8
+// S390X:#define __SIZEOF_PTRDIFF_T__ 8
+// S390X:#define __SIZEOF_SHORT__ 2
+// S390X:#define __SIZEOF_SIZE_T__ 8
+// S390X:#define __SIZEOF_WCHAR_T__ 4
+// S390X:#define __SIZEOF_WINT_T__ 4
 // S390X:#define __SIZE_TYPE__ long unsigned int
 // S390X:#define __SIZE_WIDTH__ 64
 // S390X:#define __UINTMAX_TYPE__ long long unsigned int
@@ -776,6 +902,8 @@
 //
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=sparc-none-none < /dev/null | FileCheck -check-prefix SPARC %s
 //
+// SPARC:#define __CHAR16_TYPE__ unsigned short
+// SPARC:#define __CHAR32_TYPE__ unsigned int
 // SPARC:#define __CHAR_BIT__ 8
 // SPARC:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
 // SPARC:#define __DBL_DIG__ 15
@@ -840,6 +968,18 @@
 // SPARC:#define __SCHAR_MAX__ 127
 // SPARC:#define __SHRT_MAX__ 32767
 // SPARC:#define __SIG_ATOMIC_WIDTH__ 32
+// SPARC:#define __SIZEOF_DOUBLE__ 8
+// SPARC:#define __SIZEOF_FLOAT__ 4
+// SPARC:#define __SIZEOF_INT__ 4
+// SPARC:#define __SIZEOF_LONG_DOUBLE__ 8
+// SPARC:#define __SIZEOF_LONG_LONG__ 8
+// SPARC:#define __SIZEOF_LONG__ 4
+// SPARC:#define __SIZEOF_POINTER__ 4
+// SPARC:#define __SIZEOF_PTRDIFF_T__ 4
+// SPARC:#define __SIZEOF_SHORT__ 2
+// SPARC:#define __SIZEOF_SIZE_T__ 4
+// SPARC:#define __SIZEOF_WCHAR_T__ 4
+// SPARC:#define __SIZEOF_WINT_T__ 4
 // SPARC:#define __SIZE_TYPE__ long unsigned int
 // SPARC:#define __SIZE_WIDTH__ 32
 // SPARC:#define __UINTMAX_TYPE__ long long unsigned int
@@ -857,6 +997,8 @@
 // 
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=tce-none-none < /dev/null | FileCheck -check-prefix TCE %s
 //
+// TCE:#define __CHAR16_TYPE__ unsigned short
+// TCE:#define __CHAR32_TYPE__ unsigned int
 // TCE:#define __CHAR_BIT__ 8
 // TCE:#define __DBL_DENORM_MIN__ 1.40129846e-45F
 // TCE:#define __DBL_DIG__ 6
@@ -918,6 +1060,18 @@
 // TCE:#define __SCHAR_MAX__ 127
 // TCE:#define __SHRT_MAX__ 32767
 // TCE:#define __SIG_ATOMIC_WIDTH__ 32
+// TCE:#define __SIZEOF_DOUBLE__ 4
+// TCE:#define __SIZEOF_FLOAT__ 4
+// TCE:#define __SIZEOF_INT__ 4
+// TCE:#define __SIZEOF_LONG_DOUBLE__ 4
+// TCE:#define __SIZEOF_LONG_LONG__ 4
+// TCE:#define __SIZEOF_LONG__ 4
+// TCE:#define __SIZEOF_POINTER__ 4
+// TCE:#define __SIZEOF_PTRDIFF_T__ 4
+// TCE:#define __SIZEOF_SHORT__ 2
+// TCE:#define __SIZEOF_SIZE_T__ 4
+// TCE:#define __SIZEOF_WCHAR_T__ 4
+// TCE:#define __SIZEOF_WINT_T__ 4
 // TCE:#define __SIZE_TYPE__ unsigned int
 // TCE:#define __SIZE_WIDTH__ 32
 // TCE:#define __TCE_V1__ 1
@@ -936,6 +1090,8 @@
 // RUN: %clang_cc1 -E -dM -ffreestanding -triple=x86_64-none-none < /dev/null | FileCheck -check-prefix X86_64 %s
 //
 // X86_64:#define _LP64 1
+// X86_64:#define __CHAR16_TYPE__ unsigned short
+// X86_64:#define __CHAR32_TYPE__ unsigned int
 // X86_64:#define __CHAR_BIT__ 8
 // X86_64:#define __DBL_DENORM_MIN__ 4.9406564584124654e-324
 // X86_64:#define __DBL_DIG__ 15
@@ -1004,6 +1160,18 @@
 // X86_64:#define __SCHAR_MAX__ 127
 // X86_64:#define __SHRT_MAX__ 32767
 // X86_64:#define __SIG_ATOMIC_WIDTH__ 32
+// X86_64:#define __SIZEOF_DOUBLE__ 8
+// X86_64:#define __SIZEOF_FLOAT__ 4
+// X86_64:#define __SIZEOF_INT__ 4
+// X86_64:#define __SIZEOF_LONG_DOUBLE__ 16
+// X86_64:#define __SIZEOF_LONG_LONG__ 8
+// X86_64:#define __SIZEOF_LONG__ 8
+// X86_64:#define __SIZEOF_POINTER__ 8
+// X86_64:#define __SIZEOF_PTRDIFF_T__ 8
+// X86_64:#define __SIZEOF_SHORT__ 2
+// X86_64:#define __SIZEOF_SIZE_T__ 8
+// X86_64:#define __SIZEOF_WCHAR_T__ 4
+// X86_64:#define __SIZEOF_WINT_T__ 4
 // X86_64:#define __SIZE_TYPE__ long unsigned int
 // X86_64:#define __SIZE_WIDTH__ 64
 // X86_64:#define __SSE2_MATH__ 1
@@ -1028,3 +1196,7 @@
 // RUN: %clang_cc1 -x c++ -triple i686-pc-linux-gnu -E -dM < /dev/null | FileCheck -check-prefix GNUSOURCE %s
 // GNUSOURCE:#define _GNU_SOURCE 1
 // 
+// RUN: %clang_cc1 -x c++ -std=c++98 -fno-rtti -E -dM < /dev/null | FileCheck -check-prefix NORTTI %s
+// NORTTI: __GXX_ABI_VERSION
+// NORTTI-NOT:#define __GXX_RTTI
+// NORTTI: __STDC__

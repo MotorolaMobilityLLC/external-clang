@@ -14,7 +14,8 @@ TBLGEN_TABLES :=    \
 	DiagnosticDriverKinds.inc	\
 	DiagnosticParseKinds.inc	\
 	DiagnosticAnalysisKinds.inc	\
-	DiagnosticFrontendKinds.inc
+	DiagnosticFrontendKinds.inc	\
+	arm_neon.inc
 
 clang_basic_SRC_FILES :=	\
 	Builtins.cpp	\
@@ -34,5 +35,6 @@ LOCAL_SRC_FILES := $(clang_basic_SRC_FILES)
 LOCAL_MODULE:= libclangBasic
 
 include $(CLANG_HOST_BUILD_MK)
+include $(CLANG_VERSION_INC_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)

@@ -6,8 +6,13 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=    \
+	AttrImpl.inc	\
+	AttrList.inc	\
+	Attrs.inc	\
+	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
-    DiagnosticCommonKinds.inc
+    DiagnosticCommonKinds.inc	\
+	StmtNodes.inc
 
 clang_ast_SRC_FILES :=	\
 	APValue.cpp	\
@@ -28,9 +33,12 @@ clang_ast_SRC_FILES :=	\
 	DeclarationName.cpp	\
 	Expr.cpp	\
 	ExprCXX.cpp	\
+	ExprClassification.cpp	\
 	ExprConstant.cpp	\
 	FullExpr.cpp	\
+	ItaniumCXXABI.cpp	\
 	InheritViz.cpp	\
+	MicrosoftCXXABI.cpp	\
 	NestedNameSpecifier.cpp	\
 	ParentMap.cpp	\
 	RecordLayout.cpp	\

@@ -11,6 +11,7 @@
 #define LLVM_CLANG_FRONTEND_FRONTENDOPTIONS_H
 
 #include "clang/Frontend/CommandLineSourceLoc.h"
+#include "clang/Frontend/FrontendAction.h"
 #include "llvm/ADT/StringRef.h"
 #include <string>
 #include <vector>
@@ -23,24 +24,26 @@ namespace frontend {
     ASTPrint,               ///< Parse ASTs and print them.
     ASTPrintXML,            ///< Parse ASTs and print them in XML.
     ASTView,                ///< Parse ASTs and view them in Graphviz.
+    BoostCon,               ///< BoostCon mode.
+    CreateModule,           ///< Create module definition
     DumpRawTokens,          ///< Dump out raw tokens.
     DumpTokens,             ///< Dump out preprocessed tokens.
     EmitAssembly,           ///< Emit a .s file.
     EmitBC,                 ///< Emit a .bc file.
     EmitHTML,               ///< Translate input source into HTML.
     EmitLLVM,               ///< Emit a .ll file.
-    EmitLLVMOnly,           ///< Generate LLVM IR, but do not
+    EmitLLVMOnly,           ///< Generate LLVM IR, but do not emit anything.
+    EmitCodeGenOnly,        ///< Generate machine code, but don't emit anything.
     EmitObj,                ///< Emit a .o file.
     FixIt,                  ///< Parse and apply any fixits to the source.
     GeneratePCH,            ///< Generate pre-compiled header.
     GeneratePTH,            ///< Generate pre-tokenized header.
     InheritanceView,        ///< View C++ inheritance for a specified class.
     InitOnly,               ///< Only execute frontend initialization.
-    ParseNoop,              ///< Parse with noop callbacks.
-    ParsePrintCallbacks,    ///< Parse and print each callback.
     ParseSyntaxOnly,        ///< Parse and perform semantic analysis.
     PluginAction,           ///< Run a plugin action, \see ActionName.
     PrintDeclContext,       ///< Print DeclContext and their Decls.
+    PrintPreamble,          ///< Print the "preamble" of the input file
     PrintPreprocessedInput, ///< -E mode.
     RewriteMacros,          ///< Expand macros but not #includes.
     RewriteObjC,            ///< ObjC->C Rewriter.
@@ -53,35 +56,29 @@ namespace frontend {
 /// FrontendOptions - Options for controlling the behavior of the frontend.
 class FrontendOptions {
 public:
-  enum InputKind {
-    IK_None,
-    IK_Asm,
-    IK_C,
-    IK_CXX,
-    IK_ObjC,
-    IK_ObjCXX,
-    IK_PreprocessedC,
-    IK_PreprocessedCXX,
-    IK_PreprocessedObjC,
-    IK_PreprocessedObjCXX,
-    IK_OpenCL,
-    IK_AST
-  };
-
   unsigned DebugCodeCompletionPrinter : 1; ///< Use the debug printer for code
                                            /// completion results.
   unsigned DisableFree : 1;                ///< Disable memory freeing on exit.
   unsigned RelocatablePCH : 1;             ///< When generating PCH files,
-                                           /// instruct the PCH writer to create
+                                           /// instruct the AST writer to create
                                            /// relocatable PCH files.
+  unsigned ChainedPCH : 1;                 ///< When generating PCH files,
+                                           /// instruct the AST writer to create
+                                           /// chained PCH files.
   unsigned ShowHelp : 1;                   ///< Show the -help text.
   unsigned ShowMacrosInCodeCompletion : 1; ///< Show macros in code completion
                                            /// results.
+  unsigned ShowCodePatternsInCodeCompletion : 1; ///< Show code patterns in code
+                                                 /// completion results.
+  unsigned ShowGlobalSymbolsInCodeCompletion : 1; ///< Show top-level decls in
+                                                  /// code completion results.
   unsigned ShowStats : 1;                  ///< Show frontend performance
                                            /// metrics and statistics.
   unsigned ShowTimers : 1;                 ///< Show timers for individual
                                            /// actions.
   unsigned ShowVersion : 1;                ///< Show the -version text.
+  unsigned FixWhatYouCan : 1;              ///< Apply fixes even if there are
+                                           /// unfixable errors.
 
   /// The input files and their types.
   std::vector<std::pair<InputKind, std::string> > Inputs;
@@ -104,11 +101,17 @@ public:
   /// The name of the action to run when using a plugin action.
   std::string ActionName;
 
+  /// Arg to pass to the plugin
+  std::vector<std::string> PluginArgs;
+
   /// The list of plugins to load.
   std::vector<std::string> Plugins;
 
   /// \brief The list of AST files to merge.
   std::vector<std::string> ASTMergeFiles;
+
+  /// \brief The list of modules to import.
+  std::vector<std::string> Modules;
 
   /// \brief A list of arguments to forward to LLVM's option processing; this
   /// should only be used for debugging and experimental features.
@@ -121,8 +124,11 @@ public:
     ProgramAction = frontend::ParseSyntaxOnly;
     ActionName = "";
     RelocatablePCH = 0;
+    ChainedPCH = 0;
     ShowHelp = 0;
     ShowMacrosInCodeCompletion = 0;
+    ShowCodePatternsInCodeCompletion = 0;
+    ShowGlobalSymbolsInCodeCompletion = 1;
     ShowStats = 0;
     ShowTimers = 0;
     ShowVersion = 0;

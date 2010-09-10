@@ -3,6 +3,8 @@ set(LLVM_NO_RTTI 1)
 add_clang_library(clangChecker
   AdjustedReturnValueChecker.cpp
   AggExprVisitor.cpp
+  AnalysisConsumer.cpp
+  AnalysisManager.cpp
   ArrayBoundChecker.cpp
   AttrNonNullChecker.cpp
   BasicConstraintManager.cpp
@@ -12,60 +14,71 @@ add_clang_library(clangChecker
   BugReporter.cpp
   BugReporterVisitors.cpp
   BuiltinFunctionChecker.cpp
-  CallAndMessageChecker.cpp
-  CallInliner.cpp
-  CastToStructChecker.cpp
   CFRefCount.cpp
+  CallAndMessageChecker.cpp
+  CastSizeChecker.cpp
+  CastToStructChecker.cpp
   CheckDeadStores.cpp
-  Checker.cpp
   CheckObjCDealloc.cpp
   CheckObjCInstMethSignature.cpp
   CheckSecuritySyntaxOnly.cpp
   CheckSizeofPointer.cpp
+  Checker.cpp
+  CheckerHelpers.cpp
   CocoaConventions.cpp
+  CStringChecker.cpp
   DereferenceChecker.cpp
   DivZeroChecker.cpp
   Environment.cpp
   ExplodedGraph.cpp
   FixedAddressChecker.cpp
   FlatStore.cpp
+  FrontendActions.cpp
   GRBlockCounter.cpp
-  GRCoreEngine.cpp
   GRCXXExprEngine.cpp
+  GRCoreEngine.cpp
   GRExprEngine.cpp
   GRExprEngineExperimentalChecks.cpp
   GRState.cpp
+  HTMLDiagnostics.cpp
+  IdempotentOperationChecker.cpp
   LLVMConventionsChecker.cpp
   MacOSXAPIChecker.cpp
   MallocChecker.cpp
   ManagerRegistry.cpp
   MemRegion.cpp
-  NoReturnFunctionChecker.cpp
   NSAutoreleasePoolChecker.cpp
   NSErrorChecker.cpp
-  ObjCUnusedIVarsChecker.cpp
+  NoReturnFunctionChecker.cpp
   OSAtomicChecker.cpp
+  ObjCUnusedIVarsChecker.cpp
   PathDiagnostic.cpp
+  PlistDiagnostics.cpp
   PointerArithChecker.cpp
   PointerSubChecker.cpp
   PthreadLockChecker.cpp
   RangeConstraintManager.cpp
   RegionStore.cpp
   ReturnPointerRangeChecker.cpp
-  ReturnStackAddressChecker.cpp
   ReturnUndefChecker.cpp
-  SimpleConstraintManager.cpp
-  SimpleSValuator.cpp
-  Store.cpp
   SVals.cpp
   SValuator.cpp
+  SimpleConstraintManager.cpp
+  SimpleSValuator.cpp
+  StackAddrLeakChecker.cpp
+  Store.cpp
+  StreamChecker.cpp
   SymbolManager.cpp
   UndefBranchChecker.cpp
   UndefCapturedBlockVarChecker.cpp
+  UndefResultChecker.cpp
   UndefinedArraySubscriptChecker.cpp
   UndefinedAssignmentChecker.cpp
-  UndefResultChecker.cpp
   UnixAPIChecker.cpp
-  ValueManager.cpp
+  UnreachableCodeChecker.cpp
   VLASizeChecker.cpp
+  ValueManager.cpp
   )
+
+add_dependencies(clangChecker ClangAttrClasses ClangAttrList ClangDeclNodes
+                 ClangStmtNodes)

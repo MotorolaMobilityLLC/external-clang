@@ -253,7 +253,7 @@ void rdar_7249327(unsigned int A[2*32]) {
   a = A;
   b = B;
   
-  n = *a++;
+  n = *a++; // expected-warning{{Assigned value is always the same as the existing value}}
   if (n)
     x += *b++; // no-warning
 }
@@ -708,7 +708,7 @@ int pr5857(char *src) {
   long long *z = (long long *) (intptr_t) src;
   long long w = 0;
   int n = 0;
-  for (n = 0; n < y; ++n) {
+  for (n = 0; n < y; ++n) { // expected-warning{{Assigned value is always the same as the existing value}}
     // Previously we crashed analyzing this statement.
     w = *z++;
   }
@@ -1014,3 +1014,55 @@ void pr6854(void * arg) {
   float f = *(float*) a;
 }
 
+// <rdar://problem/8032791> False positive due to symbolic store not find
+//  value because of 'const' qualifier
+double rdar_8032791_2();
+double rdar_8032791_1() {
+   struct R8032791 { double x[2]; double y; }
+   data[3] = {
+     {{1.0, 3.0}, 3.0},  //  1   2   3
+     {{1.0, 1.0}, 0.0},  // 1 1 2 2 3 3
+     {{1.0, 3.0}, 1.0}   //    1   2   3
+   };
+
+   double x = 0.0;
+   for (unsigned i = 0 ; i < 3; i++) {
+     const struct R8032791 *p = &data[i];
+     x += p->y + rdar_8032791_2(); // no-warning
+   }
+   return x;
+}
+
+// PR 7450 - Handle pointer arithmetic with __builtin_alloca
+void pr_7450_aux(void *x);
+void pr_7450() {
+  void *p = __builtin_alloca(10);
+  // Don't crash when analyzing the following statement.
+  pr_7450_aux(p + 8);
+}
+
+// <rdar://problem/8243408> - Symbolicate struct values returned by value.
+struct s_rdar_8243408 { int x; };
+extern struct s_rdar_8243408 rdar_8243408_aux(void);
+void rdar_8243408(void) {
+  struct s_rdar_8243408 a = { 1 }, *b = 0;
+  while (a.x && !b)
+    a = rdar_8243408_aux();
+
+  // Previously there was a false error here with 'b' being null.
+  (void) (a.x && b->x); // no-warning
+
+  // Introduce a null deref to ensure we are checking this path.
+  int *p = 0;
+  *p = 0xDEADBEEF; // expected-warning{{Dereference of null pointer}}
+}
+
+// <rdar://problem/8258814>
+int r8258814()
+{
+  int foo;
+  int * a = &foo;
+  a[0] = 10;
+  // Do not warn that the value of 'foo' is uninitialized.
+  return foo; // no-warning
+}

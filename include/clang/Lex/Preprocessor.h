@@ -42,6 +42,7 @@ class CommentHandler;
 class ScratchBuffer;
 class TargetInfo;
 class PPCallbacks;
+class CodeCompletionHandler;
 class DirectoryLookup;
 class PreprocessingRecord;
   
@@ -117,7 +118,7 @@ class Preprocessor {
   /// conceptually similar the IdentifierTable. In addition, the current control
   /// flow (in clang::ParseAST()), make it convenient to put here.
   /// FIXME: Make sure the lifetime of Identifiers/Selectors *isn't* tied to
-  /// the lifetime fo the preprocessor.
+  /// the lifetime of the preprocessor.
   SelectorTable Selectors;
 
   /// BuiltinInfo - Information about builtins.
@@ -131,9 +132,18 @@ class Preprocessor {
   /// with this preprocessor.
   std::vector<CommentHandler *> CommentHandlers;
 
+  /// \brief The code-completion handler.
+  CodeCompletionHandler *CodeComplete;
+  
   /// \brief The file that we're performing code-completion for, if any.
   const FileEntry *CodeCompletionFile;
 
+  /// \brief The number of bytes that we will initially skip when entering the
+  /// main file, which is used when loading a precompiled preamble, along
+  /// with a flag that indicates whether skipping this number of bytes will
+  /// place the lexer at the start of a line.
+  std::pair<unsigned, bool> SkipMainFilePreamble;
+  
   /// CurLexer - This is the current top of the stack that we're lexing from if
   /// not expanding a macro and we are lexing directly from source code.
   ///  Only one of CurLexer, CurPTHLexer, or CurTokenLexer will be non-null.
@@ -192,6 +202,11 @@ class Preprocessor {
   /// reused for quick allocation.
   MacroArgs *MacroArgCache;
   friend class MacroArgs;
+ 
+  /// PragmaPushMacroInfo - For each IdentifierInfo used in a #pragma 
+  /// push_macro directive, we keep a MacroInfo stack used to restore 
+  /// previous macro value.
+  llvm::DenseMap<IdentifierInfo*, std::vector<MacroInfo*> > PragmaPushMacroInfo;
 
   // Various statistics we track for performance analysis.
   unsigned NumDirectives, NumIncluded, NumDefined, NumUndefined, NumPragma;
@@ -290,8 +305,8 @@ public:
   /// expansions going on at the time.
   PreprocessorLexer *getCurrentLexer() const { return CurPPLexer; }
 
-  /// getCurrentFileLexer - Return the current file lexer being lexed from.  Note
-  /// that this ignores any potentially active macro expansions and _Pragma
+  /// getCurrentFileLexer - Return the current file lexer being lexed from.
+  /// Note that this ignores any potentially active macro expansions and _Pragma
   /// expansions going on at the time.
   PreprocessorLexer *getCurrentFileLexer() const;
 
@@ -340,13 +355,19 @@ public:
   /// AddPragmaHandler - Add the specified pragma handler to the preprocessor.
   /// If 'Namespace' is non-null, then it is a token required to exist on the
   /// pragma line before the pragma string starts, e.g. "STDC" or "GCC".
-  void AddPragmaHandler(const char *Namespace, PragmaHandler *Handler);
+  void AddPragmaHandler(llvm::StringRef Namespace, PragmaHandler *Handler);
+  void AddPragmaHandler(PragmaHandler *Handler) {
+    AddPragmaHandler(llvm::StringRef(), Handler);
+  }
 
   /// RemovePragmaHandler - Remove the specific pragma handler from
   /// the preprocessor. If \arg Namespace is non-null, then it should
   /// be the namespace that \arg Handler was added to. It is an error
   /// to remove a handler that has not been registered.
-  void RemovePragmaHandler(const char *Namespace, PragmaHandler *Handler);
+  void RemovePragmaHandler(llvm::StringRef Namespace, PragmaHandler *Handler);
+  void RemovePragmaHandler(PragmaHandler *Handler) {
+    RemovePragmaHandler(llvm::StringRef(), Handler);
+  }
 
   /// \brief Add the specified comment handler to the preprocessor.
   void AddCommentHandler(CommentHandler *Handler);
@@ -356,6 +377,25 @@ public:
   /// It is an error to remove a handler that has not been registered.
   void RemoveCommentHandler(CommentHandler *Handler);
 
+  /// \brief Set the code completion handler to the given object.
+  void setCodeCompletionHandler(CodeCompletionHandler &Handler) {
+    CodeComplete = &Handler;
+  }
+  
+  /// \brief Retrieve the current code-completion handler.
+  CodeCompletionHandler *getCodeCompletionHandler() const {
+    return CodeComplete;
+  }
+  
+  /// \brief Clear out the code completion handler.
+  void clearCodeCompletionHandler() {
+    CodeComplete = 0;
+  }
+  
+  /// \brief Hook used by the lexer to invoke the "natural language" code
+  /// completion point.
+  void CodeCompleteNaturalLanguage();
+  
   /// \brief Retrieve the preprocessing record, or NULL if there is no
   /// preprocessing record.
   PreprocessingRecord *getPreprocessingRecord() const { return Record; }
@@ -550,6 +590,18 @@ public:
   /// for which we are performing code completion.
   bool isCodeCompletionFile(SourceLocation FileLoc) const;
 
+  /// \brief Instruct the preprocessor to skip part of the main
+  /// the main source file.
+  ///
+  /// \brief Bytes The number of bytes in the preamble to skip.
+  ///
+  /// \brief StartOfLine Whether skipping these bytes puts the lexer at the
+  /// start of a line.
+  void setSkipMainFilePreamble(unsigned Bytes, bool StartOfLine) { 
+    SkipMainFilePreamble.first = Bytes;
+    SkipMainFilePreamble.second = StartOfLine;
+  }
+  
   /// Diag - Forwarding function for diagnostics.  This emits a diagnostic at
   /// the specified Token's location, translating the token's start
   /// position in the current buffer into a SourcePosition object for rendering.
@@ -720,7 +772,10 @@ public:
 
   /// AllocateMacroInfo - Allocate a new MacroInfo object with the provide
   ///  SourceLocation.
-  MacroInfo* AllocateMacroInfo(SourceLocation L);
+  MacroInfo *AllocateMacroInfo(SourceLocation L);
+
+  /// CloneMacroInfo - Allocate a new MacroInfo object which is clone of MI.
+  MacroInfo *CloneMacroInfo(const MacroInfo &MI);
 
   /// GetIncludeFilenameSpelling - Turn the specified lexer token into a fully
   /// checked and spelled filename, e.g. as an operand of #include. This returns
@@ -753,9 +808,9 @@ public:
   ///    #include FOO
   /// because in this case, "<a/b.h>" is returned as 7 tokens, not one.
   ///
-  /// This code concatenates and consumes tokens up to the '>' token.  It returns
-  /// false if the > was found, otherwise it returns true if it finds and consumes
-  /// the EOM marker.
+  /// This code concatenates and consumes tokens up to the '>' token.  It
+  /// returns false if the > was found, otherwise it returns true if it finds
+  /// and consumes the EOM marker.
   bool ConcatenateIncludeName(llvm::SmallString<128> &FilenameBuffer);
 
 private:
@@ -777,6 +832,9 @@ private:
     CurDirLookup  = IncludeMacroStack.back().TheDirLookup;
     IncludeMacroStack.pop_back();
   }
+
+  /// AllocateMacroInfo - Allocate a new MacroInfo object.
+  MacroInfo *AllocateMacroInfo();
 
   /// ReleaseMacroInfo - Release the specified MacroInfo.  This memory will
   ///  be reused for allocating new MacroInfo objects.
@@ -871,7 +929,12 @@ private:
   //===--------------------------------------------------------------------===//
   // Caching stuff.
   void CachingLex(Token &Result);
-  bool InCachingLexMode() const { return CurPPLexer == 0 && CurTokenLexer == 0;}
+  bool InCachingLexMode() const {
+    // If the Lexer pointers are 0 and IncludeMacroStack is empty, it means
+    // that we are past EOF, not that we are in CachingLex mode.
+    return CurPPLexer == 0 && CurTokenLexer == 0 && CurPTHLexer == 0 && 
+           !IncludeMacroStack.empty();
+  }
   void EnterCachingLexMode();
   void ExitCachingLexMode() {
     if (InCachingLexMode())
@@ -900,8 +963,6 @@ private:
   // Macro handling.
   void HandleDefineDirective(Token &Tok);
   void HandleUndefDirective(Token &Tok);
-  // HandleAssertDirective(Token &Tok);
-  // HandleUnassertDirective(Token &Tok);
 
   // Conditional Inclusion.
   void HandleIfdefDirective(Token &Tok, bool isIfndef,
@@ -920,6 +981,11 @@ public:
   void HandlePragmaSystemHeader(Token &SysHeaderTok);
   void HandlePragmaDependency(Token &DependencyTok);
   void HandlePragmaComment(Token &CommentTok);
+  void HandlePragmaMessage(Token &MessageTok);
+  void HandlePragmaPushMacro(Token &Tok);
+  void HandlePragmaPopMacro(Token &Tok);
+  IdentifierInfo *ParsePragmaPushOrPopMacro(Token &Tok);
+
   // Return true and store the first token only if any CommentHandler
   // has inserted some tokens and getCommentRetentionState() is false.
   bool HandleComment(Token &Token, SourceRange Comment);

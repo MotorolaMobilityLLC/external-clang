@@ -6,9 +6,16 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=    \
-    DiagnosticCommonKinds.inc
+	AttrList.inc	\
+	Attrs.inc	\
+	DeclNodes.inc	\
+	DiagnosticCommonKinds.inc	\
+	DiagnosticFrontendKinds.inc	\
+	StmtNodes.inc	\
+	arm_neon.inc
 
 clang_codegen_SRC_FILES :=	\
+	BackendUtil.cpp	\
 	CGBlocks.cpp	\
 	CGBuiltin.cpp	\
 	CGCXX.cpp	\
@@ -33,10 +40,13 @@ clang_codegen_SRC_FILES :=	\
 	CGTemporaries.cpp	\
 	CGVTT.cpp	\
 	CGVTables.cpp	\
+	CodeGenAction.cpp	\
 	CodeGenFunction.cpp	\
 	CodeGenModule.cpp	\
 	CodeGenTypes.cpp	\
+	ItaniumCXXABI.cpp	\
 	Mangle.cpp	\
+	MicrosoftCXXABI.cpp	\
 	ModuleBuilder.cpp	\
 	TargetInfo.cpp
 
@@ -45,6 +55,7 @@ LOCAL_SRC_FILES := $(clang_codegen_SRC_FILES)
 LOCAL_MODULE:= libclangCodeGen
 
 include $(CLANG_HOST_BUILD_MK)
+include $(CLANG_VERSION_INC_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(LLVM_GEN_INTRINSICS_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)

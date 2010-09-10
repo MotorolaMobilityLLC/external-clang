@@ -118,8 +118,6 @@ int* ptest1 = __builtin_choose_expr(1, (int*)0, (int*)0);
 typedef int32_t ivector4 __attribute((vector_size(16)));
 ivector4 vtest1 = 1 ? (ivector4){1} : (ivector4){1};
 ivector4 vtest2 = __builtin_choose_expr(1, (ivector4){1}, (ivector4){1});
-ivector4 vtest3 = __real__ (ivector4){1};
-ivector4 vtest4 = __imag__ (ivector4){1};
 
 uintptr_t ptrasintadd1 = (uintptr_t)&a - 4;
 uintptr_t ptrasintadd2 = (uintptr_t)&a + 4;
@@ -131,3 +129,17 @@ const wchar_t widestr[] = L"asdf";
 // PR5447
 const double pr5447 = (0.05 < -1.0) ? -1.0 : 0.0499878;
 
+// PR4386
+
+// None of these are constant initializers, but we implement GCC's old
+// behaviour of accepting bar and zed but not foo. GCC's behaviour was
+// changed in 2007 (rev 122551), so we should be able to change too one
+// day.
+int PR4386_bar();
+int PR4386_foo() __attribute((weak));
+int PR4386_zed();
+
+int PR4386_a = ((void *) PR4386_bar) != 0;
+int PR4386_b = ((void *) PR4386_foo) != 0; // expected-error{{initializer element is not a compile-time constant}}
+int PR4386_c = ((void *) PR4386_zed) != 0;
+int PR4386_zed() __attribute((weak));

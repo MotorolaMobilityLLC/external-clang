@@ -38,7 +38,7 @@ I2 *operator+(I2_holder, int);
   return 0;
 }
 + (void)method {
-  [ivar method]; // expected-error{{receiver type 'ivar' (aka 'ivar') is not an Objective-C class}}
+  [ivar method]; // expected-error{{receiver type 'ivar' is not an Objective-C class}}
 }
 @end
 
@@ -62,15 +62,15 @@ struct identity {
   // or typename-specifiers.
   if (false) {
     if (true)
-      return [typename identity<I3>::type method];
+      return [typename identity<I3>::type method]; // expected-warning{{occurs outside of a template}}
 
     return [::I3 method];
   }
 
   int* ip1 = {[super method]};
   int* ip2 = {[::I3 method]};
-  int* ip3 = {[typename identity<I3>::type method]};
-  int* ip4 = {[typename identity<I2_holder>::type().get() method]};
+  int* ip3 = {[typename identity<I3>::type method]}; // expected-warning{{occurs outside of a template}}
+  int* ip4 = {[typename identity<I2_holder>::type().get() method]}; // expected-warning{{occurs outside of a template}}
   int array[5] = {[3] = 2};
   return [super method];
 }

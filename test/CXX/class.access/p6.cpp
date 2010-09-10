@@ -52,3 +52,90 @@ namespace test1 {
     A apriv = priv; // expected-error {{private constructor}}
   }
 }
+
+// PR6967
+namespace test2 {
+  class A {
+  public:
+    template <class T> static void set(T &t, typename T::type v) {
+      t.value = v;
+    }
+    template <class T> static typename T::type get(const T &t) {
+      return t.value;
+    }
+  };
+
+  class B {
+    friend class A;
+
+  private:
+    typedef int type;
+    type value;
+  };
+
+  int test() {
+    B b;
+    A::set(b, 0);
+    return A::get(b);
+  }
+}
+
+namespace test3 {
+  class Green {}; class Blue {};
+
+  // We have to wrap this in a class because a partial specialization
+  // isn't actually in the context of the template.
+  struct Outer {
+    template <class T, class Nat> class A {
+    };
+  };
+
+  template <class T> class Outer::A<T, typename T::nature> {
+  public:
+    static void foo();
+  };
+
+  class B {
+  private: typedef Green nature;
+    friend class Outer;
+  };
+
+  void test() {
+    Outer::A<B, Green>::foo();
+    Outer::A<B, Blue>::foo(); // expected-error {{no member named 'foo'}}
+  }
+}
+
+namespace test4 {
+  template <class T> class A {
+  private: typedef int type;
+    template <class U> friend void foo(U &, typename U::type);
+  };
+
+  template <class U> void foo(U &, typename U::type) {}
+  
+  void test() {
+    A<int> a;
+    foo(a, 0);
+  }
+}
+
+// PR7644
+namespace test5 {
+  class A {
+    enum Enum { E0, E1, E2 }; // expected-note 4 {{declared private here}}
+    template <Enum> void foo();
+    template <Enum> class bar;
+  };
+
+  template <A::Enum en> void A::foo() {}
+  template <A::Enum en> class A::bar {};
+
+  template <A::Enum en> void foo() {} // expected-error {{'Enum' is a private member of 'test5::A'}}
+  template <A::Enum en> class bar {}; // expected-error {{'Enum' is a private member of 'test5::A'}}
+
+  class B {
+    template <A::Enum en> void foo() {} // expected-error {{'Enum' is a private member of 'test5::A'}}
+    template <A::Enum en> class bar {}; // expected-error {{'Enum' is a private member of 'test5::A'}}
+  };
+}

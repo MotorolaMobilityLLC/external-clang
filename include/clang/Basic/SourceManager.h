@@ -50,13 +50,20 @@ namespace SrcMgr {
     C_User, C_System, C_ExternCSystem
   };
 
-  /// ContentCache - Once instance of this struct is kept for every file
+  /// ContentCache - One instance of this struct is kept for every file
   /// loaded or used.  This object owns the MemoryBuffer object.
   class ContentCache {
+    enum CCFlags {
+      /// \brief Whether the buffer is invalid.
+      InvalidFlag = 0x01,
+      /// \brief Whether the buffer should not be freed on destruction.
+      DoNotFreeFlag = 0x02
+    };
+    
     /// Buffer - The actual buffer containing the characters from the input
     /// file.  This is owned by the ContentCache object.
-    /// The bit indicates whether the buffer is invalid.
-    mutable llvm::PointerIntPair<const llvm::MemoryBuffer *, 1, bool> Buffer;
+    /// The bits indicate indicates whether the buffer is invalid.
+    mutable llvm::PointerIntPair<const llvm::MemoryBuffer *, 2> Buffer;
 
   public:
     /// Reference to the file entry.  This reference does not own
@@ -103,11 +110,27 @@ namespace SrcMgr {
       Buffer.setPointer(B);
       Buffer.setInt(false);
     }
+    
+    /// \brief Get the underlying buffer, returning NULL if the buffer is not
+    /// yet available.
+    const llvm::MemoryBuffer *getRawBuffer() const {
+      return Buffer.getPointer();
+    }
 
     /// \brief Replace the existing buffer (which will be deleted)
     /// with the given buffer.
-    void replaceBuffer(const llvm::MemoryBuffer *B);
+    void replaceBuffer(const llvm::MemoryBuffer *B, bool DoNotFree = false);
 
+    /// \brief Determine whether the buffer itself is invalid.
+    bool isBufferInvalid() const {
+      return Buffer.getInt() & InvalidFlag;
+    }
+    
+    /// \brief Determine whether the buffer should be freed.
+    bool shouldFreeBuffer() const {
+      return (Buffer.getInt() & DoNotFreeFlag) == 0;
+    }
+    
     ContentCache(const FileEntry *Ent = 0)
       : Buffer(0, false), Entry(Ent), SourceLineCache(0), NumLines(0) {}
 
@@ -280,6 +303,57 @@ public:
   /// \brief Read the source location entry with index ID.
   virtual void ReadSLocEntry(unsigned ID) = 0;
 };
+  
+
+/// IsBeforeInTranslationUnitCache - This class holds the cache used by
+/// isBeforeInTranslationUnit.  The cache structure is complex enough to be
+/// worth breaking out of SourceManager.
+class IsBeforeInTranslationUnitCache {
+  /// L/R QueryFID - These are the FID's of the cached query.  If these match up
+  /// with a subsequent query, the result can be reused.
+  FileID LQueryFID, RQueryFID;
+  
+  /// CommonFID - This is the file found in common between the two #include
+  /// traces.  It is the nearest common ancestor of the #include tree.
+  FileID CommonFID;
+  
+  /// L/R CommonOffset - This is the offset of the previous query in CommonFID.
+  /// Usually, this represents the location of the #include for QueryFID, but if
+  /// LQueryFID is a parent of RQueryFID (or vise versa) then these can be a
+  /// random token in the parent.
+  unsigned LCommonOffset, RCommonOffset;
+public:
+  
+  /// isCacheValid - Return true if the currently cached values match up with
+  /// the specified LHS/RHS query.  If not, we can't use the cache.
+  bool isCacheValid(FileID LHS, FileID RHS) const {
+    return LQueryFID == LHS && RQueryFID == RHS;
+  }
+  
+  /// getCachedResult - If the cache is valid, compute the result given the
+  /// specified offsets in the LHS/RHS FID's.
+  bool getCachedResult(unsigned LOffset, unsigned ROffset) const {
+    // If one of the query files is the common file, use the offset.  Otherwise,
+    // use the #include loc in the common file.
+    if (LQueryFID != CommonFID) LOffset = LCommonOffset;
+    if (RQueryFID != CommonFID) ROffset = RCommonOffset;
+    return LOffset < ROffset;
+  }
+  
+  // Set up a new query.
+  void setQueryFIDs(FileID LHS, FileID RHS) {
+    LQueryFID = LHS;
+    RQueryFID = RHS;
+  }
+  
+  void setCommonLoc(FileID commonFID, unsigned lCommonOffset,
+                    unsigned rCommonOffset) {
+    CommonFID = commonFID;
+    LCommonOffset = lCommonOffset;
+    RCommonOffset = rCommonOffset;
+  }
+  
+};
 
 /// SourceManager - This file handles loading and caching of source files into
 /// memory.  This object owns the MemoryBuffer objects for all of the loaded
@@ -347,9 +421,7 @@ class SourceManager {
   mutable unsigned NumLinearScans, NumBinaryProbes;
 
   // Cache results for the isBeforeInTranslationUnit method.
-  mutable FileID LastLFIDForBeforeTUCheck;
-  mutable FileID LastRFIDForBeforeTUCheck;
-  mutable bool   LastResForBeforeTUCheck;
+  mutable IsBeforeInTranslationUnitCache IsBeforeInTUCache;
 
   // SourceManager doesn't support copy construction.
   explicit SourceManager(const SourceManager&);
@@ -372,10 +444,9 @@ public:
   FileID getMainFileID() const { return MainFileID; }
 
   /// createMainFileID - Create the FileID for the main source file.
-  FileID createMainFileID(const FileEntry *SourceFile,
-                          SourceLocation IncludePos) {
+  FileID createMainFileID(const FileEntry *SourceFile) {
     assert(MainFileID.isInvalid() && "MainFileID already set!");
-    MainFileID = createFileID(SourceFile, IncludePos, SrcMgr::C_User);
+    MainFileID = createFileID(SourceFile, SourceLocation(), SrcMgr::C_User);
     return MainFileID;
   }
 
@@ -386,7 +457,7 @@ public:
   /// createFileID - Create a new FileID that represents the specified file
   /// being #included from the specified IncludePosition.  This returns 0 on
   /// error and translates NULL into standard input.
-  /// PreallocateID should be non-zero to specify which a pre-allocated,
+  /// PreallocateID should be non-zero to specify which pre-allocated,
   /// lazily computed source location is being filled in by this operation.
   FileID createFileID(const FileEntry *SourceFile, SourceLocation IncludePos,
                       SrcMgr::CharacteristicKind FileCharacter,
@@ -436,14 +507,18 @@ public:
   /// \brief Override the contents of the given source file by providing an
   /// already-allocated buffer.
   ///
-  /// \param SourceFile the source file whose contents will be override.
+  /// \param SourceFile the source file whose contents will be overriden.
   ///
   /// \param Buffer the memory buffer whose contents will be used as the
   /// data in the given source file.
   ///
+  /// \param DoNotFree If true, then the buffer will not be freed when the
+  /// source manager is destroyed.
+  ///
   /// \returns true if an error occurred, false otherwise.
   bool overrideFileContents(const FileEntry *SourceFile,
-                            const llvm::MemoryBuffer *Buffer);
+                            const llvm::MemoryBuffer *Buffer,
+                            bool DoNotFree = false);
 
   //===--------------------------------------------------------------------===//
   // FileID manipulation methods.
@@ -719,7 +794,7 @@ public:
   unsigned sloc_entry_size() const { return SLocEntryTable.size(); }
 
   // FIXME: Exposing this is a little gross; what we want is a good way
-  //  to iterate the entries that were not defined in a PCH file (or
+  //  to iterate the entries that were not defined in an AST file (or
   //  any other external source).
   unsigned sloc_loaded_entry_size() const { return SLocEntryLoaded.size(); }
 

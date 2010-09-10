@@ -9,17 +9,18 @@
 
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/AST/ASTConsumer.h"
+#include "clang/Lex/Pragma.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Parse/Parser.h"
 #include "clang/Basic/FileManager.h"
-#include "clang/Frontend/AnalysisConsumer.h"
 #include "clang/Frontend/ASTConsumers.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
-#include "clang/Frontend/FixItRewriter.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Frontend/Utils.h"
+#include "clang/Serialization/ASTWriter.h"
 #include "llvm/ADT/OwningPtr.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace clang;
 
@@ -38,13 +39,6 @@ void InitOnlyAction::ExecuteAction() {
 //===----------------------------------------------------------------------===//
 // AST Consumer Actions
 //===----------------------------------------------------------------------===//
-
-ASTConsumer *AnalysisAction::CreateASTConsumer(CompilerInstance &CI,
-                                               llvm::StringRef InFile) {
-  return CreateAnalysisConsumer(CI.getPreprocessor(),
-                                CI.getFrontendOpts().OutputFile,
-                                CI.getAnalyzerOpts());
-}
 
 ASTConsumer *ASTPrintAction::CreateASTConsumer(CompilerInstance &CI,
                                                llvm::StringRef InFile) {
@@ -77,84 +71,40 @@ ASTConsumer *DeclContextPrintAction::CreateASTConsumer(CompilerInstance &CI,
 
 ASTConsumer *GeneratePCHAction::CreateASTConsumer(CompilerInstance &CI,
                                                   llvm::StringRef InFile) {
-  const std::string &Sysroot = CI.getHeaderSearchOpts().Sysroot;
-  if (CI.getFrontendOpts().RelocatablePCH &&
-      Sysroot.empty()) {
-    CI.getDiagnostics().Report(diag::err_relocatable_without_without_isysroot);
-    return 0;
-  }
-
-  llvm::raw_ostream *OS = CI.createDefaultOutputFile(true, InFile);
-  if (!OS)
+  std::string Sysroot;
+  llvm::raw_ostream *OS = 0;
+  bool Chaining;
+  if (ComputeASTConsumerArguments(CI, InFile, Sysroot, OS, Chaining))
     return 0;
 
-  if (CI.getFrontendOpts().RelocatablePCH)
-    return CreatePCHGenerator(CI.getPreprocessor(), OS, Sysroot.c_str());
-
-  return CreatePCHGenerator(CI.getPreprocessor(), OS);
+  const char *isysroot = CI.getFrontendOpts().RelocatablePCH ?
+                             Sysroot.c_str() : 0;  
+  return new PCHGenerator(CI.getPreprocessor(), Chaining, isysroot, OS);
 }
 
-ASTConsumer *HTMLPrintAction::CreateASTConsumer(CompilerInstance &CI,
-                                                llvm::StringRef InFile) {
-  if (llvm::raw_ostream *OS = CI.createDefaultOutputFile(false, InFile))
-    return CreateHTMLPrinter(OS, CI.getPreprocessor());
-  return 0;
+bool GeneratePCHAction::ComputeASTConsumerArguments(CompilerInstance &CI,
+                                                    llvm::StringRef InFile,
+                                                    std::string &Sysroot,
+                                                    llvm::raw_ostream *&OS,
+                                                    bool &Chaining) {
+  Sysroot = CI.getHeaderSearchOpts().Sysroot;
+  if (CI.getFrontendOpts().RelocatablePCH && Sysroot.empty()) {
+    CI.getDiagnostics().Report(diag::err_relocatable_without_isysroot);
+    return true;
+  }
+
+  OS = CI.createDefaultOutputFile(true, InFile);
+  if (!OS)
+    return true;
+
+  Chaining = CI.getInvocation().getFrontendOpts().ChainedPCH &&
+             !CI.getPreprocessorOpts().ImplicitPCHInclude.empty();
+  return false;
 }
 
 ASTConsumer *InheritanceViewAction::CreateASTConsumer(CompilerInstance &CI,
                                                       llvm::StringRef InFile) {
   return CreateInheritanceViewer(CI.getFrontendOpts().ViewClassInheritance);
-}
-
-FixItAction::FixItAction() {}
-FixItAction::~FixItAction() {}
-
-ASTConsumer *FixItAction::CreateASTConsumer(CompilerInstance &CI,
-                                            llvm::StringRef InFile) {
-  return new ASTConsumer();
-}
-
-class FixItActionSuffixInserter : public FixItPathRewriter {
-  std::string NewSuffix;
-
-public:
-  explicit FixItActionSuffixInserter(std::string NewSuffix)
-    : NewSuffix(NewSuffix) {}
-
-  std::string RewriteFilename(const std::string &Filename) {
-    llvm::sys::Path Path(Filename);
-    std::string Suffix = Path.getSuffix();
-    Path.eraseSuffix();
-    Path.appendSuffix(NewSuffix + "." + Suffix);
-    return Path.c_str();
-  }
-};
-
-bool FixItAction::BeginSourceFileAction(CompilerInstance &CI,
-                                        llvm::StringRef Filename) {
-  const FrontendOptions &FEOpts = getCompilerInstance().getFrontendOpts();
-  if (!FEOpts.FixItSuffix.empty()) {
-    PathRewriter.reset(new FixItActionSuffixInserter(FEOpts.FixItSuffix));
-  } else {
-    PathRewriter.reset();
-  }
-  Rewriter.reset(new FixItRewriter(CI.getDiagnostics(), CI.getSourceManager(),
-                                   CI.getLangOpts(), PathRewriter.get()));
-  return true;
-}
-
-void FixItAction::EndSourceFileAction() {
-  // Otherwise rewrite all files.
-  Rewriter->WriteFixedFiles();
-}
-
-ASTConsumer *RewriteObjCAction::CreateASTConsumer(CompilerInstance &CI,
-                                                  llvm::StringRef InFile) {
-  if (llvm::raw_ostream *OS = CI.createDefaultOutputFile(false, InFile, "cpp"))
-    return CreateObjCRewriter(InFile, OS,
-                              CI.getDiagnostics(), CI.getLangOpts(),
-                              CI.getDiagnosticOpts().NoRewriteMacros);
-  return 0;
 }
 
 ASTConsumer *SyntaxOnlyAction::CreateASTConsumer(CompilerInstance &CI,
@@ -211,17 +161,11 @@ void GeneratePTHAction::ExecuteAction() {
   CacheTokens(CI.getPreprocessor(), OS);
 }
 
-void ParseOnlyAction::ExecuteAction() {
-  Preprocessor &PP = getCompilerInstance().getPreprocessor();
-  llvm::OwningPtr<Action> PA(new MinimalAction(PP));
-
-  Parser P(PP, *PA);
-  PP.EnterMainSourceFile();
-  P.ParseTranslationUnit();
-}
-
 void PreprocessOnlyAction::ExecuteAction() {
   Preprocessor &PP = getCompilerInstance().getPreprocessor();
+
+  // Ignore unknown pragmas.
+  PP.AddPragmaHandler(new EmptyPragmaHandler());
 
   Token Tok;
   // Start parsing the specified input file.
@@ -229,19 +173,6 @@ void PreprocessOnlyAction::ExecuteAction() {
   do {
     PP.Lex(Tok);
   } while (Tok.isNot(tok::eof));
-}
-
-void PrintParseAction::ExecuteAction() {
-  CompilerInstance &CI = getCompilerInstance();
-  Preprocessor &PP = getCompilerInstance().getPreprocessor();
-  llvm::raw_ostream *OS = CI.createDefaultOutputFile(false, getCurrentFile());
-  if (!OS) return;
-
-  llvm::OwningPtr<Action> PA(CreatePrintParserActionsAction(PP, OS));
-
-  Parser P(PP, *PA);
-  PP.EnterMainSourceFile();
-  P.ParseTranslationUnit();
 }
 
 void PrintPreprocessedAction::ExecuteAction() {
@@ -255,18 +186,31 @@ void PrintPreprocessedAction::ExecuteAction() {
                            CI.getPreprocessorOutputOpts());
 }
 
-void RewriteMacrosAction::ExecuteAction() {
-  CompilerInstance &CI = getCompilerInstance();
-  llvm::raw_ostream *OS = CI.createDefaultOutputFile(true, getCurrentFile());
-  if (!OS) return;
-
-  RewriteMacrosInInput(CI.getPreprocessor(), OS);
-}
-
-void RewriteTestAction::ExecuteAction() {
-  CompilerInstance &CI = getCompilerInstance();
-  llvm::raw_ostream *OS = CI.createDefaultOutputFile(false, getCurrentFile());
-  if (!OS) return;
-
-  DoRewriteTest(CI.getPreprocessor(), OS);
+void PrintPreambleAction::ExecuteAction() {
+  switch (getCurrentFileKind()) {
+  case IK_C:
+  case IK_CXX:
+  case IK_ObjC:
+  case IK_ObjCXX:
+  case IK_OpenCL:
+    break;
+      
+  case IK_None:
+  case IK_Asm:
+  case IK_PreprocessedC:
+  case IK_PreprocessedCXX:
+  case IK_PreprocessedObjC:
+  case IK_PreprocessedObjCXX:
+  case IK_AST:
+  case IK_LLVM_IR:
+    // We can't do anything with these.
+    return;
+  }
+  
+  llvm::MemoryBuffer *Buffer = llvm::MemoryBuffer::getFile(getCurrentFile());
+  if (Buffer) {
+    unsigned Preamble = Lexer::ComputePreamble(Buffer).first;
+    llvm::outs().write(Buffer->getBufferStart(), Preamble);
+    delete Buffer;
+  }
 }

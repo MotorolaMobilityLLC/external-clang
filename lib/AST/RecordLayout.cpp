@@ -19,8 +19,10 @@ using namespace clang;
 void ASTRecordLayout::Destroy(ASTContext &Ctx) {
   if (FieldOffsets)
     Ctx.Deallocate(FieldOffsets);
-  if (CXXInfo)
+  if (CXXInfo) {
     Ctx.Deallocate(CXXInfo);
+    CXXInfo->~CXXRecordLayoutInfo();
+  }
   this->~ASTRecordLayout();
   Ctx.Deallocate(this);
 }
@@ -44,7 +46,9 @@ ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx,
                                  unsigned fieldcount,
                                  uint64_t nonvirtualsize,
                                  unsigned nonvirtualalign,
-                                 const PrimaryBaseInfo &PrimaryBase,
+                                 uint64_t SizeOfLargestEmptySubobject,
+                                 const CXXRecordDecl *PrimaryBase,
+                                 bool PrimaryBaseIsVirtual,
                                  const BaseOffsetsMapTy& BaseOffsets,
                                  const BaseOffsetsMapTy& VBaseOffsets)
   : Size(size), DataSize(datasize), FieldOffsets(0), Alignment(alignment),
@@ -55,9 +59,10 @@ ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx,
     memcpy(FieldOffsets, fieldoffsets, FieldCount * sizeof(*FieldOffsets));
   }
 
-  CXXInfo->PrimaryBase = PrimaryBase;
+  CXXInfo->PrimaryBase = PrimaryBaseInfo(PrimaryBase, PrimaryBaseIsVirtual);
   CXXInfo->NonVirtualSize = nonvirtualsize;
   CXXInfo->NonVirtualAlign = nonvirtualalign;
+  CXXInfo->SizeOfLargestEmptySubobject = SizeOfLargestEmptySubobject;
   CXXInfo->BaseOffsets = BaseOffsets;
   CXXInfo->VBaseOffsets = VBaseOffsets;
 

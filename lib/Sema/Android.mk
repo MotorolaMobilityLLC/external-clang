@@ -6,17 +6,23 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=    \
+	AttrList.inc	\
+	Attrs.inc	\
+	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
 	DiagnosticSemaKinds.inc	\
 	DiagnosticParseKinds.inc	\
-    DiagnosticCommonKinds.inc
+	DiagnosticCommonKinds.inc	\
+	StmtNodes.inc	\
+	arm_neon.inc
 
 clang_sema_SRC_FILES :=	\
 	AnalysisBasedWarnings.cpp	\
+	AttributeList.cpp	\
 	CodeCompleteConsumer.cpp	\
+	DeclSpec.cpp	\
 	IdentifierResolver.cpp	\
 	JumpDiagnostics.cpp	\
-	ParseAST.cpp	\
 	Sema.cpp	\
 	SemaAccess.cpp	\
 	SemaAttr.cpp	\

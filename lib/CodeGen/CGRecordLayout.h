@@ -168,33 +168,43 @@ private:
   /// field no. This info is populated by record builder.
   llvm::DenseMap<const FieldDecl *, CGBitFieldInfo> BitFields;
 
+  // FIXME: Maybe we could use a CXXBaseSpecifier as the key and use a single
+  // map for both virtual and non virtual bases.
+  llvm::DenseMap<const CXXRecordDecl *, unsigned> NonVirtualBaseFields;
+
   /// Whether one of the fields in this record layout is a pointer to data
   /// member, or a struct that contains pointer to data member.
-  bool ContainsPointerToDataMember : 1;
+  bool IsZeroInitializable : 1;
 
 public:
-  CGRecordLayout(const llvm::Type *T, bool ContainsPointerToDataMember)
-    : LLVMType(T), ContainsPointerToDataMember(ContainsPointerToDataMember) {}
+  CGRecordLayout(const llvm::Type *T, bool IsZeroInitializable)
+    : LLVMType(T), IsZeroInitializable(IsZeroInitializable) {}
 
   /// \brief Return the LLVM type associated with this record.
   const llvm::Type *getLLVMType() const {
     return LLVMType;
   }
 
-  /// \brief Check whether this struct contains pointers to data members.
-  bool containsPointerToDataMember() const {
-    return ContainsPointerToDataMember;
+  /// \brief Check whether this struct can be C++ zero-initialized
+  /// with a zeroinitializer.
+  bool isZeroInitializable() const {
+    return IsZeroInitializable;
   }
 
-  /// \brief Return the BitFieldInfo that corresponds to the field FD.
+  /// \brief Return llvm::StructType element number that corresponds to the
+  /// field FD.
   unsigned getLLVMFieldNo(const FieldDecl *FD) const {
     assert(!FD->isBitField() && "Invalid call for bit-field decl!");
     assert(FieldInfo.count(FD) && "Invalid field for record!");
     return FieldInfo.lookup(FD);
   }
 
-  /// \brief Return llvm::StructType element number that corresponds to the
-  /// field FD.
+  unsigned getNonVirtualBaseLLVMFieldNo(const CXXRecordDecl *RD) const {
+    assert(NonVirtualBaseFields.count(RD) && "Invalid non-virtual base!");
+    return NonVirtualBaseFields.lookup(RD);
+  }
+
+  /// \brief Return the BitFieldInfo that corresponds to the field FD.
   const CGBitFieldInfo &getBitFieldInfo(const FieldDecl *FD) const {
     assert(FD->isBitField() && "Invalid call for non bit-field decl!");
     llvm::DenseMap<const FieldDecl *, CGBitFieldInfo>::const_iterator

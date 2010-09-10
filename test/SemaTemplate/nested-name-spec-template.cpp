@@ -21,7 +21,8 @@ namespace N {
   }
 
   M::Promote<int>::type *ret_intptr3(int* ip) { return ip; }
-  M::template Promote<int>::type *ret_intptr4(int* ip) { return ip; }
+  M::template Promote<int>::type *ret_intptr4(int* ip) { return ip; } // expected-warning{{'template' keyword outside of a template}}
+  M::template Promote<int> pi; // expected-warning{{'template' keyword outside of a template}}
 }
 
 N::M::Promote<int>::type *ret_intptr5(int* ip) { return ip; }
@@ -51,3 +52,50 @@ struct TestA {
   typedef typename N::template B<T>::type type; // expected-error{{'B' following the 'template' keyword does not refer to a template}} \
                                                 // expected-error{{expected member name}}
 };
+
+// Reduced from a Boost failure.
+namespace test1 {
+  template <class T> struct pair {
+    T x;
+    T y;
+
+    static T pair<T>::* const mem_array[2];
+  };
+
+  template <class T>
+  T pair<T>::* const pair<T>::mem_array[2] = { &pair<T>::x, &pair<T>::y };
+}
+
+typedef int T;
+namespace N1 {
+  template<typename T> T f0();
+}
+
+template<typename T> T N1::f0() { }
+
+namespace PR7385 {
+  template< typename > struct has_xxx0
+  {
+    template< typename > struct has_xxx0_introspect
+    {
+      template< typename > struct has_xxx0_substitute ;
+      template< typename V > 
+      int int00( has_xxx0_substitute < typename V::template xxx< > > = 0 );
+    };
+    static const int value = has_xxx0_introspect<int>::value; // expected-error{{no member named 'value'}}
+    typedef int type;
+  };
+
+  has_xxx0<int>::type t; // expected-note{{instantiation of}}
+}
+
+namespace PR7725 {
+  template<class ignored> struct TypedefProvider;
+  template<typename T>
+  struct TemplateClass : public TypedefProvider<T>
+  {
+    void PrintSelf() {
+      TemplateClass::Test::PrintSelf();
+    }
+  };
+}

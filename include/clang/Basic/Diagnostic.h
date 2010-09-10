@@ -16,6 +16,7 @@
 
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/type_traits.h"
 #include <string>
@@ -24,7 +25,6 @@
 
 namespace llvm {
   template <typename T> class SmallVectorImpl;
-  class raw_ostream;
 }
 
 namespace clang {
@@ -36,8 +36,6 @@ namespace clang {
   class LangOptions;
   class PartialDiagnostic;
   class Preprocessor;
-  class SourceManager;
-  class SourceRange;
 
   // Import the diagnostic enums themselves.
   namespace diag {
@@ -60,7 +58,7 @@ namespace clang {
 
     // Get typedefs for common diagnostics.
     enum {
-#define DIAG(ENUM,FLAGS,DEFAULT_MAPPING,DESC,GROUP,SFINAE) ENUM,
+#define DIAG(ENUM,FLAGS,DEFAULT_MAPPING,DESC,GROUP,SFINAE,CATEGORY) ENUM,
 #include "clang/Basic/DiagnosticCommonKinds.inc"
       NUM_BUILTIN_COMMON_DIAGNOSTICS
 #undef DIAG
@@ -98,12 +96,9 @@ namespace clang {
 /// compilation.
 class FixItHint {
 public:
-  /// \brief Tokens that should be removed to correct the error.
-  SourceRange RemoveRange;
-
-  /// \brief The location at which we should insert code to correct
-  /// the error.
-  SourceLocation InsertionLoc;
+  /// \brief Code that should be replaced to correct the error. Empty for an
+  /// insertion hint.
+  CharSourceRange RemoveRange;
 
   /// \brief The actual code to insert at the insertion location, as a
   /// string.
@@ -111,10 +106,10 @@ public:
 
   /// \brief Empty code modification hint, indicating that no code
   /// modification is known.
-  FixItHint() : RemoveRange(), InsertionLoc() { }
+  FixItHint() : RemoveRange() { }
 
   bool isNull() const {
-    return !RemoveRange.isValid() && !InsertionLoc.isValid();
+    return !RemoveRange.isValid();
   }
   
   /// \brief Create a code modification hint that inserts the given
@@ -122,28 +117,36 @@ public:
   static FixItHint CreateInsertion(SourceLocation InsertionLoc,
                                    llvm::StringRef Code) {
     FixItHint Hint;
-    Hint.InsertionLoc = InsertionLoc;
+    Hint.RemoveRange =
+      CharSourceRange(SourceRange(InsertionLoc, InsertionLoc), false);
     Hint.CodeToInsert = Code;
     return Hint;
   }
 
   /// \brief Create a code modification hint that removes the given
   /// source range.
-  static FixItHint CreateRemoval(SourceRange RemoveRange) {
+  static FixItHint CreateRemoval(CharSourceRange RemoveRange) {
     FixItHint Hint;
     Hint.RemoveRange = RemoveRange;
     return Hint;
   }
-
+  static FixItHint CreateRemoval(SourceRange RemoveRange) {
+    return CreateRemoval(CharSourceRange::getTokenRange(RemoveRange));
+  }
+  
   /// \brief Create a code modification hint that replaces the given
   /// source range with the given code string.
-  static FixItHint CreateReplacement(SourceRange RemoveRange,
+  static FixItHint CreateReplacement(CharSourceRange RemoveRange,
                                      llvm::StringRef Code) {
     FixItHint Hint;
     Hint.RemoveRange = RemoveRange;
-    Hint.InsertionLoc = RemoveRange.getBegin();
     Hint.CodeToInsert = Code;
     return Hint;
+  }
+  
+  static FixItHint CreateReplacement(SourceRange RemoveRange,
+                                     llvm::StringRef Code) {
+    return CreateReplacement(CharSourceRange::getTokenRange(RemoveRange), Code);
   }
 };
 
@@ -176,7 +179,14 @@ public:
     ak_nestednamespec,  // NestedNameSpecifier *
     ak_declcontext      // DeclContext *
   };
-  
+
+  /// Specifies which overload candidates to display when overload resolution
+  /// fails.
+  enum OverloadsShown {
+    Ovl_All,  ///< Show all overloads.
+    Ovl_Best  ///< Show just the "best" overload candidates.
+  };
+
   /// ArgumentValue - This typedef represents on argument value, which is a
   /// union discriminated by ArgumentKind, with a value.
   typedef std::pair<ArgumentKind, intptr_t> ArgumentValue;
@@ -188,20 +198,37 @@ private:
   bool ErrorsAsFatal;            // Treat errors like fatal errors.
   bool SuppressSystemWarnings;   // Suppress warnings in system headers.
   bool SuppressAllDiagnostics;   // Suppress all diagnostics.
+  OverloadsShown ShowOverloads;  // Which overload candidates to show.
   unsigned ErrorLimit;           // Cap of # errors emitted, 0 -> no limit.
   unsigned TemplateBacktraceLimit; // Cap on depth of template backtrace stack,
                                    // 0 -> no limit.
   ExtensionHandling ExtBehavior; // Map extensions onto warnings or errors?
-  DiagnosticClient *Client;
-
+  llvm::OwningPtr<DiagnosticClient> Client;
+  
   /// DiagMappings - Mapping information for diagnostics.  Mapping info is
   /// packed into four bits per diagnostic.  The low three bits are the mapping
   /// (an instance of diag::Mapping), or zero if unset.  The high bit is set
   /// when the mapping was established as a user mapping.  If the high bit is
   /// clear, then the low bits are set to the default value, and should be
   /// mapped with -pedantic, -Werror, etc.
+  class DiagMappings {
+    unsigned char Values[diag::DIAG_UPPER_LIMIT/2];
 
-  typedef std::vector<unsigned char> DiagMappings;
+  public:
+    DiagMappings() {
+      memset(Values, 0, diag::DIAG_UPPER_LIMIT/2);
+    }
+
+    void setMapping(diag::kind Diag, unsigned Map) {
+      size_t Shift = (Diag & 1)*4;
+      Values[Diag/2] = (Values[Diag/2] & ~(15 << Shift)) | (Map << Shift);
+    }
+
+    diag::Mapping getMapping(diag::kind Diag) const {
+      return (diag::Mapping)((Values[Diag/2] >> (Diag & 1)*4) & 15);
+    }
+  };
+
   mutable std::vector<DiagMappings> DiagMappingsStack;
 
   /// ErrorOccurred / FatalErrorOccurred - This is set to true when an error or
@@ -259,8 +286,12 @@ public:
   //  Diagnostic characterization methods, used by a client to customize how
   //
 
-  DiagnosticClient *getClient() { return Client; }
-  const DiagnosticClient *getClient() const { return Client; }
+  DiagnosticClient *getClient() { return Client.get(); }
+  const DiagnosticClient *getClient() const { return Client.get(); }
+  
+  /// \brief Return the current diagnostic client along with ownership of that
+  /// client.
+  DiagnosticClient *takeClient() { return Client.take(); }
 
   /// pushMappings - Copies the current DiagMappings and pushes the new copy
   /// onto the top of the stack.
@@ -272,7 +303,10 @@ public:
   /// stack.
   bool popMappings();
 
-  void setClient(DiagnosticClient* client) { Client = client; }
+  /// \brief Set the diagnostic client associated with this diagnostic object.
+  ///
+  /// The diagnostic object takes ownership of \c client.
+  void setClient(DiagnosticClient* client) { Client.reset(client); }
 
   /// setErrorLimit - Specify a limit for the number of errors we should
   /// emit before giving up.  Zero disables the limit.
@@ -283,13 +317,13 @@ public:
   void setTemplateBacktraceLimit(unsigned Limit) {
     TemplateBacktraceLimit = Limit;
   }
-
+  
   /// \brief Retrieve the maximum number of template instantiation
   /// nodes to emit along with a given diagnostic.
   unsigned getTemplateBacktraceLimit() const {
     return TemplateBacktraceLimit;
   }
-
+  
   /// setIgnoreAllWarnings - When set to true, any unmapped warnings are
   /// ignored.  If this and WarningsAsErrors are both set, then this one wins.
   void setIgnoreAllWarnings(bool Val) { IgnoreAllWarnings = Val; }
@@ -317,6 +351,13 @@ public:
     SuppressAllDiagnostics = Val; 
   }
   bool getSuppressAllDiagnostics() const { return SuppressAllDiagnostics; }
+  
+  /// \brief Specify which overload candidates to show when overload resolution
+  /// fails.  By default, we show all candidates.
+  void setShowOverloads(OverloadsShown Val) {
+    ShowOverloads = Val;
+  }
+  OverloadsShown getShowOverloads() const { return ShowOverloads; }
   
   /// \brief Pretend that the last diagnostic issued was ignored. This can
   /// be used by clients who suppress diagnostics themselves.
@@ -362,6 +403,10 @@ public:
   unsigned getNumErrorsSuppressed() const { return NumErrorsSuppressed; }
   unsigned getNumWarnings() const { return NumWarnings; }
 
+  void setNumWarnings(unsigned NumWarnings) {
+    this->NumWarnings = NumWarnings;
+  }
+
   /// getCustomDiagID - Return an ID for a diagnostic with the specified message
   /// and level.  If this is the first request for this diagnosic, it is
   /// registered and created, otherwise the existing ID is returned.
@@ -384,6 +429,10 @@ public:
     ArgToStringCookie = Cookie;
   }
 
+  /// \brief Reset the state of the diagnostic object to its initial 
+  /// configuration.
+  void Reset();
+  
   //===--------------------------------------------------------------------===//
   // Diagnostic classification and reporting interfaces.
   //
@@ -423,6 +472,14 @@ public:
   /// the diagnostic, this returns null.
   static const char *getWarningOptionForDiag(unsigned DiagID);
 
+  /// getWarningOptionForDiag - Return the category number that a specified
+  /// DiagID belongs to, or 0 if no category.
+  static unsigned getCategoryNumberForDiag(unsigned DiagID);
+
+  /// getCategoryNameFromID - Given a category ID, return the name of the
+  /// category.
+  static const char *getCategoryNameFromID(unsigned CategoryID);
+  
   /// \brief Enumeration describing how the the emission of a diagnostic should
   /// be treated when it occurs during C++ template argument deduction.
   enum SFINAEResponse {
@@ -507,17 +564,13 @@ private:
   /// specified builtin diagnostic.  This returns the high bit encoding, or zero
   /// if the field is completely uninitialized.
   diag::Mapping getDiagnosticMappingInfo(diag::kind Diag) const {
-    const DiagMappings &currentMappings = DiagMappingsStack.back();
-    return (diag::Mapping)((currentMappings[Diag/2] >> (Diag & 1)*4) & 15);
+    return DiagMappingsStack.back().getMapping(Diag);
   }
 
   void setDiagnosticMappingInternal(unsigned DiagId, unsigned Map,
                                     bool isUser) const {
     if (isUser) Map |= 8;  // Set the high bit for user mappings.
-    unsigned char &Slot = DiagMappingsStack.back()[DiagId/2];
-    unsigned Shift = (DiagId & 1)*4;
-    Slot &= ~(15 << Shift);
-    Slot |= Map << Shift;
+    DiagMappingsStack.back().setMapping((diag::kind)DiagId, Map);
   }
 
   /// getDiagnosticLevel - This is an internal implementation helper used when
@@ -574,7 +627,7 @@ private:
 
   /// DiagRanges - The list of ranges added to this diagnostic.  It currently
   /// only support 10 ranges, could easily be extended if needed.
-  SourceRange DiagRanges[10];
+  CharSourceRange DiagRanges[10];
 
   enum { MaxFixItHints = 3 };
 
@@ -673,7 +726,7 @@ public:
     }
   }
 
-  void AddSourceRange(const SourceRange &R) const {
+  void AddSourceRange(const CharSourceRange &R) const {
     assert(NumRanges <
            sizeof(DiagObj->DiagRanges)/sizeof(DiagObj->DiagRanges[0]) &&
            "Too many arguments to diagnostic!");
@@ -744,10 +797,16 @@ operator<<(const DiagnosticBuilder &DB, T *DC) {
   
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
                                            const SourceRange &R) {
-  DB.AddSourceRange(R);
+  DB.AddSourceRange(CharSourceRange::getTokenRange(R));
   return DB;
 }
 
+inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
+                                           const CharSourceRange &R) {
+  DB.AddSourceRange(R);
+  return DB;
+}
+  
 inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
                                            const FixItHint &Hint) {
   DB.AddFixItHint(Hint);
@@ -841,7 +900,7 @@ public:
     return DiagObj->NumDiagRanges;
   }
 
-  SourceRange getRange(unsigned Idx) const {
+  const CharSourceRange &getRange(unsigned Idx) const {
     assert(Idx < DiagObj->NumDiagRanges && "Invalid diagnostic range index!");
     return DiagObj->DiagRanges[Idx];
   }
@@ -878,7 +937,7 @@ class StoredDiagnostic {
   Diagnostic::Level Level;
   FullSourceLoc Loc;
   std::string Message;
-  std::vector<SourceRange> Ranges;
+  std::vector<CharSourceRange> Ranges;
   std::vector<FixItHint> FixIts;
 
 public:
@@ -893,8 +952,10 @@ public:
   Diagnostic::Level getLevel() const { return Level; }
   const FullSourceLoc &getLocation() const { return Loc; }
   llvm::StringRef getMessage() const { return Message; }
-  
-  typedef std::vector<SourceRange>::const_iterator range_iterator;
+
+  void setLocation(FullSourceLoc Loc) { this->Loc = Loc; }
+
+  typedef std::vector<CharSourceRange>::const_iterator range_iterator;
   range_iterator range_begin() const { return Ranges.begin(); }
   range_iterator range_end() const { return Ranges.end(); }
   unsigned range_size() const { return Ranges.size(); }

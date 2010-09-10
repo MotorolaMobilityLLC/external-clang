@@ -2,10 +2,11 @@ set(LLVM_NO_RTTI 1)
 
 add_clang_library(clangSema
   AnalysisBasedWarnings.cpp
+  AttributeList.cpp
   CodeCompleteConsumer.cpp
+  DeclSpec.cpp
   IdentifierResolver.cpp
   JumpDiagnostics.cpp
-  ParseAST.cpp
   Sema.cpp
   SemaAccess.cpp
   SemaAttr.cpp
@@ -34,4 +35,5 @@ add_clang_library(clangSema
   TargetAttributesSema.cpp
   )
 
-add_dependencies(clangSema ClangDiagnosticSema)
+add_dependencies(clangSema ClangARMNeon ClangAttrClasses ClangAttrList 
+                 ClangDiagnosticSema ClangDeclNodes ClangStmtNodes)

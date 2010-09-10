@@ -73,9 +73,6 @@ class BasicObjCFoundationChecks : public GRSimpleAPICheck {
   bool isNSString(const ObjCInterfaceType *T, llvm::StringRef suffix);
   bool AuditNSString(ExplodedNode* N, const ObjCMessageExpr* ME);
 
-  void Warn(ExplodedNode* N, const Expr* E, const std::string& s);
-  void WarnNilArg(ExplodedNode* N, const Expr* E);
-
   bool CheckNilArg(ExplodedNode* N, unsigned Arg);
 
 public:
@@ -358,7 +355,7 @@ bool AuditCFNumberCreate::Audit(ExplodedNode* N,GRStateManager&){
   if (!R)
     return false;
 
-  QualType T = Ctx.getCanonicalType(R->getValueType(Ctx));
+  QualType T = Ctx.getCanonicalType(R->getValueType());
 
   // FIXME: If the pointee isn't an integer type, should we flag a warning?
   //  People can do weird stuff with pointers.
@@ -415,59 +412,72 @@ clang::CreateAuditCFNumberCreate(ASTContext& Ctx, BugReporter& BR) {
 }
 
 //===----------------------------------------------------------------------===//
-// CFRetain/CFRelease auditing for null arguments.
+// CFRetain/CFRelease checking for null arguments.
 //===----------------------------------------------------------------------===//
 
 namespace {
-class AuditCFRetainRelease : public GRSimpleAPICheck {
+class CFRetainReleaseChecker : public CheckerVisitor<CFRetainReleaseChecker> {
   APIMisuse *BT;
-
-  // FIXME: Either this should be refactored into GRSimpleAPICheck, or
-  //   it should always be passed with a call to Audit.  The latter
-  //   approach makes this class more stateless.
-  ASTContext& Ctx;
   IdentifierInfo *Retain, *Release;
-  BugReporter& BR;
 
 public:
-  AuditCFRetainRelease(ASTContext& ctx, BugReporter& br)
-  : BT(0), Ctx(ctx),
-    Retain(&Ctx.Idents.get("CFRetain")), Release(&Ctx.Idents.get("CFRelease")),
-    BR(br){}
+  CFRetainReleaseChecker(ASTContext& Ctx): BT(NULL),
+    Retain(&Ctx.Idents.get("CFRetain")), Release(&Ctx.Idents.get("CFRelease"))
+    {}
 
-  ~AuditCFRetainRelease() {}
+  static void *getTag() { static int x = 0; return &x; }
 
-  bool Audit(ExplodedNode* N, GRStateManager&);
+  void PreVisitCallExpr(CheckerContext& C, const CallExpr* CE);
 };
 } // end anonymous namespace
 
 
-bool AuditCFRetainRelease::Audit(ExplodedNode* N, GRStateManager&) {
-  const CallExpr* CE = cast<CallExpr>(cast<PostStmt>(N->getLocation()).getStmt());
-
+void CFRetainReleaseChecker::PreVisitCallExpr(CheckerContext& C,
+                                              const CallExpr* CE) {
   // If the CallExpr doesn't have exactly 1 argument just give up checking.
   if (CE->getNumArgs() != 1)
-    return false;
+    return;
 
-  // Check if we called CFRetain/CFRelease.
-  const GRState* state = N->getState();
+  // Get the function declaration of the callee.
+  const GRState* state = C.getState();
   SVal X = state->getSVal(CE->getCallee());
   const FunctionDecl* FD = X.getAsFunctionDecl();
 
   if (!FD)
-    return false;
+    return;
 
+  // Check if we called CFRetain/CFRelease.
   const IdentifierInfo *FuncII = FD->getIdentifier();
   if (!(FuncII == Retain || FuncII == Release))
-    return false;
+    return;
 
-  // Finally, check if the argument is NULL.
-  // FIXME: We should be able to bifurcate the state here, as a successful
-  // check will result in the value not being NULL afterwards.
-  // FIXME: Need a way to register vistors for the BugReporter.  Would like
-  // to benefit from the same diagnostics that regular null dereference
-  // reporting has.
-  if (state->getStateManager().isEqual(state, CE->getArg(0), 0)) {
+  // FIXME: The rest of this just checks that the argument is non-null.
+  // It should probably be refactored and combined with AttrNonNullChecker.
+
+  // Get the argument's value.
+  const Expr *Arg = CE->getArg(0);
+  SVal ArgVal = state->getSVal(Arg);
+  DefinedSVal *DefArgVal = dyn_cast<DefinedSVal>(&ArgVal);
+  if (!DefArgVal)
+    return;
+
+  // Get a NULL value.
+  ValueManager &ValMgr = C.getValueManager();
+  DefinedSVal Zero = cast<DefinedSVal>(ValMgr.makeZeroVal(Arg->getType()));
+
+  // Make an expression asserting that they're equal.
+  SValuator &SVator = ValMgr.getSValuator();
+  DefinedOrUnknownSVal ArgIsNull = SVator.EvalEQ(state, Zero, *DefArgVal);
+
+  // Are they equal?
+  const GRState *stateTrue, *stateFalse;
+  llvm::tie(stateTrue, stateFalse) = state->Assume(ArgIsNull);
+
+  if (stateTrue && !stateFalse) {
+    ExplodedNode *N = C.GenerateSink(stateTrue);
+    if (!N)
+      return;
+
     if (!BT)
       BT = new APIMisuse("null passed to CFRetain/CFRelease");
 
@@ -475,19 +485,16 @@ bool AuditCFRetainRelease::Audit(ExplodedNode* N, GRStateManager&) {
                             ? "Null pointer argument in call to CFRetain"
                             : "Null pointer argument in call to CFRelease";
 
-    RangedBugReport *report = new RangedBugReport(*BT, description, N);
-    report->addRange(CE->getArg(0)->getSourceRange());
-    BR.EmitReport(report);
-    return true;
+    EnhancedBugReport *report = new EnhancedBugReport(*BT, description, N);
+    report->addRange(Arg->getSourceRange());
+    report->addVisitorCreator(bugreporter::registerTrackNullOrUndefValue, Arg);
+
+    C.EmitReport(report);
+    return;
   }
 
-  return false;
-}
-
-
-GRSimpleAPICheck*
-clang::CreateAuditCFRetainRelease(ASTContext& Ctx, BugReporter& BR) {
-  return new AuditCFRetainRelease(Ctx, BR);
+  // From here on, we know the argument is non-null.
+  C.addTransition(stateFalse);
 }
 
 //===----------------------------------------------------------------------===//
@@ -521,11 +528,11 @@ void ClassReleaseChecker::PreVisitObjCMessageExpr(CheckerContext &C,
   ObjCInterfaceDecl *Class = 0;
   switch (ME->getReceiverKind()) {
   case ObjCMessageExpr::Class:
-    Class = ME->getClassReceiver()->getAs<ObjCInterfaceType>()->getDecl();
+    Class = ME->getClassReceiver()->getAs<ObjCObjectType>()->getInterface();
     break;
 
   case ObjCMessageExpr::SuperClass:
-    Class = ME->getSuperType()->getAs<ObjCInterfaceType>()->getDecl();
+    Class = ME->getSuperType()->getAs<ObjCObjectType>()->getInterface();
     break;
 
   case ObjCMessageExpr::Instance:
@@ -569,9 +576,10 @@ void clang::RegisterAppleChecks(GRExprEngine& Eng, const Decl &D) {
   Eng.AddCheck(CreateBasicObjCFoundationChecks(Ctx, BR),
                Stmt::ObjCMessageExprClass);
   Eng.AddCheck(CreateAuditCFNumberCreate(Ctx, BR), Stmt::CallExprClass);
-  Eng.AddCheck(CreateAuditCFRetainRelease(Ctx, BR), Stmt::CallExprClass);
 
   RegisterNSErrorChecks(BR, Eng, D);
   RegisterNSAutoreleasePoolChecks(Eng);
+
+  Eng.registerCheck(new CFRetainReleaseChecker(Ctx));
   Eng.registerCheck(new ClassReleaseChecker(Ctx));
 }

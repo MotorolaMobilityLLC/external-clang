@@ -247,6 +247,7 @@ public:
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isCharType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isWideCharType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isIntegralType)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isIntegralOrEnumerationType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isRealFloatingType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isComplexType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isAnyComplexType)
@@ -269,8 +270,13 @@ public:
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isNullPtrType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isDependentType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isOverloadableType)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isArrayType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasPointerRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasObjCPointerRepresentation)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasIntegerRepresentation)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasSignedIntegerRepresentation)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasUnsignedIntegerRepresentation)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, hasFloatingRepresentation)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isPromotableIntegerType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isSignedIntegerType)
   LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isUnsignedIntegerType)
@@ -643,6 +649,24 @@ struct CanProxyAdaptor<TemplateTypeParmType>
 };
 
 template<>
+struct CanProxyAdaptor<ObjCObjectType>
+  : public CanProxyBase<ObjCObjectType> {
+  LLVM_CLANG_CANPROXY_TYPE_ACCESSOR(getBaseType)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(const ObjCInterfaceDecl *,
+                                      getInterface)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isObjCUnqualifiedId)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isObjCUnqualifiedClass)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isObjCQualifiedId)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, isObjCQualifiedClass)
+
+  typedef ObjCObjectPointerType::qual_iterator qual_iterator;
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(qual_iterator, qual_begin)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(qual_iterator, qual_end)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(bool, qual_empty)
+  LLVM_CLANG_CANPROXY_SIMPLE_ACCESSOR(unsigned, getNumProtocols)
+};
+
+template<>
 struct CanProxyAdaptor<ObjCObjectPointerType>
   : public CanProxyBase<ObjCObjectPointerType> {
   LLVM_CLANG_CANPROXY_TYPE_ACCESSOR(getPointeeType)
@@ -679,9 +703,9 @@ inline CanQual<Type> CanQual<T>::getNonReferenceType() const {
 template<typename T>
 CanQual<T> CanQual<T>::getFromOpaquePtr(void *Ptr) {
   CanQual<T> Result;
-  Result.Stored.setFromOpaqueValue(Ptr);
-  assert((!Result || Result.Stored.isCanonical())
-         && "Type is not canonical!");
+  Result.Stored = QualType::getFromOpaquePtr(Ptr);
+  assert((!Result || Result.Stored.getAsOpaquePtr() == (void*)-1 ||
+          Result.Stored.isCanonical()) && "Type is not canonical!");
   return Result;
 }
 

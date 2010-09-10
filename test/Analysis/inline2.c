@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -analyze -inline-call -analyzer-store region -analyze-function f2 -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-check-objc-mem -analyzer-inline-call -analyzer-store region -verify %s
 
 // Test parameter 'a' is registered to LiveVariables analysis data although it
 // is not referenced in the function body. 

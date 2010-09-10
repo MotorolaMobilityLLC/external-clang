@@ -97,7 +97,7 @@ namespace test2 {
   A A::foo; // okay
   
   class B : A { }; // expected-error {{base class 'test2::A' has private constructor}}
-  B b;
+  B b; // expected-note{{implicit default constructor}}
   
   class C : virtual A { 
   public:
@@ -105,7 +105,7 @@ namespace test2 {
   };
 
   class D : C { }; // expected-error {{inherited virtual base class 'test2::A' has private constructor}}
-  D d;
+  D d; // expected-note{{implicit default constructor}}
 }
 
 // Implicit destructor calls.
@@ -143,13 +143,15 @@ namespace test3 {
   };
 
   class Derived3 : // expected-error 2 {{inherited virtual base class 'Base<2>' has private destructor}} \
-                   // expected-error 2 {{inherited virtual base class 'Base<3>' has private destructor}}
+                   // expected-error 2 {{inherited virtual base class 'Base<3>' has private destructor}} \
+    // expected-note 2{{implicit default constructor}}
     Base<0>,  // expected-error 2 {{base class 'Base<0>' has private destructor}}
     virtual Base<1>, // expected-error 2 {{base class 'Base<1>' has private destructor}}
     Base2, // expected-error 2 {{base class 'test3::Base2' has private destructor}}
     virtual Base3
-  {};
-  Derived3 d3;
+  {}; 
+  Derived3 d3; // expected-note {{implicit default constructor}}\
+               // expected-note{{implicit default destructor}}}
 }
 
 // Conversion functions.
@@ -158,7 +160,7 @@ namespace test4 {
   private:
     operator Private(); // expected-note 4 {{declared private here}}
   public:
-    operator Public();
+    operator Public(); // expected-note 2{{member is declared here}}
   };
 
   class Derived1 : private Base { // expected-note 2 {{declared private here}} \
@@ -202,16 +204,16 @@ namespace test5 {
     void operator=(const A &); // expected-note 2 {{declared private here}}
   };
 
-  class Test1 { A a; }; // expected-error {{field of type 'test5::A' has private copy assignment operator}}
+  class Test1 { A a; }; // expected-error {{private member}}
   void test1() {
     Test1 a;
-    a = Test1();
+    a = Test1(); // expected-note{{implicit default copy}}
   }
 
-  class Test2 : A {}; // expected-error {{base class 'test5::A' has private copy assignment operator}}
+  class Test2 : A {}; // expected-error {{private member}}
   void test2() {
     Test2 a;
-    a = Test2();
+    a = Test2(); // expected-note{{implicit default copy}}
   }
 }
 
@@ -224,12 +226,12 @@ namespace test6 {
 
   class Test1 { A a; }; // expected-error {{field of type 'test6::A' has private copy constructor}}
   void test1(const Test1 &t) {
-    Test1 a = t;
+    Test1 a = t; // expected-note{{implicit default copy}}
   }
 
   class Test2 : A {}; // expected-error {{base class 'test6::A' has private copy constructor}}
   void test2(const Test2 &t) {
-    Test2 a = t;
+    Test2 a = t; // expected-note{{implicit default copy}}
   }
 }
 
@@ -265,7 +267,7 @@ namespace test8 {
 // Don't silently upgrade forbidden-access paths to private.
 namespace test9 {
   class A {
-    public: static int x;
+  public: static int x; // expected-note {{member is declared here}}
   };
   class B : private A { // expected-note {{constrained by private inheritance here}}
   };
@@ -363,3 +365,88 @@ namespace test14 {
   }
 }
 
+// PR 7024
+namespace test15 {
+  template <class T> class A {
+  private:
+    int private_foo; // expected-note {{declared private here}}
+    static int private_sfoo; // expected-note {{declared private here}}
+  protected:
+    int protected_foo; // expected-note 4 {{declared protected here}}
+    static int protected_sfoo; // expected-note 3 {{declared protected here}}
+
+    int test1(A<int> &a) {
+      return a.private_foo; // expected-error {{private member}}
+    }
+
+    int test2(A<int> &a) {
+      return a.private_sfoo; // expected-error {{private member}}
+    }
+
+    int test3(A<int> &a) {
+      return a.protected_foo; // expected-error {{protected member}}
+    }
+
+    int test4(A<int> &a) {
+      return a.protected_sfoo; // expected-error {{protected member}}
+    }
+  };
+
+  template class A<int>;
+  template class A<long>; // expected-note 4 {{in instantiation}} 
+
+  template <class T> class B : public A<T> {
+    // TODO: These first two accesses can be detected as ill-formed at
+    // definition time because they're member accesses and A<int> can't
+    // be a subclass of B<T> for any T.
+
+    int test1(A<int> &a) {
+      return a.protected_foo; // expected-error 2 {{protected member}}
+    }
+
+    int test2(A<int> &a) {
+      return a.protected_sfoo; // expected-error {{protected member}}
+    }
+
+    int test3(B<int> &b) {
+      return b.protected_foo; // expected-error {{protected member}}
+    }
+
+    int test4(B<int> &b) {
+      return b.protected_sfoo; // expected-error {{protected member}}
+    }
+  };
+
+  template class B<int>;  // expected-note {{in instantiation}}
+  template class B<long>; // expected-note 4 {{in instantiation}}
+}
+
+// PR7281
+namespace test16 {
+  class A { ~A(); }; // expected-note 2{{declared private here}}
+  void b() { throw A(); } // expected-error{{temporary of type 'test16::A' has private destructor}} \
+  // expected-error{{exception object of type 'test16::A' has private destructor}}
+}
+
+// rdar://problem/8146294
+namespace test17 {
+  class A {
+    template <typename T> class Inner { }; // expected-note {{declared private here}}
+  };
+
+  A::Inner<int> s; // expected-error {{'Inner' is a private member of 'test17::A'}}
+}
+
+namespace test18 {
+  template <class T> class A {};
+  class B : A<int> {
+    A<int> member;
+  };
+
+  // FIXME: this access to A should be forbidden (because C++ is dumb),
+  // but LookupResult can't express the necessary information to do
+  // the check, so we aggressively suppress access control.
+  class C : B {
+    A<int> member;
+  };
+}

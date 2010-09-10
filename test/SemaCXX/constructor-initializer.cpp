@@ -204,3 +204,34 @@ C f(C c) {
 }
 
 }
+
+// Don't build implicit initializers for anonymous union fields when we already
+// have an explicit initializer for another field in the union.
+namespace PR7402 {
+  struct S {
+    union {
+      void* ptr_;
+      struct { int i_; };
+    };
+
+    template <typename T> S(T) : ptr_(0) { }
+  };
+
+  void f() {
+    S s(3);
+  }
+}
+
+// <rdar://problem/8308215>: don't crash.
+// Lots of questionable recovery here;  errors can change.
+namespace test3 {
+  class A : public std::exception {}; // expected-error {{undeclared identifier}} expected-error {{expected class name}} expected-note 3 {{candidate}} expected-note {{passing argument}}
+  class B : public A {
+  public:
+    B(const String& s, int e=0) // expected-error {{unknown type name}} 
+      : A(e), m_String(s) , m_ErrorStr(__null) {} // expected-error {{no matching constructor}} expected-error {{does not name}}
+    B(const B& e)
+      : A(e), m_String(e.m_String), m_ErrorStr(__null) { // expected-error {{no viable conversion}} expected-error {{does not name}}
+    }
+  };
+}

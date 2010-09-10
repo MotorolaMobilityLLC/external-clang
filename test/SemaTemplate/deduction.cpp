@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only %s
+// RUN: %clang_cc1 -fsyntax-only -verify %s
 
 // Template argument deduction with template template parameters.
 template<typename T, template<T> class A> 
@@ -97,4 +97,27 @@ namespace PR6257 {
   void f(A& a);
   void f(const X<A>& a);
   void test(A& a) { (void)f(a); }
+}
+
+// PR7463
+namespace PR7463 {
+  const int f ();
+  template <typename T_> void g (T_&); // expected-note{{T_ = int}}
+  void h (void) { g(f()); } // expected-error{{no matching function for call}}
+}
+
+namespace test0 {
+  template <class T> void make(const T *(*fn)()); // expected-note {{candidate template ignored: can't deduce a type for 'T' which would make 'T const' equal 'char'}}
+  char *char_maker();
+  void test() {
+    make(char_maker); // expected-error {{no matching function for call to 'make'}}
+  }
+}
+
+namespace test1 {
+  template<typename T> void foo(const T a[3][3]);
+  void test() {
+    int a[3][3];
+    foo(a);
+  }
 }

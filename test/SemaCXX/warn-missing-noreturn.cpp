@@ -27,3 +27,26 @@ template void B::g<int>(int); // expected-note {{in instantiation of function te
 struct X {
   virtual void g() { f(); }
 };
+
+namespace test1 {
+  bool condition();
+
+  // We don't want a warning here.
+  void foo() {
+    while (condition()) {}
+  }
+}
+
+
+// <rdar://problem/7880658> - This test case previously had a false "missing return"
+// warning.
+struct R7880658 {
+  R7880658 &operator++();
+  bool operator==(const R7880658 &) const;
+  bool operator!=(const R7880658 &) const;
+};
+
+void f_R7880658(R7880658 f, R7880658 l) {  // no-warning
+  for (; f != l; ++f) {
+  }
+}

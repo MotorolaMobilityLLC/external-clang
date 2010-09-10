@@ -45,5 +45,20 @@ namespace test2 {
 namespace test3 {
   class Foo {
     friend const int getInt(int inInt = 0);
+
   };
+}
+
+namespace test4 {
+  class T4A {
+    friend class T4B;
+  
+  public:
+    T4A(class T4B *);
+
+  protected:
+    T4B *mB;          // error here
+  };
+ 
+  class T4B {};
 }

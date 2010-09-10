@@ -10,16 +10,21 @@
 //
 //===----------------------------------------------------------------------===/
 
-#include "Sema.h"
+#include "clang/Sema/Sema.h"
+#include "clang/Sema/DeclSpec.h"
+#include "clang/Sema/Template.h"
+#include "clang/Sema/TemplateDeduction.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
-#include "clang/Parse/DeclSpec.h"
 #include <algorithm>
 
 namespace clang {
+  using namespace sema;
+
   /// \brief Various flags that control template argument deduction.
   ///
   /// These flags can be bitwise-OR'd together.
@@ -74,7 +79,7 @@ DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         const TemplateArgument &Param,
                         const TemplateArgument &Arg,
-                        Sema::TemplateDeductionInfo &Info,
+                        TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced);
 
 /// \brief If the given expression is of a form that permits the deduction
@@ -97,7 +102,7 @@ DeduceNonTypeTemplateArgument(Sema &S,
                               NonTypeTemplateParmDecl *NTTP,
                               llvm::APSInt Value, QualType ValueType,
                               bool DeducedFromArrayBound,
-                              Sema::TemplateDeductionInfo &Info,
+                              TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   assert(NTTP->getDepth() == 0 &&
          "Cannot deduce non-type template argument with depth > 0");
@@ -138,7 +143,7 @@ static Sema::TemplateDeductionResult
 DeduceNonTypeTemplateArgument(Sema &S,
                               NonTypeTemplateParmDecl *NTTP,
                               Expr *Value,
-                              Sema::TemplateDeductionInfo &Info,
+                              TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   assert(NTTP->getDepth() == 0 &&
          "Cannot deduce non-type template argument with depth > 0");
@@ -180,7 +185,7 @@ static Sema::TemplateDeductionResult
 DeduceNonTypeTemplateArgument(Sema &S,
                               NonTypeTemplateParmDecl *NTTP,
                               Decl *D,
-                              Sema::TemplateDeductionInfo &Info,
+                              TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   assert(NTTP->getDepth() == 0 &&
          "Cannot deduce non-type template argument with depth > 0");
@@ -214,7 +219,7 @@ DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         TemplateName Param,
                         TemplateName Arg,
-                        Sema::TemplateDeductionInfo &Info,
+                        TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   TemplateDecl *ParamDecl = Param.getAsTemplateDecl();
   if (!ParamDecl) {
@@ -278,7 +283,7 @@ DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         const TemplateSpecializationType *Param,
                         QualType Arg,
-                        Sema::TemplateDeductionInfo &Info,
+                        TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   assert(Arg.isCanonical() && "Argument type must be canonical");
 
@@ -370,7 +375,7 @@ static Sema::TemplateDeductionResult
 DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         QualType ParamIn, QualType ArgIn,
-                        Sema::TemplateDeductionInfo &Info,
+                        TemplateDeductionInfo &Info,
                      llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced,
                         unsigned TDF) {
   // We only want to look at the canonical types, since typedefs and
@@ -428,9 +433,9 @@ DeduceTemplateArguments(Sema &S,
     // type.
     if (Param.isMoreQualifiedThan(Arg) && !(TDF & TDF_IgnoreQualifiers)) {
       Info.Param = cast<TemplateTypeParmDecl>(TemplateParams->getParam(Index));
-      Info.FirstArg = Deduced[Index];
+      Info.FirstArg = TemplateArgument(Param);
       Info.SecondArg = TemplateArgument(Arg);
-      return Sema::TDK_InconsistentQuals;
+      return Sema::TDK_Underqualified;
     }
 
     assert(TemplateTypeParm->getDepth() == 0 && "Can't deduce with depth > 0");
@@ -482,14 +487,20 @@ DeduceTemplateArguments(Sema &S,
 
     //     T *
     case Type::Pointer: {
-      const PointerType *PointerArg = Arg->getAs<PointerType>();
-      if (!PointerArg)
+      QualType PointeeType;
+      if (const PointerType *PointerArg = Arg->getAs<PointerType>()) {
+        PointeeType = PointerArg->getPointeeType();
+      } else if (const ObjCObjectPointerType *PointerArg
+                   = Arg->getAs<ObjCObjectPointerType>()) {
+        PointeeType = PointerArg->getPointeeType();
+      } else {
         return Sema::TDK_NonDeducedMismatch;
+      }
 
       unsigned SubTDF = TDF & (TDF_IgnoreQualifiers | TDF_DerivedClass);
       return DeduceTemplateArguments(S, TemplateParams,
                                    cast<PointerType>(Param)->getPointeeType(),
-                                     PointerArg->getPointeeType(),
+                                     PointeeType,
                                      Info, Deduced, SubTDF);
     }
 
@@ -524,10 +535,11 @@ DeduceTemplateArguments(Sema &S,
       if (!IncompleteArrayArg)
         return Sema::TDK_NonDeducedMismatch;
 
+      unsigned SubTDF = TDF & TDF_IgnoreQualifiers;
       return DeduceTemplateArguments(S, TemplateParams,
                      S.Context.getAsIncompleteArrayType(Param)->getElementType(),
                                      IncompleteArrayArg->getElementType(),
-                                     Info, Deduced, 0);
+                                     Info, Deduced, SubTDF);
     }
 
     //     T [integer-constant]
@@ -542,10 +554,11 @@ DeduceTemplateArguments(Sema &S,
       if (ConstantArrayArg->getSize() != ConstantArrayParm->getSize())
         return Sema::TDK_NonDeducedMismatch;
 
+      unsigned SubTDF = TDF & TDF_IgnoreQualifiers;
       return DeduceTemplateArguments(S, TemplateParams,
                                      ConstantArrayParm->getElementType(),
                                      ConstantArrayArg->getElementType(),
-                                     Info, Deduced, 0);
+                                     Info, Deduced, SubTDF);
     }
 
     //     type [i]
@@ -554,6 +567,8 @@ DeduceTemplateArguments(Sema &S,
       if (!ArrayArg)
         return Sema::TDK_NonDeducedMismatch;
 
+      unsigned SubTDF = TDF & TDF_IgnoreQualifiers;
+
       // Check the element type of the arrays
       const DependentSizedArrayType *DependentArrayParm
         = S.Context.getAsDependentSizedArrayType(Param);
@@ -561,7 +576,7 @@ DeduceTemplateArguments(Sema &S,
             = DeduceTemplateArguments(S, TemplateParams,
                                       DependentArrayParm->getElementType(),
                                       ArrayArg->getElementType(),
-                                      Info, Deduced, 0))
+                                      Info, Deduced, SubTDF))
         return Result;
 
       // Determine the array bound is something we can deduce.
@@ -791,7 +806,7 @@ DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         const TemplateArgument &Param,
                         const TemplateArgument &Arg,
-                        Sema::TemplateDeductionInfo &Info,
+                        TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   switch (Param.getKind()) {
   case TemplateArgument::Null:
@@ -841,7 +856,6 @@ DeduceTemplateArguments(Sema &S,
       return Sema::TDK_NonDeducedMismatch;
     }
 
-    assert(false && "Type/value mismatch");
     Info.FirstArg = Param;
     Info.SecondArg = Arg;
     return Sema::TDK_NonDeducedMismatch;
@@ -862,7 +876,6 @@ DeduceTemplateArguments(Sema &S,
         return DeduceNonTypeTemplateArgument(S, NTTP, Arg.getAsDecl(),
                                              Info, Deduced);
       
-      assert(false && "Type/value mismatch");
       Info.FirstArg = Param;
       Info.SecondArg = Arg;
       return Sema::TDK_NonDeducedMismatch;
@@ -884,7 +897,7 @@ DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         const TemplateArgumentList &ParamList,
                         const TemplateArgumentList &ArgList,
-                        Sema::TemplateDeductionInfo &Info,
+                        TemplateDeductionInfo &Info,
                     llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   assert(ParamList.size() == ArgList.size());
   for (unsigned I = 0, N = ParamList.size(); I != N; ++I) {
@@ -961,6 +974,113 @@ static TemplateParameter makeTemplateParameter(Decl *D) {
   return TemplateParameter(cast<TemplateTemplateParmDecl>(D));
 }
 
+/// Complete template argument deduction for a class template partial
+/// specialization.
+static Sema::TemplateDeductionResult
+FinishTemplateArgumentDeduction(Sema &S, 
+                                ClassTemplatePartialSpecializationDecl *Partial,
+                                const TemplateArgumentList &TemplateArgs,
+                      llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced,
+                                TemplateDeductionInfo &Info) {
+  // Trap errors.
+  Sema::SFINAETrap Trap(S);
+  
+  Sema::ContextRAII SavedContext(S, Partial);
+
+  // C++ [temp.deduct.type]p2:
+  //   [...] or if any template argument remains neither deduced nor
+  //   explicitly specified, template argument deduction fails.
+  TemplateArgumentListBuilder Builder(Partial->getTemplateParameters(),
+                                      Deduced.size());
+  for (unsigned I = 0, N = Deduced.size(); I != N; ++I) {
+    if (Deduced[I].isNull()) {
+      Decl *Param
+      = const_cast<NamedDecl *>(
+                                Partial->getTemplateParameters()->getParam(I));
+      Info.Param = makeTemplateParameter(Param);
+      return Sema::TDK_Incomplete;
+    }
+    
+    Builder.Append(Deduced[I]);
+  }
+  
+  // Form the template argument list from the deduced template arguments.
+  TemplateArgumentList *DeducedArgumentList
+    = new (S.Context) TemplateArgumentList(S.Context, Builder, 
+                                           /*TakeArgs=*/true);
+  Info.reset(DeducedArgumentList);
+
+  // Substitute the deduced template arguments into the template
+  // arguments of the class template partial specialization, and
+  // verify that the instantiated template arguments are both valid
+  // and are equivalent to the template arguments originally provided
+  // to the class template.
+  // FIXME: Do we have to correct the types of deduced non-type template 
+  // arguments (in particular, integral non-type template arguments?).
+  LocalInstantiationScope InstScope(S);
+  ClassTemplateDecl *ClassTemplate = Partial->getSpecializedTemplate();
+  const TemplateArgumentLoc *PartialTemplateArgs
+    = Partial->getTemplateArgsAsWritten();
+  unsigned N = Partial->getNumTemplateArgsAsWritten();
+
+  // Note that we don't provide the langle and rangle locations.
+  TemplateArgumentListInfo InstArgs;
+
+  for (unsigned I = 0; I != N; ++I) {
+    Decl *Param = const_cast<NamedDecl *>(
+                    ClassTemplate->getTemplateParameters()->getParam(I));
+    TemplateArgumentLoc InstArg;
+    if (S.Subst(PartialTemplateArgs[I], InstArg,
+                MultiLevelTemplateArgumentList(*DeducedArgumentList))) {
+      Info.Param = makeTemplateParameter(Param);
+      Info.FirstArg = PartialTemplateArgs[I].getArgument();
+      return Sema::TDK_SubstitutionFailure;
+    }
+    InstArgs.addArgument(InstArg);
+  }
+
+  TemplateArgumentListBuilder ConvertedInstArgs(
+                                  ClassTemplate->getTemplateParameters(), N);
+
+  if (S.CheckTemplateArgumentList(ClassTemplate, Partial->getLocation(),
+                                InstArgs, false, ConvertedInstArgs))
+    return Sema::TDK_SubstitutionFailure;
+  
+  for (unsigned I = 0, E = ConvertedInstArgs.flatSize(); I != E; ++I) {
+    TemplateArgument InstArg = ConvertedInstArgs.getFlatArguments()[I];
+
+    Decl *Param = const_cast<NamedDecl *>(
+                    ClassTemplate->getTemplateParameters()->getParam(I));
+
+    if (InstArg.getKind() == TemplateArgument::Expression) {
+      // When the argument is an expression, check the expression result
+      // against the actual template parameter to get down to the canonical
+      // template argument.
+      Expr *InstExpr = InstArg.getAsExpr();
+      if (NonTypeTemplateParmDecl *NTTP
+            = dyn_cast<NonTypeTemplateParmDecl>(Param)) {
+        if (S.CheckTemplateArgument(NTTP, NTTP->getType(), InstExpr, InstArg)) {
+          Info.Param = makeTemplateParameter(Param);
+          Info.FirstArg = Partial->getTemplateArgs()[I];
+          return Sema::TDK_SubstitutionFailure;
+        }
+      }
+    }
+
+    if (!isSameTemplateArg(S.Context, TemplateArgs[I], InstArg)) {
+      Info.Param = makeTemplateParameter(Param);
+      Info.FirstArg = TemplateArgs[I];
+      Info.SecondArg = InstArg;
+      return Sema::TDK_NonDeducedMismatch;
+    }
+  }
+
+  if (Trap.hasErrorOccurred())
+    return Sema::TDK_SubstitutionFailure;
+
+  return Sema::TDK_Success;
+}
+
 /// \brief Perform template argument deduction to determine whether
 /// the given template arguments match the given class template
 /// partial specialization per C++ [temp.class.spec.match].
@@ -988,99 +1108,11 @@ Sema::DeduceTemplateArguments(ClassTemplatePartialSpecializationDecl *Partial,
   if (Inst)
     return TDK_InstantiationDepth;
 
-  // C++ [temp.deduct.type]p2:
-  //   [...] or if any template argument remains neither deduced nor
-  //   explicitly specified, template argument deduction fails.
-  TemplateArgumentListBuilder Builder(Partial->getTemplateParameters(),
-                                      Deduced.size());
-  for (unsigned I = 0, N = Deduced.size(); I != N; ++I) {
-    if (Deduced[I].isNull()) {
-      Decl *Param
-        = const_cast<NamedDecl *>(
-                                Partial->getTemplateParameters()->getParam(I));
-      Info.Param = makeTemplateParameter(Param);
-      return TDK_Incomplete;
-    }
-
-    Builder.Append(Deduced[I]);
-  }
-
-  // Form the template argument list from the deduced template arguments.
-  TemplateArgumentList *DeducedArgumentList
-    = new (Context) TemplateArgumentList(Context, Builder, /*TakeArgs=*/true);
-  Info.reset(DeducedArgumentList);
-
-  // Substitute the deduced template arguments into the template
-  // arguments of the class template partial specialization, and
-  // verify that the instantiated template arguments are both valid
-  // and are equivalent to the template arguments originally provided
-  // to the class template.
-  // FIXME: Do we have to correct the types of deduced non-type template 
-  // arguments (in particular, integral non-type template arguments?).
-  Sema::LocalInstantiationScope InstScope(*this);
-  ClassTemplateDecl *ClassTemplate = Partial->getSpecializedTemplate();
-  const TemplateArgumentLoc *PartialTemplateArgs
-    = Partial->getTemplateArgsAsWritten();
-  unsigned N = Partial->getNumTemplateArgsAsWritten();
-
-  // Note that we don't provide the langle and rangle locations.
-  TemplateArgumentListInfo InstArgs;
-
-  for (unsigned I = 0; I != N; ++I) {
-    Decl *Param = const_cast<NamedDecl *>(
-                    ClassTemplate->getTemplateParameters()->getParam(I));
-    TemplateArgumentLoc InstArg;
-    if (Subst(PartialTemplateArgs[I], InstArg,
-              MultiLevelTemplateArgumentList(*DeducedArgumentList))) {
-      Info.Param = makeTemplateParameter(Param);
-      Info.FirstArg = PartialTemplateArgs[I].getArgument();
-      return TDK_SubstitutionFailure;
-    }
-    InstArgs.addArgument(InstArg);
-  }
-
-  TemplateArgumentListBuilder ConvertedInstArgs(
-                                  ClassTemplate->getTemplateParameters(), N);
-
-  if (CheckTemplateArgumentList(ClassTemplate, Partial->getLocation(),
-                                InstArgs, false, ConvertedInstArgs)) {
-    // FIXME: fail with more useful information?
-    return TDK_SubstitutionFailure;
-  }
-  
-  for (unsigned I = 0, E = ConvertedInstArgs.flatSize(); I != E; ++I) {
-    TemplateArgument InstArg = ConvertedInstArgs.getFlatArguments()[I];
-
-    Decl *Param = const_cast<NamedDecl *>(
-                    ClassTemplate->getTemplateParameters()->getParam(I));
-
-    if (InstArg.getKind() == TemplateArgument::Expression) {
-      // When the argument is an expression, check the expression result
-      // against the actual template parameter to get down to the canonical
-      // template argument.
-      Expr *InstExpr = InstArg.getAsExpr();
-      if (NonTypeTemplateParmDecl *NTTP
-            = dyn_cast<NonTypeTemplateParmDecl>(Param)) {
-        if (CheckTemplateArgument(NTTP, NTTP->getType(), InstExpr, InstArg)) {
-          Info.Param = makeTemplateParameter(Param);
-          Info.FirstArg = Partial->getTemplateArgs()[I];
-          return TDK_SubstitutionFailure;
-        }
-      }
-    }
-
-    if (!isSameTemplateArg(Context, TemplateArgs[I], InstArg)) {
-      Info.Param = makeTemplateParameter(Param);
-      Info.FirstArg = TemplateArgs[I];
-      Info.SecondArg = InstArg;
-      return TDK_NonDeducedMismatch;
-    }
-  }
-
   if (Trap.hasErrorOccurred())
-    return TDK_SubstitutionFailure;
-
-  return TDK_Success;
+    return Sema::TDK_SubstitutionFailure;
+ 
+  return ::FinishTemplateArgumentDeduction(*this, Partial, TemplateArgs, 
+                                           Deduced, Info);
 }
 
 /// \brief Determine whether the given type T is a simple-template-id type.
@@ -1163,12 +1195,19 @@ Sema::SubstituteExplicitTemplateArguments(
   if (Inst)
     return TDK_InstantiationDepth;
 
+  ContextRAII SavedContext(*this, FunctionTemplate->getTemplatedDecl());
+
   if (CheckTemplateArgumentList(FunctionTemplate,
                                 SourceLocation(),
                                 ExplicitTemplateArgs,
                                 true,
-                                Builder) || Trap.hasErrorOccurred())
+                                Builder) || Trap.hasErrorOccurred()) {
+    unsigned Index = Builder.structuredSize();
+    if (Index >= TemplateParams->size())
+      Index = TemplateParams->size() - 1;
+    Info.Param = makeTemplateParameter(TemplateParams->getParam(Index));
     return TDK_InvalidExplicitArguments;
+  }
 
   // Form the template argument list from the explicitly-specified
   // template arguments.
@@ -1213,7 +1252,8 @@ Sema::SubstituteExplicitTemplateArguments(
                                       Proto->isVariadic(),
                                       Proto->getTypeQuals(),
                                       Function->getLocation(),
-                                      Function->getDeclName());
+                                      Function->getDeclName(),
+                                      Proto->getExtInfo());
     if (FunctionType->isNull() || Trap.hasErrorOccurred())
       return TDK_SubstitutionFailure;
   }
@@ -1311,6 +1351,8 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
   if (Inst)
     return TDK_InstantiationDepth;
 
+  ContextRAII SavedContext(*this, FunctionTemplate->getTemplatedDecl());
+
   // C++ [temp.deduct.type]p2:
   //   [...] or if any template argument remains neither deduced nor
   //   explicitly specified, template argument deduction fails.
@@ -1349,6 +1391,8 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
                                  NTTP->getDeclName());
             if (NTTPType.isNull()) {
               Info.Param = makeTemplateParameter(Param);
+              Info.reset(new (Context) TemplateArgumentList(Context, Builder, 
+                                                            /*TakeArgs=*/true));
               return TDK_SubstitutionFailure;
             }
           }
@@ -1374,6 +1418,8 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
                                   : CTAK_Deduced)) {
         Info.Param = makeTemplateParameter(
                          const_cast<NamedDecl *>(TemplateParams->getParam(I)));
+        Info.reset(new (Context) TemplateArgumentList(Context, Builder, 
+                                                      /*TakeArgs=*/true));
         return TDK_SubstitutionFailure;
       }
 
@@ -1404,6 +1450,8 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
                               CTAK_Deduced)) {
       Info.Param = makeTemplateParameter(
                          const_cast<NamedDecl *>(TemplateParams->getParam(I)));
+      Info.reset(new (Context) TemplateArgumentList(Context, Builder, 
+                                                    /*TakeArgs=*/true));
       return TDK_SubstitutionFailure;
     }
 
@@ -1417,9 +1465,11 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
 
   // Substitute the deduced template arguments into the function template
   // declaration to produce the function template specialization.
+  DeclContext *Owner = FunctionTemplate->getDeclContext();
+  if (FunctionTemplate->getFriendObjectKind())
+    Owner = FunctionTemplate->getLexicalDeclContext();
   Specialization = cast_or_null<FunctionDecl>(
-                      SubstDecl(FunctionTemplate->getTemplatedDecl(),
-                                FunctionTemplate->getDeclContext(),
+                      SubstDecl(FunctionTemplate->getTemplatedDecl(), Owner,
                          MultiLevelTemplateArgumentList(*DeducedArgumentList)));
   if (!Specialization)
     return TDK_SubstitutionFailure;
@@ -1429,7 +1479,8 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
   
   // If the template argument list is owned by the function template
   // specialization, release it.
-  if (Specialization->getTemplateSpecializationArgs() == DeducedArgumentList)
+  if (Specialization->getTemplateSpecializationArgs() == DeducedArgumentList &&
+      !Trap.hasErrorOccurred())
     Info.take();
 
   // There may have been an error that did not prevent us from constructing a
@@ -1443,14 +1494,22 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
   return TDK_Success;
 }
 
+/// Gets the type of a function for template-argument-deducton
+/// purposes when it's considered as part of an overload set.
 static QualType GetTypeOfFunction(ASTContext &Context,
-                                  bool isAddressOfOperand,
+                                  const OverloadExpr::FindResult &R,
                                   FunctionDecl *Fn) {
-  if (!isAddressOfOperand) return Fn->getType();
   if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(Fn))
-    if (Method->isInstance())
+    if (Method->isInstance()) {
+      // An instance method that's referenced in a form that doesn't
+      // look like a member pointer is just invalid.
+      if (!R.HasFormOfMemberPointer) return QualType();
+
       return Context.getMemberPointerType(Fn->getType(),
                Context.getTypeDeclType(Method->getParent()).getTypePtr());
+    }
+
+  if (!R.IsAddressOfOperand) return Fn->getType();
   return Context.getPointerType(Fn->getType());
 }
 
@@ -1461,10 +1520,10 @@ static QualType GetTypeOfFunction(ASTContext &Context,
 static QualType
 ResolveOverloadForDeduction(Sema &S, TemplateParameterList *TemplateParams,
                             Expr *Arg, QualType ParamType) {
-  llvm::PointerIntPair<OverloadExpr*,1> R = OverloadExpr::find(Arg);
+  
+  OverloadExpr::FindResult R = OverloadExpr::find(Arg);
 
-  bool isAddressOfOperand = bool(R.getInt());
-  OverloadExpr *Ovl = R.getPointer();
+  OverloadExpr *Ovl = R.Expression;
 
   // If there were explicit template arguments, we can only find
   // something via C++ [temp.arg.explicit]p3, i.e. if the arguments
@@ -1473,7 +1532,7 @@ ResolveOverloadForDeduction(Sema &S, TemplateParameterList *TemplateParams,
     // But we can still look for an explicit specialization.
     if (FunctionDecl *ExplicitSpec
           = S.ResolveSingleFunctionTemplateSpecialization(Ovl))
-      return GetTypeOfFunction(S.Context, isAddressOfOperand, ExplicitSpec);
+      return GetTypeOfFunction(S.Context, R, ExplicitSpec);
     return QualType();
   }
 
@@ -1498,7 +1557,8 @@ ResolveOverloadForDeduction(Sema &S, TemplateParameterList *TemplateParams,
       return QualType();
 
     FunctionDecl *Fn = cast<FunctionDecl>(D);
-    QualType ArgType = GetTypeOfFunction(S.Context, isAddressOfOperand, Fn);
+    QualType ArgType = GetTypeOfFunction(S.Context, R, Fn);
+    if (ArgType.isNull()) continue;
 
     //   - If the argument is an overload set (not containing function
     //     templates), trial argument deduction is attempted using each
@@ -1514,7 +1574,7 @@ ResolveOverloadForDeduction(Sema &S, TemplateParameterList *TemplateParams,
     // So we do not reject deductions which were made elsewhere.
     llvm::SmallVector<DeducedTemplateArgument, 8> 
       Deduced(TemplateParams->size());
-    Sema::TemplateDeductionInfo Info(S.Context, Ovl->getNameLoc());
+    TemplateDeductionInfo Info(S.Context, Ovl->getNameLoc());
     unsigned TDF = 0;
 
     Sema::TemplateDeductionResult Result
@@ -1581,7 +1641,7 @@ Sema::DeduceTemplateArguments(FunctionTemplateDecl *FunctionTemplate,
 
   // The types of the parameters from which we will perform template argument
   // deduction.
-  Sema::LocalInstantiationScope InstScope(*this);
+  LocalInstantiationScope InstScope(*this);
   TemplateParameterList *TemplateParams
     = FunctionTemplate->getTemplateParameters();
   llvm::SmallVector<DeducedTemplateArgument, 4> Deduced;
@@ -1677,7 +1737,8 @@ Sema::DeduceTemplateArguments(FunctionTemplateDecl *FunctionTemplate,
     //     - The transformed A can be another pointer or pointer to member
     //       type that can be converted to the deduced A via a qualification
     //       conversion (4.4).
-    if (ArgType->isPointerType() || ArgType->isMemberPointerType())
+    if (ArgType->isPointerType() || ArgType->isMemberPointerType() ||
+        ArgType->isObjCObjectPointerType())
       TDF |= TDF_IgnoreQualifiers;
     //     - If P is a class and P has the form simple-template-id, then the
     //       transformed A can be a derived class of the deduced A. Likewise,
@@ -1740,7 +1801,7 @@ Sema::DeduceTemplateArguments(FunctionTemplateDecl *FunctionTemplate,
   QualType FunctionType = Function->getType();
 
   // Substitute any explicit template arguments.
-  Sema::LocalInstantiationScope InstScope(*this);
+  LocalInstantiationScope InstScope(*this);
   llvm::SmallVector<DeducedTemplateArgument, 4> Deduced;
   unsigned NumExplicitlySpecified = 0;
   llvm::SmallVector<QualType, 4> ParamTypes;
@@ -1872,7 +1933,7 @@ Sema::DeduceTemplateArguments(FunctionTemplateDecl *FunctionTemplate,
   // modulo the various allowed differences.
 
   // Finish template argument deduction.
-  Sema::LocalInstantiationScope InstScope(*this);
+  LocalInstantiationScope InstScope(*this);
   FunctionDecl *Spec = 0;
   TemplateDeductionResult Result
     = FinishTemplateArgumentDeduction(FunctionTemplate, Deduced, 0, Spec, 
@@ -1936,7 +1997,7 @@ static Sema::TemplateDeductionResult
 DeduceTemplateArgumentsDuringPartialOrdering(Sema &S,
                                         TemplateParameterList *TemplateParams,
                                              QualType ParamIn, QualType ArgIn,
-                                             Sema::TemplateDeductionInfo &Info,
+                                             TemplateDeductionInfo &Info,
                       llvm::SmallVectorImpl<DeducedTemplateArgument> &Deduced,
    llvm::SmallVectorImpl<DeductionQualifierComparison> *QualifierComparisons) {
   CanQualType Param = S.Context.getCanonicalType(ParamIn);
@@ -2018,7 +2079,7 @@ static bool isAtLeastAsSpecializedAs(Sema &S,
   // C++0x [temp.deduct.partial]p3:
   //   The types used to determine the ordering depend on the context in which
   //   the partial ordering is done:
-  Sema::TemplateDeductionInfo Info(S.Context, Loc);
+  TemplateDeductionInfo Info(S.Context, Loc);
   switch (TPOC) {
   case TPOC_Call: {
     //   - In the context of a function call, the function parameter types are
@@ -2333,14 +2394,17 @@ Sema::getMoreSpecializedPartialSpecialization(
   //       whose type is a class template specialization with the template 
   //       arguments of the second partial specialization.
   //
-  // Rather than synthesize function templates, we merely perform the 
-  // equivalent partial ordering by performing deduction directly on the
-  // template arguments of the class template partial specializations. This
-  // computation is slightly simpler than the general problem of function
-  // template partial ordering, because class template partial specializations
-  // are more constrained. We know that every template parameter is deduc
+  // Rather than synthesize function templates, we merely perform the
+  // equivalent partial ordering by performing deduction directly on
+  // the template arguments of the class template partial
+  // specializations. This computation is slightly simpler than the
+  // general problem of function template partial ordering, because
+  // class template partial specializations are more constrained. We
+  // know that every template parameter is deducible from the class
+  // template partial specialization's template arguments, for
+  // example.
   llvm::SmallVector<DeducedTemplateArgument, 4> Deduced;
-  Sema::TemplateDeductionInfo Info(Context, Loc);
+  TemplateDeductionInfo Info(Context, Loc);
 
   QualType PT1 = PS1->getInjectedSpecializationType();
   QualType PT2 = PS2->getInjectedSpecializationType();
@@ -2354,7 +2418,11 @@ Sema::getMoreSpecializedPartialSpecialization(
                                                                Info,
                                                                Deduced,
                                                                0);
-
+  if (Better1)
+    Better1 = !::FinishTemplateArgumentDeduction(*this, PS2, 
+                                                 PS1->getTemplateArgs(), 
+                                                 Deduced, Info);
+  
   // Determine whether PS2 is at least as specialized as PS1
   Deduced.clear();
   Deduced.resize(PS1->getTemplateParameters()->size());
@@ -2365,6 +2433,10 @@ Sema::getMoreSpecializedPartialSpecialization(
                                                                Info,
                                                                Deduced,
                                                                0);
+  if (Better2)
+    Better2 = !::FinishTemplateArgumentDeduction(*this, PS1, 
+                                                 PS2->getTemplateArgs(), 
+                                                 Deduced, Info);
   
   if (Better1 == Better2)
     return 0;
@@ -2570,6 +2642,18 @@ MarkUsedTemplateParameters(Sema &SemaRef, QualType T,
                                  OnlyDeduced, Depth, Used);
     break;
 
+  case Type::DependentTemplateSpecialization: {
+    const DependentTemplateSpecializationType *Spec
+      = cast<DependentTemplateSpecializationType>(T);
+    if (!OnlyDeduced)
+      MarkUsedTemplateParameters(SemaRef, Spec->getQualifier(),
+                                 OnlyDeduced, Depth, Used);
+    for (unsigned I = 0, N = Spec->getNumArgs(); I != N; ++I)
+      MarkUsedTemplateParameters(SemaRef, Spec->getArg(I), OnlyDeduced, Depth,
+                                 Used);
+    break;
+  }
+
   case Type::TypeOf:
     if (!OnlyDeduced)
       MarkUsedTemplateParameters(SemaRef,
@@ -2598,6 +2682,7 @@ MarkUsedTemplateParameters(Sema &SemaRef, QualType T,
   case Type::Record:
   case Type::Enum:
   case Type::ObjCInterface:
+  case Type::ObjCObject:
   case Type::ObjCObjectPointer:
   case Type::UnresolvedUsing:
 #define TYPE(Class, Base)

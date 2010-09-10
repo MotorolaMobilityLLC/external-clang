@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Sema/Sema.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/Basic/Diagnostic.h"
@@ -20,11 +21,11 @@
 #include "clang/Lex/PTHManager.h"
 #include "clang/Frontend/ChainedDiagnosticClient.h"
 #include "clang/Frontend/FrontendAction.h"
-#include "clang/Frontend/PCHReader.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Frontend/VerifyDiagnosticsClient.h"
 #include "clang/Frontend/Utils.h"
+#include "clang/Serialization/ASTReader.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "llvm/LLVMContext.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -55,10 +56,6 @@ void CompilerInstance::setDiagnostics(Diagnostic *Value) {
   Diagnostics = Value;
 }
 
-void CompilerInstance::setDiagnosticClient(DiagnosticClient *Value) {
-  DiagClient.reset(Value);
-}
-
 void CompilerInstance::setTarget(TargetInfo *Value) {
   Target.reset(Value);
 }
@@ -77,6 +74,10 @@ void CompilerInstance::setPreprocessor(Preprocessor *Value) {
 
 void CompilerInstance::setASTContext(ASTContext *Value) {
   Context.reset(Value);
+}
+
+void CompilerInstance::setSema(Sema *S) {
+  TheSema.reset(S);
 }
 
 void CompilerInstance::setASTConsumer(ASTConsumer *Value) {
@@ -126,14 +127,11 @@ static void SetUpBuildDumpLog(const DiagnosticOptions &DiagOpts,
   // Chain in a diagnostic client which will log the diagnostics.
   DiagnosticClient *Logger =
     new TextDiagnosticPrinter(*OS.take(), DiagOpts, /*OwnsOutputStream=*/true);
-  Diags.setClient(new ChainedDiagnosticClient(Diags.getClient(), Logger));
+  Diags.setClient(new ChainedDiagnosticClient(Diags.takeClient(), Logger));
 }
 
 void CompilerInstance::createDiagnostics(int Argc, char **Argv) {
   Diagnostics = createDiagnostics(getDiagnosticOpts(), Argc, Argv);
-
-  if (Diagnostics)
-    DiagClient.reset(Diagnostics->getClient());
 }
 
 llvm::IntrusiveRefCntPtr<Diagnostic> 
@@ -150,22 +148,20 @@ CompilerInstance::createDiagnostics(const DiagnosticOptions &Opts,
       // bit of a problem. So, just create a text diagnostic printer
       // to complain about this problem, and pretend that the user
       // didn't try to use binary output.
-      DiagClient.reset(new TextDiagnosticPrinter(llvm::errs(), Opts));
-      Diags->setClient(DiagClient.take());
+      Diags->setClient(new TextDiagnosticPrinter(llvm::errs(), Opts));
       Diags->Report(diag::err_fe_stderr_binary);
       return Diags;
     } else {
-      DiagClient.reset(new BinaryDiagnosticSerializer(llvm::errs()));
+      Diags->setClient(new BinaryDiagnosticSerializer(llvm::errs()));
     }
   } else {
-    DiagClient.reset(new TextDiagnosticPrinter(llvm::errs(), Opts));
+    Diags->setClient(new TextDiagnosticPrinter(llvm::errs(), Opts));
   }
 
   // Chain in -verify checker, if requested.
   if (Opts.VerifyDiagnostics)
-    DiagClient.reset(new VerifyDiagnosticsClient(*Diags, DiagClient.take()));
+    Diags->setClient(new VerifyDiagnosticsClient(*Diags, Diags->takeClient()));
 
-  Diags->setClient(DiagClient.take());
   if (!Opts.DumpBuildInformation.empty())
     SetUpBuildDumpLog(Opts, Argc, Argv, *Diags);
 
@@ -245,40 +241,48 @@ void CompilerInstance::createASTContext() {
   Context.reset(new ASTContext(getLangOpts(), PP.getSourceManager(),
                                getTarget(), PP.getIdentifierTable(),
                                PP.getSelectorTable(), PP.getBuiltinInfo(),
-                               /*FreeMemory=*/ !getFrontendOpts().DisableFree,
                                /*size_reserve=*/ 0));
 }
 
 // ExternalASTSource
 
-void CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path) {
+void CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
+                                                  bool DisablePCHValidation,
+                                                 void *DeserializationListener){
   llvm::OwningPtr<ExternalASTSource> Source;
   Source.reset(createPCHExternalASTSource(Path, getHeaderSearchOpts().Sysroot,
-                                          getPreprocessor(), getASTContext()));
+                                          DisablePCHValidation,
+                                          getPreprocessor(), getASTContext(),
+                                          DeserializationListener));
   getASTContext().setExternalSource(Source);
 }
 
 ExternalASTSource *
 CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
                                              const std::string &Sysroot,
+                                             bool DisablePCHValidation,
                                              Preprocessor &PP,
-                                             ASTContext &Context) {
-  llvm::OwningPtr<PCHReader> Reader;
-  Reader.reset(new PCHReader(PP, &Context,
-                             Sysroot.empty() ? 0 : Sysroot.c_str()));
+                                             ASTContext &Context,
+                                             void *DeserializationListener) {
+  llvm::OwningPtr<ASTReader> Reader;
+  Reader.reset(new ASTReader(PP, &Context,
+                             Sysroot.empty() ? 0 : Sysroot.c_str(),
+                             DisablePCHValidation));
 
-  switch (Reader->ReadPCH(Path)) {
-  case PCHReader::Success:
+  Reader->setDeserializationListener(
+            static_cast<ASTDeserializationListener *>(DeserializationListener));
+  switch (Reader->ReadAST(Path)) {
+  case ASTReader::Success:
     // Set the predefines buffer as suggested by the PCH reader. Typically, the
     // predefines buffer will be empty.
     PP.setPredefines(Reader->getSuggestedPredefines());
     return Reader.take();
 
-  case PCHReader::Failure:
+  case ASTReader::Failure:
     // Unrecoverable failure: don't even try to process the input file.
     break;
 
-  case PCHReader::IgnorePCH:
+  case ASTReader::IgnorePCH:
     // No suitable PCH file could be found. Return an error.
     break;
   }
@@ -288,16 +292,42 @@ CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
 
 // Code Completion
 
+static bool EnableCodeCompletion(Preprocessor &PP, 
+                                 const std::string &Filename,
+                                 unsigned Line,
+                                 unsigned Column) {
+  // Tell the source manager to chop off the given file at a specific
+  // line and column.
+  const FileEntry *Entry = PP.getFileManager().getFile(Filename);
+  if (!Entry) {
+    PP.getDiagnostics().Report(diag::err_fe_invalid_code_complete_file)
+      << Filename;
+    return true;
+  }
+
+  // Truncate the named file at the given line/column.
+  PP.SetCodeCompletionPoint(Entry, Line, Column);
+  return false;
+}
+
 void CompilerInstance::createCodeCompletionConsumer() {
   const ParsedSourceLocation &Loc = getFrontendOpts().CodeCompletionAt;
-  CompletionConsumer.reset(
-    createCodeCompletionConsumer(getPreprocessor(),
-                                 Loc.FileName, Loc.Line, Loc.Column,
-                                 getFrontendOpts().DebugCodeCompletionPrinter,
-                                 getFrontendOpts().ShowMacrosInCodeCompletion,
-                                 llvm::outs()));
-  if (!CompletionConsumer)
+  if (!CompletionConsumer) {
+    CompletionConsumer.reset(
+      createCodeCompletionConsumer(getPreprocessor(),
+                                   Loc.FileName, Loc.Line, Loc.Column,
+                                   getFrontendOpts().DebugCodeCompletionPrinter,
+                                   getFrontendOpts().ShowMacrosInCodeCompletion,
+                             getFrontendOpts().ShowCodePatternsInCodeCompletion,
+                           getFrontendOpts().ShowGlobalSymbolsInCodeCompletion,
+                                   llvm::outs()));
+    if (!CompletionConsumer)
+      return;
+  } else if (EnableCodeCompletion(getPreprocessor(), Loc.FileName,
+                                  Loc.Line, Loc.Column)) {
+    CompletionConsumer.reset();
     return;
+  }
 
   if (CompletionConsumer->isOutputBinary() &&
       llvm::sys::Program::ChangeStdoutToBinary()) {
@@ -317,24 +347,25 @@ CompilerInstance::createCodeCompletionConsumer(Preprocessor &PP,
                                                unsigned Column,
                                                bool UseDebugPrinter,
                                                bool ShowMacros,
+                                               bool ShowCodePatterns,
+                                               bool ShowGlobals,
                                                llvm::raw_ostream &OS) {
-  // Tell the source manager to chop off the given file at a specific
-  // line and column.
-  const FileEntry *Entry = PP.getFileManager().getFile(Filename);
-  if (!Entry) {
-    PP.getDiagnostics().Report(diag::err_fe_invalid_code_complete_file)
-      << Filename;
+  if (EnableCodeCompletion(PP, Filename, Line, Column))
     return 0;
-  }
-
-  // Truncate the named file at the given line/column.
-  PP.SetCodeCompletionPoint(Entry, Line, Column);
 
   // Set up the creation routine for code-completion.
   if (UseDebugPrinter)
-    return new PrintingCodeCompleteConsumer(ShowMacros, OS);
+    return new PrintingCodeCompleteConsumer(ShowMacros, ShowCodePatterns, 
+                                            ShowGlobals, OS);
   else
-    return new CIndexCodeCompleteConsumer(ShowMacros, OS);
+    return new CIndexCodeCompleteConsumer(ShowMacros, ShowCodePatterns, 
+                                          ShowGlobals, OS);
+}
+
+void CompilerInstance::createSema(bool CompleteTranslationUnit,
+                                  CodeCompleteConsumer *CompletionConsumer) {
+  TheSema.reset(new Sema(getPreprocessor(), getASTContext(), getASTConsumer(),
+                         CompleteTranslationUnit, CompletionConsumer));
 }
 
 // Output Files
@@ -433,14 +464,14 @@ bool CompilerInstance::InitializeSourceManager(llvm::StringRef InputFile,
   // Figure out where to get and map in the main file.
   if (InputFile != "-") {
     const FileEntry *File = FileMgr.getFile(InputFile);
-    if (File) SourceMgr.createMainFileID(File, SourceLocation());
+    if (File) SourceMgr.createMainFileID(File);
     if (SourceMgr.getMainFileID().isInvalid()) {
       Diags.Report(diag::err_fe_error_reading) << InputFile;
       return false;
     }
   } else {
     llvm::MemoryBuffer *SB = llvm::MemoryBuffer::getSTDIN();
-    SourceMgr.createMainFileIDForMemBuffer(SB);
+    if (SB) SourceMgr.createMainFileIDForMemBuffer(SB);
     if (SourceMgr.getMainFileID().isInvalid()) {
       Diags.Report(diag::err_fe_error_reading_stdin);
       return false;
@@ -487,27 +518,11 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
   for (unsigned i = 0, e = getFrontendOpts().Inputs.size(); i != e; ++i) {
     const std::string &InFile = getFrontendOpts().Inputs[i].second;
 
-    // If we aren't using an AST file, setup the file and source managers and
-    // the preprocessor.
-    bool IsAST = getFrontendOpts().Inputs[i].first == FrontendOptions::IK_AST;
-    if (!IsAST) {
-      if (!i) {
-        // Create a file manager object to provide access to and cache the
-        // filesystem.
-        createFileManager();
+    // Reset the ID tables if we are reusing the SourceManager.
+    if (hasSourceManager())
+      getSourceManager().clearIDTables();
 
-        // Create the source manager.
-        createSourceManager();
-      } else {
-        // Reset the ID tables if we are reusing the SourceManager.
-        getSourceManager().clearIDTables();
-      }
-
-      // Create the preprocessor.
-      createPreprocessor();
-    }
-
-    if (Act.BeginSourceFile(*this, InFile, IsAST)) {
+    if (Act.BeginSourceFile(*this, InFile, getFrontendOpts().Inputs[i].first)) {
       Act.Execute();
       Act.EndSourceFile();
     }
@@ -528,7 +543,7 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
       OS << " generated.\n";
   }
 
-  if (getFrontendOpts().ShowStats) {
+  if (getFrontendOpts().ShowStats && hasFileManager()) {
     getFileManager().PrintStats();
     OS << "\n";
   }

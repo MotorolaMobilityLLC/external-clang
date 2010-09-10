@@ -134,3 +134,19 @@ void test18(int b) {
   test18_a(b, b); // expected-error {{too many arguments to function call, expected 1, have 2}}
   test18_a(); // expected-error {{too few arguments to function call, expected 1, have 0}}
 }
+
+// PR7569
+void test19() {
+  *(int*)0 = 0;   // expected-warning {{indirection of non-volatile null pointer}} \
+                  // expected-note {{consider using __builtin_trap}}
+  *(volatile int*)0 = 0;  // Ok.
+}
+
+int test20(int x) {
+  return x && 4; // expected-warning {{use of logical && with constant operand; switch to bitwise & or remove constant}}
+
+  return x && sizeof(int) == 4;  // no warning, RHS is logical op.
+  
+  // no warning, this is an idiom for "true" in old C style.
+  return x && (signed char)1;
+}

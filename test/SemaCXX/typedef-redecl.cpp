@@ -37,3 +37,20 @@ namespace test1 {
   using namespace a; 
   foo x;
 }
+
+namespace PR6923 {
+  struct A;
+
+  extern "C" {
+    struct A;
+    typedef struct A A;
+  }
+
+  struct A;
+}
+
+namespace PR7462 {
+  struct A {};
+  typedef int operator! (A); // expected-error{{typedef name must be an identifier}}
+  int i = !A(); // expected-error{{invalid argument type}}
+}

@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Basic/Version.h"
 #include "clang/Frontend/Utils.h"
 #include "clang/Basic/MacroBuilder.h"
 #include "clang/Basic/TargetInfo.h"
@@ -82,8 +83,8 @@ static void AddImplicitIncludeMacros(MacroBuilder &Builder,
 static void AddImplicitIncludePTH(MacroBuilder &Builder, Preprocessor &PP,
                                   llvm::StringRef ImplicitIncludePTH) {
   PTHManager *P = PP.getPTHManager();
-  assert(P && "No PTHManager.");
-  const char *OriginalFile = P->getOriginalSourceFile();
+  // Null check 'P' in the corner case where it couldn't be created.
+  const char *OriginalFile = P ? P->getOriginalSourceFile() : 0;
 
   if (!OriginalFile) {
     PP.getDiagnostics().Report(diag::err_fe_pth_file_has_no_source_header)
@@ -168,10 +169,11 @@ static void DefineTypeSize(llvm::StringRef MacroName, unsigned TypeWidth,
                            llvm::StringRef ValSuffix, bool isSigned,
                            MacroBuilder& Builder) {
   long long MaxVal;
-  if (isSigned)
-    MaxVal = (1LL << (TypeWidth - 1)) - 1;
-  else
-    MaxVal = ~0LL >> (64-TypeWidth);
+  if (isSigned) {
+    assert(TypeWidth != 1);
+    MaxVal = ~0ULL >> (65-TypeWidth);
+  } else
+    MaxVal = ~0ULL >> (64-TypeWidth);
 
   Builder.defineMacro(MacroName, llvm::Twine(MaxVal) + ValSuffix);
 }
@@ -194,9 +196,21 @@ static void DefineTypeWidth(llvm::StringRef MacroName, TargetInfo::IntType Ty,
   Builder.defineMacro(MacroName, llvm::Twine(TI.getTypeWidth(Ty)));
 }
 
+static void DefineTypeSizeof(llvm::StringRef MacroName, unsigned BitWidth,
+                             const TargetInfo &TI, MacroBuilder &Builder) {
+  Builder.defineMacro(MacroName,
+                      llvm::Twine(BitWidth / TI.getCharWidth()));
+}
+
 static void DefineExactWidthIntType(TargetInfo::IntType Ty, 
                                const TargetInfo &TI, MacroBuilder &Builder) {
   int TypeWidth = TI.getTypeWidth(Ty);
+
+  // Use the target specified int64 type, when appropriate, so that [u]int64_t
+  // ends up being defined in terms of the correct type.
+  if (TypeWidth == 64)
+    Ty = TI.getInt64Type();
+
   DefineType("__INT" + llvm::Twine(TypeWidth) + "_TYPE__", Ty, Builder);
 
   llvm::StringRef ConstSuffix(TargetInfo::getTypeConstantSuffix(Ty));
@@ -212,7 +226,20 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   // Compiler version introspection macros.
   Builder.defineMacro("__llvm__");  // LLVM Backend
   Builder.defineMacro("__clang__"); // Clang Frontend
-
+#define TOSTR2(X) #X
+#define TOSTR(X) TOSTR2(X)
+  Builder.defineMacro("__clang_major__", TOSTR(CLANG_VERSION_MAJOR));
+  Builder.defineMacro("__clang_minor__", TOSTR(CLANG_VERSION_MINOR));
+#ifdef CLANG_VERSION_PATCHLEVEL
+  Builder.defineMacro("__clang_patchlevel__", TOSTR(CLANG_VERSION_PATCHLEVEL));
+#else
+  Builder.defineMacro("__clang_patchlevel__", "0");
+#endif
+  Builder.defineMacro("__clang_version__", 
+                      "\"" CLANG_VERSION_STRING " ("
+                      + getClangFullRepositoryVersion() + ")\"");
+#undef TOSTR
+#undef TOSTR2
   // Currently claim to be compatible with GCC 4.2.1-5621.
   Builder.defineMacro("__GNUC_MINOR__", "2");
   Builder.defineMacro("__GNUC_PATCHLEVEL__", "1");
@@ -279,6 +306,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
 
   if (LangOpts.Exceptions)
     Builder.defineMacro("__EXCEPTIONS");
+  if (LangOpts.RTTI)
+    Builder.defineMacro("__GXX_RTTI");
   if (LangOpts.SjLjExceptions)
     Builder.defineMacro("__USING_SJLJ_EXCEPTIONS__");
 
@@ -290,7 +319,7 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
       Builder.defineMacro("__cplusplus");
     else
       // C++ [cpp.predefined]p1:
-      //   The name_ _cplusplusis defined to the value199711Lwhen compiling a
+      //   The name_ _cplusplusis defined to the value 199711L when compiling a
       //   C++ translation unit.
       Builder.defineMacro("__cplusplus", "199711L");
     Builder.defineMacro("__private_extern__", "extern");
@@ -336,6 +365,23 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   DefineTypeSize("__WCHAR_MAX__", TI.getWCharType(), TI, Builder);
   DefineTypeSize("__INTMAX_MAX__", TI.getIntMaxType(), TI, Builder);
 
+  DefineTypeSizeof("__SIZEOF_DOUBLE__", TI.getDoubleWidth(), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_FLOAT__", TI.getFloatWidth(), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_INT__", TI.getIntWidth(), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_LONG__", TI.getLongWidth(), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_LONG_DOUBLE__",TI.getLongDoubleWidth(),TI,Builder);
+  DefineTypeSizeof("__SIZEOF_LONG_LONG__", TI.getLongLongWidth(), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_POINTER__", TI.getPointerWidth(0), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_SHORT__", TI.getShortWidth(), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_PTRDIFF_T__",
+                   TI.getTypeWidth(TI.getPtrDiffType(0)), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_SIZE_T__",
+                   TI.getTypeWidth(TI.getSizeType()), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_WCHAR_T__",
+                   TI.getTypeWidth(TI.getWCharType()), TI, Builder);
+  DefineTypeSizeof("__SIZEOF_WINT_T__",
+                   TI.getTypeWidth(TI.getWIntType()), TI, Builder);
+
   DefineType("__INTMAX_TYPE__", TI.getIntMaxType(), Builder);
   DefineType("__UINTMAX_TYPE__", TI.getUIntMaxType(), Builder);
   DefineTypeWidth("__INTMAX_WIDTH__",  TI.getIntMaxType(), TI, Builder);
@@ -350,6 +396,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   DefineType("__WINT_TYPE__", TI.getWIntType(), Builder);
   DefineTypeWidth("__WINT_WIDTH__", TI.getWIntType(), TI, Builder);
   DefineTypeWidth("__SIG_ATOMIC_WIDTH__", TI.getSigAtomicType(), TI, Builder);
+  DefineType("__CHAR16_TYPE__", TI.getChar16Type(), Builder);
+  DefineType("__CHAR32_TYPE__", TI.getChar32Type(), Builder);
 
   DefineFloatMacros(Builder, "FLT", &TI.getFloatFormat());
   DefineFloatMacros(Builder, "DBL", &TI.getDoubleFormat());
@@ -414,6 +462,11 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
 
   if (FEOpts.ProgramAction == frontend::RewriteObjC)
     Builder.defineMacro("__weak", "__attribute__((objc_gc(weak)))");
+
+  // Define a macro that exists only when using the static analyzer.
+  if (FEOpts.ProgramAction == frontend::RunAnalysis)
+    Builder.defineMacro("__clang_analyzer__");
+
   // Get other target #defines.
   TI.getTargetDefines(LangOpts, Builder);
 }
@@ -425,7 +478,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
                                     FileManager &FileMgr,
                                     const PreprocessorOptions &InitOpts) {
   // Remap files in the source manager (with buffers).
-  for (PreprocessorOptions::remapped_file_buffer_iterator
+  for (PreprocessorOptions::const_remapped_file_buffer_iterator
          Remap = InitOpts.remapped_file_buffer_begin(),
          RemapEnd = InitOpts.remapped_file_buffer_end();
        Remap != RemapEnd;
@@ -437,19 +490,21 @@ static void InitializeFileRemapping(Diagnostic &Diags,
     if (!FromFile) {
       Diags.Report(diag::err_fe_remap_missing_from_file)
         << Remap->first;
-      delete Remap->second;
+      if (!InitOpts.RetainRemappedFileBuffers)
+        delete Remap->second;
       continue;
     }
 
     // Override the contents of the "from" file with the contents of
     // the "to" file.
-    SourceMgr.overrideFileContents(FromFile, Remap->second);
+    SourceMgr.overrideFileContents(FromFile, Remap->second,
+                                   InitOpts.RetainRemappedFileBuffers);
   }
 
   // Remap files in the source manager (with other files).
-  for (PreprocessorOptions::remapped_file_iterator
-       Remap = InitOpts.remapped_file_begin(),
-       RemapEnd = InitOpts.remapped_file_end();
+  for (PreprocessorOptions::const_remapped_file_iterator
+         Remap = InitOpts.remapped_file_begin(),
+         RemapEnd = InitOpts.remapped_file_end();
        Remap != RemapEnd;
        ++Remap) {
     // Find the file that we're mapping to.
@@ -544,6 +599,10 @@ void clang::InitializePreprocessor(Preprocessor &PP,
   if (!PP.getLangOptions().AsmPreprocessor)
     Builder.append("# 1 \"<built-in>\" 2");
 
+  // Instruct the preprocessor to skip the preamble.
+  PP.setSkipMainFilePreamble(InitOpts.PrecompiledPreambleBytes.first,
+                             InitOpts.PrecompiledPreambleBytes.second);
+                          
   // Copy PredefinedBuffer into the Preprocessor.
   PP.setPredefines(Predefines.str());
 

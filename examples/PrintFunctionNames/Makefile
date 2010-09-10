@@ -7,21 +7,18 @@
 # 
 ##===----------------------------------------------------------------------===##
 
-LEVEL = ../../../..
+CLANG_LEVEL := ../..
 LIBRARYNAME = PrintFunctionNames
 
-CPPFLAGS += -I$(PROJ_SRC_DIR)/../../include -I$(PROJ_OBJ_DIR)/../../include
-
-# Include this here so we can get the configuration of the targets that have
-# been configured for construction. We have to do this early so we can set up
-# LINK_COMPONENTS before including Makefile.rules
-include $(LEVEL)/Makefile.config
+# If we don't need RTTI or EH, there's no reason to export anything
+# from the plugin.
+ifneq ($(REQUIRES_RTTI), 1)
+ifneq ($(REQUIRES_EH), 1)
+EXPORTED_SYMBOL_FILE = $(PROJ_SRC_DIR)/PrintFunctionNames.exports
+endif
+endif
 
 LINK_LIBS_IN_SHARED = 1
 SHARED_LIBRARY = 1
 
-LINK_COMPONENTS := bitreader mc core
-USEDLIBS = clangIndex.a clangFrontend.a clangDriver.a clangSema.a \
-	   clangAnalysis.a clangAST.a clangParse.a clangLex.a clangBasic.a
-
-include $(LEVEL)/Makefile.common
+include $(CLANG_LEVEL)/Makefile

@@ -1,4 +1,4 @@
-//=== ASTRecordLayoutBuilder.cpp - Helper class for building record layouts ==//
+//=== RecordLayoutBuilder.cpp - Helper class for building record layouts ---==//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,28 +7,676 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "RecordLayoutBuilder.h"
-
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/Support/Format.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/MathExtras.h"
+#include <map>
 
 using namespace clang;
 
-ASTRecordLayoutBuilder::ASTRecordLayoutBuilder(ASTContext &Context)
-  : Context(Context), Size(0), Alignment(8), Packed(false), 
-  UnfilledBitsInLastByte(0), MaxFieldAlignment(0), DataSize(0), IsUnion(false),
-  NonVirtualSize(0), NonVirtualAlignment(8), FirstNearlyEmptyVBase(0) { }
+namespace {
+
+/// BaseSubobjectInfo - Represents a single base subobject in a complete class.
+/// For a class hierarchy like
+///
+/// class A { };
+/// class B : A { };
+/// class C : A, B { };
+///
+/// The BaseSubobjectInfo graph for C will have three BaseSubobjectInfo
+/// instances, one for B and two for A.
+///
+/// If a base is virtual, it will only have one BaseSubobjectInfo allocated.
+struct BaseSubobjectInfo {
+  /// Class - The class for this base info.
+  const CXXRecordDecl *Class;
+
+  /// IsVirtual - Whether the BaseInfo represents a virtual base or not.
+  bool IsVirtual;
+
+  /// Bases - Information about the base subobjects.
+  llvm::SmallVector<BaseSubobjectInfo*, 4> Bases;
+
+  /// PrimaryVirtualBaseInfo - Holds the base info for the primary virtual base
+  /// of this base info (if one exists).
+  BaseSubobjectInfo *PrimaryVirtualBaseInfo;
+
+  // FIXME: Document.
+  const BaseSubobjectInfo *Derived;
+};
+
+/// EmptySubobjectMap - Keeps track of which empty subobjects exist at different
+/// offsets while laying out a C++ class.
+class EmptySubobjectMap {
+  ASTContext &Context;
+
+  /// Class - The class whose empty entries we're keeping track of.
+  const CXXRecordDecl *Class;
+
+  /// EmptyClassOffsets - A map from offsets to empty record decls.
+  typedef llvm::SmallVector<const CXXRecordDecl *, 1> ClassVectorTy;
+  typedef llvm::DenseMap<uint64_t, ClassVectorTy> EmptyClassOffsetsMapTy;
+  EmptyClassOffsetsMapTy EmptyClassOffsets;
+  
+  /// MaxEmptyClassOffset - The highest offset known to contain an empty
+  /// base subobject.
+  uint64_t MaxEmptyClassOffset;
+  
+  /// ComputeEmptySubobjectSizes - Compute the size of the largest base or
+  /// member subobject that is empty.
+  void ComputeEmptySubobjectSizes();
+  
+  void AddSubobjectAtOffset(const CXXRecordDecl *RD, uint64_t Offset);
+  
+  void UpdateEmptyBaseSubobjects(const BaseSubobjectInfo *Info,
+                                 uint64_t Offset, bool PlacingEmptyBase);
+  
+  void UpdateEmptyFieldSubobjects(const CXXRecordDecl *RD, 
+                                  const CXXRecordDecl *Class,
+                                  uint64_t Offset);
+  void UpdateEmptyFieldSubobjects(const FieldDecl *FD, uint64_t Offset);
+  
+  /// AnyEmptySubobjectsBeyondOffset - Returns whether there are any empty
+  /// subobjects beyond the given offset.
+  bool AnyEmptySubobjectsBeyondOffset(uint64_t Offset) const {
+    return Offset <= MaxEmptyClassOffset;
+  }
+
+protected:
+  bool CanPlaceSubobjectAtOffset(const CXXRecordDecl *RD, 
+                                 uint64_t Offset) const;
+
+  bool CanPlaceBaseSubobjectAtOffset(const BaseSubobjectInfo *Info,
+                                     uint64_t Offset);
+
+  bool CanPlaceFieldSubobjectAtOffset(const CXXRecordDecl *RD, 
+                                      const CXXRecordDecl *Class,
+                                      uint64_t Offset) const;
+  bool CanPlaceFieldSubobjectAtOffset(const FieldDecl *FD,
+                                      uint64_t Offset) const;
+
+public:
+  /// This holds the size of the largest empty subobject (either a base
+  /// or a member). Will be zero if the record being built doesn't contain
+  /// any empty classes.
+  uint64_t SizeOfLargestEmptySubobject;
+
+  EmptySubobjectMap(ASTContext &Context, const CXXRecordDecl *Class)
+    : Context(Context), Class(Class), MaxEmptyClassOffset(0),
+    SizeOfLargestEmptySubobject(0) {
+      ComputeEmptySubobjectSizes();
+  }
+
+  /// CanPlaceBaseAtOffset - Return whether the given base class can be placed
+  /// at the given offset.
+  /// Returns false if placing the record will result in two components
+  /// (direct or indirect) of the same type having the same offset.
+  bool CanPlaceBaseAtOffset(const BaseSubobjectInfo *Info,
+                            uint64_t Offset);
+
+  /// CanPlaceFieldAtOffset - Return whether a field can be placed at the given
+  /// offset.
+  bool CanPlaceFieldAtOffset(const FieldDecl *FD, uint64_t Offset);
+};
+
+void EmptySubobjectMap::ComputeEmptySubobjectSizes() {
+  // Check the bases.
+  for (CXXRecordDecl::base_class_const_iterator I = Class->bases_begin(),
+       E = Class->bases_end(); I != E; ++I) {
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+
+    uint64_t EmptySize = 0;
+    const ASTRecordLayout &Layout = Context.getASTRecordLayout(BaseDecl);
+    if (BaseDecl->isEmpty()) {
+      // If the class decl is empty, get its size.
+      EmptySize = Layout.getSize();
+    } else {
+      // Otherwise, we get the largest empty subobject for the decl.
+      EmptySize = Layout.getSizeOfLargestEmptySubobject();
+    }
+
+    SizeOfLargestEmptySubobject = std::max(SizeOfLargestEmptySubobject,
+                                           EmptySize);
+  }
+
+  // Check the fields.
+  for (CXXRecordDecl::field_iterator I = Class->field_begin(),
+       E = Class->field_end(); I != E; ++I) {
+    const FieldDecl *FD = *I;
+
+    const RecordType *RT =
+      Context.getBaseElementType(FD->getType())->getAs<RecordType>();
+
+    // We only care about record types.
+    if (!RT)
+      continue;
+
+    uint64_t EmptySize = 0;
+    const CXXRecordDecl *MemberDecl = cast<CXXRecordDecl>(RT->getDecl());
+    const ASTRecordLayout &Layout = Context.getASTRecordLayout(MemberDecl);
+    if (MemberDecl->isEmpty()) {
+      // If the class decl is empty, get its size.
+      EmptySize = Layout.getSize();
+    } else {
+      // Otherwise, we get the largest empty subobject for the decl.
+      EmptySize = Layout.getSizeOfLargestEmptySubobject();
+    }
+
+   SizeOfLargestEmptySubobject = std::max(SizeOfLargestEmptySubobject,
+                                          EmptySize);
+  }
+}
+
+bool
+EmptySubobjectMap::CanPlaceSubobjectAtOffset(const CXXRecordDecl *RD, 
+                                             uint64_t Offset) const {
+  // We only need to check empty bases.
+  if (!RD->isEmpty())
+    return true;
+
+  EmptyClassOffsetsMapTy::const_iterator I = EmptyClassOffsets.find(Offset);
+  if (I == EmptyClassOffsets.end())
+    return true;
+  
+  const ClassVectorTy& Classes = I->second;
+  if (std::find(Classes.begin(), Classes.end(), RD) == Classes.end())
+    return true;
+
+  // There is already an empty class of the same type at this offset.
+  return false;
+}
+  
+void EmptySubobjectMap::AddSubobjectAtOffset(const CXXRecordDecl *RD, 
+                                             uint64_t Offset) {
+  // We only care about empty bases.
+  if (!RD->isEmpty())
+    return;
+
+  ClassVectorTy& Classes = EmptyClassOffsets[Offset];
+  assert(std::find(Classes.begin(), Classes.end(), RD) == Classes.end() &&
+         "Duplicate empty class detected!");
+
+  Classes.push_back(RD);
+  
+  // Update the empty class offset.
+  MaxEmptyClassOffset = std::max(MaxEmptyClassOffset, Offset);
+}
+
+bool
+EmptySubobjectMap::CanPlaceBaseSubobjectAtOffset(const BaseSubobjectInfo *Info, 
+                                                 uint64_t Offset) {
+  // We don't have to keep looking past the maximum offset that's known to
+  // contain an empty class.
+  if (!AnyEmptySubobjectsBeyondOffset(Offset))
+    return true;
+
+  if (!CanPlaceSubobjectAtOffset(Info->Class, Offset))
+    return false;
+
+  // Traverse all non-virtual bases.
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(Info->Class);
+  for (unsigned I = 0, E = Info->Bases.size(); I != E; ++I) {
+    BaseSubobjectInfo* Base = Info->Bases[I];
+    if (Base->IsVirtual)
+      continue;
+
+    uint64_t BaseOffset = Offset + Layout.getBaseClassOffset(Base->Class);
+
+    if (!CanPlaceBaseSubobjectAtOffset(Base, BaseOffset))
+      return false;
+  }
+
+  if (Info->PrimaryVirtualBaseInfo) {
+    BaseSubobjectInfo *PrimaryVirtualBaseInfo = Info->PrimaryVirtualBaseInfo;
+
+    if (Info == PrimaryVirtualBaseInfo->Derived) {
+      if (!CanPlaceBaseSubobjectAtOffset(PrimaryVirtualBaseInfo, Offset))
+        return false;
+    }
+  }
+  
+  // Traverse all member variables.
+  unsigned FieldNo = 0;
+  for (CXXRecordDecl::field_iterator I = Info->Class->field_begin(), 
+       E = Info->Class->field_end(); I != E; ++I, ++FieldNo) {
+    const FieldDecl *FD = *I;
+
+    uint64_t FieldOffset = Offset + Layout.getFieldOffset(FieldNo);
+    if (!CanPlaceFieldSubobjectAtOffset(FD, FieldOffset))
+      return false;
+  }
+  
+  return true;
+}
+
+void EmptySubobjectMap::UpdateEmptyBaseSubobjects(const BaseSubobjectInfo *Info, 
+                                                  uint64_t Offset,
+                                                  bool PlacingEmptyBase) {
+  if (!PlacingEmptyBase && Offset >= SizeOfLargestEmptySubobject) {
+    // We know that the only empty subobjects that can conflict with empty
+    // subobject of non-empty bases, are empty bases that can be placed at
+    // offset zero. Because of this, we only need to keep track of empty base 
+    // subobjects with offsets less than the size of the largest empty
+    // subobject for our class.    
+    return;
+  }
+
+  AddSubobjectAtOffset(Info->Class, Offset);
+
+  // Traverse all non-virtual bases.
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(Info->Class);
+  for (unsigned I = 0, E = Info->Bases.size(); I != E; ++I) {
+    BaseSubobjectInfo* Base = Info->Bases[I];
+    if (Base->IsVirtual)
+      continue;
+
+    uint64_t BaseOffset = Offset + Layout.getBaseClassOffset(Base->Class);
+    UpdateEmptyBaseSubobjects(Base, BaseOffset, PlacingEmptyBase);
+  }
+
+  if (Info->PrimaryVirtualBaseInfo) {
+    BaseSubobjectInfo *PrimaryVirtualBaseInfo = Info->PrimaryVirtualBaseInfo;
+    
+    if (Info == PrimaryVirtualBaseInfo->Derived)
+      UpdateEmptyBaseSubobjects(PrimaryVirtualBaseInfo, Offset,
+                                PlacingEmptyBase);
+  }
+
+  // Traverse all member variables.
+  unsigned FieldNo = 0;
+  for (CXXRecordDecl::field_iterator I = Info->Class->field_begin(), 
+       E = Info->Class->field_end(); I != E; ++I, ++FieldNo) {
+    const FieldDecl *FD = *I;
+
+    uint64_t FieldOffset = Offset + Layout.getFieldOffset(FieldNo);
+    UpdateEmptyFieldSubobjects(FD, FieldOffset);
+  }
+}
+
+bool EmptySubobjectMap::CanPlaceBaseAtOffset(const BaseSubobjectInfo *Info,
+                                             uint64_t Offset) {
+  // If we know this class doesn't have any empty subobjects we don't need to
+  // bother checking.
+  if (!SizeOfLargestEmptySubobject)
+    return true;
+
+  if (!CanPlaceBaseSubobjectAtOffset(Info, Offset))
+    return false;
+
+  // We are able to place the base at this offset. Make sure to update the
+  // empty base subobject map.
+  UpdateEmptyBaseSubobjects(Info, Offset, Info->Class->isEmpty());
+  return true;
+}
+
+bool
+EmptySubobjectMap::CanPlaceFieldSubobjectAtOffset(const CXXRecordDecl *RD, 
+                                                  const CXXRecordDecl *Class,
+                                                  uint64_t Offset) const {
+  // We don't have to keep looking past the maximum offset that's known to
+  // contain an empty class.
+  if (!AnyEmptySubobjectsBeyondOffset(Offset))
+    return true;
+
+  if (!CanPlaceSubobjectAtOffset(RD, Offset))
+    return false;
+  
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
+
+  // Traverse all non-virtual bases.
+  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
+       E = RD->bases_end(); I != E; ++I) {
+    if (I->isVirtual())
+      continue;
+
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+
+    uint64_t BaseOffset = Offset + Layout.getBaseClassOffset(BaseDecl);
+    if (!CanPlaceFieldSubobjectAtOffset(BaseDecl, Class, BaseOffset))
+      return false;
+  }
+
+  if (RD == Class) {
+    // This is the most derived class, traverse virtual bases as well.
+    for (CXXRecordDecl::base_class_const_iterator I = RD->vbases_begin(),
+         E = RD->vbases_end(); I != E; ++I) {
+      const CXXRecordDecl *VBaseDecl =
+        cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+      
+      uint64_t VBaseOffset = Offset + Layout.getVBaseClassOffset(VBaseDecl);
+      if (!CanPlaceFieldSubobjectAtOffset(VBaseDecl, Class, VBaseOffset))
+        return false;
+    }
+  }
+    
+  // Traverse all member variables.
+  unsigned FieldNo = 0;
+  for (CXXRecordDecl::field_iterator I = RD->field_begin(), E = RD->field_end();
+       I != E; ++I, ++FieldNo) {
+    const FieldDecl *FD = *I;
+    
+    uint64_t FieldOffset = Offset + Layout.getFieldOffset(FieldNo);
+    
+    if (!CanPlaceFieldSubobjectAtOffset(FD, FieldOffset))
+      return false;
+  }
+
+  return true;
+}
+
+bool EmptySubobjectMap::CanPlaceFieldSubobjectAtOffset(const FieldDecl *FD,
+                                                       uint64_t Offset) const {
+  // We don't have to keep looking past the maximum offset that's known to
+  // contain an empty class.
+  if (!AnyEmptySubobjectsBeyondOffset(Offset))
+    return true;
+  
+  QualType T = FD->getType();
+  if (const RecordType *RT = T->getAs<RecordType>()) {
+    const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+    return CanPlaceFieldSubobjectAtOffset(RD, RD, Offset);
+  }
+
+  // If we have an array type we need to look at every element.
+  if (const ConstantArrayType *AT = Context.getAsConstantArrayType(T)) {
+    QualType ElemTy = Context.getBaseElementType(AT);
+    const RecordType *RT = ElemTy->getAs<RecordType>();
+    if (!RT)
+      return true;
+  
+    const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+    const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
+
+    uint64_t NumElements = Context.getConstantArrayElementCount(AT);
+    uint64_t ElementOffset = Offset;
+    for (uint64_t I = 0; I != NumElements; ++I) {
+      // We don't have to keep looking past the maximum offset that's known to
+      // contain an empty class.
+      if (!AnyEmptySubobjectsBeyondOffset(ElementOffset))
+        return true;
+      
+      if (!CanPlaceFieldSubobjectAtOffset(RD, RD, ElementOffset))
+        return false;
+
+      ElementOffset += Layout.getSize();
+    }
+  }
+
+  return true;
+}
+
+bool
+EmptySubobjectMap::CanPlaceFieldAtOffset(const FieldDecl *FD, uint64_t Offset) {
+  if (!CanPlaceFieldSubobjectAtOffset(FD, Offset))
+    return false;
+  
+  // We are able to place the member variable at this offset.
+  // Make sure to update the empty base subobject map.
+  UpdateEmptyFieldSubobjects(FD, Offset);
+  return true;
+}
+
+void EmptySubobjectMap::UpdateEmptyFieldSubobjects(const CXXRecordDecl *RD, 
+                                                   const CXXRecordDecl *Class,
+                                                   uint64_t Offset) {
+  // We know that the only empty subobjects that can conflict with empty
+  // field subobjects are subobjects of empty bases that can be placed at offset
+  // zero. Because of this, we only need to keep track of empty field 
+  // subobjects with offsets less than the size of the largest empty
+  // subobject for our class.
+  if (Offset >= SizeOfLargestEmptySubobject)
+    return;
+
+  AddSubobjectAtOffset(RD, Offset);
+
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
+
+  // Traverse all non-virtual bases.
+  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
+       E = RD->bases_end(); I != E; ++I) {
+    if (I->isVirtual())
+      continue;
+
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+
+    uint64_t BaseOffset = Offset + Layout.getBaseClassOffset(BaseDecl);
+    UpdateEmptyFieldSubobjects(BaseDecl, Class, BaseOffset);
+  }
+
+  if (RD == Class) {
+    // This is the most derived class, traverse virtual bases as well.
+    for (CXXRecordDecl::base_class_const_iterator I = RD->vbases_begin(),
+         E = RD->vbases_end(); I != E; ++I) {
+      const CXXRecordDecl *VBaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+      
+      uint64_t VBaseOffset = Offset + Layout.getVBaseClassOffset(VBaseDecl);
+      UpdateEmptyFieldSubobjects(VBaseDecl, Class, VBaseOffset);
+    }
+  }
+  
+  // Traverse all member variables.
+  unsigned FieldNo = 0;
+  for (CXXRecordDecl::field_iterator I = RD->field_begin(), E = RD->field_end();
+       I != E; ++I, ++FieldNo) {
+    const FieldDecl *FD = *I;
+    
+    uint64_t FieldOffset = Offset + Layout.getFieldOffset(FieldNo);
+
+    UpdateEmptyFieldSubobjects(FD, FieldOffset);
+  }
+}
+  
+void EmptySubobjectMap::UpdateEmptyFieldSubobjects(const FieldDecl *FD,
+                                                   uint64_t Offset) {
+  QualType T = FD->getType();
+  if (const RecordType *RT = T->getAs<RecordType>()) {
+    const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+    UpdateEmptyFieldSubobjects(RD, RD, Offset);
+    return;
+  }
+
+  // If we have an array type we need to update every element.
+  if (const ConstantArrayType *AT = Context.getAsConstantArrayType(T)) {
+    QualType ElemTy = Context.getBaseElementType(AT);
+    const RecordType *RT = ElemTy->getAs<RecordType>();
+    if (!RT)
+      return;
+    
+    const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+    const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
+    
+    uint64_t NumElements = Context.getConstantArrayElementCount(AT);
+    uint64_t ElementOffset = Offset;
+    
+    for (uint64_t I = 0; I != NumElements; ++I) {
+      // We know that the only empty subobjects that can conflict with empty
+      // field subobjects are subobjects of empty bases that can be placed at 
+      // offset zero. Because of this, we only need to keep track of empty field
+      // subobjects with offsets less than the size of the largest empty
+      // subobject for our class.
+      if (ElementOffset >= SizeOfLargestEmptySubobject)
+        return;
+
+      UpdateEmptyFieldSubobjects(RD, RD, ElementOffset);
+      ElementOffset += Layout.getSize();
+    }
+  }
+}
+
+class RecordLayoutBuilder {
+protected:
+  // FIXME: Remove this and make the appropriate fields public.
+  friend class clang::ASTContext;
+
+  ASTContext &Context;
+
+  EmptySubobjectMap *EmptySubobjects;
+
+  /// Size - The current size of the record layout.
+  uint64_t Size;
+
+  /// Alignment - The current alignment of the record layout.
+  unsigned Alignment;
+
+  llvm::SmallVector<uint64_t, 16> FieldOffsets;
+
+  /// Packed - Whether the record is packed or not.
+  unsigned Packed : 1;
+
+  unsigned IsUnion : 1;
+
+  unsigned IsMac68kAlign : 1;
+
+  /// UnfilledBitsInLastByte - If the last field laid out was a bitfield,
+  /// this contains the number of bits in the last byte that can be used for
+  /// an adjacent bitfield if necessary.
+  unsigned char UnfilledBitsInLastByte;
+
+  /// MaxFieldAlignment - The maximum allowed field alignment. This is set by
+  /// #pragma pack.
+  unsigned MaxFieldAlignment;
+
+  /// DataSize - The data size of the record being laid out.
+  uint64_t DataSize;
+
+  uint64_t NonVirtualSize;
+  unsigned NonVirtualAlignment;
+
+  /// PrimaryBase - the primary base class (if one exists) of the class
+  /// we're laying out.
+  const CXXRecordDecl *PrimaryBase;
+
+  /// PrimaryBaseIsVirtual - Whether the primary base of the class we're laying
+  /// out is virtual.
+  bool PrimaryBaseIsVirtual;
+
+  typedef llvm::DenseMap<const CXXRecordDecl *, uint64_t> BaseOffsetsMapTy;
+
+  /// Bases - base classes and their offsets in the record.
+  BaseOffsetsMapTy Bases;
+
+  // VBases - virtual base classes and their offsets in the record.
+  BaseOffsetsMapTy VBases;
+
+  /// IndirectPrimaryBases - Virtual base classes, direct or indirect, that are
+  /// primary base classes for some other direct or indirect base class.
+  llvm::SmallSet<const CXXRecordDecl*, 32> IndirectPrimaryBases;
+
+  /// FirstNearlyEmptyVBase - The first nearly empty virtual base class in
+  /// inheritance graph order. Used for determining the primary base class.
+  const CXXRecordDecl *FirstNearlyEmptyVBase;
+
+  /// VisitedVirtualBases - A set of all the visited virtual bases, used to
+  /// avoid visiting virtual bases more than once.
+  llvm::SmallPtrSet<const CXXRecordDecl *, 4> VisitedVirtualBases;
+
+  RecordLayoutBuilder(ASTContext &Context, EmptySubobjectMap *EmptySubobjects)
+    : Context(Context), EmptySubobjects(EmptySubobjects), Size(0), Alignment(8),
+      Packed(false), IsUnion(false), IsMac68kAlign(false),
+      UnfilledBitsInLastByte(0), MaxFieldAlignment(0), DataSize(0),
+      NonVirtualSize(0), NonVirtualAlignment(8), PrimaryBase(0),
+      PrimaryBaseIsVirtual(false), FirstNearlyEmptyVBase(0) { }
+
+  void Layout(const RecordDecl *D);
+  void Layout(const CXXRecordDecl *D);
+  void Layout(const ObjCInterfaceDecl *D);
+
+  void LayoutFields(const RecordDecl *D);
+  void LayoutField(const FieldDecl *D);
+  void LayoutWideBitField(uint64_t FieldSize, uint64_t TypeSize);
+  void LayoutBitField(const FieldDecl *D);
+
+  /// BaseSubobjectInfoAllocator - Allocator for BaseSubobjectInfo objects.
+  llvm::SpecificBumpPtrAllocator<BaseSubobjectInfo> BaseSubobjectInfoAllocator;
+  
+  typedef llvm::DenseMap<const CXXRecordDecl *, BaseSubobjectInfo *>
+    BaseSubobjectInfoMapTy;
+
+  /// VirtualBaseInfo - Map from all the (direct or indirect) virtual bases
+  /// of the class we're laying out to their base subobject info.
+  BaseSubobjectInfoMapTy VirtualBaseInfo;
+  
+  /// NonVirtualBaseInfo - Map from all the direct non-virtual bases of the
+  /// class we're laying out to their base subobject info.
+  BaseSubobjectInfoMapTy NonVirtualBaseInfo;
+
+  /// ComputeBaseSubobjectInfo - Compute the base subobject information for the
+  /// bases of the given class.
+  void ComputeBaseSubobjectInfo(const CXXRecordDecl *RD);
+
+  /// ComputeBaseSubobjectInfo - Compute the base subobject information for a
+  /// single class and all of its base classes.
+  BaseSubobjectInfo *ComputeBaseSubobjectInfo(const CXXRecordDecl *RD, 
+                                              bool IsVirtual,
+                                              BaseSubobjectInfo *Derived);
+
+  /// DeterminePrimaryBase - Determine the primary base of the given class.
+  void DeterminePrimaryBase(const CXXRecordDecl *RD);
+
+  void SelectPrimaryVBase(const CXXRecordDecl *RD);
+
+  virtual uint64_t GetVirtualPointersSize(const CXXRecordDecl *RD) const;
+
+  /// IdentifyPrimaryBases - Identify all virtual base classes, direct or
+  /// indirect, that are primary base classes for some other direct or indirect
+  /// base class.
+  void IdentifyPrimaryBases(const CXXRecordDecl *RD);
+
+  virtual bool IsNearlyEmpty(const CXXRecordDecl *RD) const;
+
+  /// LayoutNonVirtualBases - Determines the primary base class (if any) and
+  /// lays it out. Will then proceed to lay out all non-virtual base clasess.
+  void LayoutNonVirtualBases(const CXXRecordDecl *RD);
+
+  /// LayoutNonVirtualBase - Lays out a single non-virtual base.
+  void LayoutNonVirtualBase(const BaseSubobjectInfo *Base);
+
+  void AddPrimaryVirtualBaseOffsets(const BaseSubobjectInfo *Info, 
+                                            uint64_t Offset);
+
+  /// LayoutVirtualBases - Lays out all the virtual bases.
+  void LayoutVirtualBases(const CXXRecordDecl *RD,
+                          const CXXRecordDecl *MostDerivedClass);
+
+  /// LayoutVirtualBase - Lays out a single virtual base.
+  void LayoutVirtualBase(const BaseSubobjectInfo *Base);
+
+  /// LayoutBase - Will lay out a base and return the offset where it was
+  /// placed, in bits.
+  uint64_t LayoutBase(const BaseSubobjectInfo *Base);
+
+  /// InitializeLayout - Initialize record layout for the given record decl.
+  void InitializeLayout(const Decl *D);
+
+  /// FinishLayout - Finalize record layout. Adjust record size based on the
+  /// alignment.
+  void FinishLayout();
+
+  void UpdateAlignment(unsigned NewAlignment);
+
+  RecordLayoutBuilder(const RecordLayoutBuilder&);   // DO NOT IMPLEMENT
+  void operator=(const RecordLayoutBuilder&); // DO NOT IMPLEMENT
+public:
+  static const CXXMethodDecl *ComputeKeyFunction(const CXXRecordDecl *RD);
+
+  virtual ~RecordLayoutBuilder() { }
+};
+} // end anonymous namespace
 
 /// IsNearlyEmpty - Indicates when a class has a vtable pointer, but
 /// no other data.
-bool ASTRecordLayoutBuilder::IsNearlyEmpty(const CXXRecordDecl *RD) const {
+bool RecordLayoutBuilder::IsNearlyEmpty(const CXXRecordDecl *RD) const {
   // FIXME: Audit the corners
   if (!RD->isDynamicClass())
     return false;
@@ -38,7 +686,7 @@ bool ASTRecordLayoutBuilder::IsNearlyEmpty(const CXXRecordDecl *RD) const {
   return false;
 }
 
-void ASTRecordLayoutBuilder::IdentifyPrimaryBases(const CXXRecordDecl *RD) {
+void RecordLayoutBuilder::IdentifyPrimaryBases(const CXXRecordDecl *RD) {
   const ASTRecordLayout::PrimaryBaseInfo &BaseInfo =
     Context.getASTRecordLayout(RD).getPrimaryBaseInfo();
 
@@ -63,7 +711,7 @@ void ASTRecordLayoutBuilder::IdentifyPrimaryBases(const CXXRecordDecl *RD) {
 }
 
 void
-ASTRecordLayoutBuilder::SelectPrimaryVBase(const CXXRecordDecl *RD) {
+RecordLayoutBuilder::SelectPrimaryVBase(const CXXRecordDecl *RD) {
   for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
          E = RD->bases_end(); I != E; ++I) {
     assert(!I->getType()->isDependentType() &&
@@ -77,8 +725,8 @@ ASTRecordLayoutBuilder::SelectPrimaryVBase(const CXXRecordDecl *RD) {
       // If it's not an indirect primary base, then we've found our primary
       // base.
       if (!IndirectPrimaryBases.count(Base)) {
-        PrimaryBase = ASTRecordLayout::PrimaryBaseInfo(Base,
-                                                       /*IsVirtual=*/true);
+        PrimaryBase = Base;
+        PrimaryBaseIsVirtual = true;
         return;
       }
 
@@ -88,13 +736,18 @@ ASTRecordLayoutBuilder::SelectPrimaryVBase(const CXXRecordDecl *RD) {
     }
 
     SelectPrimaryVBase(Base);
-    if (PrimaryBase.getBase())
+    if (PrimaryBase)
       return;
   }
 }
 
+uint64_t
+RecordLayoutBuilder::GetVirtualPointersSize(const CXXRecordDecl *RD) const {
+  return Context.Target.getPointerWidth(0);
+}
+
 /// DeterminePrimaryBase - Determine the primary base of the given class.
-void ASTRecordLayoutBuilder::DeterminePrimaryBase(const CXXRecordDecl *RD) {
+void RecordLayoutBuilder::DeterminePrimaryBase(const CXXRecordDecl *RD) {
   // If the class isn't dynamic, it won't have a primary base.
   if (!RD->isDynamicClass())
     return;
@@ -124,7 +777,8 @@ void ASTRecordLayoutBuilder::DeterminePrimaryBase(const CXXRecordDecl *RD) {
 
     if (Base->isDynamicClass()) {
       // We found it.
-      PrimaryBase = ASTRecordLayout::PrimaryBaseInfo(Base, /*IsVirtual=*/false);
+      PrimaryBase = Base;
+      PrimaryBaseIsVirtual = false;
       return;
     }
   }
@@ -133,49 +787,169 @@ void ASTRecordLayoutBuilder::DeterminePrimaryBase(const CXXRecordDecl *RD) {
   // indirect primary virtual base class, if one exists.
   if (RD->getNumVBases() != 0) {
     SelectPrimaryVBase(RD);
-    if (PrimaryBase.getBase())
+    if (PrimaryBase)
       return;
   }
 
   // Otherwise, it is the first nearly empty virtual base that is not an
   // indirect primary virtual base class, if one exists.
   if (FirstNearlyEmptyVBase) {
-    PrimaryBase = ASTRecordLayout::PrimaryBaseInfo(FirstNearlyEmptyVBase,
-                                                   /*IsVirtual=*/true);
+    PrimaryBase = FirstNearlyEmptyVBase;
+    PrimaryBaseIsVirtual = true;
     return;
   }
 
   // Otherwise there is no primary base class.
-  assert(!PrimaryBase.getBase() && "Should not get here with a primary base!");
+  assert(!PrimaryBase && "Should not get here with a primary base!");
 
   // Allocate the virtual table pointer at offset zero.
   assert(DataSize == 0 && "Vtable pointer must be at offset zero!");
 
   // Update the size.
-  Size += Context.Target.getPointerWidth(0);
+  Size += GetVirtualPointersSize(RD);
   DataSize = Size;
 
   // Update the alignment.
   UpdateAlignment(Context.Target.getPointerAlign(0));
 }
 
+BaseSubobjectInfo *
+RecordLayoutBuilder::ComputeBaseSubobjectInfo(const CXXRecordDecl *RD, 
+                                              bool IsVirtual,
+                                              BaseSubobjectInfo *Derived) {
+  BaseSubobjectInfo *Info;
+  
+  if (IsVirtual) {
+    // Check if we already have info about this virtual base.
+    BaseSubobjectInfo *&InfoSlot = VirtualBaseInfo[RD];
+    if (InfoSlot) {
+      assert(InfoSlot->Class == RD && "Wrong class for virtual base info!");
+      return InfoSlot;
+    }
+
+    // We don't, create it.
+    InfoSlot = new (BaseSubobjectInfoAllocator.Allocate()) BaseSubobjectInfo;
+    Info = InfoSlot;
+  } else {
+    Info = new (BaseSubobjectInfoAllocator.Allocate()) BaseSubobjectInfo;
+  }
+  
+  Info->Class = RD;
+  Info->IsVirtual = IsVirtual;
+  Info->Derived = 0;
+  Info->PrimaryVirtualBaseInfo = 0;
+  
+  const CXXRecordDecl *PrimaryVirtualBase = 0;
+  BaseSubobjectInfo *PrimaryVirtualBaseInfo = 0;
+
+  // Check if this base has a primary virtual base.
+  if (RD->getNumVBases()) {
+    const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
+    if (Layout.getPrimaryBaseWasVirtual()) {
+      // This base does have a primary virtual base.
+      PrimaryVirtualBase = Layout.getPrimaryBase();
+      assert(PrimaryVirtualBase && "Didn't have a primary virtual base!");
+      
+      // Now check if we have base subobject info about this primary base.
+      PrimaryVirtualBaseInfo = VirtualBaseInfo.lookup(PrimaryVirtualBase);
+      
+      if (PrimaryVirtualBaseInfo) {
+        if (PrimaryVirtualBaseInfo->Derived) {
+          // We did have info about this primary base, and it turns out that it
+          // has already been claimed as a primary virtual base for another
+          // base. 
+          PrimaryVirtualBase = 0;        
+        } else {
+          // We can claim this base as our primary base.
+          Info->PrimaryVirtualBaseInfo = PrimaryVirtualBaseInfo;
+          PrimaryVirtualBaseInfo->Derived = Info;
+        }
+      }
+    }
+  }
+
+  // Now go through all direct bases.
+  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
+       E = RD->bases_end(); I != E; ++I) {
+    bool IsVirtual = I->isVirtual();
+    
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+    
+    Info->Bases.push_back(ComputeBaseSubobjectInfo(BaseDecl, IsVirtual, Info));
+  }
+  
+  if (PrimaryVirtualBase && !PrimaryVirtualBaseInfo) {
+    // Traversing the bases must have created the base info for our primary
+    // virtual base.
+    PrimaryVirtualBaseInfo = VirtualBaseInfo.lookup(PrimaryVirtualBase);
+    assert(PrimaryVirtualBaseInfo &&
+           "Did not create a primary virtual base!");
+      
+    // Claim the primary virtual base as our primary virtual base.
+    Info->PrimaryVirtualBaseInfo = PrimaryVirtualBaseInfo;
+    PrimaryVirtualBaseInfo->Derived = Info;
+  }
+  
+  return Info;
+}
+
+void RecordLayoutBuilder::ComputeBaseSubobjectInfo(const CXXRecordDecl *RD) {
+  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
+       E = RD->bases_end(); I != E; ++I) {
+    bool IsVirtual = I->isVirtual();
+
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+    
+    // Compute the base subobject info for this base.
+    BaseSubobjectInfo *Info = ComputeBaseSubobjectInfo(BaseDecl, IsVirtual, 0);
+
+    if (IsVirtual) {
+      // ComputeBaseInfo has already added this base for us.
+      assert(VirtualBaseInfo.count(BaseDecl) &&
+             "Did not add virtual base!");
+    } else {
+      // Add the base info to the map of non-virtual bases.
+      assert(!NonVirtualBaseInfo.count(BaseDecl) &&
+             "Non-virtual base already exists!");
+      NonVirtualBaseInfo.insert(std::make_pair(BaseDecl, Info));
+    }
+  }
+}
+
 void
-ASTRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD) {
-  // First, determine the primary base class.
+RecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD) {
+  // Then, determine the primary base class.
   DeterminePrimaryBase(RD);
 
+  // Compute base subobject info.
+  ComputeBaseSubobjectInfo(RD);
+  
   // If we have a primary base class, lay it out.
-  if (const CXXRecordDecl *Base = PrimaryBase.getBase()) {
-    if (PrimaryBase.isVirtual()) {
-      // We have a virtual primary base, insert it as an indirect primary base.
-      IndirectPrimaryBases.insert(Base);
-
-      assert(!VisitedVirtualBases.count(Base) && "vbase already visited!");
-      VisitedVirtualBases.insert(Base);
+  if (PrimaryBase) {
+    if (PrimaryBaseIsVirtual) {
+      // If the primary virtual base was a primary virtual base of some other
+      // base class we'll have to steal it.
+      BaseSubobjectInfo *PrimaryBaseInfo = VirtualBaseInfo.lookup(PrimaryBase);
+      PrimaryBaseInfo->Derived = 0;
       
-      LayoutVirtualBase(Base);
-    } else
-      LayoutNonVirtualBase(Base);
+      // We have a virtual primary base, insert it as an indirect primary base.
+      IndirectPrimaryBases.insert(PrimaryBase);
+
+      assert(!VisitedVirtualBases.count(PrimaryBase) &&
+             "vbase already visited!");
+      VisitedVirtualBases.insert(PrimaryBase);
+
+      LayoutVirtualBase(PrimaryBaseInfo);
+    } else {
+      BaseSubobjectInfo *PrimaryBaseInfo = 
+        NonVirtualBaseInfo.lookup(PrimaryBase);
+      assert(PrimaryBaseInfo && 
+             "Did not find base info for non-virtual primary base!");
+
+      LayoutNonVirtualBase(PrimaryBaseInfo);
+    }
   }
 
   // Now lay out the non-virtual bases.
@@ -186,93 +960,76 @@ ASTRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD) {
     if (I->isVirtual())
       continue;
 
-    const CXXRecordDecl *Base =
-      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
-
-    // Skip the primary base.
-    if (Base == PrimaryBase.getBase() && !PrimaryBase.isVirtual())
-      continue;
-
-    // Lay out the base.
-    LayoutNonVirtualBase(Base);
-  }
-}
-
-void ASTRecordLayoutBuilder::LayoutNonVirtualBase(const CXXRecordDecl *RD) {
-  // Layout the base.
-  uint64_t Offset = LayoutBase(RD);
-
-  // Add its base class offset.
-  if (!Bases.insert(std::make_pair(RD, Offset)).second)
-    assert(false && "Added same base offset more than once!");
-}
-
-void
-ASTRecordLayoutBuilder::AddPrimaryVirtualBaseOffsets(const CXXRecordDecl *RD, 
-                                        uint64_t Offset,
-                                        const CXXRecordDecl *MostDerivedClass) {
-  // We already have the offset for the primary base of the most derived class.
-  if (RD != MostDerivedClass) {
-    const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
-    const CXXRecordDecl *PrimaryBase = Layout.getPrimaryBase();
-
-    // If this is a primary virtual base and we haven't seen it before, add it.
-    if (PrimaryBase && Layout.getPrimaryBaseWasVirtual() &&
-        !VBases.count(PrimaryBase))
-      VBases.insert(std::make_pair(PrimaryBase, Offset));
-  }
-
-  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
-       E = RD->bases_end(); I != E; ++I) {
-    assert(!I->getType()->isDependentType() &&
-           "Cannot layout class with dependent bases.");
-    
     const CXXRecordDecl *BaseDecl =
       cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
 
-    if (!BaseDecl->getNumVBases()) {
-      // This base isn't interesting since it doesn't have any virtual bases.
+    // Skip the primary base.
+    if (BaseDecl == PrimaryBase && !PrimaryBaseIsVirtual)
       continue;
-    }
-    
-    // Compute the offset of this base.
-    uint64_t BaseOffset;
-    
-    if (I->isVirtual()) {
-      // If we don't know this vbase yet, don't visit it. It will be visited
-      // later.
-      if (!VBases.count(BaseDecl)) {
-        continue;
-      }
-      
-      // Check if we've already visited this base.
-      if (!VisitedVirtualBases.insert(BaseDecl))
-        continue;
 
-      // We want the vbase offset from the class we're currently laying out.
-      BaseOffset = VBases[BaseDecl];
-    } else if (RD == MostDerivedClass) {
-      // We want the base offset from the class we're currently laying out.
-      assert(Bases.count(BaseDecl) && "Did not find base!");
-      BaseOffset = Bases[BaseDecl];
-    } else {
-      const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
-      BaseOffset = Offset + Layout.getBaseClassOffset(BaseDecl);
-    }
+    // Lay out the base.
+    BaseSubobjectInfo *BaseInfo = NonVirtualBaseInfo.lookup(BaseDecl);
+    assert(BaseInfo && "Did not find base info for non-virtual base!");
 
-    AddPrimaryVirtualBaseOffsets(BaseDecl, BaseOffset, MostDerivedClass);
+    LayoutNonVirtualBase(BaseInfo);
+  }
+}
+
+void RecordLayoutBuilder::LayoutNonVirtualBase(const BaseSubobjectInfo *Base) {
+  // Layout the base.
+  uint64_t Offset = LayoutBase(Base);
+
+  // Add its base class offset.
+  assert(!Bases.count(Base->Class) && "base offset already exists!");
+  Bases.insert(std::make_pair(Base->Class, Offset));
+
+  AddPrimaryVirtualBaseOffsets(Base, Offset);
+}
+
+void
+RecordLayoutBuilder::AddPrimaryVirtualBaseOffsets(const BaseSubobjectInfo *Info, 
+                                                  uint64_t Offset) {
+  // This base isn't interesting, it has no virtual bases.
+  if (!Info->Class->getNumVBases())
+    return;
+  
+  // First, check if we have a virtual primary base to add offsets for.
+  if (Info->PrimaryVirtualBaseInfo) {
+    assert(Info->PrimaryVirtualBaseInfo->IsVirtual && 
+           "Primary virtual base is not virtual!");
+    if (Info->PrimaryVirtualBaseInfo->Derived == Info) {
+      // Add the offset.
+      assert(!VBases.count(Info->PrimaryVirtualBaseInfo->Class) && 
+             "primary vbase offset already exists!");
+      VBases.insert(std::make_pair(Info->PrimaryVirtualBaseInfo->Class,
+                                   Offset));
+
+      // Traverse the primary virtual base.
+      AddPrimaryVirtualBaseOffsets(Info->PrimaryVirtualBaseInfo, Offset);
+    }
+  }
+
+  // Now go through all direct non-virtual bases.
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(Info->Class);
+  for (unsigned I = 0, E = Info->Bases.size(); I != E; ++I) {
+    const BaseSubobjectInfo *Base = Info->Bases[I];
+    if (Base->IsVirtual)
+      continue;
+
+    uint64_t BaseOffset = Offset + Layout.getBaseClassOffset(Base->Class);
+    AddPrimaryVirtualBaseOffsets(Base, BaseOffset);
   }
 }
 
 void
-ASTRecordLayoutBuilder::LayoutVirtualBases(const CXXRecordDecl *RD,
+RecordLayoutBuilder::LayoutVirtualBases(const CXXRecordDecl *RD,
                                         const CXXRecordDecl *MostDerivedClass) {
   const CXXRecordDecl *PrimaryBase;
   bool PrimaryBaseIsVirtual;
 
   if (MostDerivedClass == RD) {
-    PrimaryBase = this->PrimaryBase.getBase();
-    PrimaryBaseIsVirtual = this->PrimaryBase.isVirtual();
+    PrimaryBase = this->PrimaryBase;
+    PrimaryBaseIsVirtual = this->PrimaryBaseIsVirtual;
   } else {
     const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
     PrimaryBase = Layout.getPrimaryBase();
@@ -284,293 +1041,159 @@ ASTRecordLayoutBuilder::LayoutVirtualBases(const CXXRecordDecl *RD,
     assert(!I->getType()->isDependentType() &&
            "Cannot layout class with dependent bases.");
 
-    const CXXRecordDecl *Base =
+    const CXXRecordDecl *BaseDecl =
       cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
 
     if (I->isVirtual()) {
-      if (PrimaryBase != Base || !PrimaryBaseIsVirtual) {
-        bool IndirectPrimaryBase = IndirectPrimaryBases.count(Base);
+      if (PrimaryBase != BaseDecl || !PrimaryBaseIsVirtual) {
+        bool IndirectPrimaryBase = IndirectPrimaryBases.count(BaseDecl);
 
         // Only lay out the virtual base if it's not an indirect primary base.
         if (!IndirectPrimaryBase) {
           // Only visit virtual bases once.
-          if (!VisitedVirtualBases.insert(Base))
+          if (!VisitedVirtualBases.insert(BaseDecl))
             continue;
-          
-          LayoutVirtualBase(Base);
+
+          const BaseSubobjectInfo *BaseInfo = VirtualBaseInfo.lookup(BaseDecl);
+          assert(BaseInfo && "Did not find virtual base info!");
+          LayoutVirtualBase(BaseInfo);
         }
       }
     }
 
-    if (!Base->getNumVBases()) {
+    if (!BaseDecl->getNumVBases()) {
       // This base isn't interesting since it doesn't have any virtual bases.
       continue;
     }
 
-    LayoutVirtualBases(Base, MostDerivedClass);
+    LayoutVirtualBases(BaseDecl, MostDerivedClass);
   }
 }
 
-void ASTRecordLayoutBuilder::LayoutVirtualBase(const CXXRecordDecl *RD) {
+void RecordLayoutBuilder::LayoutVirtualBase(const BaseSubobjectInfo *Base) {
+  assert(!Base->Derived && "Trying to lay out a primary virtual base!");
+  
   // Layout the base.
-  uint64_t Offset = LayoutBase(RD);
+  uint64_t Offset = LayoutBase(Base);
 
   // Add its base class offset.
-  if (!VBases.insert(std::make_pair(RD, Offset)).second)
-    assert(false && "Added same vbase offset more than once!");
+  assert(!VBases.count(Base->Class) && "vbase offset already exists!");
+  VBases.insert(std::make_pair(Base->Class, Offset));
+  
+  AddPrimaryVirtualBaseOffsets(Base, Offset);
 }
 
-uint64_t ASTRecordLayoutBuilder::LayoutBase(const CXXRecordDecl *RD) {
-  const ASTRecordLayout &BaseInfo = Context.getASTRecordLayout(RD);
+uint64_t RecordLayoutBuilder::LayoutBase(const BaseSubobjectInfo *Base) {
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(Base->Class);
 
   // If we have an empty base class, try to place it at offset 0.
-  if (RD->isEmpty() && canPlaceRecordAtOffset(RD, 0)) {
-    // We were able to place the class at offset 0.
-    UpdateEmptyClassOffsets(RD, 0);
-
-    Size = std::max(Size, BaseInfo.getSize());
+  if (Base->Class->isEmpty() &&
+      EmptySubobjects->CanPlaceBaseAtOffset(Base, 0)) {
+    Size = std::max(Size, Layout.getSize());
 
     return 0;
   }
 
-  unsigned BaseAlign = BaseInfo.getNonVirtualAlign();
+  unsigned BaseAlign = Layout.getNonVirtualAlign();
 
   // Round up the current record size to the base's alignment boundary.
   uint64_t Offset = llvm::RoundUpToAlignment(DataSize, BaseAlign);
 
   // Try to place the base.
-  while (true) {
-    if (canPlaceRecordAtOffset(RD, Offset))
-      break;
-
+  while (!EmptySubobjects->CanPlaceBaseAtOffset(Base, Offset))
     Offset += BaseAlign;
-  }
 
-  if (!RD->isEmpty()) {
+  if (!Base->Class->isEmpty()) {
     // Update the data size.
-    DataSize = Offset + BaseInfo.getNonVirtualSize();
+    DataSize = Offset + Layout.getNonVirtualSize();
 
     Size = std::max(Size, DataSize);
   } else
-    Size = std::max(Size, Offset + BaseInfo.getSize());
+    Size = std::max(Size, Offset + Layout.getSize());
 
   // Remember max struct/class alignment.
   UpdateAlignment(BaseAlign);
 
-  UpdateEmptyClassOffsets(RD, Offset);
   return Offset;
 }
 
-bool ASTRecordLayoutBuilder::canPlaceRecordAtOffset(const CXXRecordDecl *RD,
-                                                    uint64_t Offset) const {
-  // Look for an empty class with the same type at the same offset.
-  for (EmptyClassOffsetsTy::const_iterator I =
-         EmptyClassOffsets.lower_bound(Offset),
-         E = EmptyClassOffsets.upper_bound(Offset); I != E; ++I) {
-
-    if (I->second == RD)
-      return false;
-  }
-
-  const ASTRecordLayout &Info = Context.getASTRecordLayout(RD);
-
-  // Check bases.
-  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
-         E = RD->bases_end(); I != E; ++I) {
-    assert(!I->getType()->isDependentType() &&
-           "Cannot layout class with dependent bases.");
-    if (I->isVirtual())
-      continue;
-
-    const CXXRecordDecl *Base =
-      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
-
-    uint64_t BaseClassOffset = Info.getBaseClassOffset(Base);
-
-    if (!canPlaceRecordAtOffset(Base, Offset + BaseClassOffset))
-      return false;
-  }
-
-  // Check fields.
-  unsigned FieldNo = 0;
-  for (CXXRecordDecl::field_iterator I = RD->field_begin(), E = RD->field_end();
-       I != E; ++I, ++FieldNo) {
-    const FieldDecl *FD = *I;
-
-    uint64_t FieldOffset = Info.getFieldOffset(FieldNo);
-
-    if (!canPlaceFieldAtOffset(FD, Offset + FieldOffset))
-      return false;
-  }
-
-  // FIXME: virtual bases.
-  return true;
-}
-
-bool ASTRecordLayoutBuilder::canPlaceFieldAtOffset(const FieldDecl *FD,
-                                                   uint64_t Offset) const {
-  QualType T = FD->getType();
-  if (const RecordType *RT = T->getAs<RecordType>()) {
-    if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl()))
-      return canPlaceRecordAtOffset(RD, Offset);
-  }
-
-  if (const ConstantArrayType *AT = Context.getAsConstantArrayType(T)) {
-    QualType ElemTy = Context.getBaseElementType(AT);
-    const RecordType *RT = ElemTy->getAs<RecordType>();
-    if (!RT)
-      return true;
-    const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl());
-    if (!RD)
-      return true;
-
-    const ASTRecordLayout &Info = Context.getASTRecordLayout(RD);
-
-    uint64_t NumElements = Context.getConstantArrayElementCount(AT);
-    uint64_t ElementOffset = Offset;
-    for (uint64_t I = 0; I != NumElements; ++I) {
-      if (!canPlaceRecordAtOffset(RD, ElementOffset))
-        return false;
-
-      ElementOffset += Info.getSize();
-    }
-  }
-
-  return true;
-}
-
-void ASTRecordLayoutBuilder::UpdateEmptyClassOffsets(const CXXRecordDecl *RD,
-                                                     uint64_t Offset) {
-  if (RD->isEmpty())
-    EmptyClassOffsets.insert(std::make_pair(Offset, RD));
-
-  const ASTRecordLayout &Info = Context.getASTRecordLayout(RD);
-
-  // Update bases.
-  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
-         E = RD->bases_end(); I != E; ++I) {
-    assert(!I->getType()->isDependentType() &&
-           "Cannot layout class with dependent bases.");
-    if (I->isVirtual())
-      continue;
-
-    const CXXRecordDecl *Base =
-      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
-
-    uint64_t BaseClassOffset = Info.getBaseClassOffset(Base);
-    UpdateEmptyClassOffsets(Base, Offset + BaseClassOffset);
-  }
-
-  // Update fields.
-  unsigned FieldNo = 0;
-  for (CXXRecordDecl::field_iterator I = RD->field_begin(), E = RD->field_end();
-       I != E; ++I, ++FieldNo) {
-    const FieldDecl *FD = *I;
-
-    uint64_t FieldOffset = Info.getFieldOffset(FieldNo);
-    UpdateEmptyClassOffsets(FD, Offset + FieldOffset);
-  }
-
-  // FIXME: Update virtual bases.
-}
-
-void
-ASTRecordLayoutBuilder::UpdateEmptyClassOffsets(const FieldDecl *FD,
-                                                uint64_t Offset) {
-  QualType T = FD->getType();
-
-  if (const RecordType *RT = T->getAs<RecordType>()) {
-    if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl())) {
-      UpdateEmptyClassOffsets(RD, Offset);
-      return;
-    }
-  }
-
-  if (const ConstantArrayType *AT = Context.getAsConstantArrayType(T)) {
-    QualType ElemTy = Context.getBaseElementType(AT);
-    const RecordType *RT = ElemTy->getAs<RecordType>();
-    if (!RT)
-      return;
-    const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl());
-    if (!RD)
-      return;
-
-    const ASTRecordLayout &Info = Context.getASTRecordLayout(RD);
-
-    uint64_t NumElements = Context.getConstantArrayElementCount(AT);
-    uint64_t ElementOffset = Offset;
-
-    for (uint64_t I = 0; I != NumElements; ++I) {
-      UpdateEmptyClassOffsets(RD, ElementOffset);
-      ElementOffset += Info.getSize();
-    }
-  }
-}
-
-void ASTRecordLayoutBuilder::Layout(const RecordDecl *D) {
-  IsUnion = D->isUnion();
+void RecordLayoutBuilder::InitializeLayout(const Decl *D) {
+  if (const RecordDecl *RD = dyn_cast<RecordDecl>(D))
+    IsUnion = RD->isUnion();
 
   Packed = D->hasAttr<PackedAttr>();
 
-  // The #pragma pack attribute specifies the maximum field alignment.
-  if (const PragmaPackAttr *PPA = D->getAttr<PragmaPackAttr>())
-    MaxFieldAlignment = PPA->getAlignment();
+  // mac68k alignment supersedes maximum field alignment and attribute aligned,
+  // and forces all structures to have 2-byte alignment. The IBM docs on it
+  // allude to additional (more complicated) semantics, especially with regard
+  // to bit-fields, but gcc appears not to follow that.
+  if (D->hasAttr<AlignMac68kAttr>()) {
+    IsMac68kAlign = true;
+    MaxFieldAlignment = 2 * 8;
+    Alignment = 2 * 8;
+  } else {
+    if (const MaxFieldAlignmentAttr *MFAA = D->getAttr<MaxFieldAlignmentAttr>())
+      MaxFieldAlignment = MFAA->getAlignment();
 
-  if (const AlignedAttr *AA = D->getAttr<AlignedAttr>())
-    UpdateAlignment(AA->getMaxAlignment());
-
-  // If this is a C++ class, lay out the vtable and the non-virtual bases.
-  const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D);
-  if (RD)
-    LayoutNonVirtualBases(RD);
-
-  LayoutFields(D);
-
-  NonVirtualSize = Size;
-  NonVirtualAlignment = Alignment;
-
-  // If this is a C++ class, lay out its virtual bases and add its primary
-  // virtual base offsets.
-  if (RD) {
-    LayoutVirtualBases(RD, RD);
-
-    VisitedVirtualBases.clear();
-    AddPrimaryVirtualBaseOffsets(RD, 0, RD);
+    if (unsigned MaxAlign = D->getMaxAlignment())
+      UpdateAlignment(MaxAlign);
   }
+}
+
+void RecordLayoutBuilder::Layout(const RecordDecl *D) {
+  InitializeLayout(D);
+  LayoutFields(D);
 
   // Finally, round the size of the total struct up to the alignment of the
   // struct itself.
   FinishLayout();
-  
+}
+
+void RecordLayoutBuilder::Layout(const CXXRecordDecl *RD) {
+  InitializeLayout(RD);
+
+  // Lay out the vtable and the non-virtual bases.
+  LayoutNonVirtualBases(RD);
+
+  LayoutFields(RD);
+
+  NonVirtualSize = Size;
+  NonVirtualAlignment = Alignment;
+
+  // Lay out the virtual bases and add the primary virtual base offsets.
+  LayoutVirtualBases(RD, RD);
+
+  VisitedVirtualBases.clear();
+
+  // Finally, round the size of the total struct up to the alignment of the
+  // struct itself.
+  FinishLayout();
+
 #ifndef NDEBUG
-  if (RD) {
-    // Check that we have base offsets for all bases.
-    for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
-         E = RD->bases_end(); I != E; ++I) {
-      if (I->isVirtual())
-        continue;
-      
-      const CXXRecordDecl *BaseDecl =
-        cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
-      
-      assert(Bases.count(BaseDecl) && "Did not find base offset!");
-    }
-    
-    // And all virtual bases.
-    for (CXXRecordDecl::base_class_const_iterator I = RD->vbases_begin(),
-         E = RD->vbases_end(); I != E; ++I) {
-      const CXXRecordDecl *BaseDecl =
-        cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
-      
-      assert(VBases.count(BaseDecl) && "Did not find base offset!");
-    }
+  // Check that we have base offsets for all bases.
+  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
+       E = RD->bases_end(); I != E; ++I) {
+    if (I->isVirtual())
+      continue;
+
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+
+    assert(Bases.count(BaseDecl) && "Did not find base offset!");
+  }
+
+  // And all virtual bases.
+  for (CXXRecordDecl::base_class_const_iterator I = RD->vbases_begin(),
+       E = RD->vbases_end(); I != E; ++I) {
+    const CXXRecordDecl *BaseDecl =
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+
+    assert(VBases.count(BaseDecl) && "Did not find base offset!");
   }
 #endif
 }
 
-// FIXME. Impl is no longer needed.
-void ASTRecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D,
-                                    const ObjCImplementationDecl *Impl) {
+void RecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D) {
   if (ObjCInterfaceDecl *SD = D->getSuperClass()) {
     const ASTRecordLayout &SL = Context.getASTObjCInterfaceLayout(SD);
 
@@ -582,14 +1205,8 @@ void ASTRecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D,
     DataSize = Size;
   }
 
-  Packed = D->hasAttr<PackedAttr>();
+  InitializeLayout(D);
 
-  // The #pragma pack attribute specifies the maximum field alignment.
-  if (const PragmaPackAttr *PPA = D->getAttr<PragmaPackAttr>())
-    MaxFieldAlignment = PPA->getAlignment();
-
-  if (const AlignedAttr *AA = D->getAttr<AlignedAttr>())
-    UpdateAlignment(AA->getMaxAlignment());
   // Layout each ivar sequentially.
   llvm::SmallVector<ObjCIvarDecl*, 16> Ivars;
   Context.ShallowCollectObjCIvars(D, Ivars);
@@ -601,7 +1218,7 @@ void ASTRecordLayoutBuilder::Layout(const ObjCInterfaceDecl *D,
   FinishLayout();
 }
 
-void ASTRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
+void RecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
   // Layout each field, for now, just sequentially, respecting alignment.  In
   // the future, this will need to be tweakable by targets.
   for (RecordDecl::field_iterator Field = D->field_begin(),
@@ -609,17 +1226,17 @@ void ASTRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
     LayoutField(*Field);
 }
 
-void ASTRecordLayoutBuilder::LayoutWideBitField(uint64_t FieldSize, 
+void RecordLayoutBuilder::LayoutWideBitField(uint64_t FieldSize,
                                                 uint64_t TypeSize) {
   assert(Context.getLangOptions().CPlusPlus &&
          "Can only have wide bit-fields in C++!");
-  
+
   // Itanium C++ ABI 2.4:
-  //   If sizeof(T)*8 < n, let T' be the largest integral POD type with 
+  //   If sizeof(T)*8 < n, let T' be the largest integral POD type with
   //   sizeof(T')*8 <= n.
-  
+
   QualType IntegralPODTypes[] = {
-    Context.UnsignedCharTy, Context.UnsignedShortTy, Context.UnsignedIntTy, 
+    Context.UnsignedCharTy, Context.UnsignedShortTy, Context.UnsignedIntTy,
     Context.UnsignedLongTy, Context.UnsignedLongLongTy
   };
 
@@ -634,24 +1251,24 @@ void ASTRecordLayoutBuilder::LayoutWideBitField(uint64_t FieldSize,
     Type = IntegralPODTypes[I];
   }
   assert(!Type.isNull() && "Did not find a type!");
-  
+
   unsigned TypeAlign = Context.getTypeAlign(Type);
 
   // We're not going to use any of the unfilled bits in the last byte.
   UnfilledBitsInLastByte = 0;
 
   uint64_t FieldOffset;
-  
+
   if (IsUnion) {
     DataSize = std::max(DataSize, FieldSize);
     FieldOffset = 0;
   } else {
     // The bitfield is allocated starting at the next offset aligned appropriately
-    // for T', with length n bits. 
+    // for T', with length n bits.
     FieldOffset = llvm::RoundUpToAlignment(DataSize, TypeAlign);
-    
+
     uint64_t NewSizeInBits = FieldOffset + FieldSize;
-    
+
     DataSize = llvm::RoundUpToAlignment(NewSizeInBits, 8);
     UnfilledBitsInLastByte = DataSize - NewSizeInBits;
   }
@@ -661,12 +1278,12 @@ void ASTRecordLayoutBuilder::LayoutWideBitField(uint64_t FieldSize,
 
   // Update the size.
   Size = std::max(Size, DataSize);
-  
+
   // Remember max struct/class alignment.
   UpdateAlignment(TypeAlign);
 }
 
-void ASTRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
+void RecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
   bool FieldPacked = Packed || D->hasAttr<PackedAttr>();
   uint64_t FieldOffset = IsUnion ? 0 : (DataSize - UnfilledBitsInLastByte);
   uint64_t FieldSize = D->getBitWidth()->EvaluateAsInt(Context).getZExtValue();
@@ -682,8 +1299,7 @@ void ASTRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
 
   if (FieldPacked || !Context.Target.useBitFieldTypeAlignment())
     FieldAlign = 1;
-  if (const AlignedAttr *AA = D->getAttr<AlignedAttr>())
-    FieldAlign = std::max(FieldAlign, AA->getMaxAlignment());
+  FieldAlign = std::max(FieldAlign, D->getMaxAlignment());
 
   // The maximum field alignment overrides the aligned attribute.
   if (MaxFieldAlignment)
@@ -691,7 +1307,7 @@ void ASTRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
 
   // Check if we need to add padding to give the field the correct alignment.
   if (FieldSize == 0 || (FieldOffset & (FieldAlign-1)) + FieldSize > TypeSize)
-    FieldOffset = (FieldOffset + (FieldAlign-1)) & ~(FieldAlign-1);
+    FieldOffset = llvm::RoundUpToAlignment(FieldOffset, FieldAlign);
 
   // Padding members don't affect overall alignment.
   if (!D->getIdentifier())
@@ -718,7 +1334,7 @@ void ASTRecordLayoutBuilder::LayoutBitField(const FieldDecl *D) {
   UpdateAlignment(FieldAlign);
 }
 
-void ASTRecordLayoutBuilder::LayoutField(const FieldDecl *D) {
+void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {
   if (D->isBitField()) {
     LayoutBitField(D);
     return;
@@ -752,8 +1368,7 @@ void ASTRecordLayoutBuilder::LayoutField(const FieldDecl *D) {
 
   if (FieldPacked)
     FieldAlign = 8;
-  if (const AlignedAttr *AA = D->getAttr<AlignedAttr>())
-    FieldAlign = std::max(FieldAlign, AA->getMaxAlignment());
+  FieldAlign = std::max(FieldAlign, D->getMaxAlignment());
 
   // The maximum field alignment overrides the aligned attribute.
   if (MaxFieldAlignment)
@@ -762,17 +1377,12 @@ void ASTRecordLayoutBuilder::LayoutField(const FieldDecl *D) {
   // Round up the current record size to the field's alignment boundary.
   FieldOffset = llvm::RoundUpToAlignment(FieldOffset, FieldAlign);
 
-  if (!IsUnion) {
-    while (true) {
-      // Check if we can place the field at this offset.
-      if (canPlaceFieldAtOffset(D, FieldOffset))
-        break;
-
+  if (!IsUnion && EmptySubobjects) {
+    // Check if we can place the field at this offset.
+    while (!EmptySubobjects->CanPlaceFieldAtOffset(D, FieldOffset)) {
       // We couldn't place the field at the offset. Try again at a new offset.
       FieldOffset += FieldAlign;
     }
-
-    UpdateEmptyClassOffsets(D, FieldOffset);
   }
 
   // Place this field at the current location.
@@ -791,7 +1401,7 @@ void ASTRecordLayoutBuilder::LayoutField(const FieldDecl *D) {
   UpdateAlignment(FieldAlign);
 }
 
-void ASTRecordLayoutBuilder::FinishLayout() {
+void RecordLayoutBuilder::FinishLayout() {
   // In C++, records cannot be of size 0.
   if (Context.getLangOptions().CPlusPlus && Size == 0)
     Size = 8;
@@ -800,7 +1410,11 @@ void ASTRecordLayoutBuilder::FinishLayout() {
   Size = llvm::RoundUpToAlignment(Size, Alignment);
 }
 
-void ASTRecordLayoutBuilder::UpdateAlignment(unsigned NewAlignment) {
+void RecordLayoutBuilder::UpdateAlignment(unsigned NewAlignment) {
+  // The alignment is not modified when using 'mac68k' alignment.
+  if (IsMac68kAlign)
+    return;
+
   if (NewAlignment <= Alignment)
     return;
 
@@ -809,57 +1423,8 @@ void ASTRecordLayoutBuilder::UpdateAlignment(unsigned NewAlignment) {
   Alignment = NewAlignment;
 }
 
-const ASTRecordLayout *
-ASTRecordLayoutBuilder::ComputeLayout(ASTContext &Ctx,
-                                      const RecordDecl *D) {
-  ASTRecordLayoutBuilder Builder(Ctx);
-
-  Builder.Layout(D);
-
-  if (!isa<CXXRecordDecl>(D))
-    return new (Ctx) ASTRecordLayout(Ctx, Builder.Size, Builder.Alignment,
-                                     Builder.Size,
-                                     Builder.FieldOffsets.data(),
-                                     Builder.FieldOffsets.size());
-
-  // FIXME: This is not always correct. See the part about bitfields at
-  // http://www.codesourcery.com/public/cxx-abi/abi.html#POD for more info.
-  // FIXME: IsPODForThePurposeOfLayout should be stored in the record layout.
-  bool IsPODForThePurposeOfLayout = cast<CXXRecordDecl>(D)->isPOD();
-
-  // FIXME: This should be done in FinalizeLayout.
-  uint64_t DataSize =
-    IsPODForThePurposeOfLayout ? Builder.Size : Builder.DataSize;
-  uint64_t NonVirtualSize =
-    IsPODForThePurposeOfLayout ? DataSize : Builder.NonVirtualSize;
-
-  return new (Ctx) ASTRecordLayout(Ctx, Builder.Size, Builder.Alignment,
-                                   DataSize, Builder.FieldOffsets.data(),
-                                   Builder.FieldOffsets.size(),
-                                   NonVirtualSize,
-                                   Builder.NonVirtualAlignment,
-                                   Builder.PrimaryBase,
-                                   Builder.Bases, Builder.VBases);
-}
-
-const ASTRecordLayout *
-ASTRecordLayoutBuilder::ComputeLayout(ASTContext &Ctx,
-                                      const ObjCInterfaceDecl *D,
-                                      const ObjCImplementationDecl *Impl) {
-  ASTRecordLayoutBuilder Builder(Ctx);
-
-  Builder.Layout(D, Impl);
-
-  return new (Ctx) ASTRecordLayout(Ctx, Builder.Size, Builder.Alignment,
-                                   Builder.DataSize,
-                                   Builder.FieldOffsets.data(),
-                                   Builder.FieldOffsets.size());
-}
-
 const CXXMethodDecl *
-ASTRecordLayoutBuilder::ComputeKeyFunction(const CXXRecordDecl *RD) {
-  assert(RD->isDynamicClass() && "Class does not have any virtual methods!");
-
+RecordLayoutBuilder::ComputeKeyFunction(const CXXRecordDecl *RD) {
   // If a class isn't polymorphic it doesn't have a key function.
   if (!RD->isPolymorphic())
     return 0;
@@ -896,6 +1461,163 @@ ASTRecordLayoutBuilder::ComputeKeyFunction(const CXXRecordDecl *RD) {
   }
 
   return 0;
+}
+
+// This class implements layout specific to the Microsoft ABI.
+class MSRecordLayoutBuilder: public RecordLayoutBuilder {
+public:
+  MSRecordLayoutBuilder(ASTContext& Ctx, EmptySubobjectMap *EmptySubobjects):
+    RecordLayoutBuilder(Ctx, EmptySubobjects) {}
+
+  virtual bool IsNearlyEmpty(const CXXRecordDecl *RD) const;
+  virtual uint64_t GetVirtualPointersSize(const CXXRecordDecl *RD) const;
+};
+
+bool MSRecordLayoutBuilder::IsNearlyEmpty(const CXXRecordDecl *RD) const {
+  // FIXME: Audit the corners
+  if (!RD->isDynamicClass())
+    return false;
+  const ASTRecordLayout &BaseInfo = Context.getASTRecordLayout(RD);
+  // In the Microsoft ABI, classes can have one or two vtable pointers.
+  if (BaseInfo.getNonVirtualSize() == Context.Target.getPointerWidth(0) ||
+      BaseInfo.getNonVirtualSize() == Context.Target.getPointerWidth(0) * 2)
+    return true;
+  return false;
+}
+
+uint64_t
+MSRecordLayoutBuilder::GetVirtualPointersSize(const CXXRecordDecl *RD) const {
+  // We should reserve space for two pointers if the class has both
+  // virtual functions and virtual bases.
+  if (RD->isPolymorphic() && RD->getNumVBases() > 0)
+    return 2 * Context.Target.getPointerWidth(0);
+  return Context.Target.getPointerWidth(0);
+}
+
+/// getASTRecordLayout - Get or compute information about the layout of the
+/// specified record (struct/union/class), which indicates its size and field
+/// position information.
+const ASTRecordLayout &ASTContext::getASTRecordLayout(const RecordDecl *D) {
+  D = D->getDefinition();
+  assert(D && "Cannot get layout of forward declarations!");
+
+  // Look up this layout, if already laid out, return what we have.
+  // Note that we can't save a reference to the entry because this function
+  // is recursive.
+  const ASTRecordLayout *Entry = ASTRecordLayouts[D];
+  if (Entry) return *Entry;
+
+  const ASTRecordLayout *NewEntry;
+
+  if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D)) {
+    EmptySubobjectMap EmptySubobjects(*this, RD);
+
+    // When compiling for Microsoft, use the special MS builder.
+    llvm::OwningPtr<RecordLayoutBuilder> Builder;
+    switch (Target.getCXXABI()) {
+    default:
+      Builder.reset(new RecordLayoutBuilder(*this, &EmptySubobjects));
+      break;
+    case CXXABI_Microsoft:
+      Builder.reset(new MSRecordLayoutBuilder(*this, &EmptySubobjects));
+    }
+    Builder->Layout(RD);
+
+    // FIXME: This is not always correct. See the part about bitfields at
+    // http://www.codesourcery.com/public/cxx-abi/abi.html#POD for more info.
+    // FIXME: IsPODForThePurposeOfLayout should be stored in the record layout.
+    bool IsPODForThePurposeOfLayout = cast<CXXRecordDecl>(D)->isPOD();
+
+    // FIXME: This should be done in FinalizeLayout.
+    uint64_t DataSize =
+      IsPODForThePurposeOfLayout ? Builder->Size : Builder->DataSize;
+    uint64_t NonVirtualSize =
+      IsPODForThePurposeOfLayout ? DataSize : Builder->NonVirtualSize;
+
+    NewEntry =
+      new (*this) ASTRecordLayout(*this, Builder->Size, Builder->Alignment,
+                                  DataSize, Builder->FieldOffsets.data(),
+                                  Builder->FieldOffsets.size(),
+                                  NonVirtualSize,
+                                  Builder->NonVirtualAlignment,
+                                  EmptySubobjects.SizeOfLargestEmptySubobject,
+                                  Builder->PrimaryBase,
+                                  Builder->PrimaryBaseIsVirtual,
+                                  Builder->Bases, Builder->VBases);
+  } else {
+    RecordLayoutBuilder Builder(*this, /*EmptySubobjects=*/0);
+    Builder.Layout(D);
+
+    NewEntry =
+      new (*this) ASTRecordLayout(*this, Builder.Size, Builder.Alignment,
+                                  Builder.Size,
+                                  Builder.FieldOffsets.data(),
+                                  Builder.FieldOffsets.size());
+  }
+
+  ASTRecordLayouts[D] = NewEntry;
+
+  if (getLangOptions().DumpRecordLayouts) {
+    llvm::errs() << "\n*** Dumping AST Record Layout\n";
+    DumpRecordLayout(D, llvm::errs());
+  }
+
+  return *NewEntry;
+}
+
+const CXXMethodDecl *ASTContext::getKeyFunction(const CXXRecordDecl *RD) {
+  RD = cast<CXXRecordDecl>(RD->getDefinition());
+  assert(RD && "Cannot get key function for forward declarations!");
+
+  const CXXMethodDecl *&Entry = KeyFunctions[RD];
+  if (!Entry)
+    Entry = RecordLayoutBuilder::ComputeKeyFunction(RD);
+  else
+    assert(Entry == RecordLayoutBuilder::ComputeKeyFunction(RD) &&
+           "Key function changed!");
+
+  return Entry;
+}
+
+/// getInterfaceLayoutImpl - Get or compute information about the
+/// layout of the given interface.
+///
+/// \param Impl - If given, also include the layout of the interface's
+/// implementation. This may differ by including synthesized ivars.
+const ASTRecordLayout &
+ASTContext::getObjCLayout(const ObjCInterfaceDecl *D,
+                          const ObjCImplementationDecl *Impl) {
+  assert(!D->isForwardDecl() && "Invalid interface decl!");
+
+  // Look up this layout, if already laid out, return what we have.
+  ObjCContainerDecl *Key =
+    Impl ? (ObjCContainerDecl*) Impl : (ObjCContainerDecl*) D;
+  if (const ASTRecordLayout *Entry = ObjCLayouts[Key])
+    return *Entry;
+
+  // Add in synthesized ivar count if laying out an implementation.
+  if (Impl) {
+    unsigned SynthCount = CountNonClassIvars(D);
+    // If there aren't any sythesized ivars then reuse the interface
+    // entry. Note we can't cache this because we simply free all
+    // entries later; however we shouldn't look up implementations
+    // frequently.
+    if (SynthCount == 0)
+      return getObjCLayout(D, 0);
+  }
+
+  RecordLayoutBuilder Builder(*this, /*EmptySubobjects=*/0);
+  Builder.Layout(D);
+
+  const ASTRecordLayout *NewEntry =
+    new (*this) ASTRecordLayout(*this, Builder.Size, Builder.Alignment,
+                                Builder.DataSize,
+                                Builder.FieldOffsets.data(),
+                                Builder.FieldOffsets.size());
+
+  ObjCLayouts[Key] = NewEntry;
+
+  return *NewEntry;
 }
 
 static void PrintOffset(llvm::raw_ostream &OS,
@@ -957,7 +1679,7 @@ static void DumpCXXRecordLayout(llvm::raw_ostream &OS,
     if (const RecordType *RT = Field->getType()->getAs<RecordType>()) {
       if (const CXXRecordDecl *D = dyn_cast<CXXRecordDecl>(RT->getDecl())) {
         DumpCXXRecordLayout(OS, D, C, FieldOffset, IndentLevel,
-                            Field->getNameAsCString(),
+                            Field->getName().data(),
                             /*IncludeVirtualBases=*/true);
         continue;
       }

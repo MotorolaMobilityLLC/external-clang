@@ -18,6 +18,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/RecordLayout.h"
 #include "CodeGenTypes.h"
+#include "CGCXXABI.h"
 #include "llvm/DerivedTypes.h"
 #include "llvm/Type.h"
 #include "llvm/Support/Debug.h"
@@ -42,10 +43,12 @@ public:
   typedef std::pair<const FieldDecl *, CGBitFieldInfo> LLVMBitFieldInfo;
   llvm::SmallVector<LLVMBitFieldInfo, 16> LLVMBitFields;
 
-  /// ContainsPointerToDataMember - Whether one of the fields in this record
-  /// layout is a pointer to data member, or a struct that contains pointer to
-  /// data member.
-  bool ContainsPointerToDataMember;
+  typedef std::pair<const CXXRecordDecl *, unsigned> LLVMBaseInfo;
+  llvm::SmallVector<LLVMBaseInfo, 16> LLVMNonVirtualBases;
+  
+  /// IsZeroInitializable - Whether this struct can be C++
+  /// zero-initialized with an LLVM zeroinitializer.
+  bool IsZeroInitializable;
 
   /// Packed - Whether the resulting LLVM struct will be packed or not.
   bool Packed;
@@ -81,8 +84,13 @@ private:
   /// Returns false if the operation failed because the struct is not packed.
   bool LayoutFields(const RecordDecl *D);
 
-  /// LayoutBases - layout the bases and vtable pointer of a record decl.
-  void LayoutBases(const CXXRecordDecl *RD, const ASTRecordLayout &Layout);
+  /// LayoutNonVirtualBase - layout a single non-virtual base.
+  void LayoutNonVirtualBase(const CXXRecordDecl *BaseDecl,
+                            uint64_t BaseOffset);
+  
+  /// LayoutNonVirtualBases - layout the non-virtual bases of a record decl.
+  void LayoutNonVirtualBases(const CXXRecordDecl *RD, 
+                             const ASTRecordLayout &Layout);
 
   /// LayoutField - layout a single field. Returns false if the operation failed
   /// because the current struct is not packed.
@@ -107,13 +115,14 @@ private:
 
   unsigned getTypeAlignment(const llvm::Type *Ty) const;
 
-  /// CheckForPointerToDataMember - Check if the given type contains a pointer
+  /// CheckZeroInitializable - Check if the given type contains a pointer
   /// to data member.
-  void CheckForPointerToDataMember(QualType T);
+  void CheckZeroInitializable(QualType T);
+  void CheckZeroInitializable(const CXXRecordDecl *RD);
 
 public:
   CGRecordLayoutBuilder(CodeGenTypes &Types)
-    : ContainsPointerToDataMember(false), Packed(false), Types(Types),
+    : IsZeroInitializable(true), Packed(false), Types(Types),
       Alignment(0), AlignmentAsLLVMStruct(1),
       BitsAvailableInLastField(0), NextFieldOffsetInBytes(0) { }
 
@@ -143,6 +152,7 @@ void CGRecordLayoutBuilder::Layout(const RecordDecl *D) {
   FieldTypes.clear();
   LLVMFields.clear();
   LLVMBitFields.clear();
+  LLVMNonVirtualBases.clear();
 
   LayoutFields(D);
 }
@@ -301,8 +311,7 @@ bool CGRecordLayoutBuilder::LayoutField(const FieldDecl *D,
     return true;
   }
 
-  // Check if we have a pointer to data member in this field.
-  CheckForPointerToDataMember(D->getType());
+  CheckZeroInitializable(D->getType());
 
   assert(FieldOffset % 8 == 0 && "FieldOffset is not on a byte boundary!");
   uint64_t FieldOffsetInBytes = FieldOffset / 8;
@@ -319,8 +328,9 @@ bool CGRecordLayoutBuilder::LayoutField(const FieldDecl *D,
 
   if (const RecordType *RT = D->getType()->getAs<RecordType>()) {
     const RecordDecl *RD = cast<RecordDecl>(RT->getDecl());
-    if (const PragmaPackAttr *PPA = RD->getAttr<PragmaPackAttr>()) {
-      if (PPA->getAlignment() != TypeAlignment * 8 && !Packed)
+    if (const MaxFieldAlignmentAttr *MFAA =
+          RD->getAttr<MaxFieldAlignmentAttr>()) {
+      if (MFAA->getAlignment() != TypeAlignment * 8 && !Packed)
         return false;
     }
   }
@@ -435,16 +445,66 @@ void CGRecordLayoutBuilder::LayoutUnion(const RecordDecl *D) {
     AppendPadding(Layout.getSize() / 8, Align);
 }
 
-void CGRecordLayoutBuilder::LayoutBases(const CXXRecordDecl *RD,
-                                        const ASTRecordLayout &Layout) {
-  // Check if we need to add a vtable pointer.
-  if (RD->isDynamicClass() && !Layout.getPrimaryBase()) {
-    const llvm::Type *Int8PtrTy =
-      llvm::Type::getInt8PtrTy(Types.getLLVMContext());
+void CGRecordLayoutBuilder::LayoutNonVirtualBase(const CXXRecordDecl *BaseDecl,
+                                                 uint64_t BaseOffset) {
+  const ASTRecordLayout &Layout = 
+    Types.getContext().getASTRecordLayout(BaseDecl);
 
-    assert(NextFieldOffsetInBytes == 0 &&
-           "VTable pointer must come first!");
-    AppendField(NextFieldOffsetInBytes, Int8PtrTy->getPointerTo());
+  uint64_t NonVirtualSize = Layout.getNonVirtualSize();
+
+  if (BaseDecl->isEmpty()) {
+    // FIXME: Lay out empty bases.
+    return;
+  }
+
+  CheckZeroInitializable(BaseDecl);
+
+  // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
+  AppendPadding(BaseOffset / 8, 1);
+  
+  // Append the base field.
+  LLVMNonVirtualBases.push_back(LLVMBaseInfo(BaseDecl, FieldTypes.size()));
+
+  AppendBytes(NonVirtualSize / 8);
+}
+
+void
+CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
+                                             const ASTRecordLayout &Layout) {
+  const CXXRecordDecl *PrimaryBase = Layout.getPrimaryBase();
+
+  // Check if we need to add a vtable pointer.
+  if (RD->isDynamicClass()) {
+    if (!PrimaryBase) {
+      const llvm::Type *FunctionType =
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(Types.getLLVMContext()),
+                                /*isVarArg=*/true);
+      const llvm::Type *VTableTy = FunctionType->getPointerTo();
+
+      assert(NextFieldOffsetInBytes == 0 &&
+             "VTable pointer must come first!");
+      AppendField(NextFieldOffsetInBytes, VTableTy->getPointerTo());
+    } else {
+      // FIXME: Handle a virtual primary base.
+      if (!Layout.getPrimaryBaseWasVirtual())
+        LayoutNonVirtualBase(PrimaryBase, 0);
+    }
+  }
+
+  // Layout the non-virtual bases.
+  for (CXXRecordDecl::base_class_const_iterator I = RD->bases_begin(),
+       E = RD->bases_end(); I != E; ++I) {
+    if (I->isVirtual())
+      continue;
+
+    const CXXRecordDecl *BaseDecl = 
+      cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+
+    // We've already laid out the primary base.
+    if (BaseDecl == PrimaryBase && !Layout.getPrimaryBaseWasVirtual())
+      continue;
+
+    LayoutNonVirtualBase(BaseDecl, Layout.getBaseClassOffset(BaseDecl));
   }
 }
 
@@ -455,7 +515,7 @@ bool CGRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
   const ASTRecordLayout &Layout = Types.getContext().getASTRecordLayout(D);
 
   if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D))
-    LayoutBases(RD, Layout);
+    LayoutNonVirtualBases(RD, Layout);
 
   unsigned FieldNo = 0;
 
@@ -542,9 +602,9 @@ unsigned CGRecordLayoutBuilder::getTypeAlignment(const llvm::Type *Ty) const {
   return Types.getTargetData().getABITypeAlignment(Ty);
 }
 
-void CGRecordLayoutBuilder::CheckForPointerToDataMember(QualType T) {
+void CGRecordLayoutBuilder::CheckZeroInitializable(QualType T) {
   // This record already contains a member pointer.
-  if (ContainsPointerToDataMember)
+  if (!IsZeroInitializable)
     return;
 
   // Can only have member pointers if we're compiling C++.
@@ -554,22 +614,27 @@ void CGRecordLayoutBuilder::CheckForPointerToDataMember(QualType T) {
   T = Types.getContext().getBaseElementType(T);
 
   if (const MemberPointerType *MPT = T->getAs<MemberPointerType>()) {
-    if (!MPT->getPointeeType()->isFunctionType()) {
-      // We have a pointer to data member.
-      ContainsPointerToDataMember = true;
-    }
+    if (!Types.getCXXABI().isZeroInitializable(MPT))
+      IsZeroInitializable = false;
   } else if (const RecordType *RT = T->getAs<RecordType>()) {
     const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-
-    // FIXME: It would be better if there was a way to explicitly compute the
-    // record layout instead of converting to a type.
-    Types.ConvertTagDeclType(RD);
-
-    const CGRecordLayout &Layout = Types.getCGRecordLayout(RD);
-
-    if (Layout.containsPointerToDataMember())
-      ContainsPointerToDataMember = true;
+    CheckZeroInitializable(RD);
   }
+}
+
+void CGRecordLayoutBuilder::CheckZeroInitializable(const CXXRecordDecl *RD) {
+  // This record already contains a member pointer.
+  if (!IsZeroInitializable)
+    return;
+
+  // FIXME: It would be better if there was a way to explicitly compute the
+  // record layout instead of converting to a type.
+  Types.ConvertTagDeclType(RD);
+  
+  const CGRecordLayout &Layout = Types.getCGRecordLayout(RD);
+  
+  if (!Layout.isZeroInitializable())
+    IsZeroInitializable = false;
 }
 
 CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D) {
@@ -582,15 +647,19 @@ CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D) {
                                                Builder.Packed);
 
   CGRecordLayout *RL =
-    new CGRecordLayout(Ty, Builder.ContainsPointerToDataMember);
+    new CGRecordLayout(Ty, Builder.IsZeroInitializable);
+
+  // Add all the non-virtual base field numbers.
+  RL->NonVirtualBaseFields.insert(Builder.LLVMNonVirtualBases.begin(),
+                                  Builder.LLVMNonVirtualBases.end());
 
   // Add all the field numbers.
-  for (unsigned i = 0, e = Builder.LLVMFields.size(); i != e; ++i)
-    RL->FieldInfo.insert(Builder.LLVMFields[i]);
+  RL->FieldInfo.insert(Builder.LLVMFields.begin(),
+                       Builder.LLVMFields.end());
 
   // Add bitfield info.
-  for (unsigned i = 0, e = Builder.LLVMBitFields.size(); i != e; ++i)
-    RL->BitFields.insert(Builder.LLVMBitFields[i]);
+  RL->BitFields.insert(Builder.LLVMBitFields.begin(),
+                       Builder.LLVMBitFields.end());
 
   // Dump the layout, if requested.
   if (getContext().getLangOptions().DumpRecordLayouts) {
@@ -649,7 +718,7 @@ CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D) {
 void CGRecordLayout::print(llvm::raw_ostream &OS) const {
   OS << "<CGRecordLayout\n";
   OS << "  LLVMType:" << *LLVMType << "\n";
-  OS << "  ContainsPointerToDataMember:" << ContainsPointerToDataMember << "\n";
+  OS << "  IsZeroInitializable:" << IsZeroInitializable << "\n";
   OS << "  BitFields:[\n";
 
   // Print bit-field infos in declaration order.

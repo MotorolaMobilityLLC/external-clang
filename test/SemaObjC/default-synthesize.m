@@ -85,11 +85,33 @@
 
 @interface TopClass <TopProtocol> 
 {
-  id myString; // expected-note {{previously declared 'myString' here}}
+  id myString; 
 }
 @end
 
 @interface SubClass : TopClass <TopProtocol> 
 @end
 
-@implementation SubClass @end // expected-error {{property 'myString' attempting to use ivar 'myString' declared in super class 'TopClass'}}
+@implementation SubClass @end 
+
+// rdar: // 7920807
+@interface C @end
+@interface C (Category)
+@property int p; // expected-warning {{property 'p' requires method 'p' to be defined }} \
+                 // expected-warning {{property 'p' requires method 'setP:' to be defined}}
+@end
+@implementation C (Category) // expected-note 2 {{implementation is here}}
+@end
+
+// Don't complain if a property is already @synthesized by usr.
+@interface D
+{
+}
+@property int PROP;
+@end
+
+@implementation D
+- (int) Meth { return self.PROP; }
+@synthesize PROP=IVAR;
+@end
+

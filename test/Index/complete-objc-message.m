@@ -1,6 +1,6 @@
 // Note: the run lines follow their respective tests, since line/column
 // matter in this test.
-
+#define nil (void*)0
 @protocol FooTestProtocol
 + protocolClassMethod;
 - protocolInstanceMethod : (int)value;
@@ -51,7 +51,7 @@ void func() {
   return 3;
 }
 @end
-
+MyClass *getMyClass();
 @implementation MySubClass
 + (int)MySubClassMethod {
   return 2;
@@ -96,9 +96,9 @@ void test_overload(Overload *ovl) {
 }
 
 @interface Ellipsis
-- (int)Method:(int)i, ...;
+- (int)Method:(int)i, ...; 
+- (int)SentinelMethod:(int)i, ... __attribute__((sentinel(0,1)));
 @end
-
 void f(Ellipsis *e) {
   [e Method:1, 2, 3];
 }
@@ -120,6 +120,18 @@ void msg_id(id x) {
   [x Method:1 Arg1:1 OtherArg:ovl];
   [[x blarg] Method:1 Arg1:1 OtherArg:ovl];
   [id Method:1 Arg1:1 OtherArg:ovl];
+}
+
+@interface A
+- (void)method1;
+@end 
+
+@interface B : A
+- (void)method2;
+@end
+
+void test_ranking(B *b) {
+  [b method1];
 }
 
 // RUN: c-index-test -code-completion-at=%s:23:19 %s | FileCheck -check-prefix=CHECK-CC1 %s
@@ -160,18 +172,18 @@ void msg_id(id x) {
 // CHECK-CC9: ObjCInstanceMethodDecl:{ResultType int}{Informative Method:}{Informative Arg1:}{TypedText Arg2:}{Placeholder (int)i2}
 // CHECK-CC9: ObjCInstanceMethodDecl:{ResultType int}{Informative Method:}{Informative Arg1:}{TypedText OtherArg:}{Placeholder (id)obj}
 // RUN: c-index-test -code-completion-at=%s:61:11 %s | FileCheck -check-prefix=CHECK-CCA %s
-// CHECK-CCA: {ResultType SEL}{TypedText _cmd}
 // CHECK-CCA: TypedefDecl:{TypedText Class}
-// CHECK-CCA: ObjCInterfaceDecl:{TypedText Foo}
-// CHECK-CCA: FunctionDecl:{ResultType void}{TypedText func}{LeftParen (}{RightParen )}
+// CHECK-CCA-NEXT: ObjCInterfaceDecl:{TypedText Foo}
+// CHECK-CCA-NOT: FunctionDecl:{ResultType void}{TypedText func}{LeftParen (}{RightParen )}
+// CHECK-CCA:FunctionDecl:{ResultType MyClass *}{TypedText getMyClass}{LeftParen (}{RightParen )}
 // CHECK-CCA: TypedefDecl:{TypedText id}
 // CHECK-CCA: ObjCInterfaceDecl:{TypedText MyClass}
 // CHECK-CCA: ObjCInterfaceDecl:{TypedText MySubClass}
-// CHECK-CCA: TypedefDecl:{TypedText SEL}
 // CHECK-CCA: {ResultType Class}{TypedText self}
 // CHECK-CCA: {TypedText super}
 // RUN: c-index-test -code-completion-at=%s:103:6 %s | FileCheck -check-prefix=CHECK-CCB %s
 // CHECK-CCB: ObjCInstanceMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (int)i}{Placeholder , ...}
+// CHECK-CCB: ObjCInstanceMethodDecl:{ResultType int}{TypedText SentinelMethod:}{Placeholder (int)i}{Placeholder , ...}{Text , nil}
 // RUN: c-index-test -code-completion-at=%s:116:14 %s | FileCheck -check-prefix=CHECK-CCC %s
 // CHECK-CCC: ObjCClassMethodDecl:{ResultType int}{TypedText Method}
 // CHECK-CCC: ObjCClassMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (int)i}
@@ -188,29 +200,21 @@ void msg_id(id x) {
 // CHECK-CCE: ObjCClassMethodDecl:{ResultType int}{Informative Method:}{Informative Arg1:}{TypedText Arg2:}{Placeholder (int)i2}
 // CHECK-CCE: ObjCClassMethodDecl:{ResultType int}{Informative Method:}{Informative Arg1:}{TypedText OtherArg:}{Placeholder (id)obj}
 // RUN: c-index-test -code-completion-at=%s:61:11 %s | FileCheck -check-prefix=CHECK-CCF %s
-// CHECK-CCF: {ResultType SEL}{TypedText _cmd}
 // CHECK-CCF: TypedefDecl:{TypedText Class}
 // CHECK-CCF: ObjCInterfaceDecl:{TypedText Foo}
-// CHECK-CCF: FunctionDecl:{ResultType void}{TypedText func}{LeftParen (}{RightParen )}
+// CHECK-CCF-NOT: FunctionDecl:{ResultType void}{TypedText func}{LeftParen (}{RightParen )}
 // CHECK-CCF: TypedefDecl:{TypedText id}
 // CHECK-CCF: ObjCInterfaceDecl:{TypedText MyClass}
 // CHECK-CCF: ObjCInterfaceDecl:{TypedText MySubClass}
-// CHECK-CCF: TypedefDecl:{TypedText SEL}
 // CHECK-CCF: {ResultType Class}{TypedText self}
 // CHECK-CCF: {TypedText super}
 // RUN: c-index-test -code-completion-at=%s:120:6 %s | FileCheck -check-prefix=CHECK-CCG %s
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType id}{TypedText categoryInstanceMethod}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType id}{TypedText instanceMethod1}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText Method}
-// CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (int)i}
-// CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (float)f}{HorizontalSpace  }{Text Arg1:}{Placeholder (int)i1}{HorizontalSpace  }{Text Arg2:}{Placeholder (int)i2}
-// CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (float)f}{HorizontalSpace  }{Text Arg1:}{Placeholder (int)i1}{HorizontalSpace  }{Text OtherArg:}{Placeholder (id)obj}
-// CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (float)f}{HorizontalSpace  }{Text SomeArg:}{Placeholder (int)i1}{HorizontalSpace  }{Text OtherArg:}{Placeholder (id)obj}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText MyInstMethod:}{Placeholder (id)x}{HorizontalSpace  }{Text second:}{Placeholder (id)y}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText MyPrivateInstMethod}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText MySubInstMethod}
-// CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText MySubInstMethod:}{Placeholder (id)obj}
-// CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText OtherMethod:}{Placeholder (float)f}{HorizontalSpace  }{Text Arg1:}{Placeholder (int)i1}{HorizontalSpace  }{Text Arg2:}{Placeholder (int)i2}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType id}{TypedText protocolInstanceMethod:}{Placeholder (int)value}
 // CHECK-CCG: ObjCInstanceMethodDecl:{ResultType int}{TypedText secondProtocolInstanceMethod}
 // RUN: c-index-test -code-completion-at=%s:121:14 %s | FileCheck -check-prefix=CHECK-CCG %s
@@ -220,9 +224,6 @@ void msg_id(id x) {
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType void}{TypedText classMethod2}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText Method}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (int)i}
-// CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (float)f}{HorizontalSpace  }{Text Arg1:}{Placeholder (int)i1}{HorizontalSpace  }{Text Arg2:}{Placeholder (int)i2}
-// CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (float)f}{HorizontalSpace  }{Text Arg1:}{Placeholder (int)i1}{HorizontalSpace  }{Text OtherArg:}{Placeholder (id)obj}
-// CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText Method:}{Placeholder (float)f}{HorizontalSpace  }{Text SomeArg:}{Placeholder (int)i1}{HorizontalSpace  }{Text OtherArg:}{Placeholder (id)obj}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText MyClassMethod:}{Placeholder (id)obj}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText MyPrivateMethod}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText MySubClassMethod}
@@ -230,4 +231,6 @@ void msg_id(id x) {
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType id}{TypedText new}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType int}{TypedText OtherMethod:}{Placeholder (float)f}{HorizontalSpace  }{Text Arg1:}{Placeholder (int)i1}{HorizontalSpace  }{Text Arg2:}{Placeholder (int)i2}
 // CHECK-CCH: ObjCClassMethodDecl:{ResultType id}{TypedText protocolClassMethod}
-
+// RUN: c-index-test -code-completion-at=%s:134:6 %s | FileCheck -check-prefix=CHECK-CCI %s
+// CHECK-CCI: ObjCInstanceMethodDecl:{ResultType void}{TypedText method1} (22)
+// CHECK-CCI: ObjCInstanceMethodDecl:{ResultType void}{TypedText method2} (20)

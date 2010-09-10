@@ -27,7 +27,8 @@ struct make_pair {
 int a0[is_same<metafun_apply2<make_pair, int, float>::type, 
                pair<int, float> >::value? 1 : -1];
 int a1[is_same<
-         typename make_pair::template apply<int, float>,
+         typename make_pair::template apply<int, float>, // expected-warning{{'template' keyword outside of a template}} \
+       // expected-warning{{'typename' occurs outside of a template}}
          make_pair::apply<int, float>
        >::value? 1 : -1];
 
@@ -113,6 +114,6 @@ namespace PR6463 {
   // FIXME: Improve source location info here.
   template<typename T>
   typename A<T>::type& A<T>::a() { // expected-error{{found in multiple base classes}}
-    return x;  // expected-error{{undeclared identifier}}
+    return x;
   }
 }

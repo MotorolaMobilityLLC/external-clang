@@ -7,10 +7,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/CodeGen/CodeGenAction.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/Tool.h"
-#include "clang/Frontend/CodeGenAction.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/DiagnosticOptions.h"
@@ -66,11 +66,11 @@ int Execute(llvm::Module *Mod, char * const *envp) {
 int main(int argc, const char **argv, char * const *envp) {
   void *MainAddr = (void*) (intptr_t) GetExecutablePath;
   llvm::sys::Path Path = GetExecutablePath(argv[0]);
-  TextDiagnosticPrinter DiagClient(llvm::errs(), DiagnosticOptions());
+  TextDiagnosticPrinter *DiagClient =
+    new TextDiagnosticPrinter(llvm::errs(), DiagnosticOptions());
 
-  Diagnostic Diags(&DiagClient);
-  Driver TheDriver(Path.getBasename(), Path.getDirname(),
-                   llvm::sys::getHostTriple(),
+  Diagnostic Diags(DiagClient);
+  Driver TheDriver(Path.str(), llvm::sys::getHostTriple(),
                    "a.out", /*IsProduction=*/false, /*CXXIsProduction=*/false,
                    Diags);
   TheDriver.setTitle("clang interpreter");

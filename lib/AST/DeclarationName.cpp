@@ -11,10 +11,12 @@
 // classes.
 //
 //===----------------------------------------------------------------------===//
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/DeclarationName.h"
 #include "clang/AST/Type.h"
+#include "clang/AST/TypeLoc.h"
 #include "clang/AST/TypeOrdering.h"
-#include "clang/AST/Decl.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
@@ -383,12 +385,12 @@ void DeclarationName::dump() const {
   llvm::errs() << '\n';
 }
 
-DeclarationNameTable::DeclarationNameTable() {
+DeclarationNameTable::DeclarationNameTable(ASTContext &C) : Ctx(C) {
   CXXSpecialNamesImpl = new llvm::FoldingSet<CXXSpecialName>;
   CXXLiteralOperatorNames = new llvm::FoldingSet<CXXLiteralOperatorIdName>;
 
   // Initialize the overloaded operator names.
-  CXXOperatorNames = new CXXOperatorIdName[NUM_OVERLOADED_OPERATORS];
+  CXXOperatorNames = new (Ctx) CXXOperatorIdName[NUM_OVERLOADED_OPERATORS];
   for (unsigned Op = 0; Op < NUM_OVERLOADED_OPERATORS; ++Op) {
     CXXOperatorNames[Op].ExtraKindOrNumArgs
       = Op + DeclarationNameExtra::CXXConversionFunction;
@@ -399,29 +401,12 @@ DeclarationNameTable::DeclarationNameTable() {
 DeclarationNameTable::~DeclarationNameTable() {
   llvm::FoldingSet<CXXSpecialName> *SpecialNames =
     static_cast<llvm::FoldingSet<CXXSpecialName>*>(CXXSpecialNamesImpl);
-  llvm::FoldingSetIterator<CXXSpecialName>
-                           SI = SpecialNames->begin(), SE = SpecialNames->end();
-
-  while (SI != SE) {
-    CXXSpecialName *n = &*SI++;
-    delete n;
-  }
-
-
   llvm::FoldingSet<CXXLiteralOperatorIdName> *LiteralNames
     = static_cast<llvm::FoldingSet<CXXLiteralOperatorIdName>*>
-                                                      (CXXLiteralOperatorNames);
-  llvm::FoldingSetIterator<CXXLiteralOperatorIdName>
-                           LI = LiteralNames->begin(), LE = LiteralNames->end();
-
-  while (LI != LE) {
-    CXXLiteralOperatorIdName *n = &*LI++;
-    delete n;
-  }
+        (CXXLiteralOperatorNames);
 
   delete SpecialNames;
   delete LiteralNames;
-  delete [] CXXOperatorNames;
 }
 
 DeclarationName
@@ -459,7 +444,7 @@ DeclarationNameTable::getCXXSpecialName(DeclarationName::NameKind Kind,
   if (CXXSpecialName *Name = SpecialNames->FindNodeOrInsertPos(ID, InsertPos))
     return DeclarationName(Name);
 
-  CXXSpecialName *SpecialName = new CXXSpecialName;
+  CXXSpecialName *SpecialName = new (Ctx) CXXSpecialName;
   SpecialName->ExtraKindOrNumArgs = EKind;
   SpecialName->Type = Ty;
   SpecialName->FETokenInfo = 0;
@@ -487,7 +472,7 @@ DeclarationNameTable::getCXXLiteralOperatorName(IdentifierInfo *II) {
                                LiteralNames->FindNodeOrInsertPos(ID, InsertPos))
     return DeclarationName (Name);
   
-  CXXLiteralOperatorIdName *LiteralName = new CXXLiteralOperatorIdName;
+  CXXLiteralOperatorIdName *LiteralName = new (Ctx) CXXLiteralOperatorIdName;
   LiteralName->ExtraKindOrNumArgs = DeclarationNameExtra::CXXLiteralOperator;
   LiteralName->ID = II;
 
@@ -501,3 +486,98 @@ getHashValue(clang::DeclarationName N) {
   return DenseMapInfo<void*>::getHashValue(N.getAsOpaquePtr());
 }
 
+DeclarationNameLoc::DeclarationNameLoc(DeclarationName Name) {
+  switch (Name.getNameKind()) {
+  case DeclarationName::Identifier:
+    break;
+  case DeclarationName::CXXConstructorName:
+  case DeclarationName::CXXDestructorName:
+  case DeclarationName::CXXConversionFunctionName:
+    NamedType.TInfo = 0;
+    break;
+  case DeclarationName::CXXOperatorName:
+    CXXOperatorName.BeginOpNameLoc = SourceLocation().getRawEncoding();
+    CXXOperatorName.EndOpNameLoc = SourceLocation().getRawEncoding();
+    break;
+  case DeclarationName::CXXLiteralOperatorName:
+    CXXLiteralOperatorName.OpNameLoc = SourceLocation().getRawEncoding();
+    break;
+  case DeclarationName::ObjCZeroArgSelector:
+  case DeclarationName::ObjCOneArgSelector:
+  case DeclarationName::ObjCMultiArgSelector:
+    // FIXME: ?
+    break;
+  case DeclarationName::CXXUsingDirective:
+    break;
+  }
+}
+
+std::string DeclarationNameInfo::getAsString() const {
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  printName(OS);
+  return OS.str();
+}
+
+void DeclarationNameInfo::printName(llvm::raw_ostream &OS) const {
+  switch (Name.getNameKind()) {
+  case DeclarationName::Identifier:
+  case DeclarationName::ObjCZeroArgSelector:
+  case DeclarationName::ObjCOneArgSelector:
+  case DeclarationName::ObjCMultiArgSelector:
+  case DeclarationName::CXXOperatorName:
+  case DeclarationName::CXXLiteralOperatorName:
+  case DeclarationName::CXXUsingDirective:
+    Name.printName(OS);
+    return;
+
+  case DeclarationName::CXXConstructorName:
+  case DeclarationName::CXXDestructorName:
+  case DeclarationName::CXXConversionFunctionName:
+    if (TypeSourceInfo *TInfo = LocInfo.NamedType.TInfo) {
+      if (Name.getNameKind() == DeclarationName::CXXDestructorName)
+        OS << '~';
+      else if (Name.getNameKind() == DeclarationName::CXXConversionFunctionName)
+        OS << "operator ";
+      OS << TInfo->getType().getAsString();
+    }
+    else
+      Name.printName(OS);
+    return;
+  }
+  assert(false && "Unexpected declaration name kind");
+}
+
+SourceLocation DeclarationNameInfo::getEndLoc() const {
+  switch (Name.getNameKind()) {
+  case DeclarationName::Identifier:
+    return NameLoc;
+
+  case DeclarationName::CXXOperatorName: {
+    unsigned raw = LocInfo.CXXOperatorName.EndOpNameLoc;
+    return SourceLocation::getFromRawEncoding(raw);
+  }
+
+  case DeclarationName::CXXLiteralOperatorName: {
+    unsigned raw = LocInfo.CXXLiteralOperatorName.OpNameLoc;
+    return SourceLocation::getFromRawEncoding(raw);
+  }
+
+  case DeclarationName::CXXConstructorName:
+  case DeclarationName::CXXDestructorName:
+  case DeclarationName::CXXConversionFunctionName:
+    if (TypeSourceInfo *TInfo = LocInfo.NamedType.TInfo)
+      return TInfo->getTypeLoc().getEndLoc();
+    else
+      return NameLoc;
+
+    // DNInfo work in progress: FIXME.
+  case DeclarationName::ObjCZeroArgSelector:
+  case DeclarationName::ObjCOneArgSelector:
+  case DeclarationName::ObjCMultiArgSelector:
+  case DeclarationName::CXXUsingDirective:
+    return NameLoc;
+  }
+  assert(false && "Unexpected declaration name kind");
+  return SourceLocation();
+}

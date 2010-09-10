@@ -98,12 +98,12 @@ public:
   enum StmtClass {
     NoStmtClass = 0,
 #define STMT(CLASS, PARENT) CLASS##Class,
-#define FIRST_STMT(CLASS) firstStmtConstant = CLASS##Class,
-#define LAST_STMT(CLASS) lastStmtConstant = CLASS##Class,
-#define FIRST_EXPR(CLASS) firstExprConstant = CLASS##Class,
-#define LAST_EXPR(CLASS) lastExprConstant = CLASS##Class
-#define ABSTRACT_EXPR(CLASS, PARENT)
-#include "clang/AST/StmtNodes.def"
+#define STMT_RANGE(BASE, FIRST, LAST) \
+        first##BASE##Constant=FIRST##Class, last##BASE##Constant=LAST##Class,
+#define LAST_STMT_RANGE(BASE, FIRST, LAST) \
+        first##BASE##Constant=FIRST##Class, last##BASE##Constant=LAST##Class
+#define ABSTRACT_STMT(STMT)
+#include "clang/AST/StmtNodes.inc"
 };
 private:
   /// \brief The statement class.
@@ -151,21 +151,10 @@ public:
   struct EmptyShell { };
 
 protected:
-  /// DestroyChildren - Invoked by destructors of subclasses of Stmt to
-  ///  recursively release child AST nodes.
-  void DestroyChildren(ASTContext& Ctx);
-
   /// \brief Construct an empty statement.
   explicit Stmt(StmtClass SC, EmptyShell) : sClass(SC), RefCount(1) {
     if (Stmt::CollectingStats()) Stmt::addStmtClass(SC);
   }
-
-  /// \brief Virtual method that performs the actual destruction of
-  /// this statement.
-  ///
-  /// Subclasses should override this method (not Destroy()) to
-  /// provide class-specific destruction.
-  virtual void DoDestroy(ASTContext &Ctx);
 
 public:
   Stmt(StmtClass SC) : sClass(SC), RefCount(1) {
@@ -180,13 +169,6 @@ public:
     return (RefCount >= 1);
   }
 #endif
-
-  /// \brief Destroy the current statement and its children.
-  void Destroy(ASTContext &Ctx) {
-    assert(RefCount >= 1);
-    if (--RefCount == 0)
-      DoDestroy(Ctx);
-  }
 
   /// \brief Increases the reference count for this statement.
   ///
@@ -221,6 +203,7 @@ public:
   /// This is useful in a debugger.
   void dump() const;
   void dump(SourceManager &SM) const;
+  void dump(llvm::raw_ostream &OS, SourceManager &SM) const;
 
   /// dumpAll - This does a dump of the specified AST fragment and all subtrees.
   void dumpAll() const;
@@ -294,9 +277,6 @@ public:
 class DeclStmt : public Stmt {
   DeclGroupRef DG;
   SourceLocation StartLoc, EndLoc;
-
-protected:
-  virtual void DoDestroy(ASTContext &Ctx);
 
 public:
   DeclStmt(DeclGroupRef dg, SourceLocation startLoc,
@@ -615,24 +595,16 @@ public:
 /// IfStmt - This represents an if/then/else.
 ///
 class IfStmt : public Stmt {
-  enum { COND, THEN, ELSE, END_EXPR };
+  enum { VAR, COND, THEN, ELSE, END_EXPR };
   Stmt* SubExprs[END_EXPR];
 
-  /// \brief If non-NULL, the declaration in the "if" statement.
-  VarDecl *Var;
-  
   SourceLocation IfLoc;
   SourceLocation ElseLoc;
   
 public:
-  IfStmt(SourceLocation IL, VarDecl *var, Expr *cond, Stmt *then,
-         SourceLocation EL = SourceLocation(), Stmt *elsev = 0)
-    : Stmt(IfStmtClass), Var(var), IfLoc(IL), ElseLoc(EL)  {
-    SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
-    SubExprs[THEN] = then;
-    SubExprs[ELSE] = elsev;
-  }
-
+  IfStmt(ASTContext &C, SourceLocation IL, VarDecl *var, Expr *cond, 
+         Stmt *then, SourceLocation EL = SourceLocation(), Stmt *elsev = 0);
+  
   /// \brief Build an empty if/then/else statement
   explicit IfStmt(EmptyShell Empty) : Stmt(IfStmtClass, Empty) { }
 
@@ -644,8 +616,8 @@ public:
   ///   printf("x is %d", x);
   /// }
   /// \endcode
-  VarDecl *getConditionVariable() const { return Var; }
-  void setConditionVariable(VarDecl *V) { Var = V; }
+  VarDecl *getConditionVariable() const;
+  void setConditionVariable(ASTContext &C, VarDecl *V);
   
   const Expr *getCond() const { return reinterpret_cast<Expr*>(SubExprs[COND]);}
   void setCond(Expr *E) { SubExprs[COND] = reinterpret_cast<Stmt *>(E); }
@@ -679,31 +651,19 @@ public:
   // over the initialization expression referenced by the condition variable.
   virtual child_iterator child_begin();
   virtual child_iterator child_end();
-
-protected:
-  virtual void DoDestroy(ASTContext &Ctx);
 };
 
 /// SwitchStmt - This represents a 'switch' stmt.
 ///
 class SwitchStmt : public Stmt {
-  enum { COND, BODY, END_EXPR };
+  enum { VAR, COND, BODY, END_EXPR };
   Stmt* SubExprs[END_EXPR];
-  VarDecl *Var;
   // This points to a linked list of case and default statements.
   SwitchCase *FirstCase;
   SourceLocation SwitchLoc;
 
-protected:
-  virtual void DoDestroy(ASTContext &Ctx);
-
 public:
-  SwitchStmt(VarDecl *Var, Expr *cond) 
-    : Stmt(SwitchStmtClass), Var(Var), FirstCase(0) 
-  {
-    SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
-    SubExprs[BODY] = NULL;
-  }
+  SwitchStmt(ASTContext &C, VarDecl *Var, Expr *cond);
 
   /// \brief Build a empty switch statement.
   explicit SwitchStmt(EmptyShell Empty) : Stmt(SwitchStmtClass, Empty) { }
@@ -717,8 +677,8 @@ public:
   ///   // ...
   /// }
   /// \endcode
-  VarDecl *getConditionVariable() const { return Var; }
-  void setConditionVariable(VarDecl *V) { Var = V; }
+  VarDecl *getConditionVariable() const;
+  void setConditionVariable(ASTContext &C, VarDecl *V);
 
   const Expr *getCond() const { return reinterpret_cast<Expr*>(SubExprs[COND]);}
   const Stmt *getBody() const { return SubExprs[BODY]; }
@@ -766,18 +726,12 @@ public:
 /// WhileStmt - This represents a 'while' stmt.
 ///
 class WhileStmt : public Stmt {
-  enum { COND, BODY, END_EXPR };
-  VarDecl *Var;
+  enum { VAR, COND, BODY, END_EXPR };
   Stmt* SubExprs[END_EXPR];
   SourceLocation WhileLoc;
 public:
-  WhileStmt(VarDecl *Var, Expr *cond, Stmt *body, SourceLocation WL)
-    : Stmt(WhileStmtClass), Var(Var) 
-  {
-    SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
-    SubExprs[BODY] = body;
-    WhileLoc = WL;
-  }
+  WhileStmt(ASTContext &C, VarDecl *Var, Expr *cond, Stmt *body, 
+            SourceLocation WL);
 
   /// \brief Build an empty while statement.
   explicit WhileStmt(EmptyShell Empty) : Stmt(WhileStmtClass, Empty) { }
@@ -790,8 +744,8 @@ public:
   ///   // ...
   /// }
   /// \endcode
-  VarDecl *getConditionVariable() const { return Var; }
-  void setConditionVariable(VarDecl *V) { Var = V; }
+  VarDecl *getConditionVariable() const;
+  void setConditionVariable(ASTContext &C, VarDecl *V);
 
   Expr *getCond() { return reinterpret_cast<Expr*>(SubExprs[COND]); }
   const Expr *getCond() const { return reinterpret_cast<Expr*>(SubExprs[COND]);}
@@ -814,9 +768,6 @@ public:
   // Iterators
   virtual child_iterator child_begin();
   virtual child_iterator child_end();
-  
-protected:
-  virtual void DoDestroy(ASTContext &Ctx);
 };
 
 /// DoStmt - This represents a 'do/while' stmt.
@@ -873,23 +824,14 @@ public:
 /// specified in the source.
 ///
 class ForStmt : public Stmt {
-  enum { INIT, COND, INC, BODY, END_EXPR };
+  enum { INIT, CONDVAR, COND, INC, BODY, END_EXPR };
   Stmt* SubExprs[END_EXPR]; // SubExprs[INIT] is an expression or declstmt.
-  VarDecl *CondVar;
   SourceLocation ForLoc;
   SourceLocation LParenLoc, RParenLoc;
 
 public:
-  ForStmt(Stmt *Init, Expr *Cond, VarDecl *condVar, Expr *Inc, Stmt *Body, 
-          SourceLocation FL, SourceLocation LP, SourceLocation RP)
-    : Stmt(ForStmtClass), CondVar(condVar), ForLoc(FL), LParenLoc(LP), 
-      RParenLoc(RP) 
-  {
-    SubExprs[INIT] = Init;
-    SubExprs[COND] = reinterpret_cast<Stmt*>(Cond);
-    SubExprs[INC] = reinterpret_cast<Stmt*>(Inc);
-    SubExprs[BODY] = Body;
-  }
+  ForStmt(ASTContext &C, Stmt *Init, Expr *Cond, VarDecl *condVar, Expr *Inc, 
+          Stmt *Body, SourceLocation FL, SourceLocation LP, SourceLocation RP);
 
   /// \brief Build an empty for statement.
   explicit ForStmt(EmptyShell Empty) : Stmt(ForStmtClass, Empty) { }
@@ -904,8 +846,8 @@ public:
   ///   // ...
   /// }
   /// \endcode
-  VarDecl *getConditionVariable() const { return CondVar; }
-  void setConditionVariable(VarDecl *V) { CondVar = V; }
+  VarDecl *getConditionVariable() const;
+  void setConditionVariable(ASTContext &C, VarDecl *V);
   
   Expr *getCond() { return reinterpret_cast<Expr*>(SubExprs[COND]); }
   Expr *getInc()  { return reinterpret_cast<Expr*>(SubExprs[INC]); }
@@ -939,9 +881,6 @@ public:
   // Iterators
   virtual child_iterator child_begin();
   virtual child_iterator child_end();
-  
-protected:
-  virtual void DoDestroy(ASTContext &Ctx);
 };
 
 /// GotoStmt - This represents a direct goto.
@@ -1083,9 +1022,15 @@ public:
 class ReturnStmt : public Stmt {
   Stmt *RetExpr;
   SourceLocation RetLoc;
+  const VarDecl *NRVOCandidate;
+  
 public:
-  ReturnStmt(SourceLocation RL, Expr *E = 0) : Stmt(ReturnStmtClass),
-    RetExpr((Stmt*) E), RetLoc(RL) {}
+  ReturnStmt(SourceLocation RL)
+    : Stmt(ReturnStmtClass), RetExpr(0), RetLoc(RL), NRVOCandidate(0) { }
+
+  ReturnStmt(SourceLocation RL, Expr *E, const VarDecl *NRVOCandidate)
+    : Stmt(ReturnStmtClass), RetExpr((Stmt*) E), RetLoc(RL),
+      NRVOCandidate(NRVOCandidate) {}
 
   /// \brief Build an empty return expression.
   explicit ReturnStmt(EmptyShell Empty) : Stmt(ReturnStmtClass, Empty) { }
@@ -1097,6 +1042,14 @@ public:
   SourceLocation getReturnLoc() const { return RetLoc; }
   void setReturnLoc(SourceLocation L) { RetLoc = L; }
 
+  /// \brief Retrieve the variable that might be used for the named return
+  /// value optimization.
+  ///
+  /// The optimization itself can only be performed if the variable is
+  /// also marked as an NRVO object.
+  const VarDecl *getNRVOCandidate() const { return NRVOCandidate; }
+  void setNRVOCandidate(const VarDecl *Var) { NRVOCandidate = Var; }
+  
   virtual SourceRange getSourceRange() const;
 
   static bool classof(const Stmt *T) {
@@ -1128,9 +1081,6 @@ class AsmStmt : public Stmt {
   StringLiteral **Constraints;
   Stmt **Exprs;
   StringLiteral **Clobbers;
-
-protected:
-  virtual void DoDestroy(ASTContext &Ctx);
   
 public:
   AsmStmt(ASTContext &C, SourceLocation asmloc, bool issimple, bool isvolatile, 

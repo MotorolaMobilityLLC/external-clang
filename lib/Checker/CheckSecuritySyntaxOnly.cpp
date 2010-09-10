@@ -41,8 +41,8 @@ class WalkAST : public StmtVisitor<WalkAST> {
 
 public:
   WalkAST(BugReporter &br) : BR(br),
-			     II_gets(0), II_getpw(0), II_mktemp(0),
-			     II_rand(), II_random(0), II_setid(),
+                             II_gets(0), II_getpw(0), II_mktemp(0),
+                             II_rand(), II_random(0), II_setid(),
                  CheckRand(isArc4RandomAvailable(BR.getContext())) {}
 
   // Statement visitor methods.
@@ -131,7 +131,7 @@ GetIncrementedVar(const Expr *expr, const VarDecl *x, const VarDecl *y) {
 
   if (const BinaryOperator *B = dyn_cast<BinaryOperator>(expr)) {
     if (!(B->isAssignmentOp() || B->isCompoundAssignmentOp() ||
-          B->getOpcode() == BinaryOperator::Comma))
+          B->getOpcode() == BO_Comma))
       return NULL;
 
     if (const DeclRefExpr *lhs = GetIncrementedVar(B->getLHS(), x, y))
@@ -191,8 +191,8 @@ void WalkAST::CheckLoopConditionForFloat(const ForStmt *FS) {
   const DeclRefExpr *drRHS = dyn_cast<DeclRefExpr>(B->getRHS()->IgnoreParens());
 
   // Does at least one of the variables have a floating point type?
-  drLHS = drLHS && drLHS->getType()->isFloatingType() ? drLHS : NULL;
-  drRHS = drRHS && drRHS->getType()->isFloatingType() ? drRHS : NULL;
+  drLHS = drLHS && drLHS->getType()->isRealFloatingType() ? drLHS : NULL;
+  drRHS = drRHS && drRHS->getType()->isRealFloatingType() ? drRHS : NULL;
 
   if (!drLHS && !drRHS)
     return;
@@ -217,7 +217,7 @@ void WalkAST::CheckLoopConditionForFloat(const ForStmt *FS) {
   llvm::SmallString<256> sbuf;
   llvm::raw_svector_ostream os(sbuf);
 
-  os << "Variable '" << drCond->getDecl()->getNameAsCString()
+  os << "Variable '" << drCond->getDecl()->getName()
      << "' with floating point type '" << drCond->getType().getAsString()
      << "' should not be used as a loop counter";
 
@@ -332,10 +332,10 @@ void WalkAST::CheckCall_mktemp(const CallExpr *CE, const FunctionDecl *FD) {
   // Issue a waring.
   SourceRange R = CE->getCallee()->getSourceRange();
   BR.EmitBasicReport("Potential insecure temporary file in call 'mktemp'",
-		     "Security",
-		     "Call to function 'mktemp' is insecure as it always "
-		     "creates or uses insecure temporary file.  Use 'mkstemp' instead",
-		     CE->getLocStart(), &R, 1);
+                     "Security",
+                     "Call to function 'mktemp' is insecure as it always "
+                     "creates or uses insecure temporary file.  Use 'mkstemp' instead",
+                     CE->getLocStart(), &R, 1);
 }
 
 //===----------------------------------------------------------------------===//

@@ -183,7 +183,7 @@ void DeclPrinter::Print(AccessSpecifier AS) {
   case AS_none:      assert(0 && "No access specifier!"); break;
   case AS_public:    Out << "public"; break;
   case AS_protected: Out << "protected"; break;
-  case AS_private:   Out << " private"; break;
+  case AS_private:   Out << "private"; break;
   }
 }
 
@@ -195,31 +195,27 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
   if (Indent)
     Indentation += Policy.Indentation;
 
-  bool PrintAccess = isa<CXXRecordDecl>(DC);
-  AccessSpecifier CurAS = AS_none;
-
   llvm::SmallVector<Decl*, 2> Decls;
   for (DeclContext::decl_iterator D = DC->decls_begin(), DEnd = DC->decls_end();
        D != DEnd; ++D) {
+
+    // Don't print ObjCIvarDecls, as they are printed when visiting the
+    // containing ObjCInterfaceDecl.
+    if (isa<ObjCIvarDecl>(*D))
+      continue;
+
     if (!Policy.Dump) {
       // Skip over implicit declarations in pretty-printing mode.
       if (D->isImplicit()) continue;
       // FIXME: Ugly hack so we don't pretty-print the builtin declaration
-      // of __builtin_va_list.  There should be some other way to check that.
-      if (isa<NamedDecl>(*D) && cast<NamedDecl>(*D)->getNameAsString() ==
-          "__builtin_va_list")
-        continue;
-    }
-
-    if (PrintAccess) {
-      AccessSpecifier AS = D->getAccess();
-
-      if (AS != CurAS) {
-        if (Indent)
-          this->Indent(Indentation - Policy.Indentation);
-        Print(AS);
-        Out << ":\n";
-        CurAS = AS;
+      // of __builtin_va_list or __[u]int128_t.  There should be some other way
+      // to check that.
+      if (NamedDecl *ND = dyn_cast<NamedDecl>(*D)) {
+        if (IdentifierInfo *II = ND->getIdentifier()) {
+          if (II->isStr("__builtin_va_list") ||
+              II->isStr("__int128_t") || II->isStr("__uint128_t"))
+            continue;
+        }
       }
     }
 
@@ -251,6 +247,16 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
       Decls.push_back(*D);
       continue;
     }
+
+    if (isa<AccessSpecDecl>(*D)) {
+      Indentation -= Policy.Indentation;
+      this->Indent();
+      Print(D->getAccess());
+      Out << ":\n";
+      Indentation += Policy.Indentation;
+      continue;
+    }
+
     this->Indent();
     Visit(*D);
 
@@ -329,10 +335,11 @@ void DeclPrinter::VisitEnumConstantDecl(EnumConstantDecl *D) {
 void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
   if (!Policy.SuppressSpecifiers) {
     switch (D->getStorageClass()) {
-    case FunctionDecl::None: break;
-    case FunctionDecl::Extern: Out << "extern "; break;
-    case FunctionDecl::Static: Out << "static "; break;
-    case FunctionDecl::PrivateExtern: Out << "__private_extern__ "; break;
+    case SC_None: break;
+    case SC_Extern: Out << "extern "; break;
+    case SC_Static: Out << "static "; break;
+    case SC_PrivateExtern: Out << "__private_extern__ "; break;
+    case SC_Auto: case SC_Register: llvm_unreachable("invalid for functions");
     }
 
     if (D->isInlineSpecified())           Out << "inline ";
@@ -341,7 +348,7 @@ void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
 
   PrintingPolicy SubPolicy(Policy);
   SubPolicy.SuppressSpecifiers = false;
-  std::string Proto = D->getNameAsString();
+  std::string Proto = D->getNameInfo().getAsString();
   if (isa<FunctionType>(D->getType().getTypePtr())) {
     const FunctionType *AFT = D->getType()->getAs<FunctionType>();
 
@@ -406,7 +413,8 @@ void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
             FieldDecl *FD = BMInitializer->getMember();
             Out << FD;
           } else {
-            Out << QualType(BMInitializer->getBaseClass(), 0).getAsString();
+            Out << QualType(BMInitializer->getBaseClass(),
+                            0).getAsString(Policy);
           }
           
           Out << "(";
@@ -498,7 +506,7 @@ void DeclPrinter::VisitFieldDecl(FieldDecl *D) {
 }
 
 void DeclPrinter::VisitVarDecl(VarDecl *D) {
-  if (!Policy.SuppressSpecifiers && D->getStorageClass() != VarDecl::None)
+  if (!Policy.SuppressSpecifiers && D->getStorageClass() != SC_None)
     Out << VarDecl::getStorageClassSpecifierString(D->getStorageClass()) << " ";
 
   if (!Policy.SuppressSpecifiers && D->isThreadSpecified())
@@ -653,7 +661,11 @@ void DeclPrinter::VisitTemplateDecl(TemplateDecl *D) {
 
   Out << "> ";
 
-  Visit(D->getTemplatedDecl());
+  if (isa<TemplateTemplateParmDecl>(D)) {
+    Out << "class " << D->getName();
+  } else {
+    Visit(D->getTemplatedDecl());
+  }
 }
 
 //----------------------------------------------------------------------------

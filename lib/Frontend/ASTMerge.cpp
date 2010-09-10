@@ -26,7 +26,8 @@ bool ASTMergeAction::BeginSourceFileAction(CompilerInstance &CI,
   // FIXME: This is a hack. We need a better way to communicate the
   // AST file, compiler instance, and file name than member variables
   // of FrontendAction.
-  AdaptedAction->setCurrentFile(getCurrentFile(), takeCurrentASTUnit());
+  AdaptedAction->setCurrentFile(getCurrentFile(), getCurrentFileKind(),
+                                takeCurrentASTUnit());
   AdaptedAction->setCompilerInstance(&CI);
   return AdaptedAction->BeginSourceFileAction(CI, Filename);
 }
@@ -39,9 +40,15 @@ void ASTMergeAction::ExecuteAction() {
                                        &CI.getASTContext());
   llvm::IntrusiveRefCntPtr<Diagnostic> Diags(&CI.getDiagnostics());
   for (unsigned I = 0, N = ASTFiles.size(); I != N; ++I) {
-    ASTUnit *Unit = ASTUnit::LoadFromPCHFile(ASTFiles[I], Diags, false);
+    ASTUnit *Unit = ASTUnit::LoadFromASTFile(ASTFiles[I], Diags, false);
     if (!Unit)
       continue;
+
+    // Reset the argument -> string function so that it has the AST
+    // context we want, since the Sema object created by
+    // LoadFromASTFile will override it.
+    CI.getDiagnostics().SetArgToStringFn(&FormatASTNodeDiagnosticArgument,
+                                         &CI.getASTContext());
 
     ASTImporter Importer(CI.getDiagnostics(),
                          CI.getASTContext(), 
@@ -95,8 +102,8 @@ bool ASTMergeAction::hasPCHSupport() const {
   return AdaptedAction->hasPCHSupport();
 }
 
-bool ASTMergeAction::hasASTSupport() const {
-  return AdaptedAction->hasASTSupport();
+bool ASTMergeAction::hasASTFileSupport() const {
+  return AdaptedAction->hasASTFileSupport();
 }
 
 bool ASTMergeAction::hasCodeCompletionSupport() const {

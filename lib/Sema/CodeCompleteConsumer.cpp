@@ -11,11 +11,13 @@
 //
 //===----------------------------------------------------------------------===//
 #include "clang/Sema/CodeCompleteConsumer.h"
+#include "clang/Sema/Scope.h"
+#include "clang/Sema/Sema.h"
 #include "clang/AST/DeclCXX.h"
-#include "clang/Parse/Scope.h"
+#include "clang/AST/DeclObjC.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang-c/Index.h"
-#include "Sema.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -210,9 +212,10 @@ CodeCompletionString::Chunk::Destroy() {
   }
 }
 
-CodeCompletionString::~CodeCompletionString() {
+void CodeCompletionString::clear() {
   std::for_each(Chunks.begin(), Chunks.end(), 
                 std::mem_fun_ref(&Chunk::Destroy));
+  Chunks.clear();
 }
 
 std::string CodeCompletionString::getAsString() const {
@@ -233,8 +236,7 @@ std::string CodeCompletionString::getAsString() const {
     default: OS << C->Text; break;
     }
   }
-  OS.flush();
-  return Result;
+  return OS.str();
 }
 
 const char *CodeCompletionString::getTypedText() const {
@@ -245,8 +247,10 @@ const char *CodeCompletionString::getTypedText() const {
   return 0;
 }
 
-CodeCompletionString *CodeCompletionString::Clone() const {
-  CodeCompletionString *Result = new CodeCompletionString;
+CodeCompletionString *
+CodeCompletionString::Clone(CodeCompletionString *Result) const {
+  if (!Result)
+    Result = new CodeCompletionString;
   for (iterator C = begin(), CEnd = end(); C != CEnd; ++C)
     Result->AddChunk(C->Clone());
   return Result;
@@ -310,15 +314,13 @@ void CodeCompletionString::Serialize(llvm::raw_ostream &OS) const {
   }
 }
 
-CodeCompletionString *CodeCompletionString::Deserialize(const char *&Str,
-                                                        const char *StrEnd) {
+bool CodeCompletionString::Deserialize(const char *&Str, const char *StrEnd) {
   if (Str == StrEnd || *Str == 0)
-    return 0;
+    return false;
 
-  CodeCompletionString *Result = new CodeCompletionString;
   unsigned NumBlocks;
   if (ReadUnsigned(Str, StrEnd, NumBlocks))
-    return Result;
+    return false;
 
   for (unsigned I = 0; I != NumBlocks; ++I) {
     if (Str + 1 >= StrEnd)
@@ -327,7 +329,7 @@ CodeCompletionString *CodeCompletionString::Deserialize(const char *&Str,
     // Parse the next kind.
     unsigned KindValue;
     if (ReadUnsigned(Str, StrEnd, KindValue))
-      return Result;
+      return false;
 
     switch (ChunkKind Kind = (ChunkKind)KindValue) {
     case CK_TypedText:
@@ -338,16 +340,17 @@ CodeCompletionString *CodeCompletionString::Deserialize(const char *&Str,
     case CK_CurrentParameter: {
       unsigned StrLen;
       if (ReadUnsigned(Str, StrEnd, StrLen) || (Str + StrLen > StrEnd))
-        return Result;
+        return false;
 
-      Result->AddChunk(Chunk(Kind, StringRef(Str, StrLen)));
+      AddChunk(Chunk(Kind, StringRef(Str, StrLen)));
       Str += StrLen;
       break;
     }
 
     case CK_Optional: {
-      std::auto_ptr<CodeCompletionString> Optional(Deserialize(Str, StrEnd));
-      Result->AddOptionalChunk(Optional);
+      std::auto_ptr<CodeCompletionString> Optional(new CodeCompletionString());
+      if (Optional->Deserialize(Str, StrEnd))
+        AddOptionalChunk(Optional);
       break;
     }
 
@@ -365,19 +368,38 @@ CodeCompletionString *CodeCompletionString::Deserialize(const char *&Str,
     case CK_Equal:
     case CK_HorizontalSpace:
     case CK_VerticalSpace:
-      Result->AddChunk(Chunk(Kind));
+      AddChunk(Chunk(Kind));
       break;      
     }
   };
   
-  return Result;
+  return true;
 }
 
-void CodeCompleteConsumer::Result::Destroy() {
+void CodeCompletionResult::Destroy() {
   if (Kind == RK_Pattern) {
     delete Pattern;
     Pattern = 0;
   }
+}
+
+unsigned CodeCompletionResult::getPriorityFromDecl(NamedDecl *ND) {
+  if (!ND)
+    return CCP_Unlikely;
+  
+  // Context-based decisions.
+  DeclContext *DC = ND->getDeclContext()->getLookupContext();
+  if (DC->isFunctionOrMethod() || isa<BlockDecl>(DC))
+    return CCP_LocalDeclaration;
+  if (DC->isRecord() || isa<ObjCContainerDecl>(DC))
+    return CCP_MemberDeclaration;
+  
+  // Content-based decisions.
+  if (isa<EnumConstantDecl>(ND))
+    return CCP_Constant;
+  if (isa<TypeDecl>(ND) || isa<ObjCInterfaceDecl>(ND))
+    return CCP_Type;
+  return CCP_Declaration;
 }
 
 //===----------------------------------------------------------------------===//
@@ -418,13 +440,16 @@ CodeCompleteConsumer::~CodeCompleteConsumer() { }
 
 void 
 PrintingCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &SemaRef,
-                                                         Result *Results, 
+                                                 CodeCompletionContext Context,
+                                                 CodeCompletionResult *Results,
                                                          unsigned NumResults) {
+  std::stable_sort(Results, Results + NumResults);
+  
   // Print the results.
   for (unsigned I = 0; I != NumResults; ++I) {
     OS << "COMPLETION: ";
     switch (Results[I].Kind) {
-    case Result::RK_Declaration:
+    case CodeCompletionResult::RK_Declaration:
       OS << Results[I].Declaration;
       if (Results[I].Hidden)
         OS << " (Hidden)";
@@ -437,11 +462,11 @@ PrintingCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &SemaRef,
       OS << '\n';
       break;
       
-    case Result::RK_Keyword:
+    case CodeCompletionResult::RK_Keyword:
       OS << Results[I].Keyword << '\n';
       break;
         
-    case Result::RK_Macro: {
+    case CodeCompletionResult::RK_Macro: {
       OS << Results[I].Macro->getName();
       if (CodeCompletionString *CCS 
             = Results[I].CreateCodeCompletionString(SemaRef)) {
@@ -452,18 +477,13 @@ PrintingCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &SemaRef,
       break;
     }
         
-    case Result::RK_Pattern: {
+    case CodeCompletionResult::RK_Pattern: {
       OS << "Pattern : " 
          << Results[I].Pattern->getAsString() << '\n';
       break;
     }
     }
   }
-  
-  // Once we've printed the code-completion results, suppress remaining
-  // diagnostics.
-  // FIXME: Move this somewhere else!
-  SemaRef.PP.getDiagnostics().setSuppressAllDiagnostics();
 }
 
 void 
@@ -478,132 +498,201 @@ PrintingCodeCompleteConsumer::ProcessOverloadCandidates(Sema &SemaRef,
       delete CCS;
     }
   }
+}
 
-  // Once we've printed the code-completion results, suppress remaining
-  // diagnostics.
-  // FIXME: Move this somewhere else!
-  SemaRef.PP.getDiagnostics().setSuppressAllDiagnostics();
+void CodeCompletionResult::computeCursorKindAndAvailability() {
+  switch (Kind) {
+  case RK_Declaration:
+    // Set the availability based on attributes.
+    Availability = CXAvailability_Available;      
+    if (Declaration->getAttr<UnavailableAttr>())
+      Availability = CXAvailability_NotAvailable;
+    else if (Declaration->getAttr<DeprecatedAttr>())
+      Availability = CXAvailability_Deprecated;
+      
+    switch (Declaration->getKind()) {
+    case Decl::Record:
+    case Decl::CXXRecord:
+    case Decl::ClassTemplateSpecialization: {
+      RecordDecl *Record = cast<RecordDecl>(Declaration);
+      if (Record->isStruct())
+        CursorKind = CXCursor_StructDecl;
+      else if (Record->isUnion())
+        CursorKind = CXCursor_UnionDecl;
+      else
+        CursorKind = CXCursor_ClassDecl;
+      break;
+    }
+      
+    case Decl::ObjCMethod: {
+      ObjCMethodDecl *Method = cast<ObjCMethodDecl>(Declaration);
+      if (Method->isInstanceMethod())
+          CursorKind = CXCursor_ObjCInstanceMethodDecl;
+      else
+        CursorKind = CXCursor_ObjCClassMethodDecl;
+      break;
+    }
+      
+    case Decl::Typedef:
+      CursorKind = CXCursor_TypedefDecl;
+      break;
+        
+    case Decl::Enum:
+      CursorKind = CXCursor_EnumDecl;
+      break;
+        
+    case Decl::Field:
+      CursorKind = CXCursor_FieldDecl;
+      break;
+        
+    case Decl::EnumConstant:
+      CursorKind = CXCursor_EnumConstantDecl;
+      break;      
+        
+    case Decl::Function:
+    case Decl::CXXMethod:
+    case Decl::CXXConstructor:
+    case Decl::CXXDestructor:
+    case Decl::CXXConversion:
+      CursorKind = CXCursor_FunctionDecl;
+      if (cast<FunctionDecl>(Declaration)->isDeleted())
+        Availability = CXAvailability_NotAvailable;
+      break;
+        
+    case Decl::Var:
+      CursorKind = CXCursor_VarDecl;
+      break;
+        
+    case Decl::ParmVar:
+      CursorKind = CXCursor_ParmDecl;
+      break;
+        
+    case Decl::ObjCInterface:
+      CursorKind = CXCursor_ObjCInterfaceDecl;
+      break;
+        
+    case Decl::ObjCCategory:
+      CursorKind = CXCursor_ObjCCategoryDecl;
+      break;
+        
+    case Decl::ObjCProtocol:
+      CursorKind = CXCursor_ObjCProtocolDecl;
+      break;
+
+    case Decl::ObjCProperty:
+      CursorKind = CXCursor_ObjCPropertyDecl;
+      break;
+        
+    case Decl::ObjCIvar:
+      CursorKind = CXCursor_ObjCIvarDecl;
+      break;
+        
+    case Decl::ObjCImplementation:
+      CursorKind = CXCursor_ObjCImplementationDecl;
+      break;
+        
+    case Decl::ObjCCategoryImpl:
+      CursorKind = CXCursor_ObjCCategoryImplDecl;
+      break;
+        
+    default:
+      CursorKind = CXCursor_NotImplemented;
+      break;
+    }
+    break;
+
+  case RK_Macro:
+    Availability = CXAvailability_Available;      
+    CursorKind = CXCursor_MacroDefinition;
+    break;
+      
+  case RK_Keyword:
+    Availability = CXAvailability_Available;      
+    CursorKind = CXCursor_NotImplemented;
+    break;
+      
+  case RK_Pattern:
+    // Do nothing: Patterns can come with cursor kinds!
+    break;
+  }
+}
+
+/// \brief Retrieve the name that should be used to order a result.
+///
+/// If the name needs to be constructed as a string, that string will be
+/// saved into Saved and the returned StringRef will refer to it.
+static llvm::StringRef getOrderedName(const CodeCompletionResult &R,
+                                    std::string &Saved) {
+  switch (R.Kind) {
+    case CodeCompletionResult::RK_Keyword:
+      return R.Keyword;
+      
+    case CodeCompletionResult::RK_Pattern:
+      return R.Pattern->getTypedText();
+      
+    case CodeCompletionResult::RK_Macro:
+      return R.Macro->getName();
+      
+    case CodeCompletionResult::RK_Declaration:
+      // Handle declarations below.
+      break;
+  }
+  
+  DeclarationName Name = R.Declaration->getDeclName();
+  
+  // If the name is a simple identifier (by far the common case), or a
+  // zero-argument selector, just return a reference to that identifier.
+  if (IdentifierInfo *Id = Name.getAsIdentifierInfo())
+    return Id->getName();
+  if (Name.isObjCZeroArgSelector())
+    if (IdentifierInfo *Id
+        = Name.getObjCSelector().getIdentifierInfoForSlot(0))
+      return Id->getName();
+  
+  Saved = Name.getAsString();
+  return Saved;
+}
+    
+bool clang::operator<(const CodeCompletionResult &X, 
+                      const CodeCompletionResult &Y) {
+  std::string XSaved, YSaved;
+  llvm::StringRef XStr = getOrderedName(X, XSaved);
+  llvm::StringRef YStr = getOrderedName(Y, YSaved);
+  int cmp = XStr.compare_lower(YStr);
+  if (cmp)
+    return cmp < 0;
+  
+  // If case-insensitive comparison fails, try case-sensitive comparison.
+  cmp = XStr.compare(YStr);
+  if (cmp)
+    return cmp < 0;
+
+  // Non-hidden names precede hidden names.
+  if (X.Hidden != Y.Hidden)
+    return !X.Hidden;
+  
+  // Non-nested-name-specifiers precede nested-name-specifiers.
+  if (X.StartsNestedNameSpecifier != Y.StartsNestedNameSpecifier)
+    return !X.StartsNestedNameSpecifier;
+  
+  return false;
 }
 
 void 
 CIndexCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &SemaRef,
-                                                       Result *Results, 
+                                                 CodeCompletionContext Context,
+                                                 CodeCompletionResult *Results,
                                                        unsigned NumResults) {
   // Print the results.
   for (unsigned I = 0; I != NumResults; ++I) {
-    CXCursorKind Kind = CXCursor_NotImplemented;
-
-    switch (Results[I].Kind) {
-    case Result::RK_Declaration:
-      switch (Results[I].Declaration->getKind()) {
-      case Decl::Record:
-      case Decl::CXXRecord:
-      case Decl::ClassTemplateSpecialization: {
-        RecordDecl *Record = cast<RecordDecl>(Results[I].Declaration);
-        if (Record->isStruct())
-          Kind = CXCursor_StructDecl;
-        else if (Record->isUnion())
-          Kind = CXCursor_UnionDecl;
-        else
-          Kind = CXCursor_ClassDecl;
-        break;
-      }
-        
-      case Decl::ObjCMethod: {
-        ObjCMethodDecl *Method = cast<ObjCMethodDecl>(Results[I].Declaration);
-        if (Method->isInstanceMethod())
-            Kind = CXCursor_ObjCInstanceMethodDecl;
-        else
-          Kind = CXCursor_ObjCClassMethodDecl;
-        break;
-      }
-        
-      case Decl::Typedef:
-        Kind = CXCursor_TypedefDecl;
-        break;
-        
-      case Decl::Enum:
-        Kind = CXCursor_EnumDecl;
-        break;
-        
-      case Decl::Field:
-        Kind = CXCursor_FieldDecl;
-        break;
-        
-      case Decl::EnumConstant:
-        Kind = CXCursor_EnumConstantDecl;
-        break;
-        
-      case Decl::Function:
-      case Decl::CXXMethod:
-      case Decl::CXXConstructor:
-      case Decl::CXXDestructor:
-      case Decl::CXXConversion:
-        Kind = CXCursor_FunctionDecl;
-        break;
-        
-      case Decl::Var:
-        Kind = CXCursor_VarDecl;
-        break;
-        
-      case Decl::ParmVar:
-        Kind = CXCursor_ParmDecl;
-        break;
-        
-      case Decl::ObjCInterface:
-        Kind = CXCursor_ObjCInterfaceDecl;
-        break;
-        
-      case Decl::ObjCCategory:
-        Kind = CXCursor_ObjCCategoryDecl;
-        break;
-        
-      case Decl::ObjCProtocol:
-        Kind = CXCursor_ObjCProtocolDecl;
-        break;
-        
-      case Decl::ObjCProperty:
-        Kind = CXCursor_ObjCPropertyDecl;
-        break;
-        
-      case Decl::ObjCIvar:
-        Kind = CXCursor_ObjCIvarDecl;
-        break;
-        
-      case Decl::ObjCImplementation:
-        Kind = CXCursor_ObjCImplementationDecl;
-        break;
-        
-      case Decl::ObjCCategoryImpl:
-        Kind = CXCursor_ObjCCategoryImplDecl;
-        break;
-        
-      default:
-        break;
-      }
-      break;
-
-    case Result::RK_Macro:
-      Kind = CXCursor_MacroDefinition;
-      break;
-
-    case Result::RK_Keyword:
-    case Result::RK_Pattern:
-      Kind = CXCursor_NotImplemented;
-      break;
-    }
-
-    WriteUnsigned(OS, Kind);
+    WriteUnsigned(OS, Results[I].CursorKind);
+    WriteUnsigned(OS, Results[I].Priority);
+    WriteUnsigned(OS, Results[I].Availability);
     CodeCompletionString *CCS = Results[I].CreateCodeCompletionString(SemaRef);
     assert(CCS && "No code-completion string?");
     CCS->Serialize(OS);
     delete CCS;
   }
-  
-  // Once we've printed the code-completion results, suppress remaining
-  // diagnostics.
-  // FIXME: Move this somewhere else!
-  SemaRef.PP.getDiagnostics().setSuppressAllDiagnostics();
 }
 
 void 
@@ -613,15 +702,12 @@ CIndexCodeCompleteConsumer::ProcessOverloadCandidates(Sema &SemaRef,
                                                        unsigned NumCandidates) {
   for (unsigned I = 0; I != NumCandidates; ++I) {
     WriteUnsigned(OS, CXCursor_NotImplemented);
+    WriteUnsigned(OS, /*Priority=*/I);
+    WriteUnsigned(OS, /*Availability=*/CXAvailability_Available);
     CodeCompletionString *CCS
       = Candidates[I].CreateSignatureString(CurrentArg, SemaRef);
     assert(CCS && "No code-completion string?");
     CCS->Serialize(OS);
     delete CCS;
   }
-  
-  // Once we've printed the code-completion results, suppress remaining
-  // diagnostics.
-  // FIXME: Move this somewhere else!
-  SemaRef.PP.getDiagnostics().setSuppressAllDiagnostics();
 }

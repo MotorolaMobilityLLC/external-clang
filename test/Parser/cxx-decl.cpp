@@ -37,6 +37,10 @@ class someclass {
   }
 };
 
+class asm_class_test {
+  void foo() __asm__("baz");
+};
+
 enum { fooenum = 1 };
 
 struct a {
@@ -72,3 +76,10 @@ class Class2 {
 }  // no ;
 
 typedef Class1<Class2> Type1; // expected-error {{cannot combine with previous 'class' declaration specifier}}
+
+// rdar : // 8307865
+struct CodeCompleteConsumer {
+};
+
+void CodeCompleteConsumer::() { // expected-error {{xpected unqualified-id}}
+} 

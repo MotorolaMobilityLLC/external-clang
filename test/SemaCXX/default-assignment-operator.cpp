@@ -6,8 +6,9 @@ class Base { // expected-error {{cannot define the implicit default assignment o
   // expected-note{{reference member 'ref' will never be initialized}}
 };
 
-class X  : Base {  // // expected-error {{cannot define the implicit default assignment operator for 'X', because non-static const member 'cint' can't use default assignment operator}}
-public:
+class X  : Base {  // // expected-error {{cannot define the implicit default assignment operator for 'X', because non-static const member 'cint' can't use default assignment operator}} \
+// expected-note{{assignment operator for 'Base' first required here}}
+public: 
   X();
   const int cint;  // expected-note {{declared here}}
 }; 
@@ -27,7 +28,7 @@ Z z2;
 
 // Test1
 void f(X x, const X cx) {
-  x = cx;  // expected-note 2 {{synthesized method is first required here}}
+  x = cx; // expected-note{{assignment operator for 'X' first required here}}
   x = cx;
   z1 = z2;
 }
@@ -73,6 +74,7 @@ void i() {
 // Test5
 
 class E1 { // expected-error{{cannot define the implicit default assignment operator for 'E1', because non-static const member 'a' can't use default assignment operator}}
+
 public:
   const int a; // expected-note{{declared here}}
   E1() : a(0) {}  
@@ -82,6 +84,35 @@ public:
 E1 e1, e2;
 
 void j() {
-  e1 = e2; // expected-note{{synthesized method is first required here}}
+  e1 = e2; // expected-note{{assignment operator for 'E1' first required here}}
 }
 
+namespace ProtectedCheck {
+  struct X {
+  protected:
+    X &operator=(const X&); // expected-note{{declared protected here}}
+  };
+
+  struct Y : public X { };
+
+  void f(Y y) { y = y; }
+
+  struct Z { // expected-error{{'operator=' is a protected member of 'ProtectedCheck::X'}}
+    X x;
+  };
+
+  void f(Z z) { z = z; }  // expected-note{{implicit default copy assignment operator}}
+
+}
+
+namespace MultiplePaths {
+  struct X0 { 
+    X0 &operator=(const X0&);
+  };
+
+  struct X1 : public virtual X0 { };
+
+  struct X2 : X0, X1 { };
+
+  void f(X2 x2) { x2 = x2; }
+}

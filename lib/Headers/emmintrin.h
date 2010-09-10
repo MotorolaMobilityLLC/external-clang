@@ -1,4 +1,4 @@
-/*===---- xmmintrin.h - SSE intrinsics -------------------------------------===
+/*===---- emmintrin.h - SSE2 intrinsics ------------------------------------===
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,7 @@
  *
  *===-----------------------------------------------------------------------===
  */
- 
+
 #ifndef __EMMINTRIN_H
 #define __EMMINTRIN_H
 
@@ -33,6 +33,9 @@
 typedef double __m128d __attribute__((__vector_size__(16)));
 typedef long long __m128i __attribute__((__vector_size__(16)));
 
+/* Type defines.  */
+typedef double __v2df __attribute__ ((__vector_size__ (16)));
+typedef long long __v2di __attribute__ ((__vector_size__ (16)));
 typedef short __v8hi __attribute__((__vector_size__(16)));
 typedef char __v16qi __attribute__((__vector_size__(16)));
 
@@ -1194,7 +1197,7 @@ static __inline__ int __attribute__((__always_inline__, __nodebug__))
 _mm_extract_epi16(__m128i a, int imm)
 {
   __v8hi b = (__v8hi)a;
-  return b[imm];
+  return (unsigned short)b[imm];
 }
 
 static __inline__ __m128i __attribute__((__always_inline__, __nodebug__))
@@ -1222,9 +1225,10 @@ _mm_movemask_epi8(__m128i a)
                                     4, 5, 6, 7))
 #define _mm_shufflehi_epi16(a, imm) \
   ((__m128i)__builtin_shufflevector((__v8hi)(a), (__v8hi) {0}, 0, 1, 2, 3, \
-                                    4 + ((imm) & 0x3), 4 + ((imm) & 0xc) >> 2, \
-                                    4 + ((imm) & 0x30) >> 4, \
-                                    4 + ((imm) & 0xc0) >> 6))
+                                    4 + (((imm) & 0x03) >> 0), \
+                                    4 + (((imm) & 0x0c) >> 2), \
+                                    4 + (((imm) & 0x30) >> 4), \
+                                    4 + (((imm) & 0xc0) >> 6)))
 
 static __inline__ __m128i __attribute__((__always_inline__, __nodebug__))
 _mm_unpackhi_epi8(__m128i a, __m128i b)
@@ -1310,8 +1314,9 @@ _mm_movemask_pd(__m128d a)
   return __builtin_ia32_movmskpd(a);
 }
 
-#define _mm_shuffle_pd(a, b, i) (__builtin_shufflevector((a), (b), (i) & 1, \
-                                                         (((i) & 2) >> 1) + 2))
+#define _mm_shuffle_pd(a, b, i) \
+  (__builtin_shufflevector((__m128d)(a), (__m128d)(b), (i) & 1, \
+                                                       (((i) & 2) >> 1) + 2))
 
 static __inline__ __m128 __attribute__((__always_inline__, __nodebug__))
 _mm_castpd_ps(__m128d in)

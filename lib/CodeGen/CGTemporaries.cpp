@@ -15,14 +15,47 @@
 using namespace clang;
 using namespace CodeGen;
 
-void CodeGenFunction::PushCXXTemporary(const CXXTemporary *Temporary,
-                                       llvm::Value *Ptr) {
-  assert((LiveTemporaries.empty() ||
-          LiveTemporaries.back().ThisPtr != Ptr ||
-          ConditionalBranchLevel) &&
-         "Pushed the same temporary twice; AST is likely wrong");
-  llvm::BasicBlock *DtorBlock = createBasicBlock("temp.dtor");
+namespace {
+  struct DestroyTemporary : EHScopeStack::Cleanup {
+    const CXXTemporary *Temporary;
+    llvm::Value *Addr;
+    llvm::Value *CondPtr;
 
+    DestroyTemporary(const CXXTemporary *Temporary, llvm::Value *Addr,
+                     llvm::Value *CondPtr)
+      : Temporary(Temporary), Addr(Addr), CondPtr(CondPtr) {}
+
+    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+      llvm::BasicBlock *CondEnd = 0;
+    
+      // If this is a conditional temporary, we need to check the condition
+      // boolean and only call the destructor if it's true.
+      if (CondPtr) {
+        llvm::BasicBlock *CondBlock =
+          CGF.createBasicBlock("temp.cond-dtor.call");
+        CondEnd = CGF.createBasicBlock("temp.cond-dtor.cont");
+
+        llvm::Value *Cond = CGF.Builder.CreateLoad(CondPtr);
+        CGF.Builder.CreateCondBr(Cond, CondBlock, CondEnd);
+        CGF.EmitBlock(CondBlock);
+      }
+
+      CGF.EmitCXXDestructorCall(Temporary->getDestructor(),
+                                Dtor_Complete, /*ForVirtualBase=*/false,
+                                Addr);
+
+      if (CondPtr) {
+        // Reset the condition to false.
+        CGF.Builder.CreateStore(CGF.Builder.getFalse(), CondPtr);
+        CGF.EmitBlock(CondEnd);
+      }
+    }
+  };
+}
+
+/// Emits all the code to cause the given temporary to be cleaned up.
+void CodeGenFunction::EmitCXXTemporary(const CXXTemporary *Temporary,
+                                       llvm::Value *Ptr) {
   llvm::AllocaInst *CondPtr = 0;
 
   // Check if temporaries need to be conditional. If so, we'll create a
@@ -35,84 +68,11 @@ void CodeGenFunction::PushCXXTemporary(const CXXTemporary *Temporary,
     InitTempAlloca(CondPtr, llvm::ConstantInt::getFalse(VMContext));
 
     // Now set it to true.
-    Builder.CreateStore(llvm::ConstantInt::getTrue(VMContext), CondPtr);
+    Builder.CreateStore(Builder.getTrue(), CondPtr);
   }
 
-  LiveTemporaries.push_back(CXXLiveTemporaryInfo(Temporary, Ptr, DtorBlock,
-                                                 CondPtr));
-
-  PushCleanupBlock(DtorBlock);
-
-  if (Exceptions) {
-    const CXXLiveTemporaryInfo& Info = LiveTemporaries.back();
-    llvm::BasicBlock *CondEnd = 0;
-    
-    EHCleanupBlock Cleanup(*this);
-
-    // If this is a conditional temporary, we need to check the condition
-    // boolean and only call the destructor if it's true.
-    if (Info.CondPtr) {
-      llvm::BasicBlock *CondBlock = createBasicBlock("cond.dtor.call");
-      CondEnd = createBasicBlock("cond.dtor.end");
-
-      llvm::Value *Cond = Builder.CreateLoad(Info.CondPtr);
-      Builder.CreateCondBr(Cond, CondBlock, CondEnd);
-      EmitBlock(CondBlock);
-    }
-
-    EmitCXXDestructorCall(Info.Temporary->getDestructor(),
-                          Dtor_Complete, Info.ThisPtr);
-
-    if (CondEnd) {
-      // Reset the condition. to false.
-      Builder.CreateStore(llvm::ConstantInt::getFalse(VMContext), Info.CondPtr);
-      EmitBlock(CondEnd);
-    }
-  }
-}
-
-void CodeGenFunction::PopCXXTemporary() {
-  const CXXLiveTemporaryInfo& Info = LiveTemporaries.back();
-
-  CleanupBlockInfo CleanupInfo = PopCleanupBlock();
-  assert(CleanupInfo.CleanupBlock == Info.DtorBlock &&
-         "Cleanup block mismatch!");
-  assert(!CleanupInfo.SwitchBlock &&
-         "Should not have a switch block for temporary cleanup!");
-  assert(!CleanupInfo.EndBlock &&
-         "Should not have an end block for temporary cleanup!");
-
-  llvm::BasicBlock *CurBB = Builder.GetInsertBlock();
-  if (CurBB && !CurBB->getTerminator() &&
-      Info.DtorBlock->getNumUses() == 0) {
-    CurBB->getInstList().splice(CurBB->end(), Info.DtorBlock->getInstList());
-    delete Info.DtorBlock;
-  } else
-    EmitBlock(Info.DtorBlock);
-
-  llvm::BasicBlock *CondEnd = 0;
-
-  // If this is a conditional temporary, we need to check the condition
-  // boolean and only call the destructor if it's true.
-  if (Info.CondPtr) {
-    llvm::BasicBlock *CondBlock = createBasicBlock("cond.dtor.call");
-    CondEnd = createBasicBlock("cond.dtor.end");
-
-    llvm::Value *Cond = Builder.CreateLoad(Info.CondPtr);
-    Builder.CreateCondBr(Cond, CondBlock, CondEnd);
-    EmitBlock(CondBlock);
-  }
-
-  EmitCXXDestructorCall(Info.Temporary->getDestructor(),
-                        Dtor_Complete, Info.ThisPtr);
-
-  if (CondEnd) {
-    // Reset the condition. to false.
-    Builder.CreateStore(llvm::ConstantInt::getFalse(VMContext), Info.CondPtr);
-    EmitBlock(CondEnd);
-  }
-
-  LiveTemporaries.pop_back();
+  EHStack.pushCleanup<DestroyTemporary>(NormalAndEHCleanup,
+                                        Temporary, Ptr, CondPtr);
 }
 
 RValue
@@ -120,40 +80,13 @@ CodeGenFunction::EmitCXXExprWithTemporaries(const CXXExprWithTemporaries *E,
                                             llvm::Value *AggLoc,
                                             bool IsAggLocVolatile,
                                             bool IsInitializer) {
-  // Keep track of the current cleanup stack depth.
-  size_t CleanupStackDepth = CleanupEntries.size();
-  (void) CleanupStackDepth;
-
-  RValue RV;
-  
-  {
-    CXXTemporariesCleanupScope Scope(*this);
-
-    RV = EmitAnyExpr(E->getSubExpr(), AggLoc, IsAggLocVolatile,
+  RunCleanupsScope Scope(*this);
+  return EmitAnyExpr(E->getSubExpr(), AggLoc, IsAggLocVolatile,
                      /*IgnoreResult=*/false, IsInitializer);
-  }
-  assert(CleanupEntries.size() == CleanupStackDepth &&
-         "Cleanup size mismatch!");
-
-  return RV;
 }
 
 LValue CodeGenFunction::EmitCXXExprWithTemporariesLValue(
                                               const CXXExprWithTemporaries *E) {
-  // Keep track of the current cleanup stack depth.
-  size_t CleanupStackDepth = CleanupEntries.size();
-  (void) CleanupStackDepth;
-
-  unsigned OldNumLiveTemporaries = LiveTemporaries.size();
-
-  LValue LV = EmitLValue(E->getSubExpr());
-
-  // Pop temporaries.
-  while (LiveTemporaries.size() > OldNumLiveTemporaries)
-    PopCXXTemporary();
-
-  assert(CleanupEntries.size() == CleanupStackDepth &&
-         "Cleanup size mismatch!");
-
-  return LV;
+  RunCleanupsScope Scope(*this);
+  return EmitLValue(E->getSubExpr());
 }

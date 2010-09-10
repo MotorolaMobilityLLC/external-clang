@@ -25,14 +25,16 @@ namespace options {
     HelpHidden       = (1 << 1),
     LinkerInput      = (1 << 2),
     NoArgumentUnused = (1 << 3),
-    RenderAsInput    = (1 << 4),
-    RenderJoined     = (1 << 5),
-    RenderSeparate   = (1 << 6),
-    Unsupported      = (1 << 7)
+    NoForward        = (1 << 4),
+    RenderAsInput    = (1 << 5),
+    RenderJoined     = (1 << 6),
+    RenderSeparate   = (1 << 7),
+    Unsupported      = (1 << 8)
   };
 }
 
   class Arg;
+  class ArgList;
   class InputArgList;
   class Option;
 
@@ -51,7 +53,7 @@ namespace options {
       const char *HelpText;
       const char *MetaVar;
       unsigned char Kind;
-      unsigned char Flags;
+      unsigned short Flags;
       unsigned char Param;
       unsigned short GroupID;
       unsigned short AliasID;
@@ -150,7 +152,7 @@ namespace options {
     /// \return - The parsed argument, or 0 if the argument is missing values
     /// (in which case Index still points at the conceptual next argument string
     /// to parse).
-    Arg *ParseOneArg(const InputArgList &Args, unsigned &Index) const;
+    Arg *ParseOneArg(const ArgList &Args, unsigned &Index) const;
 
     /// ParseArgs - Parse an list of arguments into an InputArgList.
     ///

@@ -43,7 +43,7 @@ class VTTBuilder {
 
   /// SubVTTIndicies - The sub-VTT indices for the bases of the most derived
   /// class.
-  llvm::DenseMap<const CXXRecordDecl *, uint64_t> SubVTTIndicies;
+  llvm::DenseMap<BaseSubobject, uint64_t> SubVTTIndicies;
 
   /// SecondaryVirtualPointerIndices - The secondary virtual pointer indices of
   /// all subobjects of the most derived class.
@@ -116,8 +116,7 @@ public:
   }
   
   /// getSubVTTIndicies - Returns a reference to the sub-VTT indices.
-  const llvm::DenseMap<const CXXRecordDecl *, uint64_t> &
-  getSubVTTIndicies() const {
+  const llvm::DenseMap<BaseSubobject, uint64_t> &getSubVTTIndicies() const {
     return SubVTTIndicies;
   }
   
@@ -341,7 +340,7 @@ void VTTBuilder::LayoutVTT(BaseSubobject Base, bool BaseIsVirtual) {
 
   if (!IsPrimaryVTT) {
     // Remember the sub-VTT index.
-    SubVTTIndicies[RD] = VTTComponents.size();
+    SubVTTIndicies[Base] = VTTComponents.size();
   }
 
   AddressPointsMapTy AddressPoints;
@@ -379,7 +378,7 @@ CodeGenVTables::GenerateVTT(llvm::GlobalVariable::LinkageTypes Linkage,
 
   D1(printf("vtt %s\n", RD->getNameAsCString()));
 
-  llvm::GlobalVariable *GV = CGM.getModule().getGlobalVariable(Name);
+  llvm::GlobalVariable *GV = CGM.getModule().getGlobalVariable(Name, true);
   if (GV == 0 || GV->isDeclaration()) {
     const llvm::Type *Int8PtrTy = 
       llvm::Type::getInt8PtrTy(CGM.getLLVMContext());
@@ -435,25 +434,25 @@ bool CodeGenVTables::needsVTTParameter(GlobalDecl GD) {
 }
 
 uint64_t CodeGenVTables::getSubVTTIndex(const CXXRecordDecl *RD, 
-                                        const CXXRecordDecl *Base) {
-  ClassPairTy ClassPair(RD, Base);
+                                        BaseSubobject Base) {
+  BaseSubobjectPairTy ClassSubobjectPair(RD, Base);
 
-  SubVTTIndiciesMapTy::iterator I = SubVTTIndicies.find(ClassPair);
+  SubVTTIndiciesMapTy::iterator I = SubVTTIndicies.find(ClassSubobjectPair);
   if (I != SubVTTIndicies.end())
     return I->second;
   
   VTTBuilder Builder(CGM, RD, /*GenerateDefinition=*/false);
 
-  for (llvm::DenseMap<const CXXRecordDecl *, uint64_t>::const_iterator I =
+  for (llvm::DenseMap<BaseSubobject, uint64_t>::const_iterator I =
        Builder.getSubVTTIndicies().begin(), 
        E = Builder.getSubVTTIndicies().end(); I != E; ++I) {
     // Insert all indices.
-    ClassPairTy ClassPair(RD, I->first);
+    BaseSubobjectPairTy ClassSubobjectPair(RD, I->first);
     
-    SubVTTIndicies.insert(std::make_pair(ClassPair, I->second));
+    SubVTTIndicies.insert(std::make_pair(ClassSubobjectPair, I->second));
   }
     
-  I = SubVTTIndicies.find(ClassPair);
+  I = SubVTTIndicies.find(ClassSubobjectPair);
   assert(I != SubVTTIndicies.end() && "Did not find index!");
   
   return I->second;

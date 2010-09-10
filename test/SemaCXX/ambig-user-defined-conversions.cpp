@@ -18,6 +18,7 @@ namespace test0 {
   void func(const B b, const int ci); // expected-note {{candidate function}}
 
   const int Test1() {
+
     func(b1, f()); // expected-error {{call to 'func' is ambiguous}}
     return f(); // expected-error {{conversion from 'test0::B' to 'int const' is ambiguous}}
   }

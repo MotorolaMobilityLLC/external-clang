@@ -39,11 +39,11 @@ template struct X3<int>;
 
 template <typename T> struct X4 {
   T f() const {
-    return; // expected-warning{{non-void function 'f' should return a value}}
+    return; // expected-error{{non-void function 'f' should return a value}}
   }
   
   T g() const {
-    return 1; // expected-warning{{void function 'g' should not return a value}}
+    return 1; // expected-error{{void function 'g' should not return a value}}
   }
 };
 
@@ -72,7 +72,7 @@ template<typename T, typename U, typename V> struct X6 {
     if (T x = t) {
       t = x;
     }
-    return v;
+    return v; // expected-error{{cannot initialize return object of type}}
   }
 };
 
@@ -178,10 +178,10 @@ template<typename T> struct IndirectGoto0 {
 
   prior:
     T prior_label;
-    prior_label = &&prior;
+    prior_label = &&prior; // expected-error{{assigning to 'int'}}
 
     T later_label;
-    later_label = &&later;
+    later_label = &&later; // expected-error{{assigning to 'int'}}
 
   later:
     (void)(1+1);
@@ -219,4 +219,9 @@ template<typename T> struct Y : public X<T> {
 namespace test0 {
   template <class T> class A { void foo(T array[10]); };
   template class A<int>;
+}
+
+namespace PR7016 {
+  template<typename T> void f() { T x = x; }
+  template void f<int>();
 }

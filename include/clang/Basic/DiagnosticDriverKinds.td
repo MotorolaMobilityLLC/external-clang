@@ -49,6 +49,8 @@ def err_drv_no_ast_support : Error<
   "'%0': unable to use AST files with this tool">;
 def err_drv_clang_unsupported : Error<
   "the clang compiler does not support '%0'">;
+def err_drv_clang_unsupported_opt_cxx_darwin_i386 : Error<
+  "the clang compiler does not support '%0' for C++ on Darwin/i386">;
 def err_drv_command_failed : Error<
   "%0 command failed with exit code %1 (use -v to see invocation)">;
 def err_drv_command_signalled : Error<
@@ -66,6 +68,8 @@ def err_drv_invalid_gcc_output_type : Error<
     "invalid output type '%0' for use with gcc tool">;
 def err_drv_cc_print_options_failure : Error<
     "unable to open CC_PRINT_OPTIONS file: %0">;
+def err_drv_preamble_format : Error<
+    "incorrect format for -preamble-bytes=N,END">;
 
 def warn_drv_input_file_unused : Warning<
   "%0: '%1' input unused when '%2' is present">;

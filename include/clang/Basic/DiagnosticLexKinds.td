@@ -11,7 +11,7 @@
 // Lexer Diagnostics
 //===----------------------------------------------------------------------===//
 
-let Component = "Lex" in {
+let Component = "Lex", CategoryName = "Lexical or Preprocessor Issue" in {
 
 def null_in_string : Warning<"null character(s) preserved in string literal">;
 def null_in_char : Warning<"null character(s) preserved in character literal">;
@@ -84,9 +84,9 @@ def err_exponent_has_no_digits : Error<"exponent has no digits">;
 def ext_imaginary_constant : Extension<"imaginary constants are an extension">;
 def err_hexconstant_requires_exponent : Error<
   "hexadecimal floating constants require an exponent">;
-def ext_hexconstant_cplusplus : ExtWarn<
+def ext_hexconstant_cplusplus : Extension<
   "hexadecimal floating constants are a C99 feature that is incompatible with "
-  "C++0x">;
+  "C++0x">, InGroup<CXXHexFloats>;
 def ext_hexconstant_invalid : Extension<
   "hexadecimal floating constants are a C99 feature">;
 def ext_binary_literal : Extension<
@@ -94,7 +94,10 @@ def ext_binary_literal : Extension<
 def err_pascal_string_too_long : Error<"Pascal string is too long">;
 def warn_octal_escape_too_large : ExtWarn<"octal escape sequence out of range">;
 def warn_hex_escape_too_large : ExtWarn<"hex escape sequence out of range">;
-
+def ext_string_too_long : Extension<"string literal of length %0 exceeds "
+  "maximum length %1 that %select{C90|ISO C99|C++}2 compilers are required to "
+  "support">, InGroup<OverlengthStrings>;
+  
 //===----------------------------------------------------------------------===//
 // PTH Diagnostics
 //===----------------------------------------------------------------------===//
@@ -106,7 +109,7 @@ def err_invalid_pth_file : Error<
 //===----------------------------------------------------------------------===//
 // Preprocessor Diagnostics
 //===----------------------------------------------------------------------===//
-def pp_hash_warning : Warning<"#warning%0">, InGroup<DiagGroup<"#warnings">>;
+def pp_hash_warning : Warning<"#warning%0">, InGroup<PoundWarning>;
 def pp_include_next_in_primary : Warning<
   "#include_next in primary source file">;
 def pp_include_macros_out_of_predefines : Error<
@@ -225,6 +228,13 @@ def err__Pragma_malformed : Error<
   "_Pragma takes a parenthesized string literal">;
 def err_pragma_comment_malformed : Error<
   "pragma comment requires parenthesized identifier and optional string">;
+def err_pragma_message_malformed : Error<
+  "pragma message requires parenthesized string">;
+def err_pragma_push_pop_macro_malformed : Error<
+   "pragma %0 requires a parenthesized string">;
+def warn_pragma_pop_macro_no_push : Warning<
+   "pragma pop_macro could not pop '%0', no matching push_macro">;
+def warn_pragma_message : Warning<"%0">;
 def warn_pragma_ignored : Warning<"unknown pragma ignored">,
    InGroup<UnknownPragmas>, DefaultIgnore;
 def ext_stdc_pragma_ignored : ExtWarn<"unknown pragma in STDC namespace">,
@@ -258,6 +268,9 @@ def warn_pragma_diagnostic_invalid_token :
 def warn_pragma_diagnostic_unknown_warning :
    ExtWarn<"unknown warning group '%0', ignored">,
    InGroup<UnknownPragmas>;
+// - #pragma __debug
+def warn_pragma_debug_unexpected_command : Warning<
+  "unexpected debug command '%0'">;
 
 def err_pragma_comment_unknown_kind : Error<"unknown kind of pragma comment">;
 def err_defined_macro_name : Error<"'defined' cannot be used as a macro name">;
@@ -274,6 +287,9 @@ def err_too_few_args_in_macro_invoc : Error<
   "too few arguments provided to function-like macro invocation">;
 def err_pp_bad_paste : Error<
   "pasting formed '%0', an invalid preprocessing token">;
+def err_pp_bad_paste_ms : Warning<
+  "pasting formed '%0', an invalid preprocessing token">, DefaultError,
+  InGroup<DiagGroup<"invalid-token-paste">>;
 def err_pp_operator_used_as_macro_name : Error<
   "C++ operator '%0' cannot be used as a macro name">;
 def err_pp_illegal_floating_literal : Error<

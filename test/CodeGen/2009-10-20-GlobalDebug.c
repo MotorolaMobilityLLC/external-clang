@@ -1,4 +1,8 @@
 // RUN: %clang -ccc-host-triple i386-apple-darwin10 -S -g -dA %s -o - | FileCheck %s
 int global;
-// CHECK: asciz "global" ## External Name
-int main() { return 0;}
+// CHECK: ascii   "localstatic"          ## DW_AT_name
+// CHECK: asciz   "global" ## External Name
+int main() { 
+  static int localstatic;
+  return 0;
+}

@@ -199,17 +199,24 @@ void test()
 }
 
 namespace PR6595 {
+  struct OtherString {
+    OtherString();
+    OtherString(const char*);
+  };
+
   struct String {
     String(const char *);
+    String(const OtherString&);
     operator const char*() const;
   };
 
-  void f(bool Cond, String S) {
+  void f(bool Cond, String S, OtherString OS) {
     (void)(Cond? S : "");
     (void)(Cond? "" : S);
     const char a[1] = {'a'};
     (void)(Cond? S : a);
     (void)(Cond? a : S);
+    (void)(Cond? OS : S);
   }
 }
 
@@ -237,4 +244,63 @@ namespace PR6757 {
     (void)(true ? Bar() : Foo2()); // okay
     (void)(true ? Bar() : Foo3()); // expected-error{{no viable constructor copying temporary}}
   }
+}
+
+// Reduced from selfhost.
+namespace test1 {
+  struct A {
+    enum Foo {
+      fa, fb, fc, fd, fe, ff
+    };
+
+    Foo x();
+  };
+
+  void foo(int);
+
+  void test(A *a) {
+    foo(a ? a->x() : 0);
+  }
+}
+
+namespace rdar7998817 {
+  class X { 
+    X(X&); // expected-note{{declared private here}}
+
+    struct ref { };
+
+  public:
+    X();
+    X(ref);
+    
+    operator ref();
+  };
+
+  void f(bool B) {
+    X x;
+    (void)(B? x // expected-error{{calling a private constructor of class 'rdar7998817::X'}}
+           : X());
+  }
+}
+
+namespace PR7598 {
+  enum Enum {
+    v = 1,
+  };
+
+  const Enum g() {
+    return v;
+  }
+
+  const volatile Enum g2() {
+    return v;
+  }
+
+  void f() {
+    const Enum v2 = v;
+    Enum e = false ? g() : v;
+    Enum e2 = false ? v2 : v;
+    Enum e3 = false ? g2() : v;
+  }
+
 }

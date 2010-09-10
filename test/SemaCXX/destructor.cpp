@@ -19,7 +19,9 @@ struct D {
     // expected-error{{type qualifier is not allowed on this function}} \
     // expected-error{{destructor cannot be declared 'static'}}  \
     // expected-error{{destructor cannot have any parameters}}   \
-    // expected-error{{destructor cannot be variadic}}
+    // expected-error{{destructor cannot be variadic}} \
+    // expected-error{{destructor cannot have a return type}} \
+    // expected-error{{'const' qualifier is not allowed on a destructor}}
 };
 
 struct D2 {
@@ -82,4 +84,38 @@ namespace PR6421 {
 namespace PR6709 {
   template<class T> class X { T v; ~X() { ++*v; } };
   void a(X<int> x) {}
+}
+
+struct X0 { virtual ~X0() throw(); };
+struct X1 : public X0 { };
+
+// Make sure we instantiate operator deletes when building a virtual
+// destructor.
+namespace test6 {
+  template <class T> class A {
+  public:
+    void *operator new(__SIZE_TYPE__);
+    void operator delete(void *p) {
+      T::deleteIt(p); // expected-error {{type 'int' cannot be used prior to '::'}}
+    }
+
+    virtual ~A() {} // expected-note {{in instantiation of member function 'test6::A<int>::operator delete' requested here}}
+  };
+
+  class B : A<int> { B(); };
+  B::B() {} // expected-note {{in instantiation of member function 'test6::A<int>::~A' requested here}}
+}
+
+// Make sure classes are marked invalid when they have invalid
+// members.  This avoids a crash-on-invalid.
+namespace test7 {
+  struct A {
+    ~A() const; // expected-error {{'const' qualifier is not allowed on a destructor}}
+  };
+  struct B : A {};
+
+  void test() {
+    B *b;
+    b->~B();
+  }
 }

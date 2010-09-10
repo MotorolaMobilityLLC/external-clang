@@ -32,7 +32,8 @@ using llvm::MemoryBuffer;
 //===----------------------------------------------------------------------===//
 
 ContentCache::~ContentCache() {
-  delete Buffer.getPointer();
+  if (shouldFreeBuffer())
+    delete Buffer.getPointer();
 }
 
 /// getSizeBytesMapped - Returns the number of bytes actually mapped for
@@ -51,12 +52,14 @@ unsigned ContentCache::getSize() const {
                              : (unsigned) Entry->getSize();
 }
 
-void ContentCache::replaceBuffer(const llvm::MemoryBuffer *B) {
+void ContentCache::replaceBuffer(const llvm::MemoryBuffer *B,
+                                 bool DoNotFree) {
   assert(B != Buffer.getPointer());
   
-  delete Buffer.getPointer();
+  if (shouldFreeBuffer())
+    delete Buffer.getPointer();
   Buffer.setPointer(B);
-  Buffer.setInt(false);
+  Buffer.setInt(DoNotFree? DoNotFreeFlag : 0);
 }
 
 const llvm::MemoryBuffer *ContentCache::getBuffer(Diagnostic &Diag,
@@ -72,7 +75,6 @@ const llvm::MemoryBuffer *ContentCache::getBuffer(Diagnostic &Diag,
     struct stat FileInfo;
     Buffer.setPointer(MemoryBuffer::getFile(Entry->getName(), &ErrorStr,
                                             Entry->getSize(), &FileInfo));
-    Buffer.setInt(false);
     
     // If we were unable to open the file, then we are in an inconsistent
     // situation where the content cache referenced a file which no longer
@@ -99,7 +101,7 @@ const llvm::MemoryBuffer *ContentCache::getBuffer(Diagnostic &Diag,
         Diag.Report(FullSourceLoc(Loc, SM), diag::err_cannot_open_file)
           << Entry->getName() << ErrorStr;
 
-      Buffer.setInt(true);
+      Buffer.setInt(Buffer.getInt() | InvalidFlag);
 
     // FIXME: This conditionalization is horrible, but we see spurious failures
     // in the test suite due to this warning and no one has had time to hunt it
@@ -119,14 +121,14 @@ const llvm::MemoryBuffer *ContentCache::getBuffer(Diagnostic &Diag,
         Diag.Report(FullSourceLoc(Loc, SM), diag::err_file_modified)
           << Entry->getName();
 
-      Buffer.setInt(true);
+      Buffer.setInt(Buffer.getInt() | InvalidFlag);
 #endif
     }
     
     // If the buffer is valid, check to see if it has a UTF Byte Order Mark
     // (BOM).  We only support UTF-8 without a BOM right now.  See
     // http://en.wikipedia.org/wiki/Byte_order_mark for more information.
-    if (!Buffer.getInt()) {
+    if (!isBufferInvalid()) {
       llvm::StringRef BufStr = Buffer.getPointer()->getBuffer();
       const char *BOM = 0;
       if (BufStr.startswith("\xFE\xBB\xBF"))
@@ -161,7 +163,7 @@ const llvm::MemoryBuffer *ContentCache::getBuffer(Diagnostic &Diag,
   }
   
   if (Invalid)
-    *Invalid = Buffer.getInt();
+    *Invalid = isBufferInvalid();
   
   return Buffer.getPointer();
 }
@@ -422,9 +424,12 @@ void SourceManager::PreallocateSLocEntries(ExternalSLocEntrySource *Source,
                                            unsigned NextOffset) {
   ExternalSLocEntries = Source;
   this->NextOffset = NextOffset;
+  unsigned CurPrealloc = SLocEntryLoaded.size();
+  // If we've ever preallocated, we must not count the dummy entry.
+  if (CurPrealloc) --CurPrealloc;
   SLocEntryLoaded.resize(NumSLocEntries + 1);
   SLocEntryLoaded[0] = true;
-  SLocEntryTable.resize(SLocEntryTable.size() + NumSLocEntries);
+  SLocEntryTable.resize(SLocEntryTable.size() + NumSLocEntries - CurPrealloc);
 }
 
 void SourceManager::ClearPreallocatedSLocEntries() {
@@ -448,7 +453,7 @@ void SourceManager::ClearPreallocatedSLocEntries() {
 // Methods to create new FileID's and instantiations.
 //===----------------------------------------------------------------------===//
 
-/// createFileID - Create a new fileID for the specified ContentCache and
+/// createFileID - Create a new FileID for the specified ContentCache and
 /// include position.  This works regardless of whether the ContentCache
 /// corresponds to a file or some other input source.
 FileID SourceManager::createFileID(const ContentCache *File,
@@ -521,12 +526,13 @@ SourceManager::getMemoryBufferForFile(const FileEntry *File,
 }
 
 bool SourceManager::overrideFileContents(const FileEntry *SourceFile,
-                                         const llvm::MemoryBuffer *Buffer) {
+                                         const llvm::MemoryBuffer *Buffer,
+                                         bool DoNotFree) {
   const SrcMgr::ContentCache *IR = getOrCreateContentCache(SourceFile);
   if (IR == 0)
     return true;
 
-  const_cast<SrcMgr::ContentCache *>(IR)->replaceBuffer(Buffer);
+  const_cast<SrcMgr::ContentCache *>(IR)->replaceBuffer(Buffer, DoNotFree);
   return false;
 }
 
@@ -1154,6 +1160,27 @@ SourceLocation SourceManager::getLocation(const FileEntry *SourceFile,
   return getLocForStartOfFile(FirstFID).getFileLocWithOffset(FilePos + Col - 1);
 }
 
+/// Given a decomposed source location, move it up the include/instantiation
+/// stack to the parent source location.  If this is possible, return the
+/// decomposed version of the parent in Loc and return false.  If Loc is the
+/// top-level entry, return true and don't modify it.
+static bool MoveUpIncludeHierarchy(std::pair<FileID, unsigned> &Loc,
+                                   const SourceManager &SM) {
+  SourceLocation UpperLoc;
+  const SrcMgr::SLocEntry &Entry = SM.getSLocEntry(Loc.first);
+  if (Entry.isInstantiation())
+    UpperLoc = Entry.getInstantiation().getInstantiationLocStart();
+  else
+    UpperLoc = Entry.getFile().getIncludeLoc();
+  
+  if (UpperLoc.isInvalid())
+    return true; // We reached the top.
+  
+  Loc = SM.getDecomposedLoc(UpperLoc);
+  return false;
+}
+  
+
 /// \brief Determines the order of 2 source locations in the translation unit.
 ///
 /// \returns true if LHS source location comes before RHS, false otherwise.
@@ -1172,78 +1199,74 @@ bool SourceManager::isBeforeInTranslationUnit(SourceLocation LHS,
 
   // If we are comparing a source location with multiple locations in the same
   // file, we get a big win by caching the result.
+  if (IsBeforeInTUCache.isCacheValid(LOffs.first, ROffs.first))
+    return IsBeforeInTUCache.getCachedResult(LOffs.second, ROffs.second);
 
-  if (LastLFIDForBeforeTUCheck == LOffs.first &&
-      LastRFIDForBeforeTUCheck == ROffs.first)
-    return LastResForBeforeTUCheck;
-
-  LastLFIDForBeforeTUCheck = LOffs.first;
-  LastRFIDForBeforeTUCheck = ROffs.first;
+  // Okay, we missed in the cache, start updating the cache for this query.
+  IsBeforeInTUCache.setQueryFIDs(LOffs.first, ROffs.first);
 
   // "Traverse" the include/instantiation stacks of both locations and try to
-  // find a common "ancestor".
+  // find a common "ancestor".  FileIDs build a tree-like structure that
+  // reflects the #include hierarchy, and this algorithm needs to find the
+  // nearest common ancestor between the two locations.  For example, if you
+  // have a.c that includes b.h and c.h, and are comparing a location in b.h to
+  // a location in c.h, we need to find that their nearest common ancestor is
+  // a.c, and compare the locations of the two #includes to find their relative
+  // ordering.
   //
-  // First we traverse the stack of the right location and check each level
-  // against the level of the left location, while collecting all levels in a
-  // "stack map".
+  // SourceManager assigns FileIDs in order of parsing.  This means that an
+  // includee always has a larger FileID than an includer.  While you might
+  // think that we could just compare the FileID's here, that doesn't work to
+  // compare a point at the end of a.c with a point within c.h.  Though c.h has
+  // a larger FileID, we have to compare the include point of c.h to the
+  // location in a.c.
+  //
+  // Despite not being able to directly compare FileID's, we can tell that a
+  // larger FileID is necessarily more deeply nested than a lower one and use
+  // this information to walk up the tree to the nearest common ancestor.
+  do {
+    // If LOffs is larger than ROffs, then LOffs must be more deeply nested than
+    // ROffs, walk up the #include chain.
+    if (LOffs.first.ID > ROffs.first.ID) {
+      if (MoveUpIncludeHierarchy(LOffs, *this))
+        break; // We reached the top.
+      
+    } else {
+      // Otherwise, ROffs is larger than LOffs, so ROffs must be more deeply
+      // nested than LOffs, walk up the #include chain.
+      if (MoveUpIncludeHierarchy(ROffs, *this))
+        break; // We reached the top.
+    }
+  } while (LOffs.first != ROffs.first);
 
-  std::map<FileID, unsigned> ROffsMap;
-  ROffsMap[ROffs.first] = ROffs.second;
-
-  while (1) {
-    SourceLocation UpperLoc;
-    const SrcMgr::SLocEntry &Entry = getSLocEntry(ROffs.first);
-    if (Entry.isInstantiation())
-      UpperLoc = Entry.getInstantiation().getInstantiationLocStart();
-    else
-      UpperLoc = Entry.getFile().getIncludeLoc();
-
-    if (UpperLoc.isInvalid())
-      break; // We reached the top.
-
-    ROffs = getDecomposedLoc(UpperLoc);
-
-    if (LOffs.first == ROffs.first)
-      return LastResForBeforeTUCheck = LOffs.second < ROffs.second;
-
-    ROffsMap[ROffs.first] = ROffs.second;
-  }
-
-  // We didn't find a common ancestor. Now traverse the stack of the left
-  // location, checking against the stack map of the right location.
-
-  while (1) {
-    SourceLocation UpperLoc;
-    const SrcMgr::SLocEntry &Entry = getSLocEntry(LOffs.first);
-    if (Entry.isInstantiation())
-      UpperLoc = Entry.getInstantiation().getInstantiationLocStart();
-    else
-      UpperLoc = Entry.getFile().getIncludeLoc();
-
-    if (UpperLoc.isInvalid())
-      break; // We reached the top.
-
-    LOffs = getDecomposedLoc(UpperLoc);
-
-    std::map<FileID, unsigned>::iterator I = ROffsMap.find(LOffs.first);
-    if (I != ROffsMap.end())
-      return LastResForBeforeTUCheck = LOffs.second < I->second;
+  // If we exited because we found a nearest common ancestor, compare the
+  // locations within the common file and cache them.
+  if (LOffs.first == ROffs.first) {
+    IsBeforeInTUCache.setCommonLoc(LOffs.first, LOffs.second, ROffs.second);
+    return IsBeforeInTUCache.getCachedResult(LOffs.second, ROffs.second);
   }
 
   // There is no common ancestor, most probably because one location is in the
-  // predefines buffer.
-  //
+  // predefines buffer or an AST file.
   // FIXME: We should rearrange the external interface so this simply never
   // happens; it can't conceptually happen. Also see PR5662.
+  IsBeforeInTUCache.setQueryFIDs(FileID(), FileID()); // Don't try caching.
 
+  // Zip both entries up to the top level record.
+  while (!MoveUpIncludeHierarchy(LOffs, *this)) /*empty*/;
+  while (!MoveUpIncludeHierarchy(ROffs, *this)) /*empty*/;
+  
   // If exactly one location is a memory buffer, assume it preceeds the other.
-  bool LIsMB = !getSLocEntry(LOffs.first).getFile().getContentCache()->Entry;
-  bool RIsMB = !getSLocEntry(ROffs.first).getFile().getContentCache()->Entry;
+  
+  // Strip off macro instantation locations, going up to the top-level File
+  // SLocEntry.
+  bool LIsMB = getFileEntryForID(LOffs.first) == 0;
+  bool RIsMB = getFileEntryForID(ROffs.first) == 0;
   if (LIsMB != RIsMB)
-    return LastResForBeforeTUCheck = LIsMB;
+    return LIsMB;
 
   // Otherwise, just assume FileIDs were created in order.
-  return LastResForBeforeTUCheck = (LOffs.first < ROffs.first);
+  return LOffs.first < ROffs.first;
 }
 
 /// PrintStats - Print statistics to stderr.

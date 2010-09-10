@@ -11,7 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Sema.h"
+#include "clang/Sema/SemaInternal.h"
 #include "clang/AST/CXXInheritance.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
@@ -249,6 +249,10 @@ bool Sema::CheckEquivalentExceptionSpec(const PartialDiagnostic &DiagID,
                                         SourceLocation NewLoc,
                                         bool *MissingExceptionSpecification,
                                      bool *MissingEmptyExceptionSpecification)  {
+  // Just completely ignore this under -fno-exceptions.
+  if (!getLangOptions().Exceptions)
+    return false;
+
   if (MissingExceptionSpecification)
     *MissingExceptionSpecification = false;
 
@@ -318,6 +322,11 @@ bool Sema::CheckExceptionSpecSubset(
     const PartialDiagnostic &DiagID, const PartialDiagnostic & NoteID,
     const FunctionProtoType *Superset, SourceLocation SuperLoc,
     const FunctionProtoType *Subset, SourceLocation SubLoc) {
+
+  // Just auto-succeed under -fno-exceptions.
+  if (!getLangOptions().Exceptions)
+    return false;
+
   // FIXME: As usual, we could be more specific in our error messages, but
   // that better waits until we've got types with source locations.
 
@@ -389,7 +398,7 @@ bool Sema::CheckExceptionSpecSubset(
       if (!IsDerivedFrom(CanonicalSubT, CanonicalSuperT, Paths))
         continue;
 
-      if (Paths.isAmbiguous(CanonicalSuperT))
+      if (Paths.isAmbiguous(Context.getCanonicalType(CanonicalSuperT)))
         continue;
 
       // Do this check from a context without privileges.

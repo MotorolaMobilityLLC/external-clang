@@ -6,13 +6,15 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=    \
+	AttrList.inc	\
+	Attrs.inc	\
+	DeclNodes.inc	\
 	DiagnosticParseKinds.inc	\
-    DiagnosticCommonKinds.inc
+    DiagnosticCommonKinds.inc	\
+	StmtNodes.inc
 
 clang_parse_SRC_FILES :=	\
-	AttributeList.cpp	\
-	DeclSpec.cpp	\
-	MinimalAction.cpp	\
+	ParseAST.cpp	\
 	ParseCXXInlineMethods.cpp	\
 	ParseDecl.cpp	\
 	ParseDeclCXX.cpp	\

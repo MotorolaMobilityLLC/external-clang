@@ -1,7 +1,7 @@
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -verify %s -analyzer-constraints=basic -analyzer-store=basic
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -verify %s -analyzer-constraints=range -analyzer-store=basic
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -analyzer-no-purge-dead -verify %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -verify %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -verify %s -analyzer-constraints=basic -analyzer-store=basic -Wreturn-type 
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -verify %s -analyzer-constraints=range -analyzer-store=basic -Wreturn-type 
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -analyzer-no-purge-dead -verify %s -Wreturn-type 
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -std=gnu99 -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -verify %s -Wreturn-type 
 
 typedef unsigned uintptr_t;
 
@@ -64,13 +64,13 @@ int f4_b() {
   short array[2];
   uintptr_t x = array; // expected-warning{{incompatible pointer to integer conversion}}
   short *p = x; // expected-warning{{incompatible integer to pointer conversion}}
-  
+
   // The following branch should be infeasible.
-  if (!(p = &array[0])) {
+  if (!(p == &array[0])) { // expected-warning{{Both operands to '==' always have the same value}}
     p = 0;
     *p = 1; // no-warning
   }
-  
+
   if (p) {
     *p = 5; // no-warning
     p = 0;
@@ -80,7 +80,6 @@ int f4_b() {
   *p += 10; // expected-warning{{Dereference of null pointer}}
   return 0;
 }
-
 
 int f5() {
   
@@ -116,6 +115,11 @@ void f6d(int *p) {
     int *q = 0;
     *q = 0xDEADBEEF; // no-warning    
   }  
+}
+
+void f6e(int *p, int offset) {
+  // PR7406 - crash from treating an UnknownVal as defined, to see if it's 0.
+  bar((p+offset)+1, 0); // not crash
 }
 
 int* qux();
@@ -275,7 +279,7 @@ void f12(HF12ITEM i, char *q) {
 // Test handling of translating between integer "pointers" and back.
 void f13() {
   int *x = 0;
-  if (((((int) x) << 2) + 1) >> 1) *x = 1; // no-warning
+  if (((((int) x) << 2) + 1) >> 1) *x = 1;
 }
 
 // PR 4759 - Attribute non-null checking by the analyzer was not correctly

@@ -6,10 +6,10 @@
 # License. See LICENSE.TXT for details.
 # 
 ##===----------------------------------------------------------------------===##
-LEVEL = ../../..
+CLANG_LEVEL := ..
 
-PARALLEL_DIRS = Headers Runtime Basic Lex Parse AST Sema CodeGen Analysis \
-                Checker Rewrite Frontend Index Driver
+PARALLEL_DIRS = Headers Basic Lex Parse AST Sema CodeGen Analysis \
+                Checker Rewrite Serialization Frontend FrontendTool Index Driver
 
-include $(LEVEL)/Makefile.common
+include $(CLANG_LEVEL)/Makefile
 
