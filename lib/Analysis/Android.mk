@@ -6,15 +6,23 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=    \
-    DiagnosticCommonKinds.inc	\
-	DiagnosticAnalysisKinds.inc
+	AttrList.inc	\
+	Attrs.inc	\
+	DeclNodes.inc	\
+	DiagnosticCommonKinds.inc	\
+	DiagnosticAnalysisKinds.inc	\
+	StmtNodes.inc
 
 clang_analysis_SRC_FILES :=	\
 	AnalysisContext.cpp	\
 	CFG.cpp	\
+	CFGStmtMap.cpp	\
+	FormatString.cpp	\
 	LiveVariables.cpp	\
 	PrintfFormatString.cpp	\
+	PseudoConstantAnalysis.cpp	\
 	ReachableCode.cpp	\
+	ScanfFormatString.cpp	\
 	UninitializedValues.cpp
 
 

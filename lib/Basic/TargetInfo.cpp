@@ -34,6 +34,8 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
   DoubleAlign = 64;
   LongDoubleWidth = 64;
   LongDoubleAlign = 64;
+  LargeArrayMinWidth = 0;
+  LargeArrayAlign = 0;
   SizeType = UnsignedLong;
   PtrDiffType = SignedLong;
   IntMaxType = SignedLongLong;
@@ -52,6 +54,13 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
   DescriptionString = "E-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
                       "i64:64:64-f32:32:32-f64:64:64-n32";
   UserLabelPrefix = "_";
+  HasAlignMac68kSupport = false;
+
+  // Default to no types using fpret.
+  RealTypeUsesObjCFPRet = 0;
+
+  // Default to using the Itanium ABI.
+  CXXABI = CXXABI_Itanium;
 }
 
 // Out of line virtual dtor for TargetInfo.
@@ -281,6 +290,15 @@ bool TargetInfo::validateOutputConstraint(ConstraintInfo &Info) const {
       Info.setAllowsRegister();
       Info.setAllowsMemory();
       break;
+    case ',': // multiple alternative constraint.  Pass it.
+      Name++;
+      // Handle additional optional '=' or '+' modifiers.
+      if (*Name == '=' || *Name == '+')
+        Name++;
+      break;
+    case '?': // Disparage slightly code.
+    case '!': // Disparage severly.
+      break;  // Pass them.
     }
 
     Name++;
@@ -344,6 +362,7 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
       if (!resolveSymbolicName(Name, OutputConstraints, NumOutputs, Index))
         return false;
 
+      Info.setTiedOperand(Index, OutputConstraints[Index]);
       break;
     }
     case '%': // commutative
@@ -374,6 +393,11 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
       Info.setAllowsRegister();
       Info.setAllowsMemory();
       break;
+    case ',': // multiple alternative constraint.  Ignore comma.
+      break;
+    case '?': // Disparage slightly code.
+    case '!': // Disparage severly.
+      break;  // Pass them.
     }
 
     Name++;

@@ -15,6 +15,7 @@
 #ifndef CLANG_CODEGEN_CGVALUE_H
 #define CLANG_CODEGEN_CGVALUE_H
 
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/Type.h"
 
 namespace llvm {
@@ -34,69 +35,64 @@ namespace CodeGen {
 /// simple LLVM SSA value, a pair of SSA values for complex numbers, or the
 /// address of an aggregate value in memory.
 class RValue {
-  llvm::Value *V1, *V2;
-  // TODO: Encode this into the low bit of pointer for more efficient
-  // return-by-value.
-  enum { Scalar, Complex, Aggregate } Flavor;
+  enum Flavor { Scalar, Complex, Aggregate };
 
-  bool Volatile:1;
+  // Stores first value and flavor.
+  llvm::PointerIntPair<llvm::Value *, 2, Flavor> V1;
+  // Stores second value and volatility.
+  llvm::PointerIntPair<llvm::Value *, 1, bool> V2;
+
 public:
+  bool isScalar() const { return V1.getInt() == Scalar; }
+  bool isComplex() const { return V1.getInt() == Complex; }
+  bool isAggregate() const { return V1.getInt() == Aggregate; }
 
-  bool isScalar() const { return Flavor == Scalar; }
-  bool isComplex() const { return Flavor == Complex; }
-  bool isAggregate() const { return Flavor == Aggregate; }
-
-  bool isVolatileQualified() const { return Volatile; }
+  bool isVolatileQualified() const { return V2.getInt(); }
 
   /// getScalarVal() - Return the Value* of this scalar value.
   llvm::Value *getScalarVal() const {
     assert(isScalar() && "Not a scalar!");
-    return V1;
+    return V1.getPointer();
   }
 
   /// getComplexVal - Return the real/imag components of this complex value.
   ///
   std::pair<llvm::Value *, llvm::Value *> getComplexVal() const {
-    return std::pair<llvm::Value *, llvm::Value *>(V1, V2);
+    return std::make_pair(V1.getPointer(), V2.getPointer());
   }
 
   /// getAggregateAddr() - Return the Value* of the address of the aggregate.
   llvm::Value *getAggregateAddr() const {
     assert(isAggregate() && "Not an aggregate!");
-    return V1;
+    return V1.getPointer();
   }
 
   static RValue get(llvm::Value *V) {
     RValue ER;
-    ER.V1 = V;
-    ER.Flavor = Scalar;
-    ER.Volatile = false;
+    ER.V1.setPointer(V);
+    ER.V1.setInt(Scalar);
+    ER.V2.setInt(false);
     return ER;
   }
   static RValue getComplex(llvm::Value *V1, llvm::Value *V2) {
     RValue ER;
-    ER.V1 = V1;
-    ER.V2 = V2;
-    ER.Flavor = Complex;
-    ER.Volatile = false;
+    ER.V1.setPointer(V1);
+    ER.V2.setPointer(V2);
+    ER.V1.setInt(Complex);
+    ER.V2.setInt(false);
     return ER;
   }
   static RValue getComplex(const std::pair<llvm::Value *, llvm::Value *> &C) {
-    RValue ER;
-    ER.V1 = C.first;
-    ER.V2 = C.second;
-    ER.Flavor = Complex;
-    ER.Volatile = false;
-    return ER;
+    return getComplex(C.first, C.second);
   }
   // FIXME: Aggregate rvalues need to retain information about whether they are
   // volatile or not.  Remove default to find all places that probably get this
   // wrong.
-  static RValue getAggregate(llvm::Value *V, bool Vol = false) {
+  static RValue getAggregate(llvm::Value *V, bool Volatile = false) {
     RValue ER;
-    ER.V1 = V;
-    ER.Flavor = Aggregate;
-    ER.Volatile = Vol;
+    ER.V1.setPointer(V);
+    ER.V1.setInt(Aggregate);
+    ER.V2.setInt(Volatile);
     return ER;
   }
 };
@@ -141,6 +137,9 @@ class LValue {
   // 'const' is unused here
   Qualifiers Quals;
 
+  /// The alignment to use when accessing this lvalue.
+  unsigned short Alignment;
+
   // objective-c's ivar
   bool Ivar:1;
   
@@ -153,15 +152,20 @@ class LValue {
 
   // Lvalue is a global reference of an objective-c object
   bool GlobalObjCRef : 1;
+  
+  // Lvalue is a thread local reference
+  bool ThreadLocalRef : 1;
 
   Expr *BaseIvarExp;
 private:
-  void SetQualifiers(Qualifiers Quals) {
+  void Initialize(Qualifiers Quals, unsigned Alignment = 0) {
     this->Quals = Quals;
-    
-    // FIXME: Convenient place to set objc flags to 0. This should really be
-    // done in a user-defined constructor instead.
+    this->Alignment = Alignment;
+    assert(this->Alignment == Alignment && "Alignment exceeds allowed max!");
+
+    // Initialize Objective-C flags.
     this->Ivar = this->ObjIsArray = this->NonGC = this->GlobalObjCRef = false;
+    this->ThreadLocalRef = false;
     this->BaseIvarExp = 0;
   }
 
@@ -180,30 +184,36 @@ public:
   }
 
   bool isObjCIvar() const { return Ivar; }
+  void setObjCIvar(bool Value) { Ivar = Value; }
+
   bool isObjCArray() const { return ObjIsArray; }
+  void setObjCArray(bool Value) { ObjIsArray = Value; }
+
   bool isNonGC () const { return NonGC; }
+  void setNonGC(bool Value) { NonGC = Value; }
+
   bool isGlobalObjCRef() const { return GlobalObjCRef; }
-  bool isObjCWeak() const { return Quals.getObjCGCAttr() == Qualifiers::Weak; }
-  bool isObjCStrong() const { return Quals.getObjCGCAttr() == Qualifiers::Strong; }
+  void setGlobalObjCRef(bool Value) { GlobalObjCRef = Value; }
+
+  bool isThreadLocalRef() const { return ThreadLocalRef; }
+  void setThreadLocalRef(bool Value) { ThreadLocalRef = Value;}
+
+  bool isObjCWeak() const {
+    return Quals.getObjCGCAttr() == Qualifiers::Weak;
+  }
+  bool isObjCStrong() const {
+    return Quals.getObjCGCAttr() == Qualifiers::Strong;
+  }
   
   Expr *getBaseIvarExp() const { return BaseIvarExp; }
   void setBaseIvarExp(Expr *V) { BaseIvarExp = V; }
 
+  const Qualifiers &getQuals() const { return Quals; }
+  Qualifiers &getQuals() { return Quals; }
+
   unsigned getAddressSpace() const { return Quals.getAddressSpace(); }
 
-  static void SetObjCIvar(LValue& R, bool iValue) {
-    R.Ivar = iValue;
-  }
-  static void SetObjCArray(LValue& R, bool iValue) {
-    R.ObjIsArray = iValue;
-  }
-  static void SetGlobalObjCRef(LValue& R, bool iValue) {
-    R.GlobalObjCRef = iValue;
-  }
-
-  static void SetObjCNonGC(LValue& R, bool iValue) {
-    R.NonGC = iValue;
-  }
+  unsigned getAlignment() const { return Alignment; }
 
   // simple lvalue
   llvm::Value *getAddress() const { assert(isSimple()); return V; }
@@ -241,11 +251,15 @@ public:
     return KVCRefExpr;
   }
 
-  static LValue MakeAddr(llvm::Value *V, Qualifiers Quals) {
+  static LValue MakeAddr(llvm::Value *V, QualType T, unsigned Alignment,
+                         ASTContext &Context) {
+    Qualifiers Quals = Context.getCanonicalType(T).getQualifiers();
+    Quals.setObjCGCAttr(Context.getObjCGCAttrKind(T));
+
     LValue R;
     R.LVType = Simple;
     R.V = V;
-    R.SetQualifiers(Quals);
+    R.Initialize(Quals, Alignment);
     return R;
   }
 
@@ -255,7 +269,7 @@ public:
     R.LVType = VectorElt;
     R.V = Vec;
     R.VectorIdx = Idx;
-    R.SetQualifiers(Qualifiers::fromCVRMask(CVR));
+    R.Initialize(Qualifiers::fromCVRMask(CVR));
     return R;
   }
 
@@ -265,7 +279,7 @@ public:
     R.LVType = ExtVectorElt;
     R.V = Vec;
     R.VectorElts = Elts;
-    R.SetQualifiers(Qualifiers::fromCVRMask(CVR));
+    R.Initialize(Qualifiers::fromCVRMask(CVR));
     return R;
   }
 
@@ -281,7 +295,7 @@ public:
     R.LVType = BitField;
     R.V = BaseValue;
     R.BitFieldInfo = &Info;
-    R.SetQualifiers(Qualifiers::fromCVRMask(CVR));
+    R.Initialize(Qualifiers::fromCVRMask(CVR));
     return R;
   }
 
@@ -293,7 +307,7 @@ public:
     LValue R;
     R.LVType = PropertyRef;
     R.PropertyRefExpr = E;
-    R.SetQualifiers(Qualifiers::fromCVRMask(CVR));
+    R.Initialize(Qualifiers::fromCVRMask(CVR));
     return R;
   }
 
@@ -302,7 +316,7 @@ public:
     LValue R;
     R.LVType = KVCRef;
     R.KVCRefExpr = E;
-    R.SetQualifiers(Qualifiers::fromCVRMask(CVR));
+    R.Initialize(Qualifiers::fromCVRMask(CVR));
     return R;
   }
 };

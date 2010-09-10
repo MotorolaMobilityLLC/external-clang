@@ -11,14 +11,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Sema.h"
-#include "Lookup.h"
+#include "clang/Sema/SemaInternal.h"
+#include "clang/Sema/Lookup.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/Basic/PartialDiagnostic.h"
-#include "clang/Parse/DeclSpec.h"
+#include "clang/Sema/DeclSpec.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace clang;
@@ -96,7 +96,7 @@ DeclContext *Sema::computeDeclContext(const CXXScopeSpec &SS,
           // injected class name of the named class template, we're entering
           // into that class template definition.
           QualType Injected
-            = ClassTemplate->getInjectedClassNameSpecialization(Context);
+            = ClassTemplate->getInjectedClassNameSpecialization();
           if (Context.hasSameType(Injected, ContextType))
             return ClassTemplate->getTemplatedDecl();
 
@@ -186,21 +186,10 @@ CXXRecordDecl *Sema::getCurrentInstantiationOf(NestedNameSpecifier *NNS) {
 /// that is currently being defined. Or, if we have a type that names
 /// a class template specialization that is not a complete type, we
 /// will attempt to instantiate that class template.
-bool Sema::RequireCompleteDeclContext(CXXScopeSpec &SS) {
-  if (!SS.isSet() || SS.isInvalid())
-    return false;
+bool Sema::RequireCompleteDeclContext(CXXScopeSpec &SS,
+                                      DeclContext *DC) {
+  assert(DC != 0 && "given null context");
 
-  DeclContext *DC = computeDeclContext(SS, true);
-  if (!DC) {
-    // It's dependent.
-    assert(isDependentScopeSpecifier(SS) && 
-           "No context for non-dependent scope specifier?");
-    Diag(SS.getRange().getBegin(), diag::err_dependent_nested_name_spec)
-      << SS.getRange();
-    SS.setScopeRep(0);
-    return true;
-  }
-  
   if (TagDecl *Tag = dyn_cast<TagDecl>(DC)) {
     // If this is a dependent type, then we consider it complete.
     if (Tag->isDependentContext())
@@ -216,7 +205,7 @@ bool Sema::RequireCompleteDeclContext(CXXScopeSpec &SS) {
     if (RequireCompleteType(SS.getRange().getBegin(),
                             Context.getTypeDeclType(Tag),
                             PDiag(diag::err_incomplete_nested_name_spec)
-                            << SS.getRange())) {
+                              << SS.getRange())) {
       SS.setScopeRep(0);  // Mark the ScopeSpec invalid.
       return true;
     }
@@ -294,7 +283,7 @@ NamedDecl *Sema::FindFirstQualifierInScope(Scope *S, NestedNameSpecifier *NNS) {
 bool Sema::isNonTypeNestedNameSpecifier(Scope *S, CXXScopeSpec &SS,
                                         SourceLocation IdLoc,
                                         IdentifierInfo &II,
-                                        TypeTy *ObjectTypePtr) {
+                                        ParsedType ObjectTypePtr) {
   QualType ObjectType = GetTypeFromParser(ObjectTypePtr);
   LookupResult Found(*this, &II, IdLoc, LookupNestedNameSpecifierName);
   
@@ -322,7 +311,8 @@ bool Sema::isNonTypeNestedNameSpecifier(Scope *S, CXXScopeSpec &SS,
     // nested-name-specifier.
     
     // The declaration context must be complete.
-    if (!LookupCtx->isDependentContext() && RequireCompleteDeclContext(SS))
+    if (!LookupCtx->isDependentContext() &&
+        RequireCompleteDeclContext(SS, LookupCtx))
       return false;
     
     LookupQualifiedName(Found, LookupCtx);
@@ -392,7 +382,8 @@ Sema::CXXScopeTy *Sema::BuildCXXNestedNameSpecifier(Scope *S,
     // nested-name-specifier.
 
     // The declaration context must be complete.
-    if (!LookupCtx->isDependentContext() && RequireCompleteDeclContext(SS))
+    if (!LookupCtx->isDependentContext() &&
+        RequireCompleteDeclContext(SS, LookupCtx))
       return 0;
 
     LookupQualifiedName(Found, LookupCtx);
@@ -425,7 +416,17 @@ Sema::CXXScopeTy *Sema::BuildCXXNestedNameSpecifier(Scope *S,
 
       ObjectTypeSearchedInScope = true;
     }
-  } else if (isDependent) {
+  } else if (!isDependent) {
+    // Perform unqualified name lookup in the current scope.
+    LookupName(Found, S);
+  }
+
+  // If we performed lookup into a dependent context and did not find anything,
+  // that's fine: just build a dependent nested-name-specifier.
+  if (Found.empty() && isDependent &&
+      !(LookupCtx && LookupCtx->isRecord() &&
+        (!cast<CXXRecordDecl>(LookupCtx)->hasDefinition() ||
+         !cast<CXXRecordDecl>(LookupCtx)->hasAnyDependentBases()))) {
     // Don't speculate if we're just trying to improve error recovery.
     if (ErrorRecoveryLookup)
       return 0;
@@ -438,11 +439,8 @@ Sema::CXXScopeTy *Sema::BuildCXXNestedNameSpecifier(Scope *S,
       return NestedNameSpecifier::Create(Context, &II);
 
     return NestedNameSpecifier::Create(Context, Prefix, &II);
-  } else {
-    // Perform unqualified name lookup in the current scope.
-    LookupName(Found, S);
-  }
-
+  } 
+  
   // FIXME: Deal with ambiguities cleanly.
 
   if (Found.empty() && !ErrorRecoveryLookup) {
@@ -467,8 +465,10 @@ Sema::CXXScopeTy *Sema::BuildCXXNestedNameSpecifier(Scope *S,
       if (NamedDecl *ND = Found.getAsSingle<NamedDecl>())
         Diag(ND->getLocation(), diag::note_previous_decl)
           << ND->getDeclName();
-    } else
+    } else {
       Found.clear();
+      Found.setLookupName(&II);
+    }
   }
 
   NamedDecl *SD = Found.getAsSingle<NamedDecl>();
@@ -567,10 +567,10 @@ Sema::CXXScopeTy *Sema::ActOnCXXNestedNameSpecifier(Scope *S,
                                                     SourceLocation IdLoc,
                                                     SourceLocation CCLoc,
                                                     IdentifierInfo &II,
-                                                    TypeTy *ObjectTypePtr,
+                                                    ParsedType ObjectTypePtr,
                                                     bool EnteringContext) {
   return BuildCXXNestedNameSpecifier(S, SS, IdLoc, CCLoc, II,
-                                     QualType::getFromOpaquePtr(ObjectTypePtr),
+                                     GetTypeFromParser(ObjectTypePtr),
                                      /*ScopeLookupResult=*/0, EnteringContext,
                                      false);
 }
@@ -582,21 +582,20 @@ Sema::CXXScopeTy *Sema::ActOnCXXNestedNameSpecifier(Scope *S,
 ///
 /// The arguments are the same as those passed to ActOnCXXNestedNameSpecifier.
 bool Sema::IsInvalidUnlessNestedName(Scope *S, CXXScopeSpec &SS,
-                                     IdentifierInfo &II, TypeTy *ObjectType,
+                                     IdentifierInfo &II, ParsedType ObjectType,
                                      bool EnteringContext) {
   return BuildCXXNestedNameSpecifier(S, SS, SourceLocation(), SourceLocation(),
-                                     II, QualType::getFromOpaquePtr(ObjectType),
+                                     II, GetTypeFromParser(ObjectType),
                                      /*ScopeLookupResult=*/0, EnteringContext,
                                      true);
 }
 
 Sema::CXXScopeTy *Sema::ActOnCXXNestedNameSpecifier(Scope *S,
                                                     const CXXScopeSpec &SS,
-                                                    TypeTy *Ty,
+                                                    ParsedType Ty,
                                                     SourceRange TypeRange,
                                                     SourceLocation CCLoc) {
-  NestedNameSpecifier *Prefix
-    = static_cast<NestedNameSpecifier *>(SS.getScopeRep());
+  NestedNameSpecifier *Prefix = SS.getScopeRep();
   QualType T = GetTypeFromParser(Ty);
   return NestedNameSpecifier::Create(Context, Prefix, /*FIXME:*/false,
                                      T.getTypePtr());
@@ -656,7 +655,7 @@ bool Sema::ActOnCXXEnterDeclaratorScope(Scope *S, CXXScopeSpec &SS) {
 
   // Before we enter a declarator's context, we need to make sure that
   // it is a complete declaration context.
-  if (!DC->isDependentContext() && RequireCompleteDeclContext(SS))
+  if (!DC->isDependentContext() && RequireCompleteDeclContext(SS, DC))
     return true;
     
   EnterDeclaratorContext(S, DC);

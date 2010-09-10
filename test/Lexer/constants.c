@@ -24,6 +24,13 @@ t',
   'abcd'  // expected-warning {{multi-character character constant}}
 };
 
+//  PR4499
+int m0 = '0';
+int m1 = '\\\''; // expected-warning {{multi-character character constant}}
+int m2 = '\\\\'; // expected-warning {{multi-character character constant}}
+int m3 = '\\\
+';
+
 
 #pragma clang diagnostic ignored "-Wmultichar"
 
@@ -55,3 +62,6 @@ double t1[] = {
   -1.9e500,  // expected-warning {{too large}}
   -1.9e-500  // expected-warning {{too small}}
 };
+
+// PR7888
+double g = 1e100000000; // expected-warning {{too large}}

@@ -10,6 +10,7 @@
 #ifndef CLANG_DRIVER_TOOLCHAIN_H_
 #define CLANG_DRIVER_TOOLCHAIN_H_
 
+#include "clang/Driver/Types.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/System/Path.h"
@@ -17,6 +18,7 @@
 
 namespace clang {
 namespace driver {
+  class ArgList;
   class Compilation;
   class DerivedArgList;
   class Driver;
@@ -53,6 +55,7 @@ public:
   const Driver &getDriver() const;
   const llvm::Triple &getTriple() const { return Triple; }
 
+  llvm::Triple::ArchType getArch() const { return Triple.getArch(); }
   llvm::StringRef getArchName() const { return Triple.getArchName(); }
   llvm::StringRef getPlatform() const { return Triple.getVendorName(); }
   llvm::StringRef getOS() const { return Triple.getOSName(); }
@@ -70,22 +73,28 @@ public:
   // Tool access.
 
   /// TranslateArgs - Create a new derived argument list for any argument
-  /// translations this ToolChain may wish to perform.
+  /// translations this ToolChain may wish to perform, or 0 if no tool chain
+  /// specific translations are needed.
   ///
   /// \param BoundArch - The bound architecture name, or 0.
-  virtual DerivedArgList *TranslateArgs(InputArgList &Args,
-                                        const char *BoundArch) const = 0;
+  virtual DerivedArgList *TranslateArgs(const DerivedArgList &Args,
+                                        const char *BoundArch) const {
+    return 0;
+  }
 
   /// SelectTool - Choose a tool to use to handle the action \arg JA.
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const = 0;
 
   // Helper methods
 
-  std::string GetFilePath(const Compilation &C, const char *Name) const;
-  std::string GetProgramPath(const Compilation &C, const char *Name,
-                             bool WantFile = false) const;
+  std::string GetFilePath(const char *Name) const;
+  std::string GetProgramPath(const char *Name, bool WantFile = false) const;
 
   // Platform defaults information
+
+  /// LookupTypeForExtension - Return the default language type to use for the
+  /// given extension.
+  virtual types::ID LookupTypeForExtension(const char *Ext) const;
 
   /// IsBlocksDefault - Does this tool chain enable -fblocks by default.
   virtual bool IsBlocksDefault() const { return false; }
@@ -133,6 +142,17 @@ public:
 
   /// UseSjLjExceptions - Does this tool chain use SjLj exceptions.
   virtual bool UseSjLjExceptions() const { return false; }
+
+  /// ComputeLLVMTriple - Return the LLVM target triple to use, after taking
+  /// command line arguments into account.
+  virtual std::string ComputeLLVMTriple(const ArgList &Args) const;
+
+  /// ComputeEffectiveClangTriple - Return the Clang triple to use for this
+  /// target, which may take into account the command line arguments. For
+  /// example, on Darwin the -mmacosx-version-min= command line argument (which
+  /// sets the deployment target) determines the version in the triple passed to
+  /// Clang.
+  virtual std::string ComputeEffectiveClangTriple(const ArgList &Args) const;
 };
 
 } // end namespace driver

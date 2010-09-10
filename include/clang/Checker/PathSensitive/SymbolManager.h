@@ -31,6 +31,7 @@ namespace clang {
   class ASTContext;
   class BasicValueFactory;
   class MemRegion;
+  class SubRegion;
   class TypedRegion;
   class VarRegion;
   class StackFrameContext;
@@ -38,7 +39,8 @@ namespace clang {
 class SymExpr : public llvm::FoldingSetNode {
 public:
   enum Kind { BEGIN_SYMBOLS,
-              RegionValueKind, ConjuredKind, DerivedKind,
+              RegionValueKind, ConjuredKind, DerivedKind, ExtentKind,
+              MetadataKind,
               END_SYMBOLS,
               SymIntKind, SymSymKind };
 private:
@@ -189,6 +191,82 @@ public:
   }
 };
 
+/// SymbolExtent - Represents the extent (size in bytes) of a bounded region.
+///  Clients should not ask the SymbolManager for a region's extent. Always use
+///  SubRegion::getExtent instead -- the value returned may not be a symbol.
+class SymbolExtent : public SymbolData {
+  const SubRegion *R;
+  
+public:
+  SymbolExtent(SymbolID sym, const SubRegion *r)
+  : SymbolData(ExtentKind, sym), R(r) {}
+
+  const SubRegion *getRegion() const { return R; }
+
+  QualType getType(ASTContext&) const;
+
+  void dumpToStream(llvm::raw_ostream &os) const;
+
+  static void Profile(llvm::FoldingSetNodeID& profile, const SubRegion *R) {
+    profile.AddInteger((unsigned) ExtentKind);
+    profile.AddPointer(R);
+  }
+
+  virtual void Profile(llvm::FoldingSetNodeID& profile) {
+    Profile(profile, R);
+  }
+
+  // Implement isa<T> support.
+  static inline bool classof(const SymExpr* SE) {
+    return SE->getKind() == ExtentKind;
+  }
+};
+
+/// SymbolMetadata - Represents path-dependent metadata about a specific region.
+///  Metadata symbols remain live as long as they are marked as in use before
+///  dead-symbol sweeping AND their associated regions are still alive.
+///  Intended for use by checkers.
+class SymbolMetadata : public SymbolData {
+  const MemRegion* R;
+  const Stmt* S;
+  QualType T;
+  unsigned Count;
+  const void* Tag;
+public:
+  SymbolMetadata(SymbolID sym, const MemRegion* r, const Stmt* s, QualType t,
+                 unsigned count, const void* tag)
+  : SymbolData(MetadataKind, sym), R(r), S(s), T(t), Count(count), Tag(tag) {}
+
+  const MemRegion *getRegion() const { return R; }
+  const Stmt* getStmt() const { return S; }
+  unsigned getCount() const { return Count; }
+  const void* getTag() const { return Tag; }
+
+  QualType getType(ASTContext&) const;
+
+  void dumpToStream(llvm::raw_ostream &os) const;
+
+  static void Profile(llvm::FoldingSetNodeID& profile, const MemRegion *R,
+                      const Stmt *S, QualType T, unsigned Count,
+                      const void *Tag) {
+    profile.AddInteger((unsigned) MetadataKind);
+    profile.AddPointer(R);
+    profile.AddPointer(S);
+    profile.Add(T);
+    profile.AddInteger(Count);
+    profile.AddPointer(Tag);
+  }
+
+  virtual void Profile(llvm::FoldingSetNodeID& profile) {
+    Profile(profile, R, S, T, Count, Tag);
+  }
+
+  // Implement isa<T> support.
+  static inline bool classof(const SymExpr* SE) {
+    return SE->getKind() == MetadataKind;
+  }
+};
+
 // SymIntExpr - Represents symbolic expression like 'x' + 3.
 class SymIntExpr : public SymExpr {
   const SymExpr *LHS;
@@ -305,6 +383,12 @@ public:
   const SymbolDerived *getDerivedSymbol(SymbolRef parentSymbol,
                                         const TypedRegion *R);
 
+  const SymbolExtent *getExtentSymbol(const SubRegion *R);
+
+  const SymbolMetadata* getMetadataSymbol(const MemRegion* R, const Stmt* S,
+                                          QualType T, unsigned VisitCount,
+                                          const void* SymbolTag = 0);
+
   const SymIntExpr *getSymIntExpr(const SymExpr *lhs, BinaryOperator::Opcode op,
                                   const llvm::APSInt& rhs, QualType t);
 
@@ -328,25 +412,40 @@ class SymbolReaper {
   typedef llvm::DenseSet<SymbolRef> SetTy;
 
   SetTy TheLiving;
+  SetTy MetadataInUse;
   SetTy TheDead;
   const LocationContext *LCtx;
+  const Stmt *Loc;
   SymbolManager& SymMgr;
 
 public:
-  SymbolReaper(const LocationContext *ctx, SymbolManager& symmgr)
-    : LCtx(ctx), SymMgr(symmgr) {}
+  SymbolReaper(const LocationContext *ctx, const Stmt *s, SymbolManager& symmgr)
+   : LCtx(ctx), Loc(s), SymMgr(symmgr) {}
 
   ~SymbolReaper() {}
 
   const LocationContext *getLocationContext() const { return LCtx; }
+  const Stmt *getCurrentStatement() const { return Loc; }
 
   bool isLive(SymbolRef sym);
+  bool isLive(const Stmt *ExprVal) const;
+  bool isLive(const VarRegion *VR) const;
 
-  bool isLive(const Stmt* Loc, const Stmt* ExprVal) const;
-
-  bool isLive(const Stmt* Loc, const VarRegion *VR) const;
-  
+  // markLive - Unconditionally marks a symbol as live. This should never be
+  //  used by checkers, only by the state infrastructure such as the store and
+  //  environment. Checkers should instead use metadata symbols and markInUse.
   void markLive(SymbolRef sym);
+
+  // markInUse - Marks a symbol as important to a checker. For metadata symbols,
+  //  this will keep the symbol alive as long as its associated region is also
+  //  live. For other symbols, this has no effect; checkers are not permitted
+  //  to influence the life of other symbols. This should be used before any
+  //  symbol marking has occurred, i.e. in the MarkLiveSymbols callback.
+  void markInUse(SymbolRef sym);
+
+  // maybeDead - If a symbol is known to be live, marks the symbol as live.
+  //  Otherwise, if the symbol cannot be proven live, it is marked as dead.
+  //  Returns true if the symbol is dead, false if live.
   bool maybeDead(SymbolRef sym);
 
   typedef SetTy::const_iterator dead_iterator;
@@ -355,6 +454,13 @@ public:
 
   bool hasDeadSymbols() const {
     return !TheDead.empty();
+  }
+
+  /// isDead - Returns whether or not a symbol has been confirmed dead. This
+  ///  should only be called once all marking of dead symbols has completed.
+  ///  (For checkers, this means only in the EvalDeadSymbols callback.)
+  bool isDead(SymbolRef sym) const {
+    return TheDead.count(sym);
   }
 };
 

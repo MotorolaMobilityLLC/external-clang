@@ -17,33 +17,59 @@
 #include "clang/Lex/Pragma.h"
 
 namespace clang {
-  class Action;
+  class Sema;
   class Parser;
 
-class PragmaPackHandler : public PragmaHandler {
-  Action &Actions;
+class PragmaAlignHandler : public PragmaHandler {
+  Sema &Actions;
 public:
-  PragmaPackHandler(const IdentifierInfo *N, Action &A) : PragmaHandler(N),
-                                                          Actions(A) {}
+  explicit PragmaAlignHandler(Sema &A) : PragmaHandler("align"), Actions(A) {}
+
+  virtual void HandlePragma(Preprocessor &PP, Token &FirstToken);
+};
+
+class PragmaGCCVisibilityHandler : public PragmaHandler {
+  Sema &Actions;
+public:
+  explicit PragmaGCCVisibilityHandler(Sema &A) : PragmaHandler("visibility"),
+                                                 Actions(A) {}
+
+  virtual void HandlePragma(Preprocessor &PP, Token &FirstToken);
+};
+
+class PragmaOptionsHandler : public PragmaHandler {
+  Sema &Actions;
+public:
+  explicit PragmaOptionsHandler(Sema &A) : PragmaHandler("options"),
+                                           Actions(A) {}
+
+  virtual void HandlePragma(Preprocessor &PP, Token &FirstToken);
+};
+
+class PragmaPackHandler : public PragmaHandler {
+  Sema &Actions;
+public:
+  explicit PragmaPackHandler(Sema &A) : PragmaHandler("pack"),
+                                        Actions(A) {}
 
   virtual void HandlePragma(Preprocessor &PP, Token &FirstToken);
 };
 
 class PragmaUnusedHandler : public PragmaHandler {
-  Action &Actions;
+  Sema &Actions;
   Parser &parser;
 public:
-  PragmaUnusedHandler(const IdentifierInfo *N, Action &A, Parser& p)
-    : PragmaHandler(N), Actions(A), parser(p) {}
+  PragmaUnusedHandler(Sema &A, Parser& p)
+    : PragmaHandler("unused"), Actions(A), parser(p) {}
 
   virtual void HandlePragma(Preprocessor &PP, Token &FirstToken);
 };
 
 class PragmaWeakHandler : public PragmaHandler {
-  Action &Actions;
+  Sema &Actions;
 public:
-  PragmaWeakHandler(const IdentifierInfo *N, Action &A)
-    : PragmaHandler(N), Actions(A) {}
+  explicit PragmaWeakHandler(Sema &A)
+    : PragmaHandler("weak"), Actions(A) {}
 
   virtual void HandlePragma(Preprocessor &PP, Token &FirstToken);
 };

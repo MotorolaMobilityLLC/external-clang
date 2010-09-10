@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -triple x86_64-unknown-unknown -emit-llvm -o %t %s
-// RUN: FileCheck < %t %s
+// RUN: %clang_cc1 -triple x86_64-unknown-unknown -emit-llvm -o - %s| FileCheck %s
+#include <stdarg.h>
 
 // CHECK: %0 = type { i64, double }
 
@@ -45,7 +45,7 @@ void f7(e7 a0) {
 // Test merging/passing of upper eightbyte with X87 class.
 //
 // CHECK: define %0 @f8_1()
-// CHECK: define void @f8_2(%0)
+// CHECK: define void @f8_2(i64 %a0.coerce0, double %a0.coerce1)
 union u8 {
   long double a;
   int b;
@@ -56,22 +56,22 @@ void f8_2(union u8 a0) {}
 // CHECK: define i64 @f9()
 struct s9 { int a; int b; int : 0; } f9(void) { while (1) {} }
 
-// CHECK: define void @f10(i64)
+// CHECK: define void @f10(i64 %a0.coerce)
 struct s10 { int a; int b; int : 0; };
 void f10(struct s10 a0) {}
 
 // CHECK: define void @f11(%struct.s19* sret %agg.result)
 union { long double a; float b; } f11() { while (1) {} }
 
-// CHECK: define i64 @f12_0()
-// CHECK: define void @f12_1(i64)
+// CHECK: define i32 @f12_0()
+// CHECK: define void @f12_1(i32 %a0.coerce)
 struct s12 { int a __attribute__((aligned(16))); };
 struct s12 f12_0(void) { while (1) {} }
 void f12_1(struct s12 a0) {}
 
 // Check that sret parameter is accounted for when checking available integer
 // registers.
-// CHECK: define void @f13(%struct.s13_0* sret %agg.result, i32 %a, i32 %b, i32 %c, i32 %d, %struct.s13_1* byval %e, i32 %f)
+// CHECK: define void @f13(%struct.s13_0* sret %agg.result, i32 %a, i32 %b, i32 %c, i32 %d, {{.*}}* byval %e, i32 %f)
 
 struct s13_0 { long long f0[3]; };
 struct s13_1 { long long f0[2]; };
@@ -92,10 +92,10 @@ void f16(float a, float b, float c, float d, float e, float f, float g, float h,
 void f17(float a, float b, float c, float d, float e, float f, float g, float h,
          long double X) {}
 
-// Check for valid coercion.
-// CHECK: [[f18_t0:%.*]] = bitcast i64* {{.*}} to %struct.f18_s0*
-// CHECK: [[f18_t1:%.*]] = load %struct.f18_s0* [[f18_t0]], align 1
-// CHECK: store %struct.f18_s0 [[f18_t1]], %struct.f18_s0* %f18_arg1
+// Check for valid coercion.  The struct should be passed/returned as i32, not
+// as i64 for better code quality.
+// rdar://8135035
+// CHECK: define void @f18(i32 %a, i32 %f18_arg1.coerce) 
 struct f18_s0 { int f0; };
 void f18(int a, struct f18_s0 f18_arg1) { while (1) {} }
 
@@ -113,3 +113,135 @@ struct __attribute__((aligned(32))) s20 {
   int y;
 };
 void f20(struct s20 x) {}
+
+struct StringRef {
+  long x;
+  const char *Ptr;
+};
+
+// rdar://7375902
+// CHECK: define i8* @f21(i64 %S.coerce0, i8* %S.coerce1) 
+const char *f21(struct StringRef S) { return S.x+S.Ptr; }
+
+// PR7567
+typedef __attribute__ ((aligned(16))) struct f22s { unsigned long long x[2]; } L;
+void f22(L x, L y) { }
+// CHECK: @f22
+// CHECK: %x = alloca{{.*}}, align 16
+// CHECK: %y = alloca{{.*}}, align 16
+
+
+
+// PR7714
+struct f23S {
+  short f0;
+  unsigned f1;
+  int f2;
+};
+
+
+void f23(int A, struct f23S B) {
+  // CHECK: define void @f23(i32 %A, i64 %B.coerce0, i32 %B.coerce1)
+}
+
+struct f24s { long a; int b; };
+
+struct f23S f24(struct f23S *X, struct f24s *P2) {
+  return *X;
+  
+  // CHECK: define %struct.f24s @f24(%struct.f23S* %X, %struct.f24s* %P2)
+}
+
+// rdar://8248065
+typedef float v4f32 __attribute__((__vector_size__(16)));
+v4f32 f25(v4f32 X) {
+  // CHECK: define <4 x float> @f25(<4 x float> %X)
+  // CHECK-NOT: alloca
+  // CHECK: alloca <4 x float>
+  // CHECK-NOT: alloca
+  // CHECK: store <4 x float> %X, <4 x float>*
+  // CHECK-NOT: store
+  // CHECK: ret <4 x float>
+  return X+X;
+}
+
+struct foo26 {
+  int *X;
+  float *Y;
+};
+
+struct foo26 f26(struct foo26 *P) {
+  // CHECK: define %struct.foo26 @f26(%struct.foo26* %P)
+  return *P;
+}
+
+
+struct v4f32wrapper {
+  v4f32 v;
+};
+
+struct v4f32wrapper f27(struct v4f32wrapper X) {
+  // CHECK: define <4 x float> @f27(<4 x float> %X.coerce)
+  return X;
+}
+
+// rdar://5711709
+struct f28c {
+  double x;
+  int y;
+};
+void f28(struct f28c C) {
+  // CHECK: define void @f28(double %C.coerce0, i32 %C.coerce1)
+}
+
+struct f29a {
+  struct c {
+    double x;
+    int y;
+  } x[1];
+};
+
+void f29a(struct f29a A) {
+  // CHECK: define void @f29a(double %A.coerce0, i32 %A.coerce1)
+}
+
+// rdar://8249586
+struct S0 { char f0[8]; char f2; char f3; char f4; };
+void f30(struct S0 p_4) {
+  // CHECK: define void @f30(i64 %p_4.coerce0, i24 %p_4.coerce1)
+}
+
+// Pass the third element as a float when followed by tail padding.
+// rdar://8251384
+struct f31foo { float a, b, c; };
+float f31(struct f31foo X) {
+  // CHECK: define float @f31(<2 x float> %X.coerce0, float %X.coerce1)
+  return X.c;
+}
+
+_Complex float f32(_Complex float A, _Complex float B) {
+  // rdar://6379669
+  // CHECK: define <2 x float> @f32(<2 x float> %A.coerce, <2 x float> %B.coerce)
+  return A+B;
+}
+
+
+// rdar://8357396
+struct f33s { long x; float c,d; };
+
+void f33(va_list X) {
+  va_arg(X, struct f33s);
+}
+
+typedef unsigned long long v1i64 __attribute__((__vector_size__(8)));
+
+// rdar://8359248
+// CHECK: define i64 @f34(i64 %arg.coerce)
+v1i64 f34(v1i64 arg) { return arg; }
+
+
+// rdar://8358475
+// CHECK: define i64 @f35(i64 %arg.coerce)
+typedef unsigned long v1i64_2 __attribute__((__vector_size__(8)));
+v1i64_2 f35(v1i64_2 arg) { return arg+arg; }
+

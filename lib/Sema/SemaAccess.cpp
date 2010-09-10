@@ -11,9 +11,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Sema.h"
-#include "SemaInit.h"
-#include "Lookup.h"
+#include "clang/Sema/SemaInternal.h"
+#include "clang/Sema/DelayedDiagnostic.h"
+#include "clang/Sema/Initialization.h"
+#include "clang/Sema/Lookup.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CXXInheritance.h"
 #include "clang/AST/DeclCXX.h"
@@ -22,6 +23,7 @@
 #include "clang/AST/ExprCXX.h"
 
 using namespace clang;
+using namespace sema;
 
 /// A copy of Sema's enum without AR_delayed.
 enum AccessResult {
@@ -132,10 +134,10 @@ struct EffectiveContext {
   bool Dependent;
 };
 
-/// Like Sema's AccessedEntity, but kindly lets us scribble all over
+/// Like sema:;AccessedEntity, but kindly lets us scribble all over
 /// it.
-struct AccessTarget : public Sema::AccessedEntity {
-  AccessTarget(const Sema::AccessedEntity &Entity)
+struct AccessTarget : public AccessedEntity {
+  AccessTarget(const AccessedEntity &Entity)
     : AccessedEntity(Entity) {
     initialize();
   }
@@ -222,6 +224,22 @@ private:
 
 }
 
+/// Checks whether one class might instantiate to the other.
+static bool MightInstantiateTo(const CXXRecordDecl *From,
+                               const CXXRecordDecl *To) {
+  // Declaration names are always preserved by instantiation.
+  if (From->getDeclName() != To->getDeclName())
+    return false;
+
+  const DeclContext *FromDC = From->getDeclContext()->getPrimaryContext();
+  const DeclContext *ToDC = To->getDeclContext()->getPrimaryContext();
+  if (FromDC == ToDC) return true;
+  if (FromDC->isFileContext() || ToDC->isFileContext()) return false;
+
+  // Be conservative.
+  return true;
+}
+
 /// Checks whether one class is derived from another, inclusively.
 /// Properly indicates when it couldn't be determined due to
 /// dependence.
@@ -233,6 +251,10 @@ static AccessResult IsDerivedFromInclusive(const CXXRecordDecl *Derived,
   assert(Target->getCanonicalDecl() == Target);
 
   if (Derived == Target) return AR_accessible;
+
+  bool CheckDependent = Derived->isDependentContext();
+  if (CheckDependent && MightInstantiateTo(Derived, Target))
+    return AR_dependent;
 
   AccessResult OnFailure = AR_inaccessible;
   llvm::SmallVector<const CXXRecordDecl*, 8> Queue; // actually a stack
@@ -246,10 +268,10 @@ static AccessResult IsDerivedFromInclusive(const CXXRecordDecl *Derived,
       QualType T = I->getType();
       if (const RecordType *RT = T->getAs<RecordType>()) {
         RD = cast<CXXRecordDecl>(RT->getDecl());
+      } else if (const InjectedClassNameType *IT
+                   = T->getAs<InjectedClassNameType>()) {
+        RD = IT->getDecl();
       } else {
-        // It's possible for a base class to be the current
-        // instantiation of some enclosing template, but I'm guessing
-        // nobody will ever care that we just dependently delay here.
         assert(T->isDependentType() && "non-dependent base wasn't a record?");
         OnFailure = AR_dependent;
         continue;
@@ -257,6 +279,9 @@ static AccessResult IsDerivedFromInclusive(const CXXRecordDecl *Derived,
 
       RD = RD->getCanonicalDecl();
       if (RD == Target) return AR_accessible;
+      if (CheckDependent && MightInstantiateTo(RD, Target))
+        OnFailure = AR_dependent;
+
       Queue.push_back(RD);
     }
 
@@ -539,6 +564,130 @@ static AccessResult GetFriendKind(Sema &S,
   return OnFailure;
 }
 
+namespace {
+
+/// A helper class for checking for a friend which will grant access
+/// to a protected instance member.
+struct ProtectedFriendContext {
+  Sema &S;
+  const EffectiveContext &EC;
+  const CXXRecordDecl *NamingClass;
+  bool CheckDependent;
+  bool EverDependent;
+
+  /// The path down to the current base class.
+  llvm::SmallVector<const CXXRecordDecl*, 20> CurPath;
+
+  ProtectedFriendContext(Sema &S, const EffectiveContext &EC,
+                         const CXXRecordDecl *InstanceContext,
+                         const CXXRecordDecl *NamingClass)
+    : S(S), EC(EC), NamingClass(NamingClass),
+      CheckDependent(InstanceContext->isDependentContext() ||
+                     NamingClass->isDependentContext()),
+      EverDependent(false) {}
+
+  /// Check classes in the current path for friendship, starting at
+  /// the given index.
+  bool checkFriendshipAlongPath(unsigned I) {
+    assert(I < CurPath.size());
+    for (unsigned E = CurPath.size(); I != E; ++I) {
+      switch (GetFriendKind(S, EC, CurPath[I])) {
+      case AR_accessible:   return true;
+      case AR_inaccessible: continue;
+      case AR_dependent:    EverDependent = true; continue;
+      }
+    }
+    return false;
+  }
+
+  /// Perform a search starting at the given class.
+  ///
+  /// PrivateDepth is the index of the last (least derived) class
+  /// along the current path such that a notional public member of
+  /// the final class in the path would have access in that class.
+  bool findFriendship(const CXXRecordDecl *Cur, unsigned PrivateDepth) {
+    // If we ever reach the naming class, check the current path for
+    // friendship.  We can also stop recursing because we obviously
+    // won't find the naming class there again.
+    if (Cur == NamingClass)
+      return checkFriendshipAlongPath(PrivateDepth);
+
+    if (CheckDependent && MightInstantiateTo(Cur, NamingClass))
+      EverDependent = true;
+
+    // Recurse into the base classes.
+    for (CXXRecordDecl::base_class_const_iterator
+           I = Cur->bases_begin(), E = Cur->bases_end(); I != E; ++I) {
+
+      // If this is private inheritance, then a public member of the
+      // base will not have any access in classes derived from Cur.
+      unsigned BasePrivateDepth = PrivateDepth;
+      if (I->getAccessSpecifier() == AS_private)
+        BasePrivateDepth = CurPath.size() - 1;
+
+      const CXXRecordDecl *RD;
+
+      QualType T = I->getType();
+      if (const RecordType *RT = T->getAs<RecordType>()) {
+        RD = cast<CXXRecordDecl>(RT->getDecl());
+      } else if (const InjectedClassNameType *IT
+                   = T->getAs<InjectedClassNameType>()) {
+        RD = IT->getDecl();
+      } else {
+        assert(T->isDependentType() && "non-dependent base wasn't a record?");
+        EverDependent = true;
+        continue;
+      }
+
+      // Recurse.  We don't need to clean up if this returns true.
+      CurPath.push_back(RD);
+      if (findFriendship(RD->getCanonicalDecl(), BasePrivateDepth))
+        return true;
+      CurPath.pop_back();
+    }
+
+    return false;
+  }
+
+  bool findFriendship(const CXXRecordDecl *Cur) {
+    assert(CurPath.empty());
+    CurPath.push_back(Cur);
+    return findFriendship(Cur, 0);
+  }
+};
+}
+
+/// Search for a class P that EC is a friend of, under the constraint
+///   InstanceContext <= P <= NamingClass
+/// and with the additional restriction that a protected member of
+/// NamingClass would have some natural access in P.
+///
+/// That second condition isn't actually quite right: the condition in
+/// the standard is whether the target would have some natural access
+/// in P.  The difference is that the target might be more accessible
+/// along some path not passing through NamingClass.  Allowing that
+/// introduces two problems:
+///   - It breaks encapsulation because you can suddenly access a
+///     forbidden base class's members by subclassing it elsewhere.
+///   - It makes access substantially harder to compute because it
+///     breaks the hill-climbing algorithm: knowing that the target is
+///     accessible in some base class would no longer let you change
+///     the question solely to whether the base class is accessible,
+///     because the original target might have been more accessible
+///     because of crazy subclassing.
+/// So we don't implement that.
+static AccessResult GetProtectedFriendKind(Sema &S, const EffectiveContext &EC,
+                                           const CXXRecordDecl *InstanceContext,
+                                           const CXXRecordDecl *NamingClass) {
+  assert(InstanceContext->getCanonicalDecl() == InstanceContext);
+  assert(NamingClass->getCanonicalDecl() == NamingClass);
+
+  ProtectedFriendContext PRC(S, EC, InstanceContext, NamingClass);
+  if (PRC.findFriendship(InstanceContext)) return AR_accessible;
+  if (PRC.EverDependent) return AR_dependent;
+  return AR_inaccessible;
+}
+
 static AccessResult HasAccess(Sema &S,
                               const EffectiveContext &EC,
                               const CXXRecordDecl *NamingClass,
@@ -562,6 +711,9 @@ static AccessResult HasAccess(Sema &S,
     if (Access == AS_private) {
       if (ECRecord == NamingClass)
         return AR_accessible;
+
+      if (EC.isDependent() && MightInstantiateTo(ECRecord, NamingClass))
+        OnFailure = AR_dependent;
 
     // [B3] and [M3]
     } else {
@@ -603,20 +755,25 @@ static AccessResult HasAccess(Sema &S,
     }
   }
 
-  if (!NamingClass->hasFriends())
-    return OnFailure;
-
-  // Don't consider friends if we're under the [class.protected]
-  // restriction, above.
+  // [M3] and [B3] say that, if the target is protected in N, we grant
+  // access if the access occurs in a friend or member of some class P
+  // that's a subclass of N and where the target has some natural
+  // access in P.  The 'member' aspect is easy to handle because P
+  // would necessarily be one of the effective-context records, and we
+  // address that above.  The 'friend' aspect is completely ridiculous
+  // to implement because there are no restrictions at all on P
+  // *unless* the [class.protected] restriction applies.  If it does,
+  // however, we should ignore whether the naming class is a friend,
+  // and instead rely on whether any potential P is a friend.
   if (Access == AS_protected && Target.hasInstanceContext()) {
     const CXXRecordDecl *InstanceContext = Target.resolveInstanceContext(S);
     if (!InstanceContext) return AR_dependent;
-
-    switch (IsDerivedFromInclusive(InstanceContext, NamingClass)) {
-    case AR_accessible: break;
+    switch (GetProtectedFriendKind(S, EC, InstanceContext, NamingClass)) {
+    case AR_accessible: return AR_accessible;
     case AR_inaccessible: return OnFailure;
     case AR_dependent: return AR_dependent;
     }
+    llvm_unreachable("impossible friendship kind");
   }
 
   switch (GetFriendKind(S, EC, NamingClass)) {
@@ -844,6 +1001,10 @@ static void DiagnoseAccessPath(Sema &S,
         << BS->getSourceRange()
         << (BaseAccess == AS_protected)
         << (BS->getAccessSpecifierAsWritten() == AS_none);
+      
+      if (D)
+        S.Diag(D->getLocation(), diag::note_field_decl);
+      
       return;
     }
   }
@@ -994,13 +1155,16 @@ static Sema::AccessResult CheckAccess(Sema &S, SourceLocation Loc,
   if (Entity.getAccess() == AS_public)
     return Sema::AR_accessible;
 
+  if (S.SuppressAccessChecking)
+    return Sema::AR_accessible;
+
   // If we're currently parsing a top-level declaration, delay
   // diagnostics.  This is the only case where parsing a declaration
   // can actually change our effective context for the purposes of
   // access control.
   if (S.CurContext->isFileContext() && S.ParsingDeclDepth) {
     S.DelayedDiagnostics.push_back(
-        Sema::DelayedDiagnostic::makeAccess(Loc, Entity));
+        DelayedDiagnostic::makeAccess(Loc, Entity));
     return Sema::AR_delayed;
   }
 
@@ -1127,9 +1291,10 @@ Sema::AccessResult Sema::CheckDestructorAccess(SourceLocation Loc,
 
 /// Checks access to a constructor.
 Sema::AccessResult Sema::CheckConstructorAccess(SourceLocation UseLoc,
-                                  CXXConstructorDecl *Constructor,
-                                  const InitializedEntity &Entity,
-                                  AccessSpecifier Access) {
+                                                CXXConstructorDecl *Constructor,
+                                                const InitializedEntity &Entity,
+                                                AccessSpecifier Access,
+                                                bool IsCopyBindingRefToTemp) {
   if (!getLangOptions().AccessControl ||
       Access == AS_public)
     return AR_accessible;
@@ -1140,7 +1305,9 @@ Sema::AccessResult Sema::CheckConstructorAccess(SourceLocation UseLoc,
                             QualType());
   switch (Entity.getKind()) {
   default:
-    AccessEntity.setDiag(diag::err_access_ctor);
+    AccessEntity.setDiag(IsCopyBindingRefToTemp
+                         ? diag::ext_rvalue_to_reference_access_ctor
+                         : diag::err_access_ctor);
     break;
 
   case InitializedEntity::EK_Base:
@@ -1230,7 +1397,7 @@ Sema::AccessResult Sema::CheckAddressOfMemberAccess(Expr *OvlExpr,
       Found.getAccess() == AS_public)
     return AR_accessible;
 
-  OverloadExpr *Ovl = OverloadExpr::find(OvlExpr).getPointer();
+  OverloadExpr *Ovl = OverloadExpr::find(OvlExpr).Expression;
   CXXRecordDecl *NamingClass = Ovl->getNamingClass();
 
   AccessTarget Entity(Context, AccessTarget::Member, NamingClass, Found,
@@ -1300,4 +1467,16 @@ void Sema::CheckLookupAccess(const LookupResult &R) {
       CheckAccess(*this, R.getNameLoc(), Entity);
     }
   }
+}
+
+void Sema::ActOnStartSuppressingAccessChecks() {
+  assert(!SuppressAccessChecking &&
+         "Tried to start access check suppression when already started.");
+  SuppressAccessChecking = true;
+}
+
+void Sema::ActOnStopSuppressingAccessChecks() {
+  assert(SuppressAccessChecking &&
+         "Tried to stop access check suprression when already stopped.");
+  SuppressAccessChecking = false;
 }

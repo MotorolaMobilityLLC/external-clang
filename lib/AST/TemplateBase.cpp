@@ -18,6 +18,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/TypeLoc.h"
+#include "clang/Basic/Diagnostic.h"
 
 using namespace clang;
 
@@ -89,6 +90,33 @@ void TemplateArgument::Profile(llvm::FoldingSetNodeID &ID,
   }
 }
 
+bool TemplateArgument::structurallyEquals(const TemplateArgument &Other) const {
+  if (getKind() != Other.getKind()) return false;
+
+  switch (getKind()) {
+  case Null:
+  case Type:
+  case Declaration:
+  case Template:
+  case Expression:
+    return TypeOrValue == Other.TypeOrValue;
+
+  case Integral:
+    return getIntegralType() == Other.getIntegralType() &&
+           *getAsIntegral() == *Other.getAsIntegral();
+
+  case Pack:
+    if (Args.NumArgs != Other.Args.NumArgs) return false;
+    for (unsigned I = 0, E = Args.NumArgs; I != E; ++I)
+      if (!Args.Args[I].structurallyEquals(Other.Args.Args[I]))
+        return false;
+    return true;
+  }
+
+  // Suppress warnings.
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // TemplateArgumentLoc Implementation
 //===----------------------------------------------------------------------===//
@@ -102,7 +130,7 @@ SourceRange TemplateArgumentLoc::getSourceRange() const {
     return getSourceDeclExpression()->getSourceRange();
       
   case TemplateArgument::Type:
-    return getTypeSourceInfo()->getTypeLoc().getFullSourceRange();
+    return getTypeSourceInfo()->getTypeLoc().getSourceRange();
       
   case TemplateArgument::Template:
     if (getTemplateQualifierRange().isValid())
@@ -118,4 +146,45 @@ SourceRange TemplateArgumentLoc::getSourceRange() const {
 
   // Silence bonus gcc warning.
   return SourceRange();
+}
+
+const DiagnosticBuilder &clang::operator<<(const DiagnosticBuilder &DB,
+                                           const TemplateArgument &Arg) {
+  switch (Arg.getKind()) {
+  case TemplateArgument::Null:
+    // This is bad, but not as bad as crashing because of argument
+    // count mismatches.
+    return DB << "(null template argument)";
+      
+  case TemplateArgument::Type:
+    return DB << Arg.getAsType();
+      
+  case TemplateArgument::Declaration:
+    return DB << Arg.getAsDecl();
+      
+  case TemplateArgument::Integral:
+    return DB << Arg.getAsIntegral()->toString(10);
+      
+  case TemplateArgument::Template:
+    return DB << Arg.getAsTemplate();
+      
+  case TemplateArgument::Expression: {
+    // This shouldn't actually ever happen, so it's okay that we're
+    // regurgitating an expression here.
+    // FIXME: We're guessing at LangOptions!
+    llvm::SmallString<32> Str;
+    llvm::raw_svector_ostream OS(Str);
+    LangOptions LangOpts;
+    LangOpts.CPlusPlus = true;
+    PrintingPolicy Policy(LangOpts);
+    Arg.getAsExpr()->printPretty(OS, 0, Policy);
+    return DB << OS.str();
+  }
+      
+  case TemplateArgument::Pack:
+    // FIXME: Format arguments in a list!
+    return DB << "<parameter pack>";
+  }
+  
+  return DB;
 }

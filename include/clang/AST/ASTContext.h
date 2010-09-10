@@ -18,7 +18,6 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/PartialDiagnostic.h"
-#include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/PrettyPrinter.h"
@@ -50,6 +49,7 @@ namespace clang {
   class SelectorTable;
   class SourceManager;
   class TargetInfo;
+  class CXXABI;
   // Decls
   class DeclContext;
   class CXXMethodDecl;
@@ -62,6 +62,7 @@ namespace clang {
   class RecordDecl;
   class StoredDeclsMap;
   class TagDecl;
+  class TemplateTemplateParmDecl;
   class TemplateTypeParmDecl;
   class TranslationUnitDecl;
   class TypeDecl;
@@ -75,6 +76,8 @@ namespace clang {
 /// ASTContext - This class holds long-lived AST nodes (such as types and
 /// decls) that can be referred to throughout the semantic analysis of a file.
 class ASTContext {
+  ASTContext &this_() { return *this; }
+
   std::vector<Type*> Types;
   llvm::FoldingSet<ExtQuals> ExtQualNodes;
   llvm::FoldingSet<ComplexType> ComplexTypes;
@@ -95,12 +98,14 @@ class ASTContext {
   llvm::FoldingSet<DependentDecltypeType> DependentDecltypeTypes;
   llvm::FoldingSet<TemplateTypeParmType> TemplateTypeParmTypes;
   llvm::FoldingSet<SubstTemplateTypeParmType> SubstTemplateTypeParmTypes;
-  llvm::FoldingSet<TemplateSpecializationType> TemplateSpecializationTypes;
-  llvm::FoldingSet<QualifiedNameType> QualifiedNameTypes;
-  llvm::FoldingSet<DependentNameType> DependentNameTypes;
-  llvm::FoldingSet<ObjCInterfaceType> ObjCInterfaceTypes;
-  llvm::FoldingSet<ObjCObjectPointerType> ObjCObjectPointerTypes;
+  llvm::ContextualFoldingSet<TemplateSpecializationType, ASTContext&>
+    TemplateSpecializationTypes;
   llvm::FoldingSet<ElaboratedType> ElaboratedTypes;
+  llvm::FoldingSet<DependentNameType> DependentNameTypes;
+  llvm::ContextualFoldingSet<DependentTemplateSpecializationType, ASTContext&>
+    DependentTemplateSpecializationTypes;
+  llvm::FoldingSet<ObjCObjectTypeImpl> ObjCObjectTypes;
+  llvm::FoldingSet<ObjCObjectPointerType> ObjCObjectPointerTypes;
 
   llvm::FoldingSet<QualifiedTemplateName> QualifiedTemplateNames;
   llvm::FoldingSet<DependentTemplateName> DependentTemplateNames;
@@ -122,6 +127,30 @@ class ASTContext {
   
   /// \brief Mapping from ObjCContainers to their ObjCImplementations.
   llvm::DenseMap<ObjCContainerDecl*, ObjCImplDecl*> ObjCImpls;
+
+  /// \brief Representation of a "canonical" template template parameter that
+  /// is used in canonical template names.
+  class CanonicalTemplateTemplateParm : public llvm::FoldingSetNode {
+    TemplateTemplateParmDecl *Parm;
+    
+  public:
+    CanonicalTemplateTemplateParm(TemplateTemplateParmDecl *Parm) 
+      : Parm(Parm) { }
+    
+    TemplateTemplateParmDecl *getParam() const { return Parm; }
+    
+    void Profile(llvm::FoldingSetNodeID &ID) { Profile(ID, Parm); }
+    
+    static void Profile(llvm::FoldingSetNodeID &ID, 
+                        TemplateTemplateParmDecl *Parm);
+  };
+  llvm::FoldingSet<CanonicalTemplateTemplateParm> CanonTemplateTemplateParms;
+  
+  TemplateTemplateParmDecl *getCanonicalTemplateTemplateParmDecl(
+                                               TemplateTemplateParmDecl *TTP);
+
+  /// \brief Whether __[u]int128_t identifier is installed.
+  bool IsInt128Installed;
 
   /// BuiltinVaListType - built-in va list type.
   /// This is initially null and set by Sema::LazilyCreateBuiltin when
@@ -163,11 +192,13 @@ class ASTContext {
   /// \brief Type for the Block descriptor for Blocks CodeGen.
   RecordDecl *BlockDescriptorExtendedType;
 
+  TypeSourceInfo NullTypeSourceInfo;
+
   /// \brief Keeps track of all declaration attributes.
   ///
   /// Since so few decls have attrs, we keep them in a hash map instead of
   /// wasting space in the Decl class.
-  llvm::DenseMap<const Decl*, Attr*> DeclAttrs;
+  llvm::DenseMap<const Decl*, AttrVec> DeclAttrs;
 
   /// \brief Keeps track of the static data member templates from which
   /// static data members of class template specializations were instantiated.
@@ -244,13 +275,18 @@ class ASTContext {
   ///  this ASTContext object.
   LangOptions LangOpts;
 
-  /// MallocAlloc/BumpAlloc - The allocator objects used to create AST objects.
-  bool FreeMemory;
-  llvm::MallocAllocator MallocAlloc;
+  /// \brief The allocator used to create AST objects.
+  ///
+  /// AST objects are never destructed; rather, all memory associated with the
+  /// AST objects will be released when the ASTContext itself is destroyed.
   llvm::BumpPtrAllocator BumpAlloc;
 
   /// \brief Allocator for partial diagnostics.
   PartialDiagnostic::StorageAllocator DiagAllocator;
+
+  /// \brief The current C++ ABI.
+  llvm::OwningPtr<CXXABI> ABI;
+  CXXABI *createCXXABI(const TargetInfo &T);
   
 public:
   const TargetInfo &Target;
@@ -270,13 +306,9 @@ public:
   SourceManager& getSourceManager() { return SourceMgr; }
   const SourceManager& getSourceManager() const { return SourceMgr; }
   void *Allocate(unsigned Size, unsigned Align = 8) {
-    return FreeMemory ? MallocAlloc.Allocate(Size, Align) :
-                        BumpAlloc.Allocate(Size, Align);
+    return BumpAlloc.Allocate(Size, Align);
   }
-  void Deallocate(void *Ptr) {
-    if (FreeMemory)
-      MallocAlloc.Deallocate(Ptr);
-  }
+  void Deallocate(void *Ptr) { }
   
   PartialDiagnostic::StorageAllocator &getDiagAllocator() {
     return DiagAllocator;
@@ -289,7 +321,7 @@ public:
   }
 
   /// \brief Retrieve the attributes for the given declaration.
-  Attr*& getDeclAttrs(const Decl *D) { return DeclAttrs[D]; }
+  AttrVec& getDeclAttrs(const Decl *D) { return DeclAttrs[D]; }
 
   /// \brief Erase the attributes corresponding to the given declaration.
   void eraseDeclAttrs(const Decl *D) { DeclAttrs.erase(D); }
@@ -303,7 +335,8 @@ public:
   /// \brief Note that the static data member \p Inst is an instantiation of
   /// the static data member template \p Tmpl of a class template.
   void setInstantiatedFromStaticDataMember(VarDecl *Inst, VarDecl *Tmpl,
-                                           TemplateSpecializationKind TSK);
+                                           TemplateSpecializationKind TSK,
+                        SourceLocation PointOfInstantiation = SourceLocation());
 
   /// \brief If the given using decl is an instantiation of a
   /// (possibly unresolved) using decl from a template instantiation,
@@ -329,6 +362,8 @@ public:
 
   overridden_cxx_method_iterator
   overridden_methods_end(const CXXMethodDecl *Method) const;
+
+  unsigned overridden_methods_size(const CXXMethodDecl *Method) const;
 
   /// \brief Note that the given C++ \p Method overrides the given \p
   /// Overridden method.
@@ -359,7 +394,7 @@ public:
   ASTContext(const LangOptions& LOpts, SourceManager &SM, const TargetInfo &t,
              IdentifierTable &idents, SelectorTable &sels,
              Builtin::Context &builtins,
-             bool FreeMemory = true, unsigned size_reserve=0);
+             unsigned size_reserve);
 
   ~ASTContext();
 
@@ -483,10 +518,10 @@ public:
   /// This gets the struct used to keep track of pointer to blocks, complete
   /// with captured variables.
   QualType getBlockParmType(bool BlockHasCopyDispose,
-                            llvm::SmallVector<const Expr *, 8> &BDRDs);
+                            llvm::SmallVectorImpl<const Expr *> &Layout);
 
   /// This builds the struct used for __block variables.
-  QualType BuildByRefType(const char *DeclName, QualType Ty);
+  QualType BuildByRefType(llvm::StringRef DeclName, QualType Ty);
 
   /// Returns true iff we need copy/dispose helpers for the given type.
   bool BlockRequiresCopying(QualType Ty);
@@ -535,7 +570,7 @@ public:
   /// getVectorType - Return the unique reference to a vector type of
   /// the specified element type and size. VectorType must be a built-in type.
   QualType getVectorType(QualType VectorType, unsigned NumElts,
-                         bool AltiVec, bool IsPixel);
+                         VectorType::AltiVecSpecific AltiVecSpec);
 
   /// getExtVectorType - Return the unique reference to an extended vector type
   /// of the specified element type and size.  VectorType must be a built-in
@@ -586,7 +621,11 @@ public:
 
   /// getTypedefType - Return the unique reference to the type for the
   /// specified typename decl.
-  QualType getTypedefType(const TypedefDecl *Decl);
+  QualType getTypedefType(const TypedefDecl *Decl, QualType Canon = QualType());
+
+  QualType getRecordType(const RecordDecl *Decl);
+
+  QualType getEnumType(const EnumDecl *Decl);
 
   QualType getInjectedClassNameType(CXXRecordDecl *Decl, QualType TST);
 
@@ -600,42 +639,48 @@ public:
   QualType getTemplateSpecializationType(TemplateName T,
                                          const TemplateArgument *Args,
                                          unsigned NumArgs,
-                                         QualType Canon = QualType(),
-                                         bool IsCurrentInstantiation = false);
+                                         QualType Canon = QualType());
+
+  QualType getCanonicalTemplateSpecializationType(TemplateName T,
+                                                  const TemplateArgument *Args,
+                                                  unsigned NumArgs);
 
   QualType getTemplateSpecializationType(TemplateName T,
                                          const TemplateArgumentListInfo &Args,
-                                         QualType Canon = QualType(),
-                                         bool IsCurrentInstantiation = false);
+                                         QualType Canon = QualType());
 
   TypeSourceInfo *
   getTemplateSpecializationTypeInfo(TemplateName T, SourceLocation TLoc,
                                     const TemplateArgumentListInfo &Args,
                                     QualType Canon = QualType());
 
-  QualType getQualifiedNameType(NestedNameSpecifier *NNS,
-                                QualType NamedType);
+  QualType getElaboratedType(ElaboratedTypeKeyword Keyword,
+                             NestedNameSpecifier *NNS,
+                             QualType NamedType);
   QualType getDependentNameType(ElaboratedTypeKeyword Keyword,
                                 NestedNameSpecifier *NNS,
                                 const IdentifierInfo *Name,
                                 QualType Canon = QualType());
-  QualType getDependentNameType(ElaboratedTypeKeyword Keyword,
-                                NestedNameSpecifier *NNS,
-                                const TemplateSpecializationType *TemplateId,
-                                QualType Canon = QualType());
-  QualType getElaboratedType(QualType UnderlyingType,
-                             ElaboratedType::TagKind Tag);
 
-  QualType getObjCInterfaceType(const ObjCInterfaceDecl *Decl,
-                                ObjCProtocolDecl **Protocols = 0,
-                                unsigned NumProtocols = 0);
+  QualType getDependentTemplateSpecializationType(ElaboratedTypeKeyword Keyword,
+                                                  NestedNameSpecifier *NNS,
+                                                  const IdentifierInfo *Name,
+                                          const TemplateArgumentListInfo &Args);
+  QualType getDependentTemplateSpecializationType(ElaboratedTypeKeyword Keyword,
+                                                  NestedNameSpecifier *NNS,
+                                                  const IdentifierInfo *Name,
+                                                  unsigned NumArgs,
+                                                  const TemplateArgument *Args);
 
-  /// getObjCObjectPointerType - Return a ObjCObjectPointerType type for the
-  /// given interface decl and the conforming protocol list.
-  QualType getObjCObjectPointerType(QualType OIT,
-                                    ObjCProtocolDecl **ProtocolList = 0,
-                                    unsigned NumProtocols = 0,
-                                    unsigned Quals = 0);
+  QualType getObjCInterfaceType(const ObjCInterfaceDecl *Decl);
+
+  QualType getObjCObjectType(QualType Base,
+                             ObjCProtocolDecl * const *Protocols,
+                             unsigned NumProtocols);
+
+  /// getObjCObjectPointerType - Return a ObjCObjectPointerType type
+  /// for the given ObjCObjectType.
+  QualType getObjCObjectPointerType(QualType OIT);
 
   /// getTypeOfType - GCC extension.
   QualType getTypeOfExprType(Expr *e);
@@ -783,6 +828,10 @@ public:
   /// purpose in characters.
   CharUnits getObjCEncodingTypeSize(QualType t);
 
+  /// \brief Whether __[u]int128_t identifier is installed.
+  bool isInt128Installed() const { return IsInt128Installed; }
+  void setInt128Installed() { IsInt128Installed = true; }
+
   /// This setter/getter represents the ObjC 'id' type. It is setup lazily, by
   /// Sema.  id is always a (typedef for a) pointer type, a pointer to a struct.
   QualType getObjCIdType() const { return ObjCIdTypedefType; }
@@ -825,7 +874,8 @@ public:
     return getExtQualType(T, Qs);
   }
 
-  DeclarationName getNameForTemplate(TemplateName Name);
+  DeclarationNameInfo getNameForTemplate(TemplateName Name,
+                                         SourceLocation NameLoc);
 
   TemplateName getOverloadedTemplateName(UnresolvedSetIterator Begin,
                                          UnresolvedSetIterator End);
@@ -860,6 +910,11 @@ public:
   /// garbage collection attribute.
   ///
   Qualifiers::GC getObjCGCAttrKind(const QualType &Ty) const;
+
+  /// areCompatibleVectorTypes - Return true if the given vector types either
+  /// are of the same unqualified type or if one is GCC and other - equivalent
+  /// AltiVec vector type.
+  bool areCompatibleVectorTypes(QualType FirstVec, QualType SecondVec);
 
   /// isObjCNSObjectType - Return true if this is an NSObject object with
   /// its NSObject attribute set.
@@ -913,6 +968,9 @@ public:
   CharUnits getTypeAlignInChars(QualType T);
   CharUnits getTypeAlignInChars(const Type *T);
 
+  std::pair<CharUnits, CharUnits> getTypeInfoInChars(const Type *T);
+  std::pair<CharUnits, CharUnits> getTypeInfoInChars(QualType T);
+
   /// getPreferredTypeAlign - Return the "preferred" alignment of the specified
   /// type for the current target in bits.  This can be different than the ABI
   /// alignment in cases where it is beneficial for performance to overalign
@@ -943,23 +1001,20 @@ public:
   const ASTRecordLayout &
   getASTObjCImplementationLayout(const ObjCImplementationDecl *D);
 
-  /// getKeyFunction - Get the key function for the given record decl. 
-  /// The key function is, according to the Itanium C++ ABI section 5.2.3:
+  /// getKeyFunction - Get the key function for the given record decl, or NULL
+  /// if there isn't one.  The key function is, according to the Itanium C++ ABI
+  /// section 5.2.3:
   ///
   /// ...the first non-pure virtual function that is not inline at the point
   /// of class definition.
   const CXXMethodDecl *getKeyFunction(const CXXRecordDecl *RD);
 
-  void CollectObjCIvars(const ObjCInterfaceDecl *OI,
-                        llvm::SmallVectorImpl<FieldDecl*> &Fields);
-
   void ShallowCollectObjCIvars(const ObjCInterfaceDecl *OI,
                                llvm::SmallVectorImpl<ObjCIvarDecl*> &Ivars);
-  void CollectNonClassIvars(const ObjCInterfaceDecl *OI,
-                               llvm::SmallVectorImpl<ObjCIvarDecl*> &Ivars);
-  void CollectIvarsToConstructOrDestruct(const ObjCInterfaceDecl *OI,
-                                    llvm::SmallVectorImpl<ObjCIvarDecl*> &Ivars,
-                                    bool construct=true);
+  
+  void DeepCollectObjCIvars(const ObjCInterfaceDecl *OI, bool leafClass,
+                            llvm::SmallVectorImpl<ObjCIvarDecl*> &Ivars);
+  
   unsigned CountNonClassIvars(const ObjCInterfaceDecl *OI);
   void CollectInheritedProtocols(const Decl *CDecl,
                           llvm::SmallPtrSet<ObjCProtocolDecl*, 8> &Protocols);
@@ -1016,8 +1071,8 @@ public:
     return UnqualT1 == UnqualT2;
   }
 
-  /// \brief Retrieves the "canonical" declaration of
-
+  bool UnwrapSimilarPointerTypes(QualType &T1, QualType &T2);
+  
   /// \brief Retrieves the "canonical" nested name specifier for a
   /// given nested name specifier.
   ///
@@ -1167,7 +1222,8 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Compatibility predicates used to check assignment expressions.
-  bool typesAreCompatible(QualType, QualType); // C99 6.2.7p1
+  bool typesAreCompatible(QualType T1, QualType T2, 
+                          bool CompareUnqualified = false); // C99 6.2.7p1
 
   bool typesAreBlockPointerCompatible(QualType, QualType); 
 
@@ -1184,26 +1240,37 @@ public:
   bool ObjCQualifiedIdTypesAreCompatible(QualType LHS, QualType RHS,
                                          bool ForCompare);
 
+  bool ObjCQualifiedClassTypesAreCompatible(QualType LHS, QualType RHS);
+  
   // Check the safety of assignment from LHS to RHS
   bool canAssignObjCInterfaces(const ObjCObjectPointerType *LHSOPT,
                                const ObjCObjectPointerType *RHSOPT);
-  bool canAssignObjCInterfaces(const ObjCInterfaceType *LHS,
-                               const ObjCInterfaceType *RHS);
+  bool canAssignObjCInterfaces(const ObjCObjectType *LHS,
+                               const ObjCObjectType *RHS);
   bool canAssignObjCInterfacesInBlockPointer(
                                           const ObjCObjectPointerType *LHSOPT,
                                           const ObjCObjectPointerType *RHSOPT);
   bool areComparableObjCPointerTypes(QualType LHS, QualType RHS);
   QualType areCommonBaseCompatible(const ObjCObjectPointerType *LHSOPT,
                                    const ObjCObjectPointerType *RHSOPT);
-  
+  bool canBindObjCObjectType(QualType To, QualType From);
+
   // Functions for calculating composite types
-  QualType mergeTypes(QualType, QualType, bool OfBlockPointer=false);
-  QualType mergeFunctionTypes(QualType, QualType, bool OfBlockPointer=false);
+  QualType mergeTypes(QualType, QualType, bool OfBlockPointer=false,
+                      bool Unqualified = false);
+  QualType mergeFunctionTypes(QualType, QualType, bool OfBlockPointer=false,
+                              bool Unqualified = false);
+  
+  QualType mergeObjCGCQualifiers(QualType, QualType);
 
   /// UsualArithmeticConversionsType - handles the various conversions
   /// that are common to binary operators (C99 6.3.1.8, C++ [expr]p9)
   /// and returns the result type of that conversion.
   QualType UsualArithmeticConversionsType(QualType lhs, QualType rhs);
+  
+  void ResetObjCLayout(const ObjCContainerDecl *CD) {
+    ObjCLayouts[CD] = 0;
+  }
 
   //===--------------------------------------------------------------------===//
   //                    Integer Predicates
@@ -1273,6 +1340,60 @@ public:
   TypeSourceInfo *
   getTrivialTypeSourceInfo(QualType T, SourceLocation Loc = SourceLocation());
 
+  TypeSourceInfo *getNullTypeSourceInfo() { return &NullTypeSourceInfo; }
+
+  /// \brief Add a deallocation callback that will be invoked when the 
+  /// ASTContext is destroyed.
+  ///
+  /// \brief Callback A callback function that will be invoked on destruction.
+  ///
+  /// \brief Data Pointer data that will be provided to the callback function
+  /// when it is called.
+  void AddDeallocation(void (*Callback)(void*), void *Data);
+
+  GVALinkage GetGVALinkageForFunction(const FunctionDecl *FD);
+  GVALinkage GetGVALinkageForVariable(const VarDecl *VD);
+
+  /// \brief Determines if the decl can be CodeGen'ed or deserialized from PCH
+  /// lazily, only when used; this is only relevant for function or file scoped
+  /// var definitions.
+  ///
+  /// \returns true if the function/var must be CodeGen'ed/deserialized even if
+  /// it is not used.
+  bool DeclMustBeEmitted(const Decl *D);
+
+  //===--------------------------------------------------------------------===//
+  //                    Statistics
+  //===--------------------------------------------------------------------===//
+
+  /// \brief The number of implicitly-declared default constructors.
+  static unsigned NumImplicitDefaultConstructors;
+  
+  /// \brief The number of implicitly-declared default constructors for 
+  /// which declarations were built.
+  static unsigned NumImplicitDefaultConstructorsDeclared;
+
+  /// \brief The number of implicitly-declared copy constructors.
+  static unsigned NumImplicitCopyConstructors;
+  
+  /// \brief The number of implicitly-declared copy constructors for 
+  /// which declarations were built.
+  static unsigned NumImplicitCopyConstructorsDeclared;
+
+  /// \brief The number of implicitly-declared copy assignment operators.
+  static unsigned NumImplicitCopyAssignmentOperators;
+  
+  /// \brief The number of implicitly-declared copy assignment operators for 
+  /// which declarations were built.
+  static unsigned NumImplicitCopyAssignmentOperatorsDeclared;
+
+  /// \brief The number of implicitly-declared destructors.
+  static unsigned NumImplicitDestructors;
+  
+  /// \brief The number of implicitly-declared destructors for which 
+  /// declarations were built.
+  static unsigned NumImplicitDestructorsDeclared;
+  
 private:
   ASTContext(const ASTContext&); // DO NOT IMPLEMENT
   void operator=(const ASTContext&); // DO NOT IMPLEMENT
@@ -1287,16 +1408,26 @@ private:
                                   const FieldDecl *Field,
                                   bool OutermostType = false,
                                   bool EncodingProperty = false);
-
+ 
   const ASTRecordLayout &getObjCLayout(const ObjCInterfaceDecl *D,
                                        const ObjCImplementationDecl *Impl);
-  
+
 private:
+  /// \brief A set of deallocations that should be performed when the 
+  /// ASTContext is destroyed.
+  llvm::SmallVector<std::pair<void (*)(void*), void *>, 16> Deallocations;
+                                       
   // FIXME: This currently contains the set of StoredDeclMaps used
   // by DeclContext objects.  This probably should not be in ASTContext,
   // but we include it here so that ASTContext can quickly deallocate them.
   llvm::PointerIntPair<StoredDeclsMap*,1> LastSDM;
+
+  /// \brief A counter used to uniquely identify "blocks".
+  unsigned int UniqueBlockByRefTypeID;
+  unsigned int UniqueBlockParmTypeID;
+  
   friend class DeclContext;
+  friend class DeclarationNameTable;
   void ReleaseDeclContextMaps();
 };
   

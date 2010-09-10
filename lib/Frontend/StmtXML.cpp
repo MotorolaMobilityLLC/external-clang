@@ -32,7 +32,8 @@ namespace  {
 
 
   void addSpecialAttribute(const char* pName, StringLiteral* Str) {
-    Doc.addAttribute(pName, Doc.escapeString(Str->getStrData(), Str->getByteLength()));
+    Doc.addAttribute(pName, Doc.escapeString(Str->getString().data(),
+                                             Str->getString().size()));
   }
 
   void addSpecialAttribute(const char* pName, SizeOfAlignOfExpr* S) {
@@ -125,6 +126,7 @@ namespace  {
     void VisitFloatingLiteral(FloatingLiteral *Node);
     void VisitStringLiteral(StringLiteral *Str);
     void VisitUnaryOperator(UnaryOperator *Node);
+    void VisitOffsetOfExpr(OffsetOfExpr *Node);
     void VisitSizeOfAlignOfExpr(SizeOfAlignOfExpr *Node);
     void VisitMemberExpr(MemberExpr *Node);
     void VisitExtVectorElementExpr(ExtVectorElementExpr *Node);
@@ -260,7 +262,6 @@ const char *StmtXML::getOpcodeStr(UnaryOperator::Opcode Op) {
   case UnaryOperator::Real:    return "__real";
   case UnaryOperator::Imag:    return "__imag";
   case UnaryOperator::Extension: return "__extension__";
-  case UnaryOperator::OffsetOf: return "__builtin_offsetof";
   }
 }
 
@@ -306,6 +307,10 @@ const char *StmtXML::getOpcodeStr(BinaryOperator::Opcode Op) {
 void StmtXML::VisitUnaryOperator(UnaryOperator *Node) {
   DumpExpr(Node);
   Doc.addAttribute("op_code", getOpcodeStr(Node->getOpcode()));
+}
+
+void StmtXML::OffsetOfExpr(OffsetOfExpr *Node) {
+  DumpExpr(Node);
 }
 
 void StmtXML::VisitSizeOfAlignOfExpr(SizeOfAlignOfExpr *Node) {

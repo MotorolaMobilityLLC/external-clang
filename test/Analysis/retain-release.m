@@ -468,6 +468,20 @@ void f16(int x, CFTypeRef p) {
   }
 }
 
+// Test that an object is non-null after being CFRetained/CFReleased.
+void f17(int x, CFTypeRef p) {
+  if (x) {
+    CFRelease(p);
+    if (!p)
+      CFRelease(0); // no-warning
+  }
+  else {
+    CFRetain(p);
+    if (!p)
+      CFRetain(0); // no-warning
+  }
+}
+
 // Test basic tracking of ivars associated with 'self'.  For the retain/release
 // checker we currently do not want to flag leaks associated with stores
 // of tracked objects to ivars.
@@ -1330,5 +1344,26 @@ void test_blocks_1_indirect_retain_via_call(void) {
   // Eventually this should be reported as a leak.
   NSNumber *number = [[NSNumber alloc] initWithInt:5]; // no-warning
   ^(NSObject *o){ [o retain]; }(number);
+}
+
+//===--------------------------------------------------------------------===//
+// Test sending message to super that returns an object alias.  Previously
+// this caused a crash in the analyzer.
+//===--------------------------------------------------------------------===//
+
+@interface Rdar8015556 : NSObject {} @end
+@implementation Rdar8015556
+- (id)retain {
+  return [super retain];
+}
+@end
+
+// <rdar://problem/8272168> - Correcly handle Class<...> in Cocoa Conventions
+// detector.
+
+@protocol Prot_R8272168 @end
+Class <Prot_R8272168> GetAClassThatImplementsProt_R8272168();
+void r8272168() {
+  GetAClassThatImplementsProt_R8272168();
 }
 

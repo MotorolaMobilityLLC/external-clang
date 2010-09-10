@@ -100,13 +100,19 @@ bool OSAtomicChecker::EvalOSAtomicCompareAndSwap(CheckerContext &C,
   const GRState *state = C.getState();
   ExplodedNodeSet Tmp;
   SVal location = state->getSVal(theValueExpr);
-  // Here we should use the value type of the region as the load type.
+  // Here we should use the value type of the region as the load type, because
+  // we are simulating the semantics of the function, not the semantics of 
+  // passing argument. So the type of theValue expr is not we are loading.
+  // But usually the type of the varregion is not the type we want either,
+  // we still need to do a CastRetrievedVal in store manager. So actually this
+  // LoadTy specifying can be omitted. But we put it here to emphasize the 
+  // semantics.
   QualType LoadTy;
   if (const TypedRegion *TR =
       dyn_cast_or_null<TypedRegion>(location.getAsRegion())) {
-    LoadTy = TR->getValueType(Ctx);
+    LoadTy = TR->getValueType();
   }
-  Engine.EvalLoad(Tmp, const_cast<Expr *>(theValueExpr), C.getPredecessor(), 
+  Engine.EvalLoad(Tmp, theValueExpr, C.getPredecessor(), 
                   state, location, OSAtomicLoadTag, LoadTy);
 
   if (Tmp.empty()) {
@@ -152,10 +158,10 @@ bool OSAtomicChecker::EvalOSAtomicCompareAndSwap(CheckerContext &C,
       // Handle implicit value casts.
       if (const TypedRegion *R =
           dyn_cast_or_null<TypedRegion>(location.getAsRegion())) {
-        val = SVator.EvalCast(val,R->getValueType(Ctx),newValueExpr->getType());
+        val = SVator.EvalCast(val,R->getValueType(), newValueExpr->getType());
       }
 
-      Engine.EvalStore(TmpStore, NULL, const_cast<Expr *>(theValueExpr), N, 
+      Engine.EvalStore(TmpStore, NULL, theValueExpr, N, 
                        stateEqual, location, val, OSAtomicStoreTag);
 
       if (TmpStore.empty()) {

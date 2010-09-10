@@ -17,7 +17,9 @@
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/LexDiagnostic.h"
+#include "clang/Lex/CodeCompletionHandler.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdio>
@@ -322,6 +324,13 @@ MacroArgs *Preprocessor::ReadFunctionLikeMacroArgs(Token &MacroName,
       // an argument value in a macro could expand to ',' or '(' or ')'.
       LexUnexpandedToken(Tok);
 
+      if (Tok.is(tok::code_completion)) {
+        if (CodeComplete)
+          CodeComplete->CodeCompleteMacroArgument(MacroName.getIdentifierInfo(),
+                                                  MI, NumActuals);
+        LexUnexpandedToken(Tok);
+      }
+      
       if (Tok.is(tok::eof) || Tok.is(tok::eom)) { // "#if f(<eof>" & "#if f(\n"
         Diag(MacroName, diag::err_unterm_macro_invoc);
         // Do not lose the EOF/EOM.  Return it to the client.
@@ -487,28 +496,33 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
   const LangOptions &LangOpts = PP.getLangOptions();
 
   return llvm::StringSwitch<bool>(II->getName())
-           .Case("blocks", LangOpts.Blocks)
-           .Case("cxx_rtti", LangOpts.RTTI)
-         //.Case("cxx_lambdas", false)
-         //.Case("cxx_nullptr", false)
-         //.Case("cxx_concepts", false)
-           .Case("cxx_decltype", LangOpts.CPlusPlus0x)
-           .Case("cxx_auto_type", LangOpts.CPlusPlus0x)
-           .Case("cxx_exceptions", LangOpts.Exceptions)
-           .Case("cxx_attributes", LangOpts.CPlusPlus0x)
-           .Case("cxx_static_assert", LangOpts.CPlusPlus0x)
-           .Case("objc_nonfragile_abi", LangOpts.ObjCNonFragileABI)
-           .Case("cxx_deleted_functions", LangOpts.CPlusPlus0x)
-         //.Case("cxx_rvalue_references", false)
-           .Case("attribute_overloadable", true)
-         //.Case("cxx_variadic_templates", false)
-           .Case("attribute_ext_vector_type", true)
            .Case("attribute_analyzer_noreturn", true)
            .Case("attribute_cf_returns_not_retained", true)
            .Case("attribute_cf_returns_retained", true)
+           .Case("attribute_ext_vector_type", true)
            .Case("attribute_ns_returns_not_retained", true)
            .Case("attribute_ns_returns_retained", true)
            .Case("attribute_objc_ivar_unused", true)
+           .Case("attribute_overloadable", true)
+           .Case("blocks", LangOpts.Blocks)
+           .Case("cxx_attributes", LangOpts.CPlusPlus0x)
+           .Case("cxx_auto_type", LangOpts.CPlusPlus0x)
+           .Case("cxx_decltype", LangOpts.CPlusPlus0x)
+           .Case("cxx_deleted_functions", LangOpts.CPlusPlus0x)
+           .Case("cxx_exceptions", LangOpts.Exceptions)
+           .Case("cxx_rtti", LangOpts.RTTI)
+           .Case("cxx_static_assert", LangOpts.CPlusPlus0x)
+           .Case("objc_nonfragile_abi", LangOpts.ObjCNonFragileABI)
+           .Case("objc_weak_class", LangOpts.ObjCNonFragileABI)
+           .Case("ownership_holds", true)
+           .Case("ownership_returns", true)
+           .Case("ownership_takes", true)
+         //.Case("cxx_concepts", false)
+         //.Case("cxx_lambdas", false)
+         //.Case("cxx_nullptr", false)
+         //.Case("cxx_rvalue_references", false)
+         //.Case("cxx_variadic_templates", false)
+           .Case("tls", PP.getTargetInfo().isTLSSupported())
            .Default(false);
 }
 

@@ -29,15 +29,15 @@ SVal SValuator::EvalBinOp(const GRState *ST, BinaryOperator::Opcode Op,
 
   if (isa<Loc>(L)) {
     if (isa<Loc>(R))
-      return EvalBinOpLL(Op, cast<Loc>(L), cast<Loc>(R), T);
+      return EvalBinOpLL(ST, Op, cast<Loc>(L), cast<Loc>(R), T);
 
     return EvalBinOpLN(ST, Op, cast<Loc>(L), cast<NonLoc>(R), T);
   }
 
   if (isa<Loc>(R)) {
-    // Support pointer arithmetic where the increment/decrement operand
-    // is on the left and the pointer on the right.
-    assert(Op == BinaryOperator::Add || Op == BinaryOperator::Sub);
+    // Support pointer arithmetic where the addend is on the left
+    // and the pointer on the right.
+    assert(Op == BO_Add);
 
     // Commute the operands.
     return EvalBinOpLN(ST, Op, cast<Loc>(R), cast<NonLoc>(L), T);
@@ -49,7 +49,7 @@ SVal SValuator::EvalBinOp(const GRState *ST, BinaryOperator::Opcode Op,
 DefinedOrUnknownSVal SValuator::EvalEQ(const GRState *ST,
                                        DefinedOrUnknownSVal L,
                                        DefinedOrUnknownSVal R) {
-  return cast<DefinedOrUnknownSVal>(EvalBinOp(ST, BinaryOperator::EQ, L, R,
+  return cast<DefinedOrUnknownSVal>(EvalBinOp(ST, BO_EQ, L, R,
                                               ValMgr.getContext().IntTy));
 }
 

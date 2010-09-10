@@ -34,6 +34,8 @@ IdentifierInfo::IdentifierInfo() {
   IsPoisoned = false;
   IsCPPOperatorKeyword = false;
   NeedsHandleIdentifier = false;
+  IsFromAST = false;
+  RevertedTokenID = false;
   FETokenInfo = 0;
   Entry = 0;
 }
@@ -70,7 +72,8 @@ namespace {
     KEYGNU = 16,
     KEYMS = 32,
     BOOLSUPPORT = 64,
-    KEYALTIVEC = 128
+    KEYALTIVEC = 128,
+    KEYNOMS = 256
   };
 }
 
@@ -94,12 +97,12 @@ static void AddKeyword(llvm::StringRef Keyword,
   else if (LangOpts.Microsoft && (Flags & KEYMS)) AddResult = 1;
   else if (LangOpts.Bool && (Flags & BOOLSUPPORT)) AddResult = 2;
   else if (LangOpts.AltiVec && (Flags & KEYALTIVEC)) AddResult = 2;
+  else if (!LangOpts.Microsoft && (Flags & KEYNOMS)) AddResult = 2;
 
   // Don't add this keyword if disabled in this language.
   if (AddResult == 0) return;
 
-  IdentifierInfo &Info = Table.get(Keyword);
-  Info.setTokenID(TokenCode);
+  IdentifierInfo &Info = Table.get(Keyword, TokenCode);
   Info.setIsExtensionToken(AddResult == 1);
 }
 
@@ -108,8 +111,7 @@ static void AddKeyword(llvm::StringRef Keyword,
 static void AddCXXOperatorKeyword(llvm::StringRef Keyword,
                                   tok::TokenKind TokenCode,
                                   IdentifierTable &Table) {
-  IdentifierInfo &Info = Table.get(Keyword);
-  Info.setTokenID(TokenCode);
+  IdentifierInfo &Info = Table.get(Keyword, TokenCode);
   Info.setIsCPlusPlusOperatorKeyword();
 }
 

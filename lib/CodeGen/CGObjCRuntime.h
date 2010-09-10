@@ -52,6 +52,7 @@ namespace CodeGen {
   class Selector;
   class ObjCIvarDecl;
   class ObjCStringLiteral;
+  class BlockDeclRefExpr;
 
 namespace CodeGen {
   class CodeGenModule;
@@ -97,11 +98,17 @@ public:
   /// return value should have the LLVM type for pointer-to
   /// ASTContext::getObjCSelType().
   virtual llvm::Value *GetSelector(CGBuilderTy &Builder,
-                                   Selector Sel) = 0;
+                                   Selector Sel, bool lval=false) = 0;
 
   /// Get a typed selector.
   virtual llvm::Value *GetSelector(CGBuilderTy &Builder,
                                    const ObjCMethodDecl *Method) = 0;
+
+  /// Get the type constant to catch for the given ObjC pointer type.
+  /// This is used externally to implement catching ObjC types in C++.
+  /// Runtimes which don't support this should add the appropriate
+  /// error to Sema.
+  virtual llvm::Constant *GetEHType(QualType T) = 0;
 
   /// Generate a constant string object.
   virtual llvm::Constant *GenerateConstantString(const StringLiteral *) = 0;
@@ -119,11 +126,12 @@ public:
   /// a property setter or getter.
   virtual CodeGen::RValue
   GenerateMessageSend(CodeGen::CodeGenFunction &CGF,
+                      ReturnValueSlot ReturnSlot,
                       QualType ResultType,
                       Selector Sel,
                       llvm::Value *Receiver,
-                      bool IsClassMessage,
                       const CallArgList &CallArgs,
+                      const ObjCInterfaceDecl *Class = 0,
                       const ObjCMethodDecl *Method = 0) = 0;
 
   /// Generate an Objective-C message send operation to the super
@@ -134,6 +142,7 @@ public:
   /// a property setter or getter.
   virtual CodeGen::RValue
   GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
+                           ReturnValueSlot ReturnSlot,
                            QualType ResultType,
                            Selector Sel,
                            const ObjCInterfaceDecl *Class,
@@ -179,8 +188,10 @@ public:
   /// compiler when a mutation is detected during foreach iteration.
   virtual llvm::Constant *EnumerationMutationFunction() = 0;
 
-  virtual void EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
-                                         const Stmt &S) = 0;
+  virtual void EmitSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
+                                    const ObjCAtSynchronizedStmt &S) = 0;
+  virtual void EmitTryStmt(CodeGen::CodeGenFunction &CGF,
+                           const ObjCAtTryStmt &S) = 0;
   virtual void EmitThrowStmt(CodeGen::CodeGenFunction &CGF,
                              const ObjCAtThrowStmt &S) = 0;
   virtual llvm::Value *EmitObjCWeakRead(CodeGen::CodeGenFunction &CGF,
@@ -188,7 +199,8 @@ public:
   virtual void EmitObjCWeakAssign(CodeGen::CodeGenFunction &CGF,
                                   llvm::Value *src, llvm::Value *dest) = 0;
   virtual void EmitObjCGlobalAssign(CodeGen::CodeGenFunction &CGF,
-                                    llvm::Value *src, llvm::Value *dest) = 0;
+                                    llvm::Value *src, llvm::Value *dest,
+                                    bool threadlocal=false) = 0;
   virtual void EmitObjCIvarAssign(CodeGen::CodeGenFunction &CGF,
                                   llvm::Value *src, llvm::Value *dest,
                                   llvm::Value *ivarOffset) = 0;
@@ -206,7 +218,10 @@ public:
   virtual void EmitGCMemmoveCollectable(CodeGen::CodeGenFunction &CGF,
                                         llvm::Value *DestPtr,
                                         llvm::Value *SrcPtr,
-                                        QualType Ty) = 0;
+                                        llvm::Value *Size) = 0;
+  virtual llvm::Constant *GCBlockLayout(CodeGen::CodeGenFunction &CGF,
+                  const llvm::SmallVectorImpl<const BlockDeclRefExpr *> &) = 0;
+                                        
 };
 
 /// Creates an instance of an Objective-C runtime class.

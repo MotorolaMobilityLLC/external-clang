@@ -8,6 +8,10 @@
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
 
+#ifndef __clang_analyzer__
+#error __clang__analyzer__ not defined
+#endif
+
 typedef struct objc_ivar *Ivar;
 typedef struct objc_selector *SEL;
 typedef signed char BOOL;
@@ -82,11 +86,11 @@ unsigned r6268365Aux();
 
 void r6268365() {
   unsigned x = 0;
-  x &= r6268365Aux();
+  x &= r6268365Aux(); // expected-warning{{The left operand to '&=' is always 0}}
   unsigned j = 0;
     
   if (x == 0) ++j;
-  if (x == 0) x = x / j; // no-warning
+  if (x == 0) x = x / j; // expected-warning{{Assigned value is always the same as the existing value}} expected-warning{{The right operand to '/' is always 1}}
 }
 
 void divzeroassume(unsigned x, unsigned j) {  
@@ -294,6 +298,7 @@ void rdar_6777209(char *p) {
 typedef void *Opcode;
 Opcode pr_4033_getOpcode();
 void pr_4033(void) {
+  void *lbl = &&next_opcode;
 next_opcode:
   {
     Opcode op = pr_4033_getOpcode();
@@ -318,7 +323,7 @@ int test_invalidate_by_ref() {
 // was the block containing the merge for '?', which would trigger an
 // assertion failure.
 int rdar_7027684_aux();
-int rdar_7027684_aux_2() __attribute__((noreturn));
+int rdar_7027684_aux_2() __attribute__((noreturn)); // expected-warning{{functions declared 'noreturn' should have a 'void' result type}}
 void rdar_7027684(int x, int y) {
   {}; // this empty compound statement is critical.
   (rdar_7027684_aux() ? rdar_7027684_aux_2() : (void) 0);
@@ -402,14 +407,14 @@ void test_trivial_symbolic_comparison(int *x) {
   int test_trivial_symbolic_comparison_aux();
   int a = test_trivial_symbolic_comparison_aux();
   int b = a;
-  if (a != b) {
+  if (a != b) { // expected-warning{{Both operands to '!=' always have the same value}}
     int *p = 0;
     *p = 0xDEADBEEF;     // no-warning
   }
   
   a = a == 1;
   b = b == 1;
-  if (a != b) {
+  if (a != b) { // expected-warning{{Both operands to '!=' always have the same value}}
     int *p = 0;
     *p = 0xDEADBEEF;     // no-warning
   }
@@ -453,7 +458,7 @@ void rdar_7062158_2() {
 // ElementRegion is created.
 unsigned char test_array_index_bitwidth(const unsigned char *p) {
   unsigned short i = 0;
-  for (i = 0; i < 2; i++) p = &p[i];  
+  for (i = 0; i < 2; i++) p = &p[i]; // expected-warning{{Assigned value is always the same as the existing value}}
   return p[i+1];
 }
 
@@ -578,7 +583,7 @@ void pr4781(unsigned long *raw1) {
 - (id) foo {
   if (self)
     return self;
-  *((int *) 0x0) = 0xDEADBEEF; // no-warning
+  *((volatile int *) 0x0) = 0xDEADBEEF; // no-warning
   return self;
 }
 @end
@@ -933,3 +938,121 @@ void foo_rev95547_b(struct s_rev95547 w) {
   struct s_rev95547 w2 = w;
   w2.z1.x += 20.0; // no-warning
 }
+
+//===----------------------------------------------------------------------===//
+// Test handling statement expressions that don't populate a CFG block that
+// is used to represent the computation of the RHS of a logical operator.
+// This previously triggered a crash.
+//===----------------------------------------------------------------------===//
+
+void pr6938() {
+  if (1 && ({
+    while (0);
+    0;
+  }) == 0) {
+  }
+}
+
+void pr6938_b() {
+  if (1 && *({ // expected-warning{{Dereference of null pointer}}
+    while (0) {}
+    ({
+      (int *) 0;
+    });
+  }) == 0) {
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// <rdar://problem/7979430> - The CFG for code containing an empty
+//  @synchronized block was previously broken (and would crash the analyzer).
+//===----------------------------------------------------------------------===//
+
+void r7979430(id x) {
+  @synchronized(x) {}
+}
+
+//===----------------------------------------------------------------------===
+// PR 7361 - Test that functions wrapped in macro instantiations are analyzed.
+//===----------------------------------------------------------------------===
+#define MAKE_TEST_FN() \
+  void test_pr7361 (char a) {\
+    char* b = 0x0;  *b = a;\
+  }
+
+MAKE_TEST_FN() // expected-warning{{null pointer}}
+
+//===----------------------------------------------------------------------===
+// PR 7491 - Test that symbolic expressions can be used as conditions.
+//===----------------------------------------------------------------------===
+
+void pr7491 () {
+  extern int getint();
+  int a = getint()-1;
+  if (a) {
+    return;
+  }
+  if (!a) {
+    return;
+  } else {
+    // Should be unreachable
+    (void)*(char*)0; // no-warning
+  }
+}
+
+//===----------------------------------------------------------------------===
+// PR 7475 - Test that assumptions about global variables are reset after
+//  calling a global function.
+//===----------------------------------------------------------------------===
+
+int *pr7475_someGlobal;
+void pr7475_setUpGlobal();
+
+void pr7475() {
+  if (pr7475_someGlobal == 0)
+    pr7475_setUpGlobal();
+  *pr7475_someGlobal = 0; // no-warning
+}
+
+void pr7475_warn() {
+  static int *someStatic = 0;
+  if (someStatic == 0)
+    pr7475_setUpGlobal();
+  *someStatic = 0; // expected-warning{{null pointer}}
+}
+
+// <rdar://problem/8202272> - __imag passed non-complex should not crash
+float f0(_Complex float x) {
+  float l0 = __real x;
+  return  __real l0 + __imag l0;
+}
+
+
+//===----------------------------------------------------------------------===
+// Test that we can reduce symbols to constants whether they are on the left
+//  or right side of an expression.
+//===----------------------------------------------------------------------===
+
+void reduce_to_constant(int x, int y) {
+  if (x != 20)
+    return;
+
+  int a = x + y;
+  int b = y + x;
+
+  if (y == -20 && a != 0)
+    (void)*(char*)0; // no-warning
+  if (y == -20 && b != 0)
+    (void)*(char*)0; // no-warning
+}
+
+// <rdar://problem/8360854> - Test that code after a switch statement with no 
+// 'case:' labels is correctly evaluated.
+void r8360854(int n) {
+  switch (n) {
+   default: ;
+  }
+  int *p = 0;
+  *p = 0xDEADBEEF; // expected-warning{{null pointer}}
+}
+

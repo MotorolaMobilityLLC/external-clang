@@ -13,6 +13,7 @@
 
 // We might split this into multiple files if it gets too unwieldy
 
+#include "CGCXXABI.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
 #include "Mangle.h"
@@ -22,7 +23,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/StmtCXX.h"
-#include "clang/CodeGen/CodeGenOptions.h"
+#include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/ADT/StringExtras.h"
 using namespace clang;
 using namespace CodeGen;
@@ -96,8 +97,8 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
   /// If we don't have a definition for the destructor yet, don't
   /// emit.  We can't emit aliases to declarations; that's just not
   /// how aliases work.
-  const CXXDestructorDecl *BaseD = UniqueBase->getDestructor(getContext());
-  if (!BaseD->isImplicit() && !BaseD->getBody())
+  const CXXDestructorDecl *BaseD = UniqueBase->getDestructor();
+  if (!BaseD->isImplicit() && !BaseD->hasBody())
     return true;
 
   // If the base is at a non-zero offset, give up.
@@ -165,8 +166,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
     new llvm::GlobalAlias(AliasType, Linkage, "", Aliasee, &getModule());
 
   // Switch any previous uses to the alias.
-  MangleBuffer MangledName;
-  getMangledName(MangledName, AliasDecl);
+  llvm::StringRef MangledName = getMangledName(AliasDecl);
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
     assert(Entry->isDeclaration() && "definition already exists for alias");
@@ -176,7 +176,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
     Entry->replaceAllUsesWith(Alias);
     Entry->eraseFromParent();
   } else {
-    Alias->setName(MangledName.getString());
+    Alias->setName(MangledName);
   }
 
   // Finally, set up the alias with its proper name and attributes.
@@ -206,6 +206,7 @@ void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *D,
     return;
 
   llvm::Function *Fn = cast<llvm::Function>(GetAddrOfCXXConstructor(D, Type));
+  setFunctionLinkage(D, Fn);
 
   CodeGenFunction(*this).GenerateCode(GlobalDecl(D, Type), Fn);
 
@@ -216,8 +217,9 @@ void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *D,
 llvm::GlobalValue *
 CodeGenModule::GetAddrOfCXXConstructor(const CXXConstructorDecl *D,
                                        CXXCtorType Type) {
-  MangleBuffer Name;
-  getMangledCXXCtorName(Name, D, Type);
+  GlobalDecl GD(D, Type);
+  
+  llvm::StringRef Name = getMangledName(GD);
   if (llvm::GlobalValue *V = GetGlobalValue(Name))
     return V;
 
@@ -225,14 +227,7 @@ CodeGenModule::GetAddrOfCXXConstructor(const CXXConstructorDecl *D,
   const llvm::FunctionType *FTy =
     getTypes().GetFunctionType(getTypes().getFunctionInfo(D, Type), 
                                FPT->isVariadic());
-  return cast<llvm::Function>(
-                      GetOrCreateLLVMFunction(Name, FTy, GlobalDecl(D, Type)));
-}
-
-void CodeGenModule::getMangledCXXCtorName(MangleBuffer &Name,
-                                          const CXXConstructorDecl *D,
-                                          CXXCtorType Type) {
-  getMangleContext().mangleCXXCtor(D, Type, Name.getBuffer());
+  return cast<llvm::Function>(GetOrCreateLLVMFunction(Name, FTy, GD));
 }
 
 void CodeGenModule::EmitCXXDestructors(const CXXDestructorDecl *D) {
@@ -269,6 +264,7 @@ void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *D,
     return;
 
   llvm::Function *Fn = cast<llvm::Function>(GetAddrOfCXXDestructor(D, Type));
+  setFunctionLinkage(D, Fn);
 
   CodeGenFunction(*this).GenerateCode(GlobalDecl(D, Type), Fn);
 
@@ -279,22 +275,16 @@ void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *D,
 llvm::GlobalValue *
 CodeGenModule::GetAddrOfCXXDestructor(const CXXDestructorDecl *D,
                                       CXXDtorType Type) {
-  MangleBuffer Name;
-  getMangledCXXDtorName(Name, D, Type);
+  GlobalDecl GD(D, Type);
+
+  llvm::StringRef Name = getMangledName(GD);
   if (llvm::GlobalValue *V = GetGlobalValue(Name))
     return V;
 
   const llvm::FunctionType *FTy =
     getTypes().GetFunctionType(getTypes().getFunctionInfo(D, Type), false);
 
-  return cast<llvm::Function>(
-                      GetOrCreateLLVMFunction(Name, FTy, GlobalDecl(D, Type)));
-}
-
-void CodeGenModule::getMangledCXXDtorName(MangleBuffer &Name,
-                                          const CXXDestructorDecl *D,
-                                          CXXDtorType Type) {
-  getMangleContext().mangleCXXDtor(D, Type, Name.getBuffer());
+  return cast<llvm::Function>(GetOrCreateLLVMFunction(Name, FTy, GD));
 }
 
 static llvm::Value *BuildVirtualCall(CodeGenFunction &CGF, uint64_t VTableIndex, 
@@ -326,4 +316,97 @@ CodeGenFunction::BuildVirtualCall(const CXXDestructorDecl *DD, CXXDtorType Type,
     CGM.getVTables().getMethodVTableIndex(GlobalDecl(DD, Type));
 
   return ::BuildVirtualCall(*this, VTableIndex, This, Ty);
+}
+
+/// Implementation for CGCXXABI.  Possibly this should be moved into
+/// the incomplete ABI implementations?
+
+CGCXXABI::~CGCXXABI() {}
+
+static void ErrorUnsupportedABI(CodeGenFunction &CGF,
+                                llvm::StringRef S) {
+  Diagnostic &Diags = CGF.CGM.getDiags();
+  unsigned DiagID = Diags.getCustomDiagID(Diagnostic::Error,
+                                          "cannot yet compile %s in this ABI");
+  Diags.Report(CGF.getContext().getFullLoc(CGF.CurCodeDecl->getLocation()),
+               DiagID)
+    << S;
+}
+
+static llvm::Constant *GetBogusMemberPointer(CodeGenModule &CGM,
+                                             QualType T) {
+  return llvm::Constant::getNullValue(CGM.getTypes().ConvertType(T));
+}
+
+const llvm::Type *
+CGCXXABI::ConvertMemberPointerType(const MemberPointerType *MPT) {
+  return CGM.getTypes().ConvertType(CGM.getContext().getPointerDiffType());
+}
+
+llvm::Value *CGCXXABI::EmitLoadOfMemberFunctionPointer(CodeGenFunction &CGF,
+                                                       llvm::Value *&This,
+                                                       llvm::Value *MemPtr,
+                                                 const MemberPointerType *MPT) {
+  ErrorUnsupportedABI(CGF, "calls through member pointers");
+
+  const FunctionProtoType *FPT = 
+    MPT->getPointeeType()->getAs<FunctionProtoType>();
+  const CXXRecordDecl *RD = 
+    cast<CXXRecordDecl>(MPT->getClass()->getAs<RecordType>()->getDecl());
+  const llvm::FunctionType *FTy = 
+    CGM.getTypes().GetFunctionType(CGM.getTypes().getFunctionInfo(RD, FPT),
+                                   FPT->isVariadic());
+  return llvm::Constant::getNullValue(FTy->getPointerTo());
+}
+
+llvm::Value *CGCXXABI::EmitMemberPointerConversion(CodeGenFunction &CGF,
+                                                   const CastExpr *E,
+                                                   llvm::Value *Src) {
+  ErrorUnsupportedABI(CGF, "member function pointer conversions");
+  return GetBogusMemberPointer(CGM, E->getType());
+}
+
+llvm::Value *
+CGCXXABI::EmitMemberPointerComparison(CodeGenFunction &CGF,
+                                      llvm::Value *L,
+                                      llvm::Value *R,
+                                      const MemberPointerType *MPT,
+                                      bool Inequality) {
+  ErrorUnsupportedABI(CGF, "member function pointer comparison");
+  return CGF.Builder.getFalse();
+}
+
+llvm::Value *
+CGCXXABI::EmitMemberPointerIsNotNull(CodeGenFunction &CGF,
+                                     llvm::Value *MemPtr,
+                                     const MemberPointerType *MPT) {
+  ErrorUnsupportedABI(CGF, "member function pointer null testing");
+  return CGF.Builder.getFalse();
+}
+
+llvm::Constant *
+CGCXXABI::EmitMemberPointerConversion(llvm::Constant *C, const CastExpr *E) {
+  return GetBogusMemberPointer(CGM, E->getType());
+}
+
+llvm::Constant *
+CGCXXABI::EmitNullMemberPointer(const MemberPointerType *MPT) {
+  return GetBogusMemberPointer(CGM, QualType(MPT, 0));
+}
+
+llvm::Constant *CGCXXABI::EmitMemberPointer(const CXXMethodDecl *MD) {
+  return GetBogusMemberPointer(CGM,
+                         CGM.getContext().getMemberPointerType(MD->getType(),
+                                         MD->getParent()->getTypeForDecl()));
+}
+
+llvm::Constant *CGCXXABI::EmitMemberPointer(const FieldDecl *FD) {
+  return GetBogusMemberPointer(CGM,
+                         CGM.getContext().getMemberPointerType(FD->getType(),
+                                         FD->getParent()->getTypeForDecl()));
+}
+
+bool CGCXXABI::isZeroInitializable(const MemberPointerType *MPT) {
+  // Fake answer.
+  return true;
 }

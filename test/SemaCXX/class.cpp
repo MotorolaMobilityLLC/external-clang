@@ -136,3 +136,32 @@ namespace pr6629 {
     };
   };
 }
+
+namespace PR7153 {
+  class EnclosingClass {
+  public:
+    struct A { } mutable *member;
+  };
+ 
+  void f(const EnclosingClass &ec) {
+    ec.member = 0;
+  }
+}
+
+namespace PR7196 {
+  struct A {
+    int a;
+
+    void f() {
+      char i[sizeof(a)];
+      enum { x = sizeof(i) };
+      enum { y = sizeof(a) };
+    }
+  };
+}
+
+namespace rdar8066414 {
+  class C {
+    C() {}
+  } // expected-error{{expected ';' after class}}
+}

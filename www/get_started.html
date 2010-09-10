@@ -61,6 +61,11 @@ follows:</p>
     <li>Note: For subsequent Clang development, you can just do make at the
     clang directory level.</li>
   </ul>
+
+  <p>It is also possible to use CMake instead of the makefiles. With CMake it 
+     is also possible to generate project files for several IDEs: Eclipse CDT4,
+     CodeBlocks, Qt-Creator (use the CodeBlocks generator), KDevelop3.</p>
+
   <li>If you intend to work on Clang C++ support, you may need to tell it how
       to find your C++ standard library headers.  If Clang cannot find your 
       system libstdc++ headers, please follow these instructions:</li>
@@ -71,7 +76,7 @@ follows:</p>
     hard-coded paths" in <tt>clang/lib/Frontend/InitHeaderSearch.cpp</tt> and
     change the lines below to include that path.</li>
   </ul>
-  <li>Try it out (assuming you add llvm/Debug/bin to your path):</li>
+  <li>Try it out (assuming you add llvm/Debug+Asserts/bin to your path):</li>
   <ul>
     <li><tt>clang --help</tt></li>
     <li><tt>clang file.c -fsyntax-only</tt> (check for correctness)</li>

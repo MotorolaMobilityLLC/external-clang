@@ -2,10 +2,12 @@ set(LLVM_NO_RTTI 1)
 
 set(LLVM_USED_LIBS
     clangFrontend
+    clangSerialization
     clangDriver
     clangCodeGen
     clangSema
     clangChecker
+    clangIndex
     clangAnalysis
     clangRewrite
     clangAST
@@ -18,8 +20,10 @@ set(LLVM_LINK_COMPONENTS
     jit
     interpreter
     nativecodegen
+    asmparser
     bitreader
     bitwriter
+    codegen
     ipo
     selectiondag
   )

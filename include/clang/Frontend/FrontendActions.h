@@ -15,8 +15,6 @@
 #include <vector>
 
 namespace clang {
-class FixItRewriter;
-class FixItPathRewriter;
 
 //===----------------------------------------------------------------------===//
 // Custom Consumer Actions
@@ -37,12 +35,6 @@ public:
 //===----------------------------------------------------------------------===//
 // AST Consumer Actions
 //===----------------------------------------------------------------------===//
-
-class AnalysisAction : public ASTFrontendAction {
-protected:
-  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
-                                         llvm::StringRef InFile);
-};
 
 class ASTPrintAction : public ASTFrontendAction {
 protected:
@@ -74,28 +66,6 @@ protected:
                                          llvm::StringRef InFile);
 };
 
-class FixItAction : public ASTFrontendAction {
-private:
-  llvm::OwningPtr<FixItRewriter> Rewriter;
-  llvm::OwningPtr<FixItPathRewriter> PathRewriter;
-
-protected:
-
-  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
-                                         llvm::StringRef InFile);
-
-  virtual bool BeginSourceFileAction(CompilerInstance &CI,
-                                     llvm::StringRef Filename);
-
-  virtual void EndSourceFileAction();
-
-  virtual bool hasASTSupport() const { return false; }
-
-public:
-  FixItAction();
-  ~FixItAction();
-};
-
 class GeneratePCHAction : public ASTFrontendAction {
 protected:
   virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
@@ -103,22 +73,21 @@ protected:
 
   virtual bool usesCompleteTranslationUnit() { return false; }
 
-  virtual bool hasASTSupport() const { return false; }
-};
+  virtual bool hasASTFileSupport() const { return false; }
 
-class HTMLPrintAction : public ASTFrontendAction {
-protected:
-  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
-                                         llvm::StringRef InFile);
+public:
+  /// \brief Compute the AST consumer arguments that will be used to
+  /// create the PCHGenerator instance returned by CreateASTConsumer.
+  ///
+  /// \returns true if an error occurred, false otherwise.
+  static bool ComputeASTConsumerArguments(CompilerInstance &CI,
+                                          llvm::StringRef InFile,
+                                          std::string &Sysroot,
+                                          llvm::raw_ostream *&OS,
+                                          bool &Chaining);
 };
 
 class InheritanceViewAction : public ASTFrontendAction {
-protected:
-  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
-                                         llvm::StringRef InFile);
-};
-
-class RewriteObjCAction : public ASTFrontendAction {
 protected:
   virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
                                          llvm::StringRef InFile);
@@ -131,6 +100,12 @@ protected:
 
 public:
   virtual bool hasCodeCompletionSupport() const { return true; }
+};
+
+class BoostConAction : public SyntaxOnlyAction {
+protected:
+  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
+                                         llvm::StringRef InFile);
 };
 
 /**
@@ -166,10 +141,20 @@ public:
   virtual bool usesPreprocessorOnly() const;
   virtual bool usesCompleteTranslationUnit();
   virtual bool hasPCHSupport() const;
-  virtual bool hasASTSupport() const;
+  virtual bool hasASTFileSupport() const;
   virtual bool hasCodeCompletionSupport() const;
 };
 
+class PrintPreambleAction : public FrontendAction {
+protected:
+  void ExecuteAction();
+  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &, llvm::StringRef) { 
+    return 0; 
+  }
+  
+  virtual bool usesPreprocessorOnly() const { return true; }
+};
+  
 //===----------------------------------------------------------------------===//
 // Preprocessor Actions
 //===----------------------------------------------------------------------===//
@@ -189,17 +174,7 @@ protected:
   void ExecuteAction();
 };
 
-class ParseOnlyAction : public PreprocessorFrontendAction {
-protected:
-  void ExecuteAction();
-};
-
 class PreprocessOnlyAction : public PreprocessorFrontendAction {
-protected:
-  void ExecuteAction();
-};
-
-class PrintParseAction : public PreprocessorFrontendAction {
 protected:
   void ExecuteAction();
 };
@@ -210,17 +185,7 @@ protected:
 
   virtual bool hasPCHSupport() const { return true; }
 };
-
-class RewriteMacrosAction : public PreprocessorFrontendAction {
-protected:
-  void ExecuteAction();
-};
-
-class RewriteTestAction : public PreprocessorFrontendAction {
-protected:
-  void ExecuteAction();
-};
-
+  
 }  // end namespace clang
 
 #endif

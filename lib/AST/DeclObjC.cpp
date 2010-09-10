@@ -21,14 +21,8 @@ using namespace clang;
 // ObjCListBase
 //===----------------------------------------------------------------------===//
 
-void ObjCListBase::Destroy(ASTContext &Ctx) {
-  Ctx.Deallocate(List);
-  NumElts = 0;
-  List = 0;
-}
-
 void ObjCListBase::set(void *const* InList, unsigned Elts, ASTContext &Ctx) {
-  assert(List == 0 && "Elements already set!");
+  List = 0;
   if (Elts == 0) return;  // Setting to an empty list is a noop.
 
 
@@ -45,12 +39,6 @@ void ObjCProtocolList::set(ObjCProtocolDecl* const* InList, unsigned Elts,
   Locations = new (Ctx) SourceLocation[Elts];
   memcpy(Locations, Locs, sizeof(SourceLocation) * Elts);
   set(InList, Elts, Ctx);
-}
-
-void ObjCProtocolList::Destroy(ASTContext &Ctx) {
-  Ctx.Deallocate(Locations);
-  Locations = 0;
-  ObjCList<ObjCProtocolDecl>::Destroy(Ctx);
 }
 
 //===----------------------------------------------------------------------===//
@@ -218,17 +206,23 @@ void ObjCInterfaceDecl::mergeClassExtensionProtocolList(
     ProtocolRefs.push_back(*p);
     ProtocolLocs.push_back(*pl);
   }
-  ReferencedProtocols.Destroy(C);
   unsigned NumProtoRefs = ProtocolRefs.size();
   setProtocolList(ProtocolRefs.data(), NumProtoRefs, ProtocolLocs.data(), C);
 }
 
-/// getClassExtension - Find class extension of the given class.
-// FIXME. can speed it up, if need be.
-ObjCCategoryDecl* ObjCInterfaceDecl::getClassExtension() const {
-  const ObjCInterfaceDecl* ClassDecl = this;
-  for (ObjCCategoryDecl *CDecl = ClassDecl->getCategoryList(); CDecl;
+/// getFirstClassExtension - Find first class extension of the given class.
+ObjCCategoryDecl* ObjCInterfaceDecl::getFirstClassExtension() const {
+  for (ObjCCategoryDecl *CDecl = getCategoryList(); CDecl;
        CDecl = CDecl->getNextClassCategory())
+    if (CDecl->IsClassExtension())
+      return CDecl;
+  return 0;
+}
+
+/// getNextClassCategory - Find next class extension in list of categories.
+const ObjCCategoryDecl* ObjCCategoryDecl::getNextClassExtension() const {
+  for (const ObjCCategoryDecl *CDecl = getNextClassCategory(); CDecl; 
+        CDecl = CDecl->getNextClassCategory())
     if (CDecl->IsClassExtension())
       return CDecl;
   return 0;
@@ -242,11 +236,13 @@ ObjCIvarDecl *ObjCInterfaceDecl::lookupInstanceVariable(IdentifierInfo *ID,
       clsDeclared = ClassDecl;
       return I;
     }
-    if (const ObjCCategoryDecl *CDecl = ClassDecl->getClassExtension())
+    for (const ObjCCategoryDecl *CDecl = ClassDecl->getFirstClassExtension();
+         CDecl; CDecl = CDecl->getNextClassExtension()) {
       if (ObjCIvarDecl *I = CDecl->getIvarDecl(ID)) {
         clsDeclared = ClassDecl;
         return I;
       }
+    }
       
     ClassDecl = ClassDecl->getSuperClass();
   }
@@ -330,25 +326,15 @@ ObjCMethodDecl *ObjCMethodDecl::Create(ASTContext &C,
                                        bool isInstance,
                                        bool isVariadic,
                                        bool isSynthesized,
+                                       bool isDefined,
                                        ImplementationControl impControl,
                                        unsigned numSelectorArgs) {
   return new (C) ObjCMethodDecl(beginLoc, endLoc,
                                 SelInfo, T, ResultTInfo, contextDecl,
                                 isInstance,
-                                isVariadic, isSynthesized, impControl,
+                                isVariadic, isSynthesized, isDefined,
+                                impControl,
                                 numSelectorArgs);
-}
-
-void ObjCMethodDecl::Destroy(ASTContext &C) {
-  if (Body) Body->Destroy(C);
-  if (SelfDecl) SelfDecl->Destroy(C);
-
-  for (param_iterator I=param_begin(), E=param_end(); I!=E; ++I)
-    if (*I) (*I)->Destroy(C);
-
-  ParamInfo.Destroy(C);
-
-  Decl::Destroy(C);
 }
 
 /// \brief A definition will return its interface declaration.
@@ -456,20 +442,9 @@ ObjCInterfaceDecl(DeclContext *DC, SourceLocation atLoc, IdentifierInfo *Id,
                   SourceLocation CLoc, bool FD, bool isInternal)
   : ObjCContainerDecl(ObjCInterface, DC, atLoc, Id),
     TypeForDecl(0), SuperClass(0),
-    CategoryList(0), ForwardDecl(FD), InternalInterface(isInternal),
+    CategoryList(0), IvarList(0), 
+    ForwardDecl(FD), InternalInterface(isInternal),
     ClassLoc(CLoc) {
-}
-
-void ObjCInterfaceDecl::Destroy(ASTContext &C) {
-  for (ivar_iterator I = ivar_begin(), E = ivar_end(); I != E; ++I)
-    if (*I) (*I)->Destroy(C);
-
-  // FIXME: CategoryList?
-
-  // FIXME: Because there is no clear ownership
-  //  role between ObjCInterfaceDecls and the ObjCPropertyDecls that they
-  //  reference, we destroy ObjCPropertyDecls in ~TranslationUnit.
-  Decl::Destroy(C);
 }
 
 ObjCImplementationDecl *ObjCInterfaceDecl::getImplementation() const {
@@ -481,6 +456,49 @@ void ObjCInterfaceDecl::setImplementation(ObjCImplementationDecl *ImplD) {
   getASTContext().setObjCImplementation(this, ImplD);
 }
 
+/// all_declared_ivar_begin - return first ivar declared in this class,
+/// its extensions and its implementation. Lazily build the list on first
+/// access.
+ObjCIvarDecl *ObjCInterfaceDecl::all_declared_ivar_begin() {
+  if (IvarList)
+    return IvarList;
+  
+  ObjCIvarDecl *curIvar = 0;
+  if (!ivar_empty()) {
+    ObjCInterfaceDecl::ivar_iterator I = ivar_begin(), E = ivar_end();
+    IvarList = (*I); ++I;
+    for (curIvar = IvarList; I != E; curIvar = *I, ++I)
+      curIvar->setNextIvar(*I);
+  }
+  
+  for (const ObjCCategoryDecl *CDecl = getFirstClassExtension(); CDecl;
+       CDecl = CDecl->getNextClassExtension()) {
+    if (!CDecl->ivar_empty()) {
+      ObjCCategoryDecl::ivar_iterator I = CDecl->ivar_begin(),
+                                          E = CDecl->ivar_end();
+      if (!IvarList) {
+        IvarList = (*I); ++I;
+        curIvar = IvarList;
+      }
+      for ( ;I != E; curIvar = *I, ++I)
+        curIvar->setNextIvar(*I);
+    }
+  }
+  
+  if (ObjCImplementationDecl *ImplDecl = getImplementation()) {
+    if (!ImplDecl->ivar_empty()) {
+      ObjCImplementationDecl::ivar_iterator I = ImplDecl->ivar_begin(),
+                                            E = ImplDecl->ivar_end();
+      if (!IvarList) {
+        IvarList = (*I); ++I;
+        curIvar = IvarList;
+      }
+      for ( ;I != E; curIvar = *I, ++I)
+        curIvar->setNextIvar(*I);
+    }
+  }
+  return IvarList;
+}
 
 /// FindCategoryDeclaration - Finds category declaration in the list of
 /// categories for this class and returns it. Name of the category is passed
@@ -566,7 +584,8 @@ bool ObjCInterfaceDecl::ClassImplementsProtocol(ObjCProtocolDecl *lProto,
 ObjCIvarDecl *ObjCIvarDecl::Create(ASTContext &C, ObjCContainerDecl *DC,
                                    SourceLocation L, IdentifierInfo *Id,
                                    QualType T, TypeSourceInfo *TInfo,
-                                   AccessControl ac, Expr *BW) {
+                                   AccessControl ac, Expr *BW,
+                                   bool synthesized) {
   if (DC) {
     // Ivar's can only appear in interfaces, implementations (via synthesized
     // properties), and class extensions (via direct declaration, or synthesized
@@ -581,9 +600,26 @@ ObjCIvarDecl *ObjCIvarDecl::Create(ASTContext &C, ObjCContainerDecl *DC,
     assert((isa<ObjCInterfaceDecl>(DC) || isa<ObjCImplementationDecl>(DC) ||
             isa<ObjCCategoryDecl>(DC)) &&
            "Invalid ivar decl context!");
+    // Once a new ivar is created in any of class/class-extension/implementation
+    // decl contexts, the previously built IvarList must be rebuilt.
+    ObjCInterfaceDecl *ID = dyn_cast<ObjCInterfaceDecl>(DC);
+    if (!ID) {
+      if (ObjCImplementationDecl *IM = dyn_cast<ObjCImplementationDecl>(DC)) {
+        ID = IM->getClassInterface();
+        if (BW)
+          IM->setHasSynthBitfield(true);
+      }
+      else {
+        ObjCCategoryDecl *CD = cast<ObjCCategoryDecl>(DC);
+        ID = CD->getClassInterface();
+        if (BW)
+          CD->setHasSynthBitfield(true);
+      }
+    }
+    ID->setIvarList(0);
   }
 
-  return new (C) ObjCIvarDecl(DC, L, Id, T, TInfo, ac, BW);
+  return new (C) ObjCIvarDecl(DC, L, Id, T, TInfo, ac, BW, synthesized);
 }
 
 const ObjCInterfaceDecl *ObjCIvarDecl::getContainingInterface() const {
@@ -621,11 +657,6 @@ ObjCAtDefsFieldDecl
   return new (C) ObjCAtDefsFieldDecl(DC, L, Id, T, BW);
 }
 
-void ObjCAtDefsFieldDecl::Destroy(ASTContext& C) {
-  this->~ObjCAtDefsFieldDecl();
-  C.Deallocate((void *)this);
-}
-
 //===----------------------------------------------------------------------===//
 // ObjCProtocolDecl
 //===----------------------------------------------------------------------===//
@@ -634,11 +665,6 @@ ObjCProtocolDecl *ObjCProtocolDecl::Create(ASTContext &C, DeclContext *DC,
                                            SourceLocation L,
                                            IdentifierInfo *Id) {
   return new (C) ObjCProtocolDecl(DC, L, Id);
-}
-
-void ObjCProtocolDecl::Destroy(ASTContext &C) {
-  ReferencedProtocols.Destroy(C);
-  ObjCContainerDecl::Destroy(C);
 }
 
 ObjCProtocolDecl *ObjCProtocolDecl::lookupProtocolNamed(IdentifierInfo *Name) {
@@ -700,23 +726,6 @@ ObjCClassDecl *ObjCClassDecl::Create(ASTContext &C, DeclContext *DC,
   return new (C) ObjCClassDecl(DC, L, Elts, Locs, nElts, C);
 }
 
-void ObjCClassDecl::Destroy(ASTContext &C) {
-  // ObjCInterfaceDecls registered with a DeclContext will get destroyed
-  // when the DeclContext is destroyed.  For those created only by a forward
-  // declaration, the first @class that created the ObjCInterfaceDecl gets
-  // to destroy it.
-  // FIXME: Note that this ownership role is very brittle; a better
-  // polict is surely need in the future.
-  for (iterator I = begin(), E = end(); I !=E ; ++I) {
-    ObjCInterfaceDecl *ID = I->getInterface();
-    if (ID->isForwardDecl() && ID->getLocStart() == getLocStart())
-      ID->Destroy(C);
-  }
-  
-  C.Deallocate(ForwardDecls);
-  Decl::Destroy(C);
-}
-
 SourceRange ObjCClassDecl::getSourceRange() const {
   // FIXME: We should include the semicolon
   assert(NumDecls);
@@ -743,11 +752,6 @@ ObjCForwardProtocolDecl::Create(ASTContext &C, DeclContext *DC,
                                 unsigned NumElts,
                                 const SourceLocation *Locs) {
   return new (C) ObjCForwardProtocolDecl(DC, L, Elts, NumElts, Locs, C);
-}
-
-void ObjCForwardProtocolDecl::Destroy(ASTContext &C) {
-  ReferencedProtocols.Destroy(C);
-  Decl::Destroy(C);
 }
 
 //===----------------------------------------------------------------------===//
@@ -887,7 +891,7 @@ ObjCPropertyDecl *ObjCPropertyDecl::Create(ASTContext &C, DeclContext *DC,
                                            SourceLocation L,
                                            IdentifierInfo *Id,
                                            SourceLocation AtLoc,
-                                           QualType T,
+                                           TypeSourceInfo *T,
                                            PropertyControl propControl) {
   return new (C) ObjCPropertyDecl(DC, L, Id, AtLoc, T);
 }

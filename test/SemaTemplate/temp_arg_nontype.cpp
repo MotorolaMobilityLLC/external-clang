@@ -193,3 +193,53 @@ namespace EntityReferenced {
     typedef X<int*, Y<int*>::f> x; // expected-note{{in instantiation of}}
   }
 }
+
+namespace PR6964 {
+  template <typename ,int, int = 9223372036854775807L > // expected-warning 2{{non-type template argument value '9223372036854775807' truncated to '-1' for template parameter of type 'int'}} \
+  // expected-note 2{{template parameter is declared here}}
+  struct as_nview { };
+
+  template <typename Sequence, int I0> 
+  struct as_nview<Sequence, I0>  // expected-note{{while checking a default template argument used here}}
+  { };
+}
+
+// rdar://problem/8302138
+namespace test8 {
+  template <int* ip> struct A {
+    int* p;
+    A() : p(ip) {}
+  };
+
+  void test0() {
+    extern int i00;
+    A<&i00> a00;
+  }
+
+  extern int i01;
+  void test1() {
+    A<&i01> a01;
+  }
+
+
+  struct C {
+    int x;
+    char y;
+    double z;
+  };
+  
+  template <C* cp> struct B {
+    C* p;
+    B() : p(cp) {}
+  };
+
+  void test2() {
+    extern C c02;
+    B<&c02> b02;
+  }
+
+  extern C c03;
+  void test3() {
+    B<&c03> b03;
+  }
+}

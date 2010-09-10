@@ -172,18 +172,21 @@ void test10(int x, float f, int i, long long lli) {
   printf("%f\n", (long double) 1.0); // expected-warning{{conversion specifies type 'double' but the argument has type 'long double'}}
   // The man page says that a zero precision is okay.
   printf("%.0Lf", (long double) 1.0); // no-warning
+  printf("%c\n", "x"); // expected-warning{{conversion specifies type 'int' but the argument has type 'char *'}}
+  printf("%c\n", 1.23); // expected-warning{{conversion specifies type 'int' but the argument has type 'double'}}
 } 
 
 void test11(void *p, char *s) {
   printf("%p", p); // no-warning
-  printf("%.4p", p); // expected-warning{{precision used in 'p' conversion specifier (where it has no meaning)}}
-  printf("%+p", p); // expected-warning{{flag '+' results in undefined behavior in 'p' conversion specifier}}
-  printf("% p", p); // expected-warning{{flag ' ' results in undefined behavior in 'p' conversion specifier}}
-  printf("%0p", p); // expected-warning{{flag '0' results in undefined behavior in 'p' conversion specifier}}
+  printf("%p", 123); // expected-warning{{conversion specifies type 'void *' but the argument has type 'int'}}
+  printf("%.4p", p); // expected-warning{{precision used with 'p' conversion specifier, resulting in undefined behavior}}
+  printf("%+p", p); // expected-warning{{flag '+' results in undefined behavior with 'p' conversion specifier}}
+  printf("% p", p); // expected-warning{{flag ' ' results in undefined behavior with 'p' conversion specifier}}
+  printf("%0p", p); // expected-warning{{flag '0' results in undefined behavior with 'p' conversion specifier}}
   printf("%s", s); // no-warning
-  printf("%+s", p); // expected-warning{{flag '+' results in undefined behavior in 's' conversion specifier}}
-  printf("% s", p); // expected-warning{{flag ' ' results in undefined behavior in 's' conversion specifier}}
-  printf("%0s", p); // expected-warning{{flag '0' results in undefined behavior in 's' conversion specifier}}
+  printf("%+s", p); // expected-warning{{flag '+' results in undefined behavior with 's' conversion specifier}}
+  printf("% s", p); // expected-warning{{flag ' ' results in undefined behavior with 's' conversion specifier}}
+  printf("%0s", p); // expected-warning{{flag '0' results in undefined behavior with 's' conversion specifier}}
 }
 
 void test12(char *b) {
@@ -236,6 +239,8 @@ void test_positional_arguments() {
   printf("%1$2.2d", (int) 2); // no-warning
   printf("%2$*1$.2d", (int) 2, (int) 3); // no-warning
   printf("%2$*8$d", (int) 2, (int) 3); // expected-warning{{specified field width is missing a matching 'int' argument}}
+  printf("%%%1$d", (int) 2); // no-warning
+  printf("%1$d%%", (int) 2); // no-warning
 }
 
 // PR 6697 - Handle format strings where the data argument is not adjacent to the format string
@@ -249,5 +254,50 @@ void test_pr_6697() {
   myprintf_PR_6697("%2$s\n", 1, "foo"); // expected-warning{{data argument position '2' exceeds the number of data arguments (1)}}
   myprintf_PR_6697("%18$s\n", 1, "foo"); // expected-warning{{data argument position '18' exceeds the number of data arguments (1)}}
   myprintf_PR_6697("%1$s\n", 1, (int) 0); // expected-warning{{conversion specifies type 'char *' but the argument has type 'int'}}
+}
+
+void rdar8026030(FILE *fp) {
+  fprintf(fp, "\%"); // expected-warning{{incomplete format specifier}}
+}
+
+void bug7377_bad_length_mod_usage() {
+  // Bad length modifiers
+  printf("%hhs", "foo"); // expected-warning{{length modifier 'hh' results in undefined behavior or no effect with 's' conversion specifier}}
+  printf("%1$zp", (void *)0); // expected-warning{{length modifier 'z' results in undefined behavior or no effect with 'p' conversion specifier}}
+  printf("%ls", L"foo"); // no-warning
+  printf("%#.2Lf", (long double)1.234); // no-warning
+
+  // Bad flag usage
+  printf("%#p", (void *) 0); // expected-warning{{flag '#' results in undefined behavior with 'p' conversion specifier}}
+  printf("%0d", -1); // no-warning
+  printf("%#n", (void *) 0); // expected-warning{{flag '#' results in undefined behavior with 'n' conversion specifier}} expected-warning{{use of '%n' in format string discouraged (potentially insecure)}}
+  printf("%-n", (void *) 0); // expected-warning{{flag '-' results in undefined behavior with 'n' conversion specifier}} expected-warning{{use of '%n' in format string discouraged (potentially insecure)}}
+  printf("%-p", (void *) 0); // no-warning
+
+  // Bad optional amount use
+  printf("%.2c", 'a'); // expected-warning{{precision used with 'c' conversion specifier, resulting in undefined behavior}}
+  printf("%1n", (void *) 0); // expected-warning{{field width used with 'n' conversion specifier, resulting in undefined behavior}} expected-warning{{use of '%n' in format string discouraged (potentially insecure)}}
+  printf("%.9n", (void *) 0); // expected-warning{{precision used with 'n' conversion specifier, resulting in undefined behavior}} expected-warning{{use of '%n' in format string discouraged (potentially insecure)}}
+
+  // Ignored flags
+  printf("% +f", 1.23); // expected-warning{{flag ' ' is ignored when flag '+' is present}}
+  printf("%+ f", 1.23); // expected-warning{{flag ' ' is ignored when flag '+' is present}}
+  printf("%0-f", 1.23); // expected-warning{{flag '0' is ignored when flag '-' is present}}
+  printf("%-0f", 1.23); // expected-warning{{flag '0' is ignored when flag '-' is present}}
+  printf("%-+f", 1.23); // no-warning
+}
+
+// PR 7981 - handle '%lc' (wint_t)
+#ifndef wint_t
+typedef int __darwin_wint_t;
+typedef __darwin_wint_t wint_t;
+#endif
+
+void pr7981(wint_t c, wchar_t c2) {
+  printf("%lc", c); // no-warning
+  printf("%lc", 1.0); // expected-warning{{the argument has type 'double'}}
+  printf("%lc", (char) 1); // no-warning
+  printf("%lc", &c); // expected-warning{{the argument has type 'wint_t *' (aka 'int *')}}
+  printf("%lc", c2); // no-warning
 }
 

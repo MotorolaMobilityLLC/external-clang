@@ -9,7 +9,7 @@ static void __attribute__((noreturn)) f0(void) {
 } // expected-warning {{function declared 'noreturn' should not return}}
 
 // On K&R
-int f1() __attribute__((noreturn));
+int f1() __attribute__((noreturn)); // expected-warning{{functions declared 'noreturn' should have a 'void' result type}}
 
 int g0 __attribute__((noreturn)); // expected-warning {{'noreturn' only applies to function types; type here is 'int'}}
 
@@ -40,3 +40,5 @@ f5 (unsigned long size)
 __attribute__((noreturn)) void f(__attribute__((noreturn)) void (*x)(void)) {
   x();
 }
+
+typedef void (*Fun)(void) __attribute__ ((noreturn(2))); // expected-error {{attribute requires 0 argument(s)}}

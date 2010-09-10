@@ -21,6 +21,11 @@
 
 namespace clang {
 
+namespace idx { 
+  class Indexer;
+  class TranslationUnit; 
+}
+
 class AnalysisManager : public BugReporterData {
   AnalysisContextManager AnaCtxMgr;
   LocationContextManager LocCtxMgr;
@@ -35,9 +40,18 @@ class AnalysisManager : public BugReporterData {
   StoreManagerCreator CreateStoreMgr;
   ConstraintManagerCreator CreateConstraintMgr;
 
+  /// \brief Provide function definitions in other translation units. This is
+  /// NULL if we don't have multiple translation units. AnalysisManager does
+  /// not own the Indexer.
+  idx::Indexer *Idxer;
+
   enum AnalysisScope { ScopeTU, ScopeDecl } AScope;
 
+  // The maximum number of exploded nodes the analyzer will generate.
   unsigned MaxNodes;
+
+  // The maximum number of times the analyzer will go through a loop.
+  unsigned MaxLoop;
 
   bool VisualizeEGDot;
   bool VisualizeEGUbi;
@@ -52,25 +66,34 @@ class AnalysisManager : public BugReporterData {
   //   bifurcates paths.
   bool EagerlyAssume;
   bool TrimGraph;
+  bool InlineCall;
 
 public:
   AnalysisManager(ASTContext &ctx, Diagnostic &diags, 
                   const LangOptions &lang, PathDiagnosticClient *pd,
                   StoreManagerCreator storemgr,
-                  ConstraintManagerCreator constraintmgr, unsigned maxnodes,
-                  bool vizdot, bool vizubi, bool purge, bool eager, bool trim)
+                  ConstraintManagerCreator constraintmgr, 
+                  idx::Indexer *idxer,
+                  unsigned maxnodes, unsigned maxloop,
+                  bool vizdot, bool vizubi, bool purge, bool eager, bool trim,
+                  bool inlinecall, bool useUnoptimizedCFG)
 
-    : Ctx(ctx), Diags(diags), LangInfo(lang), PD(pd),
-      CreateStoreMgr(storemgr), CreateConstraintMgr(constraintmgr),
-      AScope(ScopeDecl), MaxNodes(maxnodes),
+    : AnaCtxMgr(useUnoptimizedCFG), Ctx(ctx), Diags(diags), LangInfo(lang),
+      PD(pd),
+      CreateStoreMgr(storemgr), CreateConstraintMgr(constraintmgr),Idxer(idxer),
+      AScope(ScopeDecl), MaxNodes(maxnodes), MaxLoop(maxloop),
       VisualizeEGDot(vizdot), VisualizeEGUbi(vizubi), PurgeDead(purge),
-      EagerlyAssume(eager), TrimGraph(trim) {}
+      EagerlyAssume(eager), TrimGraph(trim), InlineCall(inlinecall) {}
   
   ~AnalysisManager() { FlushDiagnostics(); }
   
   void ClearContexts() {
     LocCtxMgr.clear();
     AnaCtxMgr.clear();
+  }
+  
+  AnalysisContextManager& getAnalysisContextManager() {
+    return AnaCtxMgr;
   }
 
   StoreManagerCreator getStoreManagerCreator() {
@@ -80,6 +103,8 @@ public:
   ConstraintManagerCreator getConstraintManagerCreator() {
     return CreateConstraintMgr;
   }
+
+  idx::Indexer *getIndexer() const { return Idxer; }
 
   virtual ASTContext &getASTContext() {
     return Ctx;
@@ -108,6 +133,8 @@ public:
 
   unsigned getMaxNodes() const { return MaxNodes; }
 
+  unsigned getMaxLoop() const { return MaxLoop; }
+
   bool shouldVisualizeGraphviz() const { return VisualizeEGDot; }
 
   bool shouldVisualizeUbigraph() const { return VisualizeEGUbi; }
@@ -122,6 +149,12 @@ public:
 
   bool shouldEagerlyAssume() const { return EagerlyAssume; }
 
+  bool shouldInlineCall() const { return InlineCall; }
+
+  bool hasIndexer() const { return Idxer != 0; }
+
+  const AnalysisContext *getAnalysisContextInAnotherTU(const Decl *D);
+
   CFG *getCFG(Decl const *D) {
     return AnaCtxMgr.getContext(D)->getCFG();
   }
@@ -134,9 +167,25 @@ public:
     return AnaCtxMgr.getContext(D)->getParentMap();
   }
 
+  AnalysisContext *getAnalysisContext(const Decl *D) {
+    return AnaCtxMgr.getContext(D);
+  }
+
+  AnalysisContext *getAnalysisContext(const Decl *D, idx::TranslationUnit *TU) {
+    return AnaCtxMgr.getContext(D, TU);
+  }
+
+  const StackFrameContext *getStackFrame(AnalysisContext *Ctx,
+                                         LocationContext const *Parent,
+                                         Stmt const *S, const CFGBlock *Blk,
+                                         unsigned Idx) {
+    return LocCtxMgr.getStackFrame(Ctx, Parent, S, Blk, Idx);
+  }
+
   // Get the top level stack frame.
-  const StackFrameContext *getStackFrame(Decl const *D) {
-    return LocCtxMgr.getStackFrame(AnaCtxMgr.getContext(D), 0, 0, 0, 0);
+  const StackFrameContext *getStackFrame(Decl const *D, 
+                                         idx::TranslationUnit *TU) {
+    return LocCtxMgr.getStackFrame(AnaCtxMgr.getContext(D, TU), 0, 0, 0, 0);
   }
 
   // Get a stack frame with parent.

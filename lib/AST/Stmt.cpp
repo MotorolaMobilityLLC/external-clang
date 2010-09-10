@@ -27,7 +27,7 @@ static struct StmtClassNameTable {
   const char *Name;
   unsigned Counter;
   unsigned Size;
-} StmtClassInfo[Stmt::lastExprConstant+1];
+} StmtClassInfo[Stmt::lastStmtConstant+1];
 
 static StmtClassNameTable &getStmtInfoTableEntry(Stmt::StmtClass E) {
   static bool Initialized = false;
@@ -36,11 +36,11 @@ static StmtClassNameTable &getStmtInfoTableEntry(Stmt::StmtClass E) {
 
   // Intialize the table on the first use.
   Initialized = true;
-#define ABSTRACT_EXPR(CLASS, PARENT)
+#define ABSTRACT_STMT(STMT)
 #define STMT(CLASS, PARENT) \
   StmtClassInfo[(unsigned)Stmt::CLASS##Class].Name = #CLASS;    \
   StmtClassInfo[(unsigned)Stmt::CLASS##Class].Size = sizeof(CLASS);
-#include "clang/AST/StmtNodes.def"
+#include "clang/AST/StmtNodes.inc"
 
   return StmtClassInfo[E];
 }
@@ -55,13 +55,13 @@ void Stmt::PrintStats() {
 
   unsigned sum = 0;
   fprintf(stderr, "*** Stmt/Expr Stats:\n");
-  for (int i = 0; i != Stmt::lastExprConstant+1; i++) {
+  for (int i = 0; i != Stmt::lastStmtConstant+1; i++) {
     if (StmtClassInfo[i].Name == 0) continue;
     sum += StmtClassInfo[i].Counter;
   }
   fprintf(stderr, "  %d stmts/exprs total.\n", sum);
   sum = 0;
-  for (int i = 0; i != Stmt::lastExprConstant+1; i++) {
+  for (int i = 0; i != Stmt::lastStmtConstant+1; i++) {
     if (StmtClassInfo[i].Name == 0) continue;
     if (StmtClassInfo[i].Counter == 0) continue;
     fprintf(stderr, "    %d %s, %d each (%d bytes)\n",
@@ -119,7 +119,7 @@ bool Stmt::hasImplicitControlFlow() const {
 
     case Stmt::BinaryOperatorClass: {
       const BinaryOperator* B = cast<BinaryOperator>(this);
-      if (B->isLogicalOp() || B->getOpcode() == BinaryOperator::Comma)
+      if (B->isLogicalOp() || B->getOpcode() == BO_Comma)
         return true;
       else
         return false;
@@ -215,8 +215,9 @@ int AsmStmt::getNamedOperand(llvm::StringRef SymbolicName) const {
 /// true, otherwise return false.
 unsigned AsmStmt::AnalyzeAsmString(llvm::SmallVectorImpl<AsmStringPiece>&Pieces,
                                    ASTContext &C, unsigned &DiagOffs) const {
-  const char *StrStart = getAsmString()->getStrData();
-  const char *StrEnd = StrStart + getAsmString()->getByteLength();
+  llvm::StringRef Str = getAsmString()->getString();
+  const char *StrStart = Str.begin();
+  const char *StrEnd = Str.end();
   const char *CurPtr = StrStart;
 
   // "Simple" inline asms have no constraints or operands, just convert the asm
@@ -451,6 +452,15 @@ CXXTryStmt *CXXTryStmt::Create(ASTContext &C, SourceLocation tryLoc,
   return new (Mem) CXXTryStmt(tryLoc, tryBlock, handlers, numHandlers);
 }
 
+CXXTryStmt *CXXTryStmt::Create(ASTContext &C, EmptyShell Empty,
+                               unsigned numHandlers) {
+  std::size_t Size = sizeof(CXXTryStmt);
+  Size += ((numHandlers + 1) * sizeof(Stmt));
+
+  void *Mem = C.Allocate(Size, llvm::alignof<CXXTryStmt>());
+  return new (Mem) CXXTryStmt(Empty, numHandlers);
+}
+
 CXXTryStmt::CXXTryStmt(SourceLocation tryLoc, Stmt *tryBlock,
                        Stmt **handlers, unsigned numHandlers)
   : Stmt(CXXTryStmtClass), TryLoc(tryLoc), NumHandlers(numHandlers) {
@@ -459,82 +469,120 @@ CXXTryStmt::CXXTryStmt(SourceLocation tryLoc, Stmt *tryBlock,
   std::copy(handlers, handlers + NumHandlers, Stmts + 1);
 }
 
-//===----------------------------------------------------------------------===//
-// AST Destruction.
-//===----------------------------------------------------------------------===//
-
-void Stmt::DestroyChildren(ASTContext &C) {
-  for (child_iterator I = child_begin(), E = child_end(); I !=E; )
-    if (Stmt* Child = *I++) Child->Destroy(C);
+IfStmt::IfStmt(ASTContext &C, SourceLocation IL, VarDecl *var, Expr *cond, 
+               Stmt *then, SourceLocation EL, Stmt *elsev)
+  : Stmt(IfStmtClass), IfLoc(IL), ElseLoc(EL)
+{
+  setConditionVariable(C, var);
+  SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
+  SubExprs[THEN] = then;
+  SubExprs[ELSE] = elsev;  
 }
 
-static void BranchDestroy(ASTContext &C, Stmt *S, Stmt **SubExprs,
-                          unsigned NumExprs) {
-  // We do not use child_iterator here because that will include
-  // the expressions referenced by the condition variable.
-  for (Stmt **I = SubExprs, **E = SubExprs + NumExprs; I != E; ++I)
-    if (Stmt *Child = *I) Child->Destroy(C);
+VarDecl *IfStmt::getConditionVariable() const {
+  if (!SubExprs[VAR])
+    return 0;
   
-  S->~Stmt();
-  C.Deallocate((void *) S);
+  DeclStmt *DS = cast<DeclStmt>(SubExprs[VAR]);
+  return cast<VarDecl>(DS->getSingleDecl());
 }
 
-void Stmt::DoDestroy(ASTContext &C) {
-  DestroyChildren(C);
-  this->~Stmt();
-  C.Deallocate((void *)this);
-}
-
-void CXXCatchStmt::DoDestroy(ASTContext& C) {
-  if (ExceptionDecl)
-    ExceptionDecl->Destroy(C);
-  Stmt::DoDestroy(C);
-}
-
-void DeclStmt::DoDestroy(ASTContext &C) {
-  // Don't use StmtIterator to iterate over the Decls, as that can recurse
-  // into VLA size expressions (which are owned by the VLA).  Further, Decls
-  // are owned by the DeclContext, and will be destroyed with them.
-  if (DG.isDeclGroup())
-    DG.getDeclGroup().Destroy(C);
-}
-
-void IfStmt::DoDestroy(ASTContext &C) {
-  BranchDestroy(C, this, SubExprs, END_EXPR);
-}
-
-void ForStmt::DoDestroy(ASTContext &C) {
-  BranchDestroy(C, this, SubExprs, END_EXPR);
-}
-
-void SwitchStmt::DoDestroy(ASTContext &C) {
-  // Destroy the SwitchCase statements in this switch. In the normal
-  // case, this loop will merely decrement the reference counts from
-  // the Retain() calls in addSwitchCase();
-  SwitchCase *SC = FirstCase;
-  while (SC) {
-    SwitchCase *Next = SC->getNextSwitchCase();
-    SC->Destroy(C);
-    SC = Next;
+void IfStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
+  if (!V) {
+    SubExprs[VAR] = 0;
+    return;
   }
   
-  BranchDestroy(C, this, SubExprs, END_EXPR);
+  SubExprs[VAR] = new (C) DeclStmt(DeclGroupRef(V), 
+                                   V->getSourceRange().getBegin(),
+                                   V->getSourceRange().getEnd());
 }
 
-void WhileStmt::DoDestroy(ASTContext &C) {
-  BranchDestroy(C, this, SubExprs, END_EXPR);
+ForStmt::ForStmt(ASTContext &C, Stmt *Init, Expr *Cond, VarDecl *condVar, 
+                 Expr *Inc, Stmt *Body, SourceLocation FL, SourceLocation LP, 
+                 SourceLocation RP)
+  : Stmt(ForStmtClass), ForLoc(FL), LParenLoc(LP), RParenLoc(RP) 
+{
+  SubExprs[INIT] = Init;
+  setConditionVariable(C, condVar);
+  SubExprs[COND] = reinterpret_cast<Stmt*>(Cond);
+  SubExprs[INC] = reinterpret_cast<Stmt*>(Inc);
+  SubExprs[BODY] = Body;
 }
 
-void AsmStmt::DoDestroy(ASTContext &C) {
-  DestroyChildren(C);
+VarDecl *ForStmt::getConditionVariable() const {
+  if (!SubExprs[CONDVAR])
+    return 0;
   
-  C.Deallocate(Names);
-  C.Deallocate(Constraints);
-  C.Deallocate(Exprs);
-  C.Deallocate(Clobbers);
+  DeclStmt *DS = cast<DeclStmt>(SubExprs[CONDVAR]);
+  return cast<VarDecl>(DS->getSingleDecl());
+}
+
+void ForStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
+  if (!V) {
+    SubExprs[CONDVAR] = 0;
+    return;
+  }
   
-  this->~AsmStmt();
-  C.Deallocate((void *)this);
+  SubExprs[CONDVAR] = new (C) DeclStmt(DeclGroupRef(V), 
+                                       V->getSourceRange().getBegin(),
+                                       V->getSourceRange().getEnd());
+}
+
+SwitchStmt::SwitchStmt(ASTContext &C, VarDecl *Var, Expr *cond) 
+  : Stmt(SwitchStmtClass), FirstCase(0) 
+{
+  setConditionVariable(C, Var);
+  SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
+  SubExprs[BODY] = NULL;
+}
+
+VarDecl *SwitchStmt::getConditionVariable() const {
+  if (!SubExprs[VAR])
+    return 0;
+  
+  DeclStmt *DS = cast<DeclStmt>(SubExprs[VAR]);
+  return cast<VarDecl>(DS->getSingleDecl());
+}
+
+void SwitchStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
+  if (!V) {
+    SubExprs[VAR] = 0;
+    return;
+  }
+  
+  SubExprs[VAR] = new (C) DeclStmt(DeclGroupRef(V), 
+                                   V->getSourceRange().getBegin(),
+                                   V->getSourceRange().getEnd());
+}
+
+WhileStmt::WhileStmt(ASTContext &C, VarDecl *Var, Expr *cond, Stmt *body, 
+                     SourceLocation WL)
+: Stmt(WhileStmtClass)
+{
+  setConditionVariable(C, Var);
+  SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
+  SubExprs[BODY] = body;
+  WhileLoc = WL;
+}
+
+VarDecl *WhileStmt::getConditionVariable() const {
+  if (!SubExprs[VAR])
+    return 0;
+  
+  DeclStmt *DS = cast<DeclStmt>(SubExprs[VAR]);
+  return cast<VarDecl>(DS->getSingleDecl());
+}
+
+void WhileStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
+  if (!V) {
+    SubExprs[VAR] = 0;
+    return;
+  }
+  
+  SubExprs[VAR] = new (C) DeclStmt(DeclGroupRef(V), 
+                                   V->getSourceRange().getBegin(),
+                                   V->getSourceRange().getEnd());
 }
 
 //===----------------------------------------------------------------------===//
@@ -572,26 +620,26 @@ Stmt::child_iterator LabelStmt::child_end() { return &SubStmt+1; }
 
 // IfStmt
 Stmt::child_iterator IfStmt::child_begin() {
-  return child_iterator(Var, &SubExprs[0]);
+  return &SubExprs[0];
 }
 Stmt::child_iterator IfStmt::child_end() {
-  return child_iterator(0, &SubExprs[0]+END_EXPR);
+  return &SubExprs[0]+END_EXPR;
 }
 
 // SwitchStmt
 Stmt::child_iterator SwitchStmt::child_begin() {
-  return child_iterator(Var, &SubExprs[0]);
+  return &SubExprs[0];
 }
 Stmt::child_iterator SwitchStmt::child_end() {
-  return child_iterator(0, &SubExprs[0]+END_EXPR);
+  return &SubExprs[0]+END_EXPR;
 }
 
 // WhileStmt
 Stmt::child_iterator WhileStmt::child_begin() {
-  return child_iterator(Var, &SubExprs[0]);
+  return &SubExprs[0];
 }
 Stmt::child_iterator WhileStmt::child_end() {
-  return child_iterator(0, &SubExprs[0]+END_EXPR);
+  return &SubExprs[0]+END_EXPR;
 }
 
 // DoStmt
@@ -600,10 +648,10 @@ Stmt::child_iterator DoStmt::child_end() { return &SubExprs[0]+END_EXPR; }
 
 // ForStmt
 Stmt::child_iterator ForStmt::child_begin() {
-  return child_iterator(CondVar, &SubExprs[0]);
+  return &SubExprs[0];
 }
 Stmt::child_iterator ForStmt::child_end() {
-  return child_iterator(0, &SubExprs[0]+END_EXPR);
+  return &SubExprs[0]+END_EXPR;
 }
 
 // ObjCForCollectionStmt

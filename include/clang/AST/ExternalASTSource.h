@@ -14,30 +14,24 @@
 #ifndef LLVM_CLANG_AST_EXTERNAL_AST_SOURCE_H
 #define LLVM_CLANG_AST_EXTERNAL_AST_SOURCE_H
 
-#include "clang/AST/DeclarationName.h"
-#include "clang/AST/Type.h"
-#include "llvm/ADT/SmallVector.h"
 #include <cassert>
 #include <vector>
+
+namespace llvm {
+template <class T> class SmallVectorImpl;
+}
+
 namespace clang {
 
 class ASTConsumer;
 class Decl;
 class DeclContext;
+class DeclContextLookupResult;
+class DeclarationName;
 class ExternalSemaSource; // layering violation required for downcasting
+class NamedDecl;
+class Selector;
 class Stmt;
-
-/// \brief The deserialized representation of a set of declarations
-/// with the same name that are visible in a given context.
-struct VisibleDeclaration {
-  /// \brief The name of the declarations.
-  DeclarationName Name;
-
-  /// \brief The ID numbers of all of the declarations with this name.
-  ///
-  /// These declarations have not necessarily been de-serialized.
-  llvm::SmallVector<unsigned, 4> Declarations;
-};
 
 /// \brief Abstract interface for external sources of AST nodes.
 ///
@@ -58,67 +52,108 @@ public:
 
   virtual ~ExternalASTSource();
 
-  /// \brief Resolve a type ID into a type, potentially building a new
-  /// type.
-  virtual QualType GetType(uint32_t ID) = 0;
+  /// \brief RAII class for safely pairing a StartedDeserializing call
+  /// with FinishedDeserializing.
+  class Deserializing {
+    ExternalASTSource *Source;
+  public:
+    explicit Deserializing(ExternalASTSource *source) : Source(source) {
+      assert(Source);
+      Source->StartedDeserializing();
+    }
+    ~Deserializing() {
+      Source->FinishedDeserializing();
+    }
+  };
 
   /// \brief Resolve a declaration ID into a declaration, potentially
   /// building a new declaration.
-  virtual Decl *GetDecl(uint32_t ID) = 0;
+  ///
+  /// This method only needs to be implemented if the AST source ever
+  /// passes back decl sets as VisibleDeclaration objects.
+  virtual Decl *GetExternalDecl(uint32_t ID) = 0;
 
   /// \brief Resolve a selector ID into a selector.
-  virtual Selector GetSelector(uint32_t ID) = 0;
+  ///
+  /// This operation only needs to be implemented if the AST source
+  /// returns non-zero for GetNumKnownSelectors().
+  virtual Selector GetExternalSelector(uint32_t ID) = 0;
 
   /// \brief Returns the number of selectors known to the external AST
   /// source.
-  virtual uint32_t GetNumKnownSelectors() = 0;
+  virtual uint32_t GetNumExternalSelectors() = 0;
 
-  /// \brief Resolve the offset of a statement in the decl stream into a
-  /// statement.
+  /// \brief Resolve the offset of a statement in the decl stream into
+  /// a statement.
   ///
-  /// This operation will read a new statement from the external
-  /// source each time it is called, and is meant to be used via a
-  /// LazyOffsetPtr.
-  virtual Stmt *GetDeclStmt(uint64_t Offset) = 0;
+  /// This operation is meant to be used via a LazyOffsetPtr.  It only
+  /// needs to be implemented if the AST source uses methods like
+  /// FunctionDecl::setLazyBody when building decls.
+  virtual Stmt *GetExternalDeclStmt(uint64_t Offset) = 0;
 
-  /// \brief Read all of the declarations lexically stored in a
-  /// declaration context.
+  /// \brief Finds all declarations with the given name in the
+  /// given context.
   ///
-  /// \param DC The declaration context whose declarations will be
-  /// read.
-  ///
-  /// \param Decls Vector that will contain the declarations loaded
-  /// from the external source. The caller is responsible for merging
-  /// these declarations with any declarations already stored in the
-  /// declaration context.
-  ///
-  /// \returns true if there was an error while reading the
-  /// declarations for this declaration context.
-  virtual bool ReadDeclsLexicallyInContext(DeclContext *DC,
-                                  llvm::SmallVectorImpl<uint32_t> &Decls) = 0;
+  /// Generally the final step of this method is either to call
+  /// SetExternalVisibleDeclsForName or to recursively call lookup on
+  /// the DeclContext after calling SetExternalVisibleDecls.
+  virtual DeclContextLookupResult
+  FindExternalVisibleDeclsByName(const DeclContext *DC,
+                                 DeclarationName Name) = 0;
 
-  /// \brief Read all of the declarations visible from a declaration
-  /// context.
+  /// \brief Deserialize all the visible declarations from external storage.
   ///
-  /// \param DC The declaration context whose visible declarations
-  /// will be read.
+  /// Name lookup deserializes visible declarations lazily, thus a DeclContext
+  /// may not have a complete name lookup table. This function deserializes
+  /// the rest of visible declarations from the external storage and completes
+  /// the name lookup table of the DeclContext.
+  virtual void MaterializeVisibleDecls(const DeclContext *DC) = 0;
+
+  /// \brief Finds all declarations lexically contained within the given
+  /// DeclContext.
   ///
-  /// \param Decls A vector of visible declaration structures,
-  /// providing the mapping from each name visible in the declaration
-  /// context to the declaration IDs of declarations with that name.
+  /// \return true if an error occurred
+  virtual bool FindExternalLexicalDecls(const DeclContext *DC,
+                                llvm::SmallVectorImpl<Decl*> &Result) = 0;
+
+  /// \brief Notify ExternalASTSource that we started deserialization of
+  /// a decl or type so until FinishedDeserializing is called there may be
+  /// decls that are initializing. Must be paired with FinishedDeserializing.
   ///
-  /// \returns true if there was an error while reading the
-  /// declarations for this declaration context.
-  virtual bool ReadDeclsVisibleInContext(DeclContext *DC,
-                       llvm::SmallVectorImpl<VisibleDeclaration> & Decls) = 0;
+  /// The default implementation of this method is a no-op.
+  virtual void StartedDeserializing() { }
+
+  /// \brief Notify ExternalASTSource that we finished the deserialization of
+  /// a decl or type. Must be paired with StartedDeserializing.
+  ///
+  /// The default implementation of this method is a no-op.
+  virtual void FinishedDeserializing() { }
 
   /// \brief Function that will be invoked when we begin parsing a new
   /// translation unit involving this external AST source.
+  ///
+  /// The default implementation of this method is a no-op.
   virtual void StartTranslationUnit(ASTConsumer *Consumer) { }
 
   /// \brief Print any statistics that have been gathered regarding
   /// the external AST source.
+  ///
+  /// The default implementation of this method is a no-op.
   virtual void PrintStats();
+
+protected:
+  static DeclContextLookupResult
+  SetExternalVisibleDeclsForName(const DeclContext *DC,
+                                 DeclarationName Name,
+                                 llvm::SmallVectorImpl<NamedDecl*> &Decls);
+
+  static DeclContextLookupResult
+  SetNoExternalVisibleDeclsForName(const DeclContext *DC,
+                                   DeclarationName Name);
+
+  void MaterializeVisibleDeclsForName(const DeclContext *DC,
+                                      DeclarationName Name,
+                                 llvm::SmallVectorImpl<NamedDecl*> &Decls);
 };
 
 /// \brief A lazy pointer to an AST node (of base type T) that resides
@@ -127,7 +162,7 @@ public:
 /// The AST node is identified within the external AST source by a
 /// 63-bit offset, and can be retrieved via an operation on the
 /// external AST source itself.
-template<typename T, T* (ExternalASTSource::*Get)(uint64_t Offset)>
+template<typename T, typename OffsT, T* (ExternalASTSource::*Get)(OffsT Offset)>
 struct LazyOffsetPtr {
   /// \brief Either a pointer to an AST node or the offset within the
   /// external AST source where the AST node can be found.
@@ -185,7 +220,12 @@ public:
 };
 
 /// \brief A lazy pointer to a statement.
-typedef LazyOffsetPtr<Stmt, &ExternalASTSource::GetDeclStmt> LazyDeclStmtPtr;
+typedef LazyOffsetPtr<Stmt, uint64_t, &ExternalASTSource::GetExternalDeclStmt>
+  LazyDeclStmtPtr;
+
+/// \brief A lazy pointer to a declaration.
+typedef LazyOffsetPtr<Decl, uint32_t, &ExternalASTSource::GetExternalDecl>
+  LazyDeclPtr;
 
 } // end namespace clang
 

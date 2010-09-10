@@ -14,6 +14,7 @@
 
 #include "clang/Parse/Parser.h"
 #include "clang/Parse/ParseDiagnostic.h"
+#include "clang/Sema/ParsedTemplate.h"
 using namespace clang;
 
 /// isCXXDeclarationStatement - C++-specialized function that disambiguates
@@ -171,14 +172,6 @@ Parser::TPResult Parser::TryParseSimpleDeclaration() {
 ///   '{' '}'
 ///
 Parser::TPResult Parser::TryParseInitDeclaratorList() {
-  // GCC only examines the first declarator for disambiguation:
-  // i.e:
-  // int(x), ++x; // GCC regards it as ill-formed declaration.
-  //
-  // Comeau and MSVC will regard the above statement as correct expression.
-  // Clang examines all of the declarators and also regards the above statement
-  // as correct expression.
-
   while (1) {
     // declarator
     TPResult TPR = TryParseDeclarator(false/*mayBeAbstract*/);
@@ -196,14 +189,15 @@ Parser::TPResult Parser::TryParseInitDeclaratorList() {
       if (!SkipUntil(tok::r_paren))
         return TPResult::Error();
     } else if (Tok.is(tok::equal)) {
-      // MSVC won't examine the rest of declarators if '=' is encountered, it
-      // will conclude that it is a declaration.
-      // Comeau and Clang will examine the rest of declarators.
-      // Note that "int(x) = {0}, ++x;" will be interpreted as ill-formed
-      // expression.
+      // MSVC and g++ won't examine the rest of declarators if '=' is 
+      // encountered; they just conclude that we have a declaration.
+      // EDG parses the initializer completely, which is the proper behavior
+      // for this case.
       //
-      // Parse through the initializer-clause.
-      SkipUntil(tok::comma, true/*StopAtSemi*/, true/*DontConsume*/);
+      // At present, Clang follows MSVC and g++, since the parser does not have
+      // the ability to parse an expression fully without recording the
+      // results of that parse.
+      return TPResult::True();
     }
 
     if (Tok.isNot(tok::comma))
@@ -752,6 +746,7 @@ Parser::TPResult Parser::isCXXDeclarationSpecifier() {
   case tok::kw___cdecl:
   case tok::kw___stdcall:
   case tok::kw___fastcall:
+  case tok::kw___thiscall:
   case tok::kw___w64:
   case tok::kw___ptr64:
   case tok::kw___forceinline:
@@ -760,6 +755,17 @@ Parser::TPResult Parser::isCXXDeclarationSpecifier() {
     // AltiVec
   case tok::kw___vector:
     return TPResult::True();
+
+  case tok::annot_template_id: {
+    TemplateIdAnnotation *TemplateId
+      = static_cast<TemplateIdAnnotation *>(Tok.getAnnotationValue());
+    if (TemplateId->Kind != TNK_Type_template)
+      return TPResult::False();
+    CXXScopeSpec SS;
+    AnnotateTemplateIdTokenAsType(&SS);
+    assert(Tok.is(tok::annot_typename));
+    goto case_typename;
+  }
 
   case tok::annot_cxxscope: // foo::bar or ::foo::bar, but already parsed
     // We've already annotated a scope; try to annotate a type.
@@ -801,6 +807,7 @@ Parser::TPResult Parser::isCXXDeclarationSpecifier() {
   case tok::kw_double:
   case tok::kw_void:
   case tok::annot_typename:
+  case_typename:
     if (NextToken().is(tok::l_paren))
       return TPResult::Ambiguous();
 

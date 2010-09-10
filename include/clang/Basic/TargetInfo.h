@@ -16,6 +16,7 @@
 
 // FIXME: Daniel isn't smart enough to use a prototype for this.
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/System/DataTypes.h"
 #include <cassert>
@@ -37,6 +38,22 @@ class TargetOptions;
 
 namespace Builtin { struct Info; }
 
+/// TargetCXXABI - The types of C++ ABIs for which we can generate code.
+enum TargetCXXABI {
+  /// The generic ("Itanium") C++ ABI, documented at:
+  ///   http://www.codesourcery.com/public/cxx-abi/
+  CXXABI_Itanium,
+
+  /// The ARM C++ ABI, based largely on the Itanium ABI but with
+  /// significant differences.
+  ///    http://infocenter.arm.com
+  ///                    /help/topic/com.arm.doc.ihi0041c/IHI0041C_cppabi.pdf
+  CXXABI_ARM,
+
+  /// The Visual Studio ABI.  Only scattered official documentation exists.
+  CXXABI_Microsoft
+};
+
 /// TargetInfo - This class exposes information about the current target.
 ///
 class TargetInfo {
@@ -51,12 +68,17 @@ protected:
   unsigned char FloatWidth, FloatAlign;
   unsigned char DoubleWidth, DoubleAlign;
   unsigned char LongDoubleWidth, LongDoubleAlign;
+  unsigned char LargeArrayMinWidth, LargeArrayAlign;
   unsigned char LongWidth, LongAlign;
   unsigned char LongLongWidth, LongLongAlign;
   const char *DescriptionString;
   const char *UserLabelPrefix;
   const llvm::fltSemantics *FloatFormat, *DoubleFormat, *LongDoubleFormat;
   unsigned char RegParmMax, SSERegParmMax;
+  TargetCXXABI CXXABI;
+
+  unsigned HasAlignMac68kSupport : 1;
+  unsigned RealTypeUsesObjCFPRet : 3;
 
   // TargetInfo Constructor.  Default initializes all fields.
   TargetInfo(const std::string &T);
@@ -83,6 +105,13 @@ public:
     SignedLongLong,
     UnsignedLongLong
   };
+
+  enum RealType {
+    Float = 0,
+    Double,
+    LongDouble
+  };
+
 protected:
   IntType SizeType, IntMaxType, UIntMaxType, PtrDiffType, IntPtrType, WCharType,
           WIntType, Char16Type, Char32Type, Int64Type, SigAtomicType;
@@ -192,6 +221,11 @@ public:
     return *LongDoubleFormat;
   }
 
+  // getLargeArrayMinWidth/Align - Return the minimum array size that is
+  // 'large' and its alignment.
+  unsigned getLargeArrayMinWidth() const { return LargeArrayMinWidth; }
+  unsigned getLargeArrayAlign() const { return LargeArrayAlign; }
+
   /// getIntMaxTWidth - Return the size of intmax_t and uintmax_t for this
   /// target, in bits.
   unsigned getIntMaxTWidth() const {
@@ -210,6 +244,12 @@ public:
     return UseBitFieldTypeAlignment;
   }
 
+  /// hasAlignMac68kSupport - Check whether this target support '#pragma options
+  /// align=mac68k'.
+  bool hasAlignMac68kSupport() const {
+    return HasAlignMac68kSupport;
+  }
+
   /// getTypeName - Return the user string for the specified integer type enum.
   /// For example, SignedShort -> "short".
   static const char *getTypeName(IntType T);
@@ -217,6 +257,12 @@ public:
   /// getTypeConstantSuffix - Return the constant suffix for the specified
   /// integer type enum. For example, SignedLong -> "L".
   static const char *getTypeConstantSuffix(IntType T);
+
+  /// \brief Check whether the given real type should use the "fpret" flavor of
+  /// Obj-C message passing on this target.
+  bool useObjCFPRetForRealType(RealType T) const {
+    return RealTypeUsesObjCFPRet & (1 << T);
+  }
 
   ///===---- Other target property query methods --------------------------===//
 
@@ -382,6 +428,11 @@ public:
     return "";
   }
 
+  /// getCXXABI - Get the C++ ABI in use.
+  virtual TargetCXXABI getCXXABI() const {
+    return CXXABI;
+  }
+
   /// setCPU - Target the specific CPU.
   ///
   /// \return - False on error (invalid CPU name).
@@ -396,6 +447,28 @@ public:
   /// \return - False on error (invalid ABI name).
   virtual bool setABI(const std::string &Name) {
     return false;
+  }
+
+  /// setCXXABI - Use this specific C++ ABI.
+  ///
+  /// \return - False on error (invalid C++ ABI name).
+  bool setCXXABI(const std::string &Name) {
+    static const TargetCXXABI Unknown = static_cast<TargetCXXABI>(-1);
+    TargetCXXABI ABI = llvm::StringSwitch<TargetCXXABI>(Name)
+      .Case("arm", CXXABI_ARM)
+      .Case("itanium", CXXABI_Itanium)
+      .Case("microsoft", CXXABI_Microsoft)
+      .Default(Unknown);
+    if (ABI == Unknown) return false;
+    return setCXXABI(ABI);
+  }
+
+  /// setCXXABI - Set the C++ ABI to be used by this implementation.
+  ///
+  /// \return - False on error (ABI not valid on this target)
+  virtual bool setCXXABI(TargetCXXABI ABI) {
+    CXXABI = ABI;
+    return true;
   }
 
   /// setFeatureEnabled - Enable or disable a specific target feature,
@@ -442,7 +515,12 @@ public:
     return -1; 
   }
   
-
+  /// getStaticInitSectionSpecifier - Return the section to use for C++ static 
+  /// initialization functions.
+  virtual const char *getStaticInitSectionSpecifier() const {
+    return 0;
+  }
+  
 protected:
   virtual uint64_t getPointerWidthV(unsigned AddrSpace) const {
     return PointerWidth;

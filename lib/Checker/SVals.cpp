@@ -62,6 +62,9 @@ const FunctionDecl *SVal::getAsFunctionDecl() const {
 ///  wraps a symbol, return that SymbolRef.  Otherwise return 0.
 // FIXME: should we consider SymbolRef wrapped in CodeTextRegion?
 SymbolRef SVal::getAsLocSymbol() const {
+  if (const nonloc::LocAsInteger *X = dyn_cast<nonloc::LocAsInteger>(this))
+    return X->getLoc().getAsLocSymbol();
+
   if (const loc::MemRegionVal *X = dyn_cast<loc::MemRegionVal>(this)) {
     const MemRegion *R = X->StripCasts();
     if (const SymbolicRegion *SymR = dyn_cast<SymbolicRegion>(R))
@@ -200,13 +203,17 @@ bool SVal::isConstant() const {
   return isa<nonloc::ConcreteInt>(this) || isa<loc::ConcreteInt>(this);
 }
 
-bool SVal::isZeroConstant() const {
+bool SVal::isConstant(int I) const {
   if (isa<loc::ConcreteInt>(*this))
-    return cast<loc::ConcreteInt>(*this).getValue() == 0;
+    return cast<loc::ConcreteInt>(*this).getValue() == I;
   else if (isa<nonloc::ConcreteInt>(*this))
-    return cast<nonloc::ConcreteInt>(*this).getValue() == 0;
+    return cast<nonloc::ConcreteInt>(*this).getValue() == I;
   else
     return false;
+}
+
+bool SVal::isZeroConstant() const {
+  return isConstant(0);
 }
 
 
@@ -243,8 +250,8 @@ SVal loc::ConcreteInt::EvalBinOp(BasicValueFactory& BasicVals,
                                  BinaryOperator::Opcode Op,
                                  const loc::ConcreteInt& R) const {
 
-  assert (Op == BinaryOperator::Add || Op == BinaryOperator::Sub ||
-          (Op >= BinaryOperator::LT && Op <= BinaryOperator::NE));
+  assert (Op == BO_Add || Op == BO_Sub ||
+          (Op >= BO_LT && Op <= BO_NE));
 
   const llvm::APSInt* X = BasicVals.EvaluateAPSInt(Op, getValue(), R.getValue());
 

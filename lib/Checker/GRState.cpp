@@ -14,6 +14,7 @@
 #include "clang/Analysis/CFG.h"
 #include "clang/Checker/PathSensitive/GRStateTrait.h"
 #include "clang/Checker/PathSensitive/GRState.h"
+#include "clang/Checker/PathSensitive/GRSubEngine.h"
 #include "clang/Checker/PathSensitive/GRTransferFuncs.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -34,7 +35,7 @@ GRStateManager::~GRStateManager() {
 }
 
 const GRState*
-GRStateManager::RemoveDeadBindings(const GRState* state, Stmt* Loc,
+GRStateManager::RemoveDeadBindings(const GRState* state,
                                    const StackFrameContext *LCtx,
                                    SymbolReaper& SymReaper) {
 
@@ -47,27 +48,109 @@ GRStateManager::RemoveDeadBindings(const GRState* state, Stmt* Loc,
   llvm::SmallVector<const MemRegion*, 10> RegionRoots;
   GRState NewState = *state;
 
-  NewState.Env = EnvMgr.RemoveDeadBindings(NewState.Env, Loc, SymReaper,
+  NewState.Env = EnvMgr.RemoveDeadBindings(NewState.Env, SymReaper,
                                            state, RegionRoots);
 
   // Clean up the store.
-  NewState.St = StoreMgr->RemoveDeadBindings(NewState.St, Loc, LCtx, SymReaper, 
-                                             RegionRoots);
+  NewState.St = StoreMgr->RemoveDeadBindings(NewState.St, LCtx, 
+                                             SymReaper, RegionRoots);
+  state = getPersistentState(NewState);
+  return ConstraintMgr->RemoveDeadBindings(state, SymReaper);
+}
 
-  return ConstraintMgr->RemoveDeadBindings(getPersistentState(NewState),
-                                           SymReaper);
+const GRState *GRStateManager::MarshalState(const GRState *state,
+                                            const StackFrameContext *InitLoc) {
+  // make up an empty state for now.
+  GRState State(this,
+                EnvMgr.getInitialEnvironment(),
+                StoreMgr->getInitialStore(InitLoc),
+                GDMFactory.GetEmptyMap());
+
+  return getPersistentState(State);
+}
+
+const GRState *GRState::bindCompoundLiteral(const CompoundLiteralExpr* CL,
+                                            const LocationContext *LC,
+                                            SVal V) const {
+  Store new_store = 
+    getStateManager().StoreMgr->BindCompoundLiteral(St, CL, LC, V);
+  return makeWithStore(new_store);
+}
+
+const GRState *GRState::bindDecl(const VarRegion* VR, SVal IVal) const {
+  Store new_store = getStateManager().StoreMgr->BindDecl(St, VR, IVal);
+  return makeWithStore(new_store);
+}
+
+const GRState *GRState::bindDeclWithNoInit(const VarRegion* VR) const {
+  Store new_store = getStateManager().StoreMgr->BindDeclWithNoInit(St, VR);
+  return makeWithStore(new_store);
+}
+
+const GRState *GRState::bindLoc(Loc LV, SVal V) const {
+  GRStateManager &Mgr = getStateManager();
+  Store new_store = Mgr.StoreMgr->Bind(St, LV, V);
+  const GRState *new_state = makeWithStore(new_store);
+
+  const MemRegion *MR = LV.getAsRegion();
+  if (MR)
+    return Mgr.getOwningEngine().ProcessRegionChange(new_state, MR);
+
+  return new_state;
+}
+
+const GRState *GRState::bindDefault(SVal loc, SVal V) const {
+  GRStateManager &Mgr = getStateManager();
+  const MemRegion *R = cast<loc::MemRegionVal>(loc).getRegion();
+  Store new_store = Mgr.StoreMgr->BindDefault(St, R, V);
+  const GRState *new_state = makeWithStore(new_store);
+  return Mgr.getOwningEngine().ProcessRegionChange(new_state, R);
+}
+
+const GRState *GRState::InvalidateRegions(const MemRegion * const *Begin,
+                                          const MemRegion * const *End,
+                                          const Expr *E, unsigned Count,
+                                          StoreManager::InvalidatedSymbols *IS,
+                                          bool invalidateGlobals) const {
+  GRStateManager &Mgr = getStateManager();
+  GRSubEngine &Eng = Mgr.getOwningEngine();
+
+  if (Eng.WantsRegionChangeUpdate(this)) {
+    StoreManager::InvalidatedRegions Regions;
+
+    Store new_store = Mgr.StoreMgr->InvalidateRegions(St, Begin, End,
+                                                      E, Count, IS,
+                                                      invalidateGlobals,
+                                                      &Regions);
+    const GRState *new_state = makeWithStore(new_store);
+
+    return Eng.ProcessRegionChanges(new_state,
+                                    &Regions.front(),
+                                    &Regions.back()+1);
+  }
+
+  Store new_store = Mgr.StoreMgr->InvalidateRegions(St, Begin, End,
+                                                    E, Count, IS,
+                                                    invalidateGlobals,
+                                                    NULL);
+  return makeWithStore(new_store);
 }
 
 const GRState *GRState::unbindLoc(Loc LV) const {
+  assert(!isa<loc::MemRegionVal>(LV) && "Use InvalidateRegion instead.");
+
   Store OldStore = getStore();
   Store NewStore = getStateManager().StoreMgr->Remove(OldStore, LV);
 
   if (NewStore == OldStore)
     return this;
 
-  GRState NewSt = *this;
-  NewSt.St = NewStore;
-  return getStateManager().getPersistentState(NewSt);
+  return makeWithStore(NewStore);
+}
+
+const GRState *GRState::EnterStackFrame(const StackFrameContext *frame) const {
+  Store new_store = getStateManager().StoreMgr->EnterStackFrame(this, frame);
+  return makeWithStore(new_store);
 }
 
 SVal GRState::getSValAsScalarOrLoc(const MemRegion *R) const {
@@ -78,7 +161,7 @@ SVal GRState::getSValAsScalarOrLoc(const MemRegion *R) const {
     return UnknownVal();
 
   if (const TypedRegion *TR = dyn_cast<TypedRegion>(R)) {
-    QualType T = TR->getValueType(getStateManager().getContext());
+    QualType T = TR->getValueType();
     if (Loc::IsLocType(T) || T->isIntegerType())
       return getSVal(R);
   }
@@ -96,6 +179,50 @@ const GRState *GRState::BindExpr(const Stmt* Ex, SVal V, bool Invalidate) const{
   GRState NewSt = *this;
   NewSt.Env = NewEnv;
   return getStateManager().getPersistentState(NewSt);
+}
+
+const GRState *GRState::AssumeInBound(DefinedOrUnknownSVal Idx,
+                                      DefinedOrUnknownSVal UpperBound,
+                                      bool Assumption) const {
+  if (Idx.isUnknown() || UpperBound.isUnknown())
+    return this;
+
+  // Build an expression for 0 <= Idx < UpperBound.
+  // This is the same as Idx + MIN < UpperBound + MIN, if overflow is allowed.
+  // FIXME: This should probably be part of SValuator.
+  GRStateManager &SM = getStateManager();
+  ValueManager &VM = SM.getValueManager();
+  SValuator &SV = VM.getSValuator();
+  ASTContext &Ctx = VM.getContext();
+
+  // Get the offset: the minimum value of the array index type.
+  BasicValueFactory &BVF = VM.getBasicValueFactory();
+  // FIXME: This should be using ValueManager::ArrayIndexTy...somehow.
+  QualType IndexTy = Ctx.IntTy;
+  nonloc::ConcreteInt Min = BVF.getMinValue(IndexTy);
+
+  // Adjust the index.
+  SVal NewIdx = SV.EvalBinOpNN(this, BO_Add,
+                               cast<NonLoc>(Idx), Min, IndexTy);
+  if (NewIdx.isUnknownOrUndef())
+    return this;
+
+  // Adjust the upper bound.
+  SVal NewBound = SV.EvalBinOpNN(this, BO_Add,
+                                 cast<NonLoc>(UpperBound), Min, IndexTy);
+  if (NewBound.isUnknownOrUndef())
+    return this;
+
+  // Build the actual comparison.
+  SVal InBound = SV.EvalBinOpNN(this, BO_LT,
+                                cast<NonLoc>(NewIdx), cast<NonLoc>(NewBound),
+                                Ctx.IntTy);
+  if (InBound.isUnknownOrUndef())
+    return this;
+
+  // Finally, let the constraint manager take care of it.
+  ConstraintManager &CM = SM.getConstraintManager();
+  return CM.Assume(this, cast<DefinedSVal>(InBound), Assumption);
 }
 
 const GRState* GRStateManager::getInitialState(const LocationContext *InitLoc) {
@@ -343,29 +470,4 @@ bool GRState::scanReachableSymbols(const MemRegion * const *I,
       return false;
   }
   return true;
-}
-
-//===----------------------------------------------------------------------===//
-// Queries.
-//===----------------------------------------------------------------------===//
-
-bool GRStateManager::isEqual(const GRState* state, const Expr* Ex,
-                             const llvm::APSInt& Y) {
-
-  SVal V = state->getSVal(Ex);
-
-  if (loc::ConcreteInt* X = dyn_cast<loc::ConcreteInt>(&V))
-    return X->getValue() == Y;
-
-  if (nonloc::ConcreteInt* X = dyn_cast<nonloc::ConcreteInt>(&V))
-    return X->getValue() == Y;
-
-  if (SymbolRef Sym = V.getAsSymbol())
-    return ConstraintMgr->isEqual(state, Sym, Y);
-
-  return false;
-}
-
-bool GRStateManager::isEqual(const GRState* state, const Expr* Ex, uint64_t x) {
-  return isEqual(state, Ex, getBasicVals().getValue(x, Ex->getType()));
 }

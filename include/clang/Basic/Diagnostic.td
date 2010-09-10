@@ -26,16 +26,26 @@ def CLASS_WARNING   : DiagClass;
 def CLASS_EXTENSION : DiagClass;
 def CLASS_ERROR     : DiagClass;
 
+// Diagnostic Categories.  These can be applied to groups or individual
+// diagnostics to specify a category.
+class DiagCategory<string Name> {
+  string CategoryName = Name;
+}
+
 // Diagnostic Groups.
 class DiagGroup<string Name, list<DiagGroup> subgroups = []> {
   string GroupName = Name;
   list<DiagGroup> SubGroups = subgroups;
+  string CategoryName = "";
 }
 class InGroup<DiagGroup G> { DiagGroup Group = G; }
 //class IsGroup<string Name> { DiagGroup Group = DiagGroup<Name>; }
 
 
-// This defines the diagnostic groups that have references to them.
+// This defines all of the named diagnostic categories.
+include "DiagnosticCategories.td"
+
+// This defines all of the named diagnostic groups.
 include "DiagnosticGroups.td"
 
 
@@ -48,6 +58,7 @@ class Diagnostic<string text, DiagClass DC, DiagMapping defaultmapping> {
   bit         SFINAE = 1;
   DiagMapping DefaultMapping = defaultmapping;
   DiagGroup   Group;
+  string      CategoryName = "";
 }
 
 class Error<string str>     : Diagnostic<str, CLASS_ERROR, MAP_ERROR>;

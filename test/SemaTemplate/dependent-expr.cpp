@@ -24,3 +24,24 @@ namespace PR6045 {
     (void)(k % member);
   }
 }
+
+namespace PR7198 {
+  struct A
+  {
+    ~A() { }
+  };
+
+  template<typename T>
+  struct B {
+    struct C : A {};
+    void f()
+    {
+      C c = C();
+    }
+  };
+}
+
+namespace PR7724 {
+  template<typename OT> int myMethod()
+  { return 2 && sizeof(OT); }
+}

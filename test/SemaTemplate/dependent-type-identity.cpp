@@ -70,3 +70,31 @@ struct X1 {
   void f8(typename N::X2<U>::template apply<T> *);
   void f8(typename ::Nalias::X2<type>::template apply<U_type> *); // expected-error{{redeclar}}
 };
+
+namespace PR6851 {
+  template <bool v>
+  struct S;
+
+  struct N {
+    template <bool w>
+    S< S<w>::cond && 1 > foo();
+  };
+
+  struct Alien;
+  bool operator&&(const Alien&, const Alien&);
+
+  template <bool w>
+  S< S<w>::cond && 1 > N::foo() { }
+}
+
+namespace PR7460 {
+  template <typename T>
+  struct TemplateClass2
+  {
+    enum { SIZE = 100 };
+    static T member[SIZE];
+  };
+
+  template <typename T>
+  T TemplateClass2<T>::member[TemplateClass2<T>::SIZE];
+}

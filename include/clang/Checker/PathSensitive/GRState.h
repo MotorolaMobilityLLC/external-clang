@@ -77,6 +77,10 @@ private:
   Store St;
   GenericDataMap   GDM;
 
+  /// makeWithStore - Return a GRState with the same values as the current
+  ///  state with the exception of using the specified Store.
+  const GRState *makeWithStore(Store store) const;
+
 public:
 
   /// This ctor is used when creating the first GRState object.
@@ -133,10 +137,6 @@ public:
   SVal LookupExpr(Expr* E) const {
     return Env.LookupExpr(E);
   }
-
-  /// makeWithStore - Return a GRState with the same values as the current
-  /// state with the exception of using the specified Store.
-  const GRState *makeWithStore(Store store) const;
 
   BasicValueFactory &getBasicVals() const;
   SymbolManager &getSymbolManager() const;
@@ -211,16 +211,40 @@ public:
 
   const GRState *bindLoc(SVal location, SVal V) const;
 
+  const GRState *bindDefault(SVal loc, SVal V) const;
+
   const GRState *unbindLoc(Loc LV) const;
 
+  /// InvalidateRegion - Returns the state with bindings for the given region
+  ///  cleared from the store. See InvalidateRegions.
+  const GRState *InvalidateRegion(const MemRegion *R,
+                                  const Expr *E, unsigned BlockCount,
+                                  StoreManager::InvalidatedSymbols *IS = NULL)
+                                  const {
+    return InvalidateRegions(&R, &R+1, E, BlockCount, IS, false);
+  }
+
+  /// InvalidateRegions - Returns the state with bindings for the given regions
+  ///  cleared from the store. The regions are provided as a continuous array
+  ///  from Begin to End. Optionally invalidates global regions as well.
+  const GRState *InvalidateRegions(const MemRegion * const *Begin,
+                                   const MemRegion * const *End,
+                                   const Expr *E, unsigned BlockCount,
+                                   StoreManager::InvalidatedSymbols *IS,
+                                   bool invalidateGlobals) const;
+
+  /// EnterStackFrame - Returns the state for entry to the given stack frame,
+  ///  preserving the current state.
+  const GRState *EnterStackFrame(const StackFrameContext *frame) const;
+
   /// Get the lvalue for a variable reference.
-  SVal getLValue(const VarDecl *D, const LocationContext *LC) const;
+  Loc getLValue(const VarDecl *D, const LocationContext *LC) const;
 
   /// Get the lvalue for a StringLiteral.
-  SVal getLValue(const StringLiteral *literal) const;
+  Loc getLValue(const StringLiteral *literal) const;
 
-  SVal getLValue(const CompoundLiteralExpr *literal,
-                 const LocationContext *LC) const;
+  Loc getLValue(const CompoundLiteralExpr *literal, 
+                const LocationContext *LC) const;
 
   /// Get the lvalue for an ivar reference.
   SVal getLValue(const ObjCIvarDecl *decl, SVal base) const;
@@ -373,6 +397,9 @@ class GRStateManager {
   friend class GRState;
   friend class GRExprEngine; // FIXME: Remove.
 private:
+  /// Eng - The GRSubEngine that owns this state manager.
+  GRSubEngine &Eng;
+
   EnvironmentManager                   EnvMgr;
   llvm::OwningPtr<StoreManager>        StoreMgr;
   llvm::OwningPtr<ConstraintManager>   ConstraintMgr;
@@ -402,7 +429,8 @@ public:
                  ConstraintManagerCreator CreateConstraintManager,
                  llvm::BumpPtrAllocator& alloc,
                  GRSubEngine &subeng)
-    : EnvMgr(alloc),
+    : Eng(subeng),
+      EnvMgr(alloc),
       GDMFactory(alloc),
       ValueMgr(alloc, Ctx, *this),
       Alloc(alloc) {
@@ -445,10 +473,15 @@ public:
 
   StoreManager& getStoreManager() { return *StoreMgr; }
   ConstraintManager& getConstraintManager() { return *ConstraintMgr; }
+  GRSubEngine& getOwningEngine() { return Eng; }
 
-  const GRState* RemoveDeadBindings(const GRState* St, Stmt* Loc,
+  const GRState* RemoveDeadBindings(const GRState* St,
                                     const StackFrameContext *LCtx,
                                     SymbolReaper& SymReaper);
+
+  /// Marshal a new state for the callee in another translation unit.
+  /// 'state' is owned by the caller's engine.
+  const GRState *MarshalState(const GRState *state, const StackFrameContext *L);
 
 public:
 
@@ -467,9 +500,6 @@ public:
   }
 
   const GRState* getPersistentState(GRState& Impl);
-
-  bool isEqual(const GRState* state, const Expr* Ex, const llvm::APSInt& V);
-  bool isEqual(const GRState* state, const Expr* Ex, uint64_t);
 
   //==---------------------------------------------------------------------==//
   // Generic Data Map methods.
@@ -582,54 +612,20 @@ GRState::Assume(DefinedOrUnknownSVal Cond) const {
                                                      cast<DefinedSVal>(Cond));
 }
 
-inline const GRState *GRState::AssumeInBound(DefinedOrUnknownSVal Idx,
-                                             DefinedOrUnknownSVal UpperBound,
-                                             bool Assumption) const {
-  if (Idx.isUnknown() || UpperBound.isUnknown())
-    return this;
-
-  ConstraintManager &CM = *getStateManager().ConstraintMgr;
-  return CM.AssumeInBound(this, cast<DefinedSVal>(Idx),
-                           cast<DefinedSVal>(UpperBound), Assumption);
-}
-
-inline const GRState *
-GRState::bindCompoundLiteral(const CompoundLiteralExpr* CL,
-                             const LocationContext *LC, SVal V) const {
-  Store new_store = 
-    getStateManager().StoreMgr->BindCompoundLiteral(St, CL, LC, V);
-  return makeWithStore(new_store);
-}
-
-inline const GRState *GRState::bindDecl(const VarRegion* VR, SVal IVal) const {
-  Store new_store = getStateManager().StoreMgr->BindDecl(St, VR, IVal);
-  return makeWithStore(new_store);
-}
-
-inline const GRState *GRState::bindDeclWithNoInit(const VarRegion* VR) const {
-  Store new_store = getStateManager().StoreMgr->BindDeclWithNoInit(St, VR);
-  return makeWithStore(new_store);
-}
-
-inline const GRState *GRState::bindLoc(Loc LV, SVal V) const {
-  Store new_store = getStateManager().StoreMgr->Bind(St, LV, V);
-  return makeWithStore(new_store);
-}
-
 inline const GRState *GRState::bindLoc(SVal LV, SVal V) const {
   return !isa<Loc>(LV) ? this : bindLoc(cast<Loc>(LV), V);
 }
 
-inline SVal GRState::getLValue(const VarDecl* VD,
+inline Loc GRState::getLValue(const VarDecl* VD,
                                const LocationContext *LC) const {
   return getStateManager().StoreMgr->getLValueVar(VD, LC);
 }
 
-inline SVal GRState::getLValue(const StringLiteral *literal) const {
+inline Loc GRState::getLValue(const StringLiteral *literal) const {
   return getStateManager().StoreMgr->getLValueString(literal);
 }
 
-inline SVal GRState::getLValue(const CompoundLiteralExpr *literal,
+inline Loc GRState::getLValue(const CompoundLiteralExpr *literal,
                                const LocationContext *LC) const {
   return getStateManager().StoreMgr->getLValueCompoundLiteral(literal, LC);
 }

@@ -18,12 +18,16 @@ include "OptParser.td"
 // Target Options
 //===----------------------------------------------------------------------===//
 
+def cxx_abi : Separate<"-cxx-abi">,
+  HelpText<"Target a particular C++ ABI type">;
 def target_abi : Separate<"-target-abi">,
   HelpText<"Target a particular ABI type">;
 def target_cpu : Separate<"-target-cpu">,
   HelpText<"Target a specific cpu type">;
 def target_feature : Separate<"-target-feature">,
   HelpText<"Target specific attributes">;
+def target_linker_version : Separate<"-target-linker-version">,
+  HelpText<"Target linker version">;
 def triple : Separate<"-triple">,
   HelpText<"Specify target triple (e.g. i686-apple-darwin9)">;
 def triple_EQ : Joined<"-triple=">, Alias<triple>;
@@ -36,6 +40,8 @@ def analysis_CFGDump : Flag<"-cfg-dump">,
   HelpText<"Display Control-Flow Graphs">;
 def analysis_CFGView : Flag<"-cfg-view">,
   HelpText<"View Control-Flow Graphs using GraphViz">;
+def analysis_UnoptimizedCFG : Flag<"-unoptimized-cfg">,
+  HelpText<"Generate unoptimized CFGs for all analyses">;
 def analysis_DisplayLiveVariables : Flag<"-dump-live-variables">,
   HelpText<"Print results of live variable analysis">;
 def analysis_LLVMConventionChecker : Flag<"-analyzer-check-llvm-conventions">,
@@ -56,8 +62,8 @@ def analysis_ObjCMemChecker : Flag<"-analyzer-check-objc-mem">,
   HelpText<"Run the [Core] Foundation reference count checker">;
 def analysis_WarnSizeofPointer : Flag<"-warn-sizeof-pointer">,
   HelpText<"Warn about unintended use of sizeof() on pointer expressions">;
-def analysis_InlineCall : Flag<"-inline-call">,
-  HelpText<"Experimental transfer function inlining callees when its definition is available.">;
+def analysis_WarnIdempotentOps : Flag<"-analyzer-check-idempotent-operations">,
+  HelpText<"Warn about idempotent operations">;
 
 def analyzer_store : Separate<"-analyzer-store">,
   HelpText<"Source Code Analysis - Abstract Memory Store Models">;
@@ -97,8 +103,12 @@ def analyzer_viz_egraph_graphviz : Flag<"-analyzer-viz-egraph-graphviz">,
   HelpText<"Display exploded graph using GraphViz">;
 def analyzer_viz_egraph_ubigraph : Flag<"-analyzer-viz-egraph-ubigraph">,
   HelpText<"Display exploded graph using Ubigraph">;
+def analyzer_inline_call : Flag<"-analyzer-inline-call">,
+  HelpText<"Experimental transfer function inlining callees when its definition is available.">;
 def analyzer_max_nodes : Separate<"-analyzer-max-nodes">,
   HelpText<"The maximum number of nodes the analyzer can generate">;
+def analyzer_max_loop : Separate<"-analyzer-max-loop">,
+  HelpText<"The maximum number of times the analyzer will go through a loop">;
 
 //===----------------------------------------------------------------------===//
 // CodeGen Options
@@ -119,6 +129,8 @@ def fno_common : Flag<"-fno-common">,
   HelpText<"Compile common globals like normal definitions">;
 def no_implicit_float : Flag<"-no-implicit-float">,
   HelpText<"Don't generate implicit floating point instructions (x86-only)">;
+def finstrument_functions : Flag<"-finstrument-functions">,
+  HelpText<"Generate calls to instrument function entry and exit">;
 def fno_merge_all_constants : Flag<"-fno-merge-all-constants">,
   HelpText<"Disallow merging of constants.">;
 def fno_threadsafe_statics : Flag<"-fno-threadsafe-statics">,
@@ -129,6 +141,8 @@ def ffunction_sections : Flag<"-ffunction-sections">,
   HelpText<"Place each function in its own section (ELF Only)">;
 def fdata_sections : Flag<"-fdata-sections">,
   HelpText<"Place each data in its own section (ELF Only)">;
+def funroll_loops : Flag<"-funroll-loops">,
+  HelpText<"Turn on loop unroller">;
 def masm_verbose : Flag<"-masm-verbose">,
   HelpText<"Generate verbose assembly output">;
 def mcode_model : Separate<"-mcode-model">,
@@ -143,8 +157,12 @@ def mlimit_float_precision : Separate<"-mlimit-float-precision">,
   HelpText<"Limit float precision to the given value">;
 def mno_zero_initialized_in_bss : Flag<"-mno-zero-initialized-in-bss">,
   HelpText<"Do not put zero initialized data in the BSS">;
+def momit_leaf_frame_pointer : Flag<"-momit-leaf-frame-pointer">,
+  HelpText<"Omit frame pointer setup for leaf functions.">;
 def msoft_float : Flag<"-msoft-float">,
   HelpText<"Use software floating point">;
+def mrelax_all : Flag<"-mrelax-all">,
+  HelpText<"Relax all machine instructions">;
 def mrelocation_model : Separate<"-mrelocation-model">,
   HelpText<"The relocation model to use">;
 def munwind_tables : Flag<"-munwind-tables">,
@@ -178,6 +196,9 @@ def fno_show_column : Flag<"-fno-show-column">,
   HelpText<"Do not include column number on diagnostics">;
 def fno_show_source_location : Flag<"-fno-show-source-location">,
   HelpText<"Do not include source location information with diagnostics">;
+def fshow_overloads_EQ : Joined<"-fshow-overloads=">,
+  HelpText<"Which overload candidates to show when overload resolution fails: "
+           "best|all; defaults to all">;
 def fno_caret_diagnostics : Flag<"-fno-caret-diagnostics">,
   HelpText<"Do not include source line and caret with diagnostics">;
 def fno_diagnostics_fixit_info : Flag<"-fno-diagnostics-fixit-info">,
@@ -194,12 +215,19 @@ def W : Joined<"-W">;
 
 def fdiagnostics_print_source_range_info : Flag<"-fdiagnostics-print-source-range-info">,
   HelpText<"Print source range spans in numeric form">;
+def fdiagnostics_parseable_fixits : Flag<"-fdiagnostics-parseable-fixits">,
+  HelpText<"Print fix-its in machine parseable form">;
 def fdiagnostics_show_option : Flag<"-fdiagnostics-show-option">,
   HelpText<"Print diagnostic name with mappable diagnostics">;
+def fdiagnostics_show_category : Separate<"-fdiagnostics-show-category">,
+  HelpText<"Print diagnostic category">;
+  
 def ftabstop : Separate<"-ftabstop">, MetaVarName<"<N>">,
   HelpText<"Set the tab stop distance.">;
 def ferror_limit : Separate<"-ferror-limit">, MetaVarName<"<N>">,
   HelpText<"Set the maximum number of errors to emit before stopping (0 = no limit).">;
+def fmacro_backtrace_limit : Separate<"-fmacro-backtrace-limit">, MetaVarName<"<N>">,
+  HelpText<"Set the maximum number of entries to print in a macro instantiation backtrace (0 = no limit).">;
 def ftemplate_backtrace_limit : Separate<"-ftemplate-backtrace-limit">, MetaVarName<"<N>">,
   HelpText<"Set the maximum number of entries to print in a template instantiation backtrace (0 = no limit).">;
 def fmessage_length : Separate<"-fmessage-length">, MetaVarName<"<N>">,
@@ -209,7 +237,7 @@ def fcolor_diagnostics : Flag<"-fcolor-diagnostics">,
 def Wno_rewrite_macros : Flag<"-Wno-rewrite-macros">,
   HelpText<"Silence ObjC rewriting warnings">;
 def Wwrite_strings : Flag<"-Wwrite-strings">,
-  HelpText<"Add const qualifier to string literals">;
+  HelpText<"Remove const qualifier from string literals">;
 def verify : Flag<"-verify">,
   HelpText<"Verify emitted diagnostics and warnings">;
 
@@ -236,6 +264,10 @@ def no_code_completion_debug_printer : Flag<"-no-code-completion-debug-printer">
   HelpText<"Don't use the \"debug\" code-completion print">;
 def code_completion_macros : Flag<"-code-completion-macros">,
   HelpText<"Include macros in code-completion results">;
+def code_completion_patterns : Flag<"-code-completion-patterns">,
+  HelpText<"Include code patterns in code-completion results">;
+def no_code_completion_globals : Flag<"-no-code-completion-globals">,
+  HelpText<"Do not include global declarations in code-completion results.">;
 def disable_free : Flag<"-disable-free">,
   HelpText<"Disable freeing of memory on exit">;
 def help : Flag<"-help">,
@@ -248,8 +280,11 @@ def cxx_inheritance_view : Separate<"-cxx-inheritance-view">,
 def o : Separate<"-o">, MetaVarName<"<path>">, HelpText<"Specify output file">;
 def load : Separate<"-load">, MetaVarName<"<dsopath>">,
   HelpText<"Load the named plugin (dynamic shared object)">;
-def plugin : Separate<"-plugin">,
+def plugin : Separate<"-plugin">, MetaVarName<"<name>">,
   HelpText<"Use the named plugin action (use \"help\" to list available options)">;
+def plugin_arg : JoinedAndSeparate<"-plugin-arg-">, 
+    MetaVarName<"<name> <arg>">,
+    HelpText<"Pass <arg> to plugin <name>">;
 def resource_dir : Separate<"-resource-dir">,
   HelpText<"The directory which holds the compiler resource files">;
 def version : Flag<"-version">,
@@ -271,16 +306,15 @@ def dump_tokens : Flag<"-dump-tokens">,
   HelpText<"Run preprocessor, dump internal rep of tokens">;
 def init_only : Flag<"-init-only">,
   HelpText<"Only execute frontend initialization">;
-def parse_noop : Flag<"-parse-noop">,
-  HelpText<"Run parser with noop callbacks (for timings)">;
 def fsyntax_only : Flag<"-fsyntax-only">,
   HelpText<"Run parser and perform semantic analysis">;
 def fixit : Flag<"-fixit">,
   HelpText<"Apply fix-it advice to the input source">;
 def fixit_EQ : Joined<"-fixit=">,
   HelpText<"Apply fix-it advice creating a file with the given suffix">;
-def parse_print_callbacks : Flag<"-parse-print-callbacks">,
-  HelpText<"Run parser and print each callback invoked">;
+def print_preamble : Flag<"-print-preamble">,
+  HelpText<"Print the \"preamble\" of a file, which is a candidate for implicit"
+           " precompiled headers.">;
 def emit_html : Flag<"-emit-html">,
   HelpText<"Output input source as HTML">;
 def ast_print : Flag<"-ast-print">,
@@ -291,6 +325,8 @@ def ast_dump : Flag<"-ast-dump">,
   HelpText<"Build ASTs and then debug dump them">;
 def ast_view : Flag<"-ast-view">,
   HelpText<"Build ASTs and view them with GraphViz">;
+def boostcon : Flag<"-boostcon">,
+  HelpText<"BoostCon workshop mode">;
 def print_decl_contexts : Flag<"-print-decl-contexts">,
   HelpText<"Print DeclContexts and their Decls">;
 def emit_pth : Flag<"-emit-pth">,
@@ -305,6 +341,8 @@ def emit_llvm_bc : Flag<"-emit-llvm-bc">,
   HelpText<"Build ASTs then convert to LLVM, emit .bc file">;
 def emit_llvm_only : Flag<"-emit-llvm-only">,
   HelpText<"Build ASTs and convert to LLVM, discarding output">;
+def emit_codegen_only : Flag<"-emit-codegen-only">,
+  HelpText<"Generate machine code, but discard output">;
 def emit_obj : Flag<"-emit-obj">,
   HelpText<"Emit native object files">;
 def rewrite_test : Flag<"-rewrite-test">,
@@ -314,17 +352,25 @@ def rewrite_objc : Flag<"-rewrite-objc">,
 def rewrite_macros : Flag<"-rewrite-macros">,
   HelpText<"Expand macros without full preprocessing">;
 
+def create_module : Flag<"-create-module">,
+  HelpText<"Create a module definition file">;
 }
+
+def import_module : Separate<"-import-module">,
+  HelpText<"Import a module definition file">;
 
 def relocatable_pch : Flag<"-relocatable-pch">,
   HelpText<"Whether to build a relocatable precompiled header">;
+def chained_pch : Flag<"-chained-pch">,
+  HelpText<"Whether to chain the new precompiled header to the old one.">;
 def print_stats : Flag<"-print-stats">,
   HelpText<"Print performance metrics and statistics">;
 def ftime_report : Flag<"-ftime-report">,
   HelpText<"Print the amount of time each phase of compilation takes">;
-
 def fdump_record_layouts : Flag<"-fdump-record-layouts">,
   HelpText<"Dump record layout information">;
+def fix_what_you_can : Flag<"-fix-what-you-can">,
+  HelpText<"Apply fix-it advice even in the presence of unfixable errors">;
 
 // Generic forwarding to LLVM options. This should only be used for debugging
 // and experimental features.
@@ -364,6 +410,8 @@ def ffreestanding : Flag<"-ffreestanding">,
   HelpText<"Assert that the compilation takes place in a freestanding environment">;
 def fgnu_runtime : Flag<"-fgnu-runtime">,
   HelpText<"Generate output compatible with the standard GNU Objective-C runtime">;
+def fhidden_weak_vtables : Flag<"-fhidden-weak-vtables">,
+  HelpText<"Generate weak vtables and RTTI with hidden visibility">;
 def std_EQ : Joined<"-std=">,
   HelpText<"Language standard to compile for">;
 def fmath_errno : Flag<"-fmath-errno">,
@@ -380,6 +428,8 @@ def fno_operator_names : Flag<"-fno-operator-names">,
   HelpText<"Do not treat C++ operator name keywords as synonyms for operators">;
 def fno_signed_char : Flag<"-fno-signed-char">,
   HelpText<"Char is unsigned">;
+def fno_spell_checking : Flag<"-fno-spell-checking">,
+  HelpText<"Disable spell-checking">;  
 def fno_use_cxa_atexit : Flag<"-fno-use-cxa-atexit">,
   HelpText<"Don't use __cxa_atexit for calling destructors">;
 def fconstant_string_class : Separate<"-fconstant-string-class">,
@@ -401,6 +451,8 @@ def fobjc_nonfragile_abi2 : Flag<"-fobjc-nonfragile-abi2">,
   HelpText<"enable objective-c's enhanced nonfragile abi">;
 def ftrapv : Flag<"-ftrapv">,
   HelpText<"Trap on integer overflow">;
+def fwrapv : Flag<"-fwrapv">,
+  HelpText<"Treat signed integer overflow as two's complement">;
 def pic_level : Separate<"-pic-level">,
   HelpText<"Value for __PIC__">;
 def pthread : Flag<"-pthread">,
@@ -409,6 +461,8 @@ def fpascal_strings : Flag<"-fpascal-strings">,
   HelpText<"Recognize and construct Pascal-style string literals">;
 def fno_rtti : Flag<"-fno-rtti">,
   HelpText<"Disable generation of rtti information">;
+def fno_validate_pch : Flag<"-fno-validate-pch">,
+  HelpText<"Disable validation of precompiled headers">;
 def fshort_wchar : Flag<"-fshort-wchar">,
   HelpText<"Force wchar_t to be a short unsigned int">;
 def static_define : Flag<"-static-define">,
@@ -417,6 +471,8 @@ def stack_protector : Separate<"-stack-protector">,
   HelpText<"Enable stack protectors">;
 def fvisibility : Separate<"-fvisibility">,
   HelpText<"Default symbol visibility">;
+def fvisibility_inlines_hidden : Flag<"-fvisibility-inlines-hidden">,
+  HelpText<"Give inline C++ member functions default visibility by default">;
 def ftemplate_depth : Separate<"-ftemplate-depth">,
   HelpText<"Maximum depth of recursive template instantiation">;
 def trigraphs : Flag<"-trigraphs">,
@@ -446,6 +502,9 @@ def iquote : JoinedOrSeparate<"-iquote">, MetaVarName<"<directory>">,
   HelpText<"Add directory to QUOTE include search path">;
 def isystem : JoinedOrSeparate<"-isystem">, MetaVarName<"<directory>">,
   HelpText<"Add directory to SYSTEM include search path">;
+def iwithsysroot : JoinedOrSeparate<"-iwithsysroot">,MetaVarName<"<directory>">,
+  HelpText<"Add directory to SYSTEM include search path, "
+           "absolute paths are relative to -isysroot">;
 def iprefix : JoinedOrSeparate<"-iprefix">, MetaVarName<"<prefix>">,
   HelpText<"Set the -iwithprefix/-iwithprefixbefore prefix">;
 def iwithprefix : JoinedOrSeparate<"-iwithprefix">, MetaVarName<"<dir>">,
@@ -471,6 +530,9 @@ def include_pch : Separate<"-include-pch">, MetaVarName<"<file>">,
   HelpText<"Include precompiled header file">;
 def include_pth : Separate<"-include-pth">, MetaVarName<"<file>">,
   HelpText<"Include file before parsing">;
+def preamble_bytes_EQ : Joined<"-preamble-bytes=">,
+  HelpText<"Assume that the precompiled header is a precompiled preamble "
+           "covering the first N bytes of the main file">;
 def token_cache : Separate<"-token-cache">, MetaVarName<"<path>">,
   HelpText<"Use specified token cache file">;
 def U : JoinedOrSeparate<"-U">, MetaVarName<"<macro>">,
@@ -494,3 +556,5 @@ def dM : Flag<"-dM">,
   HelpText<"Print macro definitions in -E mode instead of normal output">;
 def dD : Flag<"-dD">,
   HelpText<"Print macro definitions in -E mode in addition to normal output">;
+def H : Flag<"-H">,
+  HelpText<"Show header includes and nesting depth">;

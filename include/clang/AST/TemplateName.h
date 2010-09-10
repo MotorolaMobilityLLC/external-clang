@@ -101,6 +101,14 @@ class TemplateName {
   }
 
 public:
+  // \brief Kind of name that is actually stored.
+  enum NameKind {
+    Template,
+    OverloadedTemplate,
+    QualifiedTemplate,
+    DependentTemplate
+  };
+
   TemplateName() : Storage() { }
   explicit TemplateName(TemplateDecl *Template) : Storage(Template) { }
   explicit TemplateName(OverloadedTemplateStorage *Storage)
@@ -110,6 +118,9 @@ public:
 
   /// \brief Determine whether this template name is NULL.
   bool isNull() const { return Storage.isNull(); }
+  
+  // \brief Get the kind of name that is actually stored.
+  NameKind getKind() const;
 
   /// \brief Retrieve the the underlying template declaration that
   /// this template name refers to, if known.
@@ -188,7 +199,7 @@ const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
 /// declaration for "vector". The QualifiedTemplateName class is only
 /// used to provide "sugar" for template names that were expressed
 /// with a qualified name, and has no semantic meaning. In this
-/// manner, it is to TemplateName what QualifiedNameType is to Type,
+/// manner, it is to TemplateName what ElaboratedType is to Type,
 /// providing extra syntactic sugar for downstream clients.
 class QualifiedTemplateName : public llvm::FoldingSetNode {
   /// \brief The nested name specifier that qualifies the template name.

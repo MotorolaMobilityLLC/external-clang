@@ -24,6 +24,8 @@ void* operator new(size_t, int*); // expected-note 3 {{candidate}}
 void* operator new(size_t, float*); // expected-note 3 {{candidate}}
 void* operator new(size_t, S); // expected-note 2 {{candidate}}
 
+struct foo { };
+
 void good_news()
 {
   int *pi = new int;
@@ -34,7 +36,6 @@ void good_news()
   S *ps = new S(1, 2, 3.4);
   ps = new (pf) (S)(1, 2, 3.4);
   S *(*paps)[2] = new S*[*pi][2];
-  ps = new (S[3])(1, 2, 3.4);
   typedef int ia4[4];
   ia4 *pai = new (int[3][4]);
   pi = ::new int;
@@ -44,6 +45,14 @@ void good_news()
   pi = new (S(1.0f, 2)) int;
   
   (void)new int[true];
+
+  // PR7147
+  typedef int a[2];
+  foo* f1 = new foo;
+  foo* f2 = new foo[2];
+  typedef foo x[2];
+  typedef foo y[2][2];
+  x* f3 = new y;
 }
 
 struct abstract {
@@ -59,7 +68,7 @@ void bad_news(int *ip)
   (void)new int[1.1]; // expected-error {{array size expression must have integral or enumerated type, not 'double'}}
   (void)new int[1][i]; // expected-error {{only the first dimension}}
   (void)new (int[1][i]); // expected-error {{only the first dimension}}
-  (void)new (int[i]); // expected-error {{when type is in parentheses}}
+  (void)new (int[i]); // expected-warning {{when type is in parentheses}}
   (void)new int(*(S*)0); // expected-error {{no viable conversion from 'S' to 'int'}}
   (void)new int(1, 2); // expected-error {{excess elements in scalar initializer}}
   (void)new S(1); // expected-error {{no matching constructor}}
@@ -94,7 +103,7 @@ void bad_deletes()
   delete 0; // expected-error {{cannot delete expression of type 'int'}}
   delete [0] (int*)0; // expected-error {{expected ']'}} \
                       // expected-note {{to match this '['}}
-  delete (void*)0; // expected-error {{cannot delete expression}}
+  delete (void*)0; // expected-warning {{cannot delete expression with pointer-to-'void' type 'void *'}}
   delete (T*)0; // expected-warning {{deleting pointer to incomplete type}}
   ::S::delete (int*)0; // expected-error {{expected unqualified-id}}
 }
@@ -230,4 +239,118 @@ namespace PR5918 { // Look for template operator new overloads.
   void test() {
     (void)new(0) S;
   }
+}
+
+namespace Test1 {
+
+void f() {
+  (void)new int[10](1, 2); // expected-error {{array 'new' cannot have initialization arguments}}
+  
+  typedef int T[10];
+  (void)new T(1, 2); // expected-error {{array 'new' cannot have initialization arguments}}
+}
+
+template<typename T>
+void g(unsigned i) {
+  (void)new T[1](i); // expected-error {{array 'new' cannot have initialization arguments}}
+}
+
+template<typename T>
+void h(unsigned i) {
+  (void)new T(i); // expected-error {{array 'new' cannot have initialization arguments}}
+}
+template void h<unsigned>(unsigned);
+template void h<unsigned[10]>(unsigned); // expected-note {{in instantiation of function template specialization 'Test1::h<unsigned int [10]>' requested here}}
+
+}
+
+// Don't diagnose access for overload candidates that aren't selected.
+namespace PR7436 {
+struct S1 {
+  void* operator new(size_t);
+  void operator delete(void* p);
+
+private:
+  void* operator new(size_t, void*); // expected-note {{declared private here}}
+  void operator delete(void*, void*);
+};
+class S2 {
+  void* operator new(size_t); // expected-note {{declared private here}}
+  void operator delete(void* p); // expected-note {{declared private here}}
+};
+
+void test(S1* s1, S2* s2) { 
+  delete s1;
+  delete s2; // expected-error {{is a private member}}
+  (void)new S1();
+  (void)new (0L) S1(); // expected-error {{is a private member}}
+  (void)new S2(); // expected-error {{is a private member}}
+}
+}
+
+namespace rdar8018245 {
+  struct X0 {
+    static const int value = 17;
+  };
+
+  const int X0::value;
+
+  struct X1 {
+    static int value;
+  };
+
+  int X1::value;
+
+  template<typename T>
+  int *f() {
+    return new (int[T::value]); // expected-warning{{when type is in parentheses, array cannot have dynamic size}}
+  }
+
+  template int *f<X0>();
+  template int *f<X1>(); // expected-note{{in instantiation of}}
+
+}
+
+// <rdar://problem/8248780>
+namespace Instantiate {
+  template<typename T> struct X { 
+    operator T*();
+  };
+
+  void f(X<int> &xi) {
+    delete xi;
+  }
+}
+
+namespace PR7810 {
+  struct X {
+    // cv is ignored in arguments
+    static void operator delete(void *const);
+  };
+  struct Y {
+    // cv is ignored in arguments
+    static void operator delete(void *volatile);
+  };
+}
+
+// Don't crash on template delete operators
+namespace TemplateDestructors {
+  struct S {
+    virtual ~S() {}
+
+    void* operator new(const size_t size);
+    template<class T> void* operator new(const size_t, const int, T*);
+    void operator delete(void*, const size_t);
+    template<class T> void operator delete(void*, const size_t, const int, T*);
+  };
+}
+
+namespace DeleteParam {
+  struct X {
+    void operator delete(X*); // expected-error{{first parameter of 'operator delete' must have type 'void *'}}
+  };
+
+  struct Y {
+    void operator delete(void* const);
+  };
 }

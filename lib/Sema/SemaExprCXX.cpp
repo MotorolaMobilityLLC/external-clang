@@ -11,27 +11,31 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Sema.h"
-#include "SemaInit.h"
-#include "Lookup.h"
+#include "clang/Sema/SemaInternal.h"
+#include "clang/Sema/DeclSpec.h"
+#include "clang/Sema/Initialization.h"
+#include "clang/Sema/Lookup.h"
+#include "clang/Sema/ParsedTemplate.h"
+#include "clang/Sema/TemplateDeduction.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CXXInheritance.h"
+#include "clang/AST/DeclObjC.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/ExprObjC.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
-#include "clang/Parse/DeclSpec.h"
-#include "clang/Parse/Template.h"
 #include "llvm/ADT/STLExtras.h"
 using namespace clang;
+using namespace sema;
 
-Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
-                                        IdentifierInfo &II, 
-                                        SourceLocation NameLoc,
-                                        Scope *S, CXXScopeSpec &SS,
-                                        TypeTy *ObjectTypePtr,
-                                        bool EnteringContext) {
+ParsedType Sema::getDestructorName(SourceLocation TildeLoc,
+                                   IdentifierInfo &II, 
+                                   SourceLocation NameLoc,
+                                   Scope *S, CXXScopeSpec &SS,
+                                   ParsedType ObjectTypePtr,
+                                   bool EnteringContext) {
   // Determine where to perform name lookup.
 
   // FIXME: This area of the standard is very messy, and the current
@@ -52,6 +56,8 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
   //   }
   //
   // See also PR6358 and PR6359.
+  // For this reason, we're currently only doing the C++03 version of this
+  // code; the C++0x version has to wait until we get a proper spec.
   QualType SearchType;
   DeclContext *LookupCtx = 0;
   bool isDependent = false;
@@ -68,50 +74,33 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
     
     bool AlreadySearched = false;
     bool LookAtPrefix = true;
-    if (!getLangOptions().CPlusPlus0x) {
-      // C++ [basic.lookup.qual]p6:
-      //   If a pseudo-destructor-name (5.2.4) contains a nested-name-specifier, 
-      //   the type-names are looked up as types in the scope designated by the
-      //   nested-name-specifier. In a qualified-id of the form:
-      // 
-      //     ::[opt] nested-name-specifier  ̃ class-name 
-      //
-      //   where the nested-name-specifier designates a namespace scope, and in
-      //   a qualified-id of the form:
-      //
-      //     ::opt nested-name-specifier class-name ::  ̃ class-name 
-      //
-      //   the class-names are looked up as types in the scope designated by 
-      //   the nested-name-specifier.
-      //
-      // Here, we check the first case (completely) and determine whether the
-      // code below is permitted to look at the prefix of the 
-      // nested-name-specifier (as we do in C++0x).
-      DeclContext *DC = computeDeclContext(SS, EnteringContext);
-      if (DC && DC->isFileContext()) {
-        AlreadySearched = true;
-        LookupCtx = DC;
-        isDependent = false;
-      } else if (DC && isa<CXXRecordDecl>(DC))
-        LookAtPrefix = false;
-    }
-    
-    // C++0x [basic.lookup.qual]p6:
-    //   If a pseudo-destructor-name (5.2.4) contains a
-    //   nested-name-specifier, the type-names are looked up as types
-    //   in the scope designated by the nested-name-specifier. Similarly, in 
+    // C++ [basic.lookup.qual]p6:
+    //   If a pseudo-destructor-name (5.2.4) contains a nested-name-specifier, 
+    //   the type-names are looked up as types in the scope designated by the
+    //   nested-name-specifier. In a qualified-id of the form:
+    // 
+    //     ::[opt] nested-name-specifier  ̃ class-name 
+    //
+    //   where the nested-name-specifier designates a namespace scope, and in
     //   a qualified-id of the form:
     //
-    //     :: [opt] nested-name-specifier[opt] class-name :: ~class-name 
+    //     ::opt nested-name-specifier class-name ::  ̃ class-name 
     //
-    //   the second class-name is looked up in the same scope as the first.
+    //   the class-names are looked up as types in the scope designated by 
+    //   the nested-name-specifier.
     //
-    // To implement this, we look at the prefix of the
-    // nested-name-specifier we were given, and determine the lookup
-    // context from that.
-    //
-    // We also fold in the second case from the C++03 rules quoted further 
-    // above.
+    // Here, we check the first case (completely) and determine whether the
+    // code below is permitted to look at the prefix of the 
+    // nested-name-specifier.
+    DeclContext *DC = computeDeclContext(SS, EnteringContext);
+    if (DC && DC->isFileContext()) {
+      AlreadySearched = true;
+      LookupCtx = DC;
+      isDependent = false;
+    } else if (DC && isa<CXXRecordDecl>(DC))
+      LookAtPrefix = false;
+    
+    // The second case from the C++03 rules quoted further above.
     NestedNameSpecifier *Prefix = 0;
     if (AlreadySearched) {
       // Nothing left to do.
@@ -120,11 +109,6 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
       PrefixSS.setScopeRep(Prefix);
       LookupCtx = computeDeclContext(PrefixSS, EnteringContext);
       isDependent = isDependentScopeSpecifier(PrefixSS);
-    } else if (getLangOptions().CPlusPlus0x &&
-               (LookupCtx = computeDeclContext(SS, EnteringContext))) {
-      if (!LookupCtx->isTranslationUnit())
-        LookupCtx = LookupCtx->getParent();
-      isDependent = LookupCtx && LookupCtx->isDependentContext();
     } else if (ObjectTypePtr) {
       LookupCtx = computeDeclContext(SearchType);
       isDependent = SearchType->isDependentType();
@@ -168,7 +152,7 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
 
     // FIXME: Should we be suppressing ambiguities here?
     if (Found.isAmbiguous())
-      return 0;
+      return ParsedType();
 
     if (TypeDecl *Type = Found.getAsSingle<TypeDecl>()) {
       QualType T = Context.getTypeDeclType(Type);
@@ -177,7 +161,7 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
           Context.hasSameUnqualifiedType(T, SearchType)) {
         // We found our type!
 
-        return T.getAsOpaquePtr();
+        return ParsedType::make(T);
       }
     }
 
@@ -210,7 +194,7 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
               = dyn_cast<ClassTemplateSpecializationDecl>(Record->getDecl())) {
           if (Spec->getSpecializedTemplate()->getCanonicalDecl() ==
                 Template->getCanonicalDecl())
-            return MemberOfType.getAsOpaquePtr();
+            return ParsedType::make(MemberOfType);
         }
 
         continue;
@@ -229,7 +213,7 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
         // specialized.
         if (TemplateDecl *SpecTemplate = SpecName.getAsTemplateDecl()) {
           if (SpecTemplate->getCanonicalDecl() == Template->getCanonicalDecl())
-            return MemberOfType.getAsOpaquePtr();
+            return ParsedType::make(MemberOfType);
 
           continue;
         }
@@ -240,7 +224,7 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
                                     = SpecName.getAsDependentTemplateName()) {
           if (DepTemplate->isIdentifier() &&
               DepTemplate->getIdentifier() == Template->getIdentifier())
-            return MemberOfType.getAsOpaquePtr();
+            return ParsedType::make(MemberOfType);
 
           continue;
         }
@@ -261,7 +245,10 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
       Range = SourceRange(NameLoc);
     }
 
-    return CheckTypenameType(ETK_None, NNS, II, Range).getAsOpaquePtr();
+    QualType T = CheckTypenameType(ETK_None, NNS, II,
+                                   SourceLocation(),
+                                   Range, NameLoc);
+    return ParsedType::make(T);
   }
 
   if (ObjectTypePtr)
@@ -270,11 +257,11 @@ Action::TypeTy *Sema::getDestructorName(SourceLocation TildeLoc,
   else
     Diag(NameLoc, diag::err_destructor_class_name);
 
-  return 0;
+  return ParsedType();
 }
 
 /// \brief Build a C++ typeid expression with a type operand.
-Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
+ExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
                                             SourceLocation TypeidLoc,
                                             TypeSourceInfo *Operand,
                                             SourceLocation RParenLoc) {
@@ -283,7 +270,10 @@ Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
   //   that is the operand of typeid are always ignored.
   //   If the type of the type-id is a class type or a reference to a class 
   //   type, the class shall be completely-defined.
-  QualType T = Operand->getType().getNonReferenceType();
+  Qualifiers Quals;
+  QualType T
+    = Context.getUnqualifiedArrayType(Operand->getType().getNonReferenceType(),
+                                      Quals);
   if (T->getAs<RecordType>() &&
       RequireCompleteType(TypeidLoc, T, diag::err_incomplete_typeid))
     return ExprError();
@@ -294,12 +284,11 @@ Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
 }
 
 /// \brief Build a C++ typeid expression with an expression operand.
-Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
+ExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
                                             SourceLocation TypeidLoc,
-                                            ExprArg Operand,
+                                            Expr *E,
                                             SourceLocation RParenLoc) {
   bool isUnevaluatedOperand = true;
-  Expr *E = static_cast<Expr *>(Operand.get());
   if (E && !E->isTypeDependent()) {
     QualType T = E->getType();
     if (const RecordType *RecordT = T->getAs<RecordType>()) {
@@ -311,11 +300,15 @@ Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
         return ExprError();
       
       // C++ [expr.typeid]p3:
-      //   When typeid is applied to an expression other than an lvalue of a
+      //   When typeid is applied to an expression other than an glvalue of a
       //   polymorphic class type [...] [the] expression is an unevaluated
       //   operand. [...]
-      if (RecordD->isPolymorphic() && E->isLvalue(Context) == Expr::LV_Valid)
+      if (RecordD->isPolymorphic() && E->Classify(Context).isGLValue()) {
         isUnevaluatedOperand = false;
+
+        // We require a vtable to query the type at run time.
+        MarkVTableUsed(TypeidLoc, RecordD);
+      }
     }
     
     // C++ [expr.typeid]p4:
@@ -323,11 +316,11 @@ Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
     //   cv-qualified type, the result of the typeid expression refers to a 
     //   std::type_info object representing the cv-unqualified referenced 
     //   type.
-    if (T.hasQualifiers()) {
-      ImpCastExprToType(E, T.getUnqualifiedType(), CastExpr::CK_NoOp,
-                        E->isLvalue(Context));
-      Operand.release();
-      Operand = Owned(E);
+    Qualifiers Quals;
+    QualType UnqualT = Context.getUnqualifiedArrayType(T, Quals);
+    if (!Context.hasSameType(T, UnqualT)) {
+      T = UnqualT;
+      ImpCastExprToType(E, UnqualT, CK_NoOp, CastCategory(E));
     }
   }
   
@@ -338,12 +331,12 @@ Sema::OwningExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
     ExprEvalContexts.back().Context = Unevaluated;
   
   return Owned(new (Context) CXXTypeidExpr(TypeInfoType.withConst(),
-                                           Operand.takeAs<Expr>(),
+                                           E,
                                            SourceRange(TypeidLoc, RParenLoc)));  
 }
 
 /// ActOnCXXTypeidOfType - Parse typeid( type-id ) or typeid (expression);
-Action::OwningExprResult
+ExprResult
 Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
                      bool isType, void *TyOrExpr, SourceLocation RParenLoc) {
   // Find the std::type_info type.
@@ -352,7 +345,7 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
 
   IdentifierInfo *TypeInfoII = &PP.getIdentifierTable().get("type_info");
   LookupResult R(*this, TypeInfoII, SourceLocation(), LookupTagName);
-  LookupQualifiedName(R, StdNamespace);
+  LookupQualifiedName(R, getStdNamespace());
   RecordDecl *TypeInfoRecordDecl = R.getAsSingle<RecordDecl>();
   if (!TypeInfoRecordDecl)
     return ExprError(Diag(OpLoc, diag::err_need_header_before_typeid));
@@ -362,7 +355,8 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
   if (isType) {
     // The operand is a type; handle it as such.
     TypeSourceInfo *TInfo = 0;
-    QualType T = GetTypeFromParser(TyOrExpr, &TInfo);
+    QualType T = GetTypeFromParser(ParsedType::getFromOpaquePtr(TyOrExpr),
+                                   &TInfo);
     if (T.isNull())
       return ExprError();
     
@@ -373,11 +367,11 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
   }
 
   // The operand is an expression.  
-  return BuildCXXTypeId(TypeInfoType, OpLoc, Owned((Expr*)TyOrExpr), RParenLoc);
+  return BuildCXXTypeId(TypeInfoType, OpLoc, (Expr*)TyOrExpr, RParenLoc);
 }
 
 /// ActOnCXXBoolLiteral - Parse {true,false} literals.
-Action::OwningExprResult
+ExprResult
 Sema::ActOnCXXBoolLiteral(SourceLocation OpLoc, tok::TokenKind Kind) {
   assert((Kind == tok::kw_true || Kind == tok::kw_false) &&
          "Unknown C++ Boolean value!");
@@ -386,15 +380,14 @@ Sema::ActOnCXXBoolLiteral(SourceLocation OpLoc, tok::TokenKind Kind) {
 }
 
 /// ActOnCXXNullPtrLiteral - Parse 'nullptr'.
-Action::OwningExprResult
+ExprResult
 Sema::ActOnCXXNullPtrLiteral(SourceLocation Loc) {
   return Owned(new (Context) CXXNullPtrLiteralExpr(Context.NullPtrTy, Loc));
 }
 
 /// ActOnCXXThrow - Parse throw expressions.
-Action::OwningExprResult
-Sema::ActOnCXXThrow(SourceLocation OpLoc, ExprArg E) {
-  Expr *Ex = E.takeAs<Expr>();
+ExprResult
+Sema::ActOnCXXThrow(SourceLocation OpLoc, Expr *Ex) {
   if (Ex && !Ex->isTypeDependent() && CheckCXXThrowOperand(OpLoc, Ex))
     return ExprError();
   return Owned(new (Context) CXXThrowExpr(Ex, Context.VoidTy, OpLoc));
@@ -409,8 +402,8 @@ bool Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *&E) {
   //   the type from "array of T" or "function returning T" to "pointer to T" 
   //   or "pointer to function returning T", [...]
   if (E->getType().hasQualifiers())
-    ImpCastExprToType(E, E->getType().getUnqualifiedType(), CastExpr::CK_NoOp,
-                      E->isLvalue(Context) == Expr::LV_Valid);
+    ImpCastExprToType(E, E->getType().getUnqualifiedType(), CK_NoOp,
+                      CastCategory(E));
   
   DefaultFunctionArrayConversion(E);
 
@@ -437,26 +430,49 @@ bool Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *&E) {
 
   // Initialize the exception result.  This implicitly weeds out
   // abstract types or types with inaccessible copy constructors.
+  // FIXME: Determine whether we can elide this copy per C++0x [class.copy]p34.
   InitializedEntity Entity =
-    InitializedEntity::InitializeException(ThrowLoc, E->getType());
-  OwningExprResult Res = PerformCopyInitialization(Entity,
+    InitializedEntity::InitializeException(ThrowLoc, E->getType(),
+                                           /*NRVO=*/false);
+  ExprResult Res = PerformCopyInitialization(Entity,
                                                    SourceLocation(),
                                                    Owned(E));
   if (Res.isInvalid())
     return true;
   E = Res.takeAs<Expr>();
+
+  // If the exception has class type, we need additional handling.
+  const RecordType *RecordTy = Ty->getAs<RecordType>();
+  if (!RecordTy)
+    return false;
+  CXXRecordDecl *RD = cast<CXXRecordDecl>(RecordTy->getDecl());
+
+  // If we are throwing a polymorphic class type or pointer thereof,
+  // exception handling will make use of the vtable.
+  MarkVTableUsed(ThrowLoc, RD);
+
+  // If the class has a non-trivial destructor, we must be able to call it.
+  if (RD->hasTrivialDestructor())
+    return false;
+
+  CXXDestructorDecl *Destructor 
+    = const_cast<CXXDestructorDecl*>(LookupDestructor(RD));
+  if (!Destructor)
+    return false;
+
+  MarkDeclarationReferenced(E->getExprLoc(), Destructor);
+  CheckDestructorAccess(E->getExprLoc(), Destructor,
+                        PDiag(diag::err_access_dtor_exception) << Ty);
   return false;
 }
 
-Action::OwningExprResult Sema::ActOnCXXThis(SourceLocation ThisLoc) {
+ExprResult Sema::ActOnCXXThis(SourceLocation ThisLoc) {
   /// C++ 9.3.2: In the body of a non-static member function, the keyword this
   /// is a non-lvalue expression whose value is the address of the object for
   /// which the function is called.
 
-  if (!isa<FunctionDecl>(CurContext))
-    return ExprError(Diag(ThisLoc, diag::err_invalid_this_use));
-
-  if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(CurContext))
+  DeclContext *DC = getFunctionLevelDeclContext();
+  if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(DC))
     if (MD->isInstance())
       return Owned(new (Context) CXXThisExpr(ThisLoc,
                                              MD->getThisType(Context),
@@ -469,8 +485,8 @@ Action::OwningExprResult Sema::ActOnCXXThis(SourceLocation ThisLoc) {
 /// Can be interpreted either as function-style casting ("int(x)")
 /// or class type construction ("ClassType(x,y,z)")
 /// or creation of a value-initialized type ("int()").
-Action::OwningExprResult
-Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, TypeTy *TypeRep,
+ExprResult
+Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, ParsedType TypeRep,
                                 SourceLocation LParenLoc,
                                 MultiExprArg exprs,
                                 SourceLocation *CommaLocs,
@@ -518,41 +534,34 @@ Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, TypeTy *TypeRep,
   // corresponding cast expression.
   //
   if (NumExprs == 1) {
-    CastExpr::CastKind Kind = CastExpr::CK_Unknown;
-    CXXBaseSpecifierArray BasePath;
+    CastKind Kind = CK_Unknown;
+    CXXCastPath BasePath;
     if (CheckCastTypes(TypeRange, Ty, Exprs[0], Kind, BasePath,
                        /*FunctionalStyle=*/true))
       return ExprError();
 
     exprs.release();
 
-    return Owned(new (Context) CXXFunctionalCastExpr(Ty.getNonReferenceType(),
-                                                     TInfo, TyBeginLoc, Kind,
-                                                     Exprs[0], BasePath,
-                                                     RParenLoc));
+    return Owned(CXXFunctionalCastExpr::Create(Context,
+                                              Ty.getNonLValueExprType(Context),
+                                               TInfo, TyBeginLoc, Kind,
+                                               Exprs[0], &BasePath,
+                                               RParenLoc));
   }
 
-  if (const RecordType *RT = Ty->getAs<RecordType>()) {
-    CXXRecordDecl *Record = cast<CXXRecordDecl>(RT->getDecl());
+  if (Ty->isRecordType()) {
+    InitializedEntity Entity = InitializedEntity::InitializeTemporary(Ty);
+    InitializationKind Kind
+      = NumExprs ? InitializationKind::CreateDirect(TypeRange.getBegin(), 
+                                                    LParenLoc, RParenLoc)
+                 : InitializationKind::CreateValue(TypeRange.getBegin(), 
+                                                   LParenLoc, RParenLoc);
+    InitializationSequence InitSeq(*this, Entity, Kind, Exprs, NumExprs);
+    ExprResult Result = InitSeq.Perform(*this, Entity, Kind,
+                                              move(exprs));
 
-    if (NumExprs > 1 || !Record->hasTrivialConstructor() ||
-        !Record->hasTrivialDestructor()) {
-      InitializedEntity Entity = InitializedEntity::InitializeTemporary(Ty);
-      InitializationKind Kind
-        = NumExprs ? InitializationKind::CreateDirect(TypeRange.getBegin(), 
-                                                      LParenLoc, RParenLoc)
-                   : InitializationKind::CreateValue(TypeRange.getBegin(), 
-                                                     LParenLoc, RParenLoc);
-      InitializationSequence InitSeq(*this, Entity, Kind, Exprs, NumExprs);
-      OwningExprResult Result = InitSeq.Perform(*this, Entity, Kind,
-                                                move(exprs));
-
-      // FIXME: Improve AST representation?
-      return move(Result);
-    }
-
-    // Fall through to value-initialize an object of class type that
-    // doesn't have a user-declared default constructor.
+    // FIXME: Improve AST representation?
+    return move(Result);
   }
 
   // C++ [expr.type.conv]p1:
@@ -571,7 +580,7 @@ Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, TypeTy *TypeRep,
   // rvalue of the specified type, which is value-initialized.
   //
   exprs.release();
-  return Owned(new (Context) CXXZeroInitValueExpr(Ty, TyBeginLoc, RParenLoc));
+  return Owned(new (Context) CXXScalarValueInitExpr(Ty, TyBeginLoc, RParenLoc));
 }
 
 
@@ -580,10 +589,10 @@ Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, TypeTy *TypeRep,
 /// or
 /// @code ::new Foo(23, "hello") @endcode
 /// For the interpretation of this heap of arguments, consult the base version.
-Action::OwningExprResult
+ExprResult
 Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   SourceLocation PlacementLParen, MultiExprArg PlacementArgs,
-                  SourceLocation PlacementRParen, bool ParenTypeId,
+                  SourceLocation PlacementRParen, SourceRange TypeIdParens, 
                   Declarator &D, SourceLocation ConstructorLParen,
                   MultiExprArg ConstructorArgs,
                   SourceLocation ConstructorRParen) {
@@ -598,17 +607,6 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
     if (!Chunk.Arr.NumElts)
       return ExprError(Diag(Chunk.Loc, diag::err_array_new_needs_size)
         << D.getSourceRange());
-
-    if (ParenTypeId) {
-      // Can't have dynamic array size when the type-id is in parentheses.
-      Expr *NumElts = (Expr *)Chunk.Arr.NumElts;
-      if (!NumElts->isTypeDependent() && !NumElts->isValueDependent() &&
-          !NumElts->isIntegerConstantExpr(Context)) {
-        Diag(D.getTypeObject(0).Loc, diag::err_new_paren_array_nonconst)
-          << NumElts->getSourceRange();
-        return ExprError();
-      }
-    }
 
     ArraySize = static_cast<Expr*>(Chunk.Arr.NumElts);
     D.DropFirstTypeObject();
@@ -633,55 +631,81 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
   }
 
   //FIXME: Store TypeSourceInfo in CXXNew expression.
-  TypeSourceInfo *TInfo = 0;
-  QualType AllocType = GetTypeForDeclarator(D, /*Scope=*/0, &TInfo);
+  TypeSourceInfo *TInfo = GetTypeForDeclarator(D, /*Scope=*/0);
+  QualType AllocType = TInfo->getType();
   if (D.isInvalidType())
     return ExprError();
-    
+  
+  SourceRange R = TInfo->getTypeLoc().getSourceRange();    
   return BuildCXXNew(StartLoc, UseGlobal,
                      PlacementLParen,
                      move(PlacementArgs),
                      PlacementRParen,
-                     ParenTypeId,
+                     TypeIdParens,
                      AllocType,
                      D.getSourceRange().getBegin(),
-                     D.getSourceRange(),
-                     Owned(ArraySize),
+                     R,
+                     ArraySize,
                      ConstructorLParen,
                      move(ConstructorArgs),
                      ConstructorRParen);
 }
 
-Sema::OwningExprResult
+ExprResult
 Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   SourceLocation PlacementLParen,
                   MultiExprArg PlacementArgs,
                   SourceLocation PlacementRParen,
-                  bool ParenTypeId,
+                  SourceRange TypeIdParens,
                   QualType AllocType,
                   SourceLocation TypeLoc,
                   SourceRange TypeRange,
-                  ExprArg ArraySizeE,
+                  Expr *ArraySize,
                   SourceLocation ConstructorLParen,
                   MultiExprArg ConstructorArgs,
                   SourceLocation ConstructorRParen) {
   if (CheckAllocatedType(AllocType, TypeLoc, TypeRange))
     return ExprError();
 
-  QualType ResultType = Context.getPointerType(AllocType);
+  // Per C++0x [expr.new]p5, the type being constructed may be a
+  // typedef of an array type.
+  if (!ArraySize) {
+    if (const ConstantArrayType *Array
+                              = Context.getAsConstantArrayType(AllocType)) {
+      ArraySize = IntegerLiteral::Create(Context, Array->getSize(),
+                                         Context.getSizeType(),
+                                         TypeRange.getEnd());
+      AllocType = Array->getElementType();
+    }
+  }
 
-  // That every array dimension except the first is constant was already
-  // checked by the type check above.
+  QualType ResultType = Context.getPointerType(AllocType);
 
   // C++ 5.3.4p6: "The expression in a direct-new-declarator shall have integral
   //   or enumeration type with a non-negative value."
-  Expr *ArraySize = (Expr *)ArraySizeE.get();
   if (ArraySize && !ArraySize->isTypeDependent()) {
+    
     QualType SizeType = ArraySize->getType();
-    if (!SizeType->isIntegralType() && !SizeType->isEnumeralType())
-      return ExprError(Diag(ArraySize->getSourceRange().getBegin(),
-                            diag::err_array_size_not_integral)
-        << SizeType << ArraySize->getSourceRange());
+    
+    ExprResult ConvertedSize
+      = ConvertToIntegralOrEnumerationType(StartLoc, ArraySize,
+                                       PDiag(diag::err_array_size_not_integral),
+                                     PDiag(diag::err_array_size_incomplete_type)
+                                       << ArraySize->getSourceRange(),
+                               PDiag(diag::err_array_size_explicit_conversion),
+                                       PDiag(diag::note_array_size_conversion),
+                               PDiag(diag::err_array_size_ambiguous_conversion),
+                                       PDiag(diag::note_array_size_conversion),
+                          PDiag(getLangOptions().CPlusPlus0x? 0 
+                                            : diag::ext_array_size_conversion));
+    if (ConvertedSize.isInvalid())
+      return ExprError();
+    
+    ArraySize = ConvertedSize.take();
+    SizeType = ArraySize->getType();
+    if (!SizeType->isIntegralOrEnumerationType())
+      return ExprError();
+    
     // Let's see if this is a constant < 0. If so, we reject it out of hand.
     // We don't care about special rules, so we tell the machinery it's not
     // evaluated - it gives us a result in more cases.
@@ -692,13 +716,33 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                         llvm::APInt::getNullValue(Value.getBitWidth()), 
                                  Value.isUnsigned()))
           return ExprError(Diag(ArraySize->getSourceRange().getBegin(),
-                           diag::err_typecheck_negative_array_size)
+                                diag::err_typecheck_negative_array_size)
             << ArraySize->getSourceRange());
+        
+        if (!AllocType->isDependentType()) {
+          unsigned ActiveSizeBits
+            = ConstantArrayType::getNumAddressingBits(Context, AllocType, Value);
+          if (ActiveSizeBits > ConstantArrayType::getMaxSizeBits(Context)) {
+            Diag(ArraySize->getSourceRange().getBegin(), 
+                 diag::err_array_too_large)
+              << Value.toString(10)
+              << ArraySize->getSourceRange();
+            return ExprError();
+          }
+        }
+      } else if (TypeIdParens.isValid()) {
+        // Can't have dynamic array size when the type-id is in parentheses.
+        Diag(ArraySize->getLocStart(), diag::ext_new_paren_array_nonconst)
+          << ArraySize->getSourceRange()
+          << FixItHint::CreateRemoval(TypeIdParens.getBegin())
+          << FixItHint::CreateRemoval(TypeIdParens.getEnd());
+          
+        TypeIdParens = SourceRange();
       }
     }
     
     ImpCastExprToType(ArraySize, Context.getSizeType(),
-                      CastExpr::CK_IntegralCast);
+                      CK_IntegralCast);
   }
 
   FunctionDecl *OperatorNew = 0;
@@ -720,10 +764,10 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
       OperatorNew->getType()->getAs<FunctionProtoType>();
     VariadicCallType CallType = 
       Proto->isVariadic() ? VariadicFunction : VariadicDoesNotApply;
-    bool Invalid = GatherArgumentsForCall(PlacementLParen, OperatorNew,
-                                          Proto, 1, PlaceArgs, NumPlaceArgs, 
-                                          AllPlaceArgs, CallType);
-    if (Invalid)
+    
+    if (GatherArgumentsForCall(PlacementLParen, OperatorNew,
+                               Proto, 1, PlaceArgs, NumPlaceArgs, 
+                               AllPlaceArgs, CallType))
       return ExprError();
     
     NumPlaceArgs = AllPlaceArgs.size();
@@ -736,7 +780,16 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
   CXXConstructorDecl *Constructor = 0;
   Expr **ConsArgs = (Expr**)ConstructorArgs.get();
   unsigned NumConsArgs = ConstructorArgs.size();
-  ASTOwningVector<&ActionBase::DeleteExpr> ConvertedConstructorArgs(*this);
+  ASTOwningVector<Expr*> ConvertedConstructorArgs(*this);
+
+  // Array 'new' can't have any initializers.
+  if (NumConsArgs && (ResultType->isArrayType() || ArraySize)) {
+    SourceRange InitRange(ConsArgs[0]->getLocStart(),
+                          ConsArgs[NumConsArgs - 1]->getLocEnd());
+    
+    Diag(StartLoc, diag::err_new_array_init_args) << InitRange;
+    return ExprError();
+  }
 
   if (!AllocType->isDependentType() &&
       !Expr::hasAnyTypeDependentArguments(ConsArgs, NumConsArgs)) {
@@ -757,7 +810,7 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
     InitializedEntity Entity
       = InitializedEntity::InitializeNew(StartLoc, AllocType);
     InitializationSequence InitSeq(*this, Entity, Kind, ConsArgs, NumConsArgs);
-    OwningExprResult FullInit = InitSeq.Perform(*this, Entity, Kind, 
+    ExprResult FullInit = InitSeq.Perform(*this, Entity, Kind, 
                                                 move(ConstructorArgs));
     if (FullInit.isInvalid())
       return ExprError();
@@ -798,14 +851,15 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
   
   PlacementArgs.release();
   ConstructorArgs.release();
-  ArraySizeE.release();
+  
+  // FIXME: The TypeSourceInfo should also be included in CXXNewExpr.
   return Owned(new (Context) CXXNewExpr(Context, UseGlobal, OperatorNew,
-                                        PlaceArgs, NumPlaceArgs, ParenTypeId,
+                                        PlaceArgs, NumPlaceArgs, TypeIdParens,
                                         ArraySize, Constructor, Init,
                                         ConsArgs, NumConsArgs, OperatorDelete,
                                         ResultType, StartLoc,
                                         Init ? ConstructorRParen :
-                                               SourceLocation()));
+                                               TypeRange.getEnd()));
 }
 
 /// CheckAllocatedType - Checks that a type is suitable as the allocated type
@@ -868,7 +922,7 @@ bool Sema::FindAllocationFunctions(SourceLocation StartLoc, SourceRange Range,
   // We don't care about the actual value of this argument.
   // FIXME: Should the Sema create the expression and embed it in the syntax
   // tree? Or should the consumer just recalculate the value?
-  IntegerLiteral Size(llvm::APInt::getNullValue(
+  IntegerLiteral Size(Context, llvm::APInt::getNullValue(
                       Context.Target.getPointerWidth(0)),
                       Context.getSizeType(),
                       SourceLocation());
@@ -886,9 +940,11 @@ bool Sema::FindAllocationFunctions(SourceLocation StartLoc, SourceRange Range,
   DeclarationName DeleteName = Context.DeclarationNames.getCXXOperatorName(
                                         IsArray ? OO_Array_Delete : OO_Delete);
 
-  if (AllocType->isRecordType() && !UseGlobal) {
+  QualType AllocElemType = Context.getBaseElementType(AllocType);
+
+  if (AllocElemType->isRecordType() && !UseGlobal) {
     CXXRecordDecl *Record
-      = cast<CXXRecordDecl>(AllocType->getAs<RecordType>()->getDecl());
+      = cast<CXXRecordDecl>(AllocElemType->getAs<RecordType>()->getDecl());
     if (FindAllocationOverload(StartLoc, Range, NewName, &AllocArgs[0],
                           AllocArgs.size(), Record, /*AllowMissing=*/true,
                           OperatorNew))
@@ -926,9 +982,9 @@ bool Sema::FindAllocationFunctions(SourceLocation StartLoc, SourceRange Range,
   //   the allocated type is not a class type or array thereof, the
   //   deallocation function’s name is looked up in the global scope.
   LookupResult FoundDelete(*this, DeleteName, StartLoc, LookupOrdinaryName);
-  if (AllocType->isRecordType() && !UseGlobal) {
+  if (AllocElemType->isRecordType() && !UseGlobal) {
     CXXRecordDecl *RD
-      = cast<CXXRecordDecl>(AllocType->getAs<RecordType>()->getDecl());
+      = cast<CXXRecordDecl>(AllocElemType->getAs<RecordType>()->getDecl());
     LookupQualifiedName(FoundDelete, RD);
   }
   if (FoundDelete.isAmbiguous())
@@ -1072,7 +1128,7 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
 
   // Do the resolution.
   OverloadCandidateSet::iterator Best;
-  switch(BestViableFunction(Candidates, StartLoc, Best)) {
+  switch (Candidates.BestViableFunction(*this, StartLoc, Best)) {
   case OR_Success: {
     // Got one!
     FunctionDecl *FnDecl = Best->Function;
@@ -1082,7 +1138,7 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
     // Watch out for variadic allocator function.
     unsigned NumArgsInFnDecl = FnDecl->getNumParams();
     for (unsigned i = 0; (i < NumArgs && i < NumArgsInFnDecl); ++i) {
-      OwningExprResult Result
+      ExprResult Result
         = PerformCopyInitialization(InitializedEntity::InitializeParameter(
                                                        FnDecl->getParamDecl(i)),
                                     SourceLocation(),
@@ -1100,20 +1156,20 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
   case OR_No_Viable_Function:
     Diag(StartLoc, diag::err_ovl_no_viable_function_in_call)
       << Name << Range;
-    PrintOverloadCandidates(Candidates, OCD_AllCandidates, Args, NumArgs);
+    Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     return true;
 
   case OR_Ambiguous:
     Diag(StartLoc, diag::err_ovl_ambiguous_call)
       << Name << Range;
-    PrintOverloadCandidates(Candidates, OCD_ViableCandidates, Args, NumArgs);
+    Candidates.NoteCandidates(*this, OCD_ViableCandidates, Args, NumArgs);
     return true;
 
   case OR_Deleted:
     Diag(StartLoc, diag::err_ovl_deleted_call)
       << Best->Function->isDeleted()
       << Name << Range;
-    PrintOverloadCandidates(Candidates, OCD_AllCandidates, Args, NumArgs);
+    Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     return true;
   }
   assert(false && "Unreachable, bad result from BestViableFunction");
@@ -1152,24 +1208,15 @@ void Sema::DeclareGlobalNewDelete() {
   // "std" or "bad_alloc" as necessary to form the exception specification.
   // However, we do not make these implicit declarations visible to name
   // lookup.
-  if (!StdNamespace) {
-    // The "std" namespace has not yet been defined, so build one implicitly.
-    StdNamespace = NamespaceDecl::Create(Context, 
-                                         Context.getTranslationUnitDecl(),
-                                         SourceLocation(),
-                                         &PP.getIdentifierTable().get("std"));
-    StdNamespace->setImplicit(true);
-  }
-  
   if (!StdBadAlloc) {
     // The "std::bad_alloc" class has not yet been declared, so build it
     // implicitly.
-    StdBadAlloc = CXXRecordDecl::Create(Context, TagDecl::TK_class, 
-                                        StdNamespace, 
+    StdBadAlloc = CXXRecordDecl::Create(Context, TTK_Class, 
+                                        getOrCreateStdNamespace(), 
                                         SourceLocation(), 
                                       &PP.getIdentifierTable().get("bad_alloc"), 
                                         SourceLocation(), 0);
-    StdBadAlloc->setImplicit(true);
+    getStdBadAlloc()->setImplicit(true);
   }
   
   GlobalNewDeleteDeclared = true;
@@ -1211,8 +1258,11 @@ void Sema::DeclareGlobalAllocationFunction(DeclarationName Name,
           Context.getCanonicalType(
             Func->getParamDecl(0)->getType().getUnqualifiedType());
         // FIXME: Do we need to check for default arguments here?
-        if (Func->getNumParams() == 1 && InitialParamType == Argument)
+        if (Func->getNumParams() == 1 && InitialParamType == Argument) {
+          if(AddMallocAttr && !Func->hasAttr<MallocAttr>())
+            Func->addAttr(::new (Context) MallocAttr(SourceLocation(), Context));
           return;
+        }
       }
     }
   }
@@ -1223,7 +1273,7 @@ void Sema::DeclareGlobalAllocationFunction(DeclarationName Name,
        Name.getCXXOverloadedOperator() == OO_Array_New);
   if (HasBadAllocExceptionSpec) {
     assert(StdBadAlloc && "Must have std::bad_alloc declared");
-    BadAllocType = Context.getTypeDeclType(StdBadAlloc);
+    BadAllocType = Context.getTypeDeclType(getStdBadAlloc());
   }
   
   QualType FnType = Context.getFunctionType(Return, &Argument, 1, false, 0,
@@ -1233,23 +1283,23 @@ void Sema::DeclareGlobalAllocationFunction(DeclarationName Name,
                                             FunctionType::ExtInfo());
   FunctionDecl *Alloc =
     FunctionDecl::Create(Context, GlobalCtx, SourceLocation(), Name,
-                         FnType, /*TInfo=*/0, FunctionDecl::None,
-                         FunctionDecl::None, false, true);
+                         FnType, /*TInfo=*/0, SC_None,
+                         SC_None, false, true);
   Alloc->setImplicit();
   
   if (AddMallocAttr)
-    Alloc->addAttr(::new (Context) MallocAttr());
+    Alloc->addAttr(::new (Context) MallocAttr(SourceLocation(), Context));
   
   ParmVarDecl *Param = ParmVarDecl::Create(Context, Alloc, SourceLocation(),
                                            0, Argument, /*TInfo=*/0,
-                                           VarDecl::None,
-                                           VarDecl::None, 0);
+                                           SC_None,
+                                           SC_None, 0);
   Alloc->setParams(&Param, 1);
 
   // FIXME: Also add this declaration to the IdentifierResolver, but
   // make sure it is at the end of the chain to coincide with the
   // global scope.
-  ((DeclContext *)TUScope->getEntity())->addDecl(Alloc);
+  Context.getTranslationUnitDecl()->addDecl(Alloc);
 }
 
 bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
@@ -1262,13 +1312,39 @@ bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
   if (Found.isAmbiguous())
     return true;
 
+  Found.suppressDiagnostics();
+
+  llvm::SmallVector<DeclAccessPair,4> Matches;
   for (LookupResult::iterator F = Found.begin(), FEnd = Found.end();
        F != FEnd; ++F) {
-    if (CXXMethodDecl *Delete = dyn_cast<CXXMethodDecl>(*F))
-      if (Delete->isUsualDeallocationFunction()) {
-        Operator = Delete;
-        return false;
-      }
+    NamedDecl *ND = (*F)->getUnderlyingDecl();
+
+    // Ignore template operator delete members from the check for a usual
+    // deallocation function.
+    if (isa<FunctionTemplateDecl>(ND))
+      continue;
+
+    if (cast<CXXMethodDecl>(ND)->isUsualDeallocationFunction())
+      Matches.push_back(F.getPair());
+  }
+
+  // There's exactly one suitable operator;  pick it.
+  if (Matches.size() == 1) {
+    Operator = cast<CXXMethodDecl>(Matches[0]->getUnderlyingDecl());
+    CheckAllocationAccess(StartLoc, SourceRange(), Found.getNamingClass(),
+                          Matches[0]);
+    return false;
+
+  // We found multiple suitable operators;  complain about the ambiguity.
+  } else if (!Matches.empty()) {
+    Diag(StartLoc, diag::err_ambiguous_suitable_delete_member_function_found)
+      << Name << RD;
+
+    for (llvm::SmallVectorImpl<DeclAccessPair>::iterator
+           F = Matches.begin(), FEnd = Matches.end(); F != FEnd; ++F)
+      Diag((*F)->getUnderlyingDecl()->getLocation(),
+           diag::note_member_declared_here) << Name;
+    return true;
   }
 
   // We did find operator delete/operator delete[] declarations, but
@@ -1278,10 +1354,9 @@ bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
       << Name << RD;
         
     for (LookupResult::iterator F = Found.begin(), FEnd = Found.end();
-         F != FEnd; ++F) {
-      Diag((*F)->getLocation(), diag::note_member_declared_here)
-        << Name;
-    }
+         F != FEnd; ++F)
+      Diag((*F)->getUnderlyingDecl()->getLocation(),
+           diag::note_member_declared_here) << Name;
 
     return true;
   }
@@ -1306,9 +1381,9 @@ bool Sema::FindDeallocationFunction(SourceLocation StartLoc, CXXRecordDecl *RD,
 /// @code ::delete ptr; @endcode
 /// or
 /// @code delete [] ptr; @endcode
-Action::OwningExprResult
+ExprResult
 Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
-                     bool ArrayForm, ExprArg Operand) {
+                     bool ArrayForm, Expr *Ex) {
   // C++ [expr.delete]p1:
   //   The operand shall have a pointer type, or a class type having a single
   //   conversion function to a pointer type. The result has type void.
@@ -1317,11 +1392,14 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
 
   FunctionDecl *OperatorDelete = 0;
 
-  Expr *Ex = (Expr *)Operand.get();
   if (!Ex->isTypeDependent()) {
     QualType Type = Ex->getType();
 
     if (const RecordType *Record = Type->getAs<RecordType>()) {
+      if (RequireCompleteType(StartLoc, Type, 
+                              PDiag(diag::err_delete_incomplete_class_type)))
+        return ExprError();
+      
       llvm::SmallVector<CXXConversionDecl*, 4> ObjectPtrConversions;
 
       CXXRecordDecl *RD = cast<CXXRecordDecl>(Record->getDecl());
@@ -1340,18 +1418,16 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
         
         QualType ConvType = Conv->getConversionType().getNonReferenceType();
         if (const PointerType *ConvPtrType = ConvType->getAs<PointerType>())
-          if (ConvPtrType->getPointeeType()->isObjectType())
+          if (ConvPtrType->getPointeeType()->isIncompleteOrObjectType())
             ObjectPtrConversions.push_back(Conv);
       }
       if (ObjectPtrConversions.size() == 1) {
         // We have a single conversion to a pointer-to-object type. Perform
         // that conversion.
         // TODO: don't redo the conversion calculation.
-        Operand.release();
         if (!PerformImplicitConversion(Ex,
                             ObjectPtrConversions.front()->getConversionType(),
                                       AA_Converting)) {
-          Operand = Owned(Ex);
           Type = Ex->getType();
         }
       }
@@ -1369,7 +1445,13 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
         << Type << Ex->getSourceRange());
 
     QualType Pointee = Type->getAs<PointerType>()->getPointeeType();
-    if (Pointee->isFunctionType() || Pointee->isVoidType())
+    if (Pointee->isVoidType() && !isSFINAEContext()) {
+      // The C++ standard bans deleting a pointer to a non-object type, which 
+      // effectively bans deletion of "void*". However, most compilers support
+      // this, so we treat it as a warning unless we're in a SFINAE context.
+      Diag(StartLoc, diag::ext_delete_void_ptr_operand)
+        << Type << Ex->getSourceRange();
+    } else if (Pointee->isFunctionType() || Pointee->isVoidType())
       return ExprError(Diag(StartLoc, diag::err_delete_operand)
         << Type << Ex->getSourceRange());
     else if (!Pointee->isDependentType() &&
@@ -1384,16 +1466,13 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
     //   (5.2.11) of the pointer expression before it is used as the operand 
     //   of the delete-expression. ]
     ImpCastExprToType(Ex, Context.getPointerType(Context.VoidTy), 
-                      CastExpr::CK_NoOp);
-    
-    // Update the operand.
-    Operand.take();
-    Operand = ExprArg(*this, Ex);
+                      CK_NoOp);
     
     DeclarationName DeleteName = Context.DeclarationNames.getCXXOperatorName(
                                       ArrayForm ? OO_Array_Delete : OO_Delete);
 
-    if (const RecordType *RT = Pointee->getAs<RecordType>()) {
+    QualType PointeeElem = Context.getBaseElementType(Pointee);
+    if (const RecordType *RT = PointeeElem->getAs<RecordType>()) {
       CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
 
       if (!UseGlobal && 
@@ -1401,7 +1480,7 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
         return ExprError();
       
       if (!RD->hasTrivialDestructor())
-        if (const CXXDestructorDecl *Dtor = RD->getDestructor(Context))
+        if (const CXXDestructorDecl *Dtor = LookupDestructor(RD))
           MarkDeclarationReferenced(StartLoc,
                                     const_cast<CXXDestructorDecl*>(Dtor));
     }
@@ -1421,14 +1500,15 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
     // FIXME: Check access and ambiguity of operator delete and destructor.
   }
 
-  Operand.release();
   return Owned(new (Context) CXXDeleteExpr(Context.VoidTy, UseGlobal, ArrayForm,
                                            OperatorDelete, Ex, StartLoc));
 }
 
 /// \brief Check the use of the given variable as a C++ condition in an if,
 /// while, do-while, or switch statement.
-Action::OwningExprResult Sema::CheckConditionVariable(VarDecl *ConditionVar) {
+ExprResult Sema::CheckConditionVariable(VarDecl *ConditionVar,
+                                                      SourceLocation StmtLoc,
+                                                      bool ConvertToBoolean) {
   QualType T = ConditionVar->getType();
   
   // C++ [stmt.select]p2:
@@ -1442,9 +1522,13 @@ Action::OwningExprResult Sema::CheckConditionVariable(VarDecl *ConditionVar) {
                           diag::err_invalid_use_of_array_type)
                      << ConditionVar->getSourceRange());
 
-  return Owned(DeclRefExpr::Create(Context, 0, SourceRange(), ConditionVar,
-                                   ConditionVar->getLocation(), 
-                                ConditionVar->getType().getNonReferenceType()));
+  Expr *Condition = DeclRefExpr::Create(Context, 0, SourceRange(), ConditionVar,
+                                        ConditionVar->getLocation(), 
+                                 ConditionVar->getType().getNonReferenceType());
+  if (ConvertToBoolean && CheckBooleanCondition(Condition, StmtLoc))
+    return ExprError();
+  
+  return Owned(Condition);
 }
 
 /// CheckCXXBooleanCondition - Returns true if a conversion to bool is invalid.
@@ -1474,7 +1558,7 @@ Sema::IsStringLiteralToNonConstPointerConversion(Expr *From, QualType ToType) {
   // be converted to an rvalue of type "pointer to char"; a wide
   // string literal can be converted to an rvalue of type "pointer
   // to wchar_t" (C++ 4.2p2).
-  if (StringLiteral *StrLit = dyn_cast<StringLiteral>(From))
+  if (StringLiteral *StrLit = dyn_cast<StringLiteral>(From->IgnoreParens()))
     if (const PointerType *ToPtrType = ToType->getAs<PointerType>())
       if (const BuiltinType *ToPointeeType
           = ToPtrType->getPointeeType()->getAs<BuiltinType>()) {
@@ -1491,34 +1575,33 @@ Sema::IsStringLiteralToNonConstPointerConversion(Expr *From, QualType ToType) {
   return false;
 }
 
-static Sema::OwningExprResult BuildCXXCastArgument(Sema &S, 
-                                                   SourceLocation CastLoc,
-                                                   QualType Ty,
-                                                   CastExpr::CastKind Kind,
-                                                   CXXMethodDecl *Method,
-                                                   Sema::ExprArg Arg) {
-  Expr *From = Arg.takeAs<Expr>();
-  
+static ExprResult BuildCXXCastArgument(Sema &S, 
+                                       SourceLocation CastLoc,
+                                       QualType Ty,
+                                       CastKind Kind,
+                                       CXXMethodDecl *Method,
+                                       Expr *From) {
   switch (Kind) {
   default: assert(0 && "Unhandled cast kind!");
-  case CastExpr::CK_ConstructorConversion: {
-    ASTOwningVector<&ActionBase::DeleteExpr> ConstructorArgs(S);
+  case CK_ConstructorConversion: {
+    ASTOwningVector<Expr*> ConstructorArgs(S);
     
     if (S.CompleteConstructorCall(cast<CXXConstructorDecl>(Method),
-                                  Sema::MultiExprArg(S, (void **)&From, 1),
+                                  MultiExprArg(&From, 1),
                                   CastLoc, ConstructorArgs))
-      return S.ExprError();
+      return ExprError();
     
-    Sema::OwningExprResult Result = 
+    ExprResult Result = 
     S.BuildCXXConstructExpr(CastLoc, Ty, cast<CXXConstructorDecl>(Method), 
-                            move_arg(ConstructorArgs));
+                            move_arg(ConstructorArgs),
+                            /*ZeroInit*/ false, CXXConstructExpr::CK_Complete);
     if (Result.isInvalid())
-      return S.ExprError();
+      return ExprError();
     
     return S.MaybeBindToTemporary(Result.takeAs<Expr>());
   }
     
-  case CastExpr::CK_UserDefinedConversion: {
+  case CK_UserDefinedConversion: {
     assert(!From->getType()->isPointerType() && "Arg can't have pointer type!");
     
     // Create an implicit call expr that calls it.
@@ -1549,10 +1632,10 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
   case ImplicitConversionSequence::UserDefinedConversion: {
     
       FunctionDecl *FD = ICS.UserDefined.ConversionFunction;
-      CastExpr::CastKind CastKind = CastExpr::CK_Unknown;
+      CastKind CastKind = CK_Unknown;
       QualType BeforeToType;
       if (const CXXConversionDecl *Conv = dyn_cast<CXXConversionDecl>(FD)) {
-        CastKind = CastExpr::CK_UserDefinedConversion;
+        CastKind = CK_UserDefinedConversion;
         
         // If the user-defined conversion is specified by a conversion function,
         // the initial standard conversion sequence converts the source type to
@@ -1560,7 +1643,7 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
         BeforeToType = Context.getTagDeclType(Conv->getParent());
       } else if (const CXXConstructorDecl *Ctor = 
                   dyn_cast<CXXConstructorDecl>(FD)) {
-        CastKind = CastExpr::CK_ConstructorConversion;
+        CastKind = CK_ConstructorConversion;
         // Do no conversion if dealing with ... for the first conversion.
         if (!ICS.UserDefined.EllipsisConversion) {
           // If the user-defined conversion is specified by a constructor, the 
@@ -1579,12 +1662,12 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
           return true;
       }
     
-      OwningExprResult CastArg 
+      ExprResult CastArg 
         = BuildCXXCastArgument(*this,
                                From->getLocStart(),
                                ToType.getNonReferenceType(),
                                CastKind, cast<CXXMethodDecl>(FD), 
-                               Owned(From));
+                               From);
 
       if (CastArg.isInvalid())
         return true;
@@ -1596,7 +1679,7 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
   }
 
   case ImplicitConversionSequence::AmbiguousConversion:
-    DiagnoseAmbiguousConversion(ICS, From->getExprLoc(),
+    ICS.DiagnoseAmbiguousConversion(*this, From->getExprLoc(),
                           PDiag(diag::err_typecheck_ambiguous_condition)
                             << From->getSourceRange());
      return true;
@@ -1633,31 +1716,50 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
     // FIXME: When can ToType be a reference type?
     assert(!ToType->isReferenceType());
     if (SCS.Second == ICK_Derived_To_Base) {
-      ASTOwningVector<&ActionBase::DeleteExpr> ConstructorArgs(*this);
+      ASTOwningVector<Expr*> ConstructorArgs(*this);
       if (CompleteConstructorCall(cast<CXXConstructorDecl>(SCS.CopyConstructor),
-                                  MultiExprArg(*this, (void **)&From, 1),
+                                  MultiExprArg(*this, &From, 1),
                                   /*FIXME:ConstructLoc*/SourceLocation(), 
                                   ConstructorArgs))
         return true;
-      OwningExprResult FromResult =
+      ExprResult FromResult =
         BuildCXXConstructExpr(/*FIXME:ConstructLoc*/SourceLocation(),
                               ToType, SCS.CopyConstructor,
-                              move_arg(ConstructorArgs));
+                              move_arg(ConstructorArgs),
+                              /*ZeroInit*/ false,
+                              CXXConstructExpr::CK_Complete);
       if (FromResult.isInvalid())
         return true;
       From = FromResult.takeAs<Expr>();
       return false;
     }
-    OwningExprResult FromResult =
+    ExprResult FromResult =
       BuildCXXConstructExpr(/*FIXME:ConstructLoc*/SourceLocation(),
                             ToType, SCS.CopyConstructor,
-                            MultiExprArg(*this, (void**)&From, 1));
+                            MultiExprArg(*this, &From, 1),
+                            /*ZeroInit*/ false,
+                            CXXConstructExpr::CK_Complete);
 
     if (FromResult.isInvalid())
       return true;
 
     From = FromResult.takeAs<Expr>();
     return false;
+  }
+
+  // Resolve overloaded function references.
+  if (Context.hasSameType(FromType, Context.OverloadTy)) {
+    DeclAccessPair Found;
+    FunctionDecl *Fn = ResolveAddressOfOverloadedFunction(From, ToType,
+                                                          true, Found);
+    if (!Fn)
+      return true;
+
+    if (DiagnoseUseOfDecl(Fn, From->getSourceRange().getBegin()))
+      return true;
+
+    From = FixOverloadedFunctionReference(From, Found, Fn);
+    FromType = From->getType();
   }
 
   // Perform the first implicit conversion.
@@ -1669,31 +1771,12 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
 
   case ICK_Array_To_Pointer:
     FromType = Context.getArrayDecayedType(FromType);
-    ImpCastExprToType(From, FromType, CastExpr::CK_ArrayToPointerDecay);
+    ImpCastExprToType(From, FromType, CK_ArrayToPointerDecay);
     break;
 
   case ICK_Function_To_Pointer:
-    if (Context.getCanonicalType(FromType) == Context.OverloadTy) {
-      DeclAccessPair Found;
-      FunctionDecl *Fn = ResolveAddressOfOverloadedFunction(From, ToType,
-                                                            true, Found);
-      if (!Fn)
-        return true;
-
-      if (DiagnoseUseOfDecl(Fn, From->getSourceRange().getBegin()))
-        return true;
-
-      From = FixOverloadedFunctionReference(From, Found, Fn);
-      FromType = From->getType();
-        
-      // If there's already an address-of operator in the expression, we have
-      // the right type already, and the code below would just introduce an
-      // invalid additional pointer level.
-      if (FromType->isPointerType() || FromType->isMemberFunctionPointerType())
-        break;
-    }
     FromType = Context.getPointerType(FromType);
-    ImpCastExprToType(From, FromType, CastExpr::CK_FunctionToPointerDecay);
+    ImpCastExprToType(From, FromType, CK_FunctionToPointerDecay);
     break;
 
   default:
@@ -1718,37 +1801,33 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
       return true;      
       
     ImpCastExprToType(From, Context.getNoReturnType(From->getType(), false),
-                      CastExpr::CK_NoOp);
+                      CK_NoOp);
     break;
       
   case ICK_Integral_Promotion:
   case ICK_Integral_Conversion:
-    ImpCastExprToType(From, ToType, CastExpr::CK_IntegralCast);
+    ImpCastExprToType(From, ToType, CK_IntegralCast);
     break;
 
   case ICK_Floating_Promotion:
   case ICK_Floating_Conversion:
-    ImpCastExprToType(From, ToType, CastExpr::CK_FloatingCast);
+    ImpCastExprToType(From, ToType, CK_FloatingCast);
     break;
 
   case ICK_Complex_Promotion:
   case ICK_Complex_Conversion:
-    ImpCastExprToType(From, ToType, CastExpr::CK_Unknown);
+    ImpCastExprToType(From, ToType, CK_Unknown);
     break;
 
   case ICK_Floating_Integral:
-    if (ToType->isFloatingType())
-      ImpCastExprToType(From, ToType, CastExpr::CK_IntegralToFloating);
+    if (ToType->isRealFloatingType())
+      ImpCastExprToType(From, ToType, CK_IntegralToFloating);
     else
-      ImpCastExprToType(From, ToType, CastExpr::CK_FloatingToIntegral);
-    break;
-
-  case ICK_Complex_Real:
-    ImpCastExprToType(From, ToType, CastExpr::CK_Unknown);
+      ImpCastExprToType(From, ToType, CK_FloatingToIntegral);
     break;
 
   case ICK_Compatible_Conversion:
-    ImpCastExprToType(From, ToType, CastExpr::CK_NoOp);
+    ImpCastExprToType(From, ToType, CK_NoOp);
     break;
 
   case ICK_Pointer_Conversion: {
@@ -1761,46 +1840,67 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
     }
 
     
-    CastExpr::CastKind Kind = CastExpr::CK_Unknown;
-    CXXBaseSpecifierArray BasePath;
+    CastKind Kind = CK_Unknown;
+    CXXCastPath BasePath;
     if (CheckPointerConversion(From, ToType, Kind, BasePath, IgnoreBaseAccess))
       return true;
-    ImpCastExprToType(From, ToType, Kind, /*isLvalue=*/false, BasePath);
+    ImpCastExprToType(From, ToType, Kind, VK_RValue, &BasePath);
     break;
   }
   
   case ICK_Pointer_Member: {
-    CastExpr::CastKind Kind = CastExpr::CK_Unknown;
-    CXXBaseSpecifierArray BasePath;
+    CastKind Kind = CK_Unknown;
+    CXXCastPath BasePath;
     if (CheckMemberPointerConversion(From, ToType, Kind, BasePath,
                                      IgnoreBaseAccess))
       return true;
     if (CheckExceptionSpecCompatibility(From, ToType))
       return true;
-    ImpCastExprToType(From, ToType, Kind, /*isLvalue=*/false, BasePath);
+    ImpCastExprToType(From, ToType, Kind, VK_RValue, &BasePath);
     break;
   }
   case ICK_Boolean_Conversion: {
-    CastExpr::CastKind Kind = CastExpr::CK_Unknown;
+    CastKind Kind = CK_Unknown;
     if (FromType->isMemberPointerType())
-      Kind = CastExpr::CK_MemberPointerToBoolean;
+      Kind = CK_MemberPointerToBoolean;
     
     ImpCastExprToType(From, Context.BoolTy, Kind);
     break;
   }
 
-  case ICK_Derived_To_Base:
+  case ICK_Derived_To_Base: {
+    CXXCastPath BasePath;
     if (CheckDerivedToBaseConversion(From->getType(), 
                                      ToType.getNonReferenceType(),
                                      From->getLocStart(),
-                                     From->getSourceRange(), 0,
+                                     From->getSourceRange(), 
+                                     &BasePath,
                                      IgnoreBaseAccess))
       return true;
-    ImpCastExprToType(From, ToType.getNonReferenceType(), 
-                      CastExpr::CK_DerivedToBase);
+
+    ImpCastExprToType(From, ToType.getNonReferenceType(),
+                      CK_DerivedToBase, CastCategory(From),
+                      &BasePath);
+    break;
+  }
+
+  case ICK_Vector_Conversion:
+    ImpCastExprToType(From, ToType, CK_BitCast);
+    break;
+
+  case ICK_Vector_Splat:
+    ImpCastExprToType(From, ToType, CK_VectorSplat);
     break;
       
-  default:
+  case ICK_Complex_Real:
+    ImpCastExprToType(From, ToType, CK_Unknown);
+    break;
+      
+  case ICK_Lvalue_To_Rvalue:
+  case ICK_Array_To_Pointer:
+  case ICK_Function_To_Pointer:
+  case ICK_Qualification:
+  case ICK_Num_Conversion_Kinds:
     assert(false && "Improper second standard conversion");
     break;
   }
@@ -1810,30 +1910,33 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
     // Nothing to do.
     break;
 
-  case ICK_Qualification:
-    // FIXME: Not sure about lvalue vs rvalue here in the presence of rvalue
-    // references.
-    ImpCastExprToType(From, ToType.getNonReferenceType(),
-                      CastExpr::CK_NoOp, ToType->isLValueReferenceType());
+  case ICK_Qualification: {
+    // The qualification keeps the category of the inner expression, unless the
+    // target type isn't a reference.
+    ExprValueKind VK = ToType->isReferenceType() ?
+                                  CastCategory(From) : VK_RValue;
+    ImpCastExprToType(From, ToType.getNonLValueExprType(Context),
+                      CK_NoOp, VK);
 
     if (SCS.DeprecatedStringLiteralToCharPtr)
       Diag(From->getLocStart(), diag::warn_deprecated_string_literal_conversion)
         << ToType.getNonReferenceType();
 
     break;
-      
+    }
+
   default:
-    assert(false && "Improper second standard conversion");
+    assert(false && "Improper third standard conversion");
     break;
   }
 
   return false;
 }
 
-Sema::OwningExprResult Sema::ActOnUnaryTypeTrait(UnaryTypeTrait OTT,
+ExprResult Sema::ActOnUnaryTypeTrait(UnaryTypeTrait OTT,
                                                  SourceLocation KWLoc,
                                                  SourceLocation LParen,
-                                                 TypeTy *Ty,
+                                                 ParsedType Ty,
                                                  SourceLocation RParen) {
   QualType T = GetTypeFromParser(Ty);
 
@@ -1907,15 +2010,15 @@ QualType Sema::CheckPointerToMemberOperands(
     }
     // Cast LHS to type of use.
     QualType UseType = isIndirect ? Context.getPointerType(Class) : Class;
-    bool isLValue = !isIndirect && lex->isLvalue(Context) == Expr::LV_Valid;
-    
-    CXXBaseSpecifierArray BasePath;
+    ExprValueKind VK =
+        isIndirect ? VK_RValue : CastCategory(lex);
+
+    CXXCastPath BasePath;
     BuildBasePathArray(Paths, BasePath);
-    ImpCastExprToType(lex, UseType, CastExpr::CK_DerivedToBase, isLValue,
-                      BasePath);
+    ImpCastExprToType(lex, UseType, CK_DerivedToBase, VK, &BasePath);
   }
 
-  if (isa<CXXZeroInitValueExpr>(rex->IgnoreParens())) {
+  if (isa<CXXScalarValueInitExpr>(rex->IgnoreParens())) {
     // Diagnose use of pointer-to-member type which when used as
     // the functional cast in a pointer-to-member expression.
     Diag(Loc, diag::err_pointer_to_member_type) << isIndirect;
@@ -2041,7 +2144,7 @@ static bool FindConditionalOverload(Sema &Self, Expr *&LHS, Expr *&RHS,
   Self.AddBuiltinOperatorCandidates(OO_Conditional, Loc, Args, 2, CandidateSet);
 
   OverloadCandidateSet::iterator Best;
-  switch (Self.BestViableFunction(CandidateSet, Loc, Best)) {
+  switch (CandidateSet.BestViableFunction(Self, Loc, Best)) {
     case OR_Success:
       // We found a match. Perform the conversions on the arguments and move on.
       if (Self.PerformImplicitConversion(LHS, Best->BuiltinTypes.ParamTypes[0],
@@ -2079,8 +2182,7 @@ static bool ConvertForConditional(Sema &Self, Expr *&E, QualType T) {
   InitializationKind Kind = InitializationKind::CreateCopy(E->getLocStart(),
                                                            SourceLocation());
   InitializationSequence InitSeq(Self, Entity, Kind, &E, 1);
-  Sema::OwningExprResult Result = InitSeq.Perform(Self, Entity, Kind, 
-                                    Sema::MultiExprArg(Self, (void **)&E, 1));
+  ExprResult Result = InitSeq.Perform(Self, Entity, Kind, MultiExprArg(&E, 1));
   if (Result.isInvalid())
     return true;
   
@@ -2107,8 +2209,6 @@ QualType Sema::CXXCheckConditionalOperands(Expr *&Cond, Expr *&LHS, Expr *&RHS,
   // Either of the arguments dependent?
   if (LHS->isTypeDependent() || RHS->isTypeDependent())
     return Context.DependentTy;
-
-  CheckSignCompare(LHS, RHS, QuestionLoc);
 
   // C++0x 5.16p2
   //   If either the second or the third operand has type (cv) void, ...
@@ -2213,9 +2313,36 @@ QualType Sema::CXXCheckConditionalOperands(Expr *&Cond, Expr *&LHS, Expr *&RHS,
 
   //   After those conversions, one of the following shall hold:
   //   -- The second and third operands have the same type; the result
-  //      is of that type.
-  if (Context.getCanonicalType(LTy) == Context.getCanonicalType(RTy))
+  //      is of that type. If the operands have class type, the result
+  //      is a prvalue temporary of the result type, which is
+  //      copy-initialized from either the second operand or the third
+  //      operand depending on the value of the first operand.
+  if (Context.getCanonicalType(LTy) == Context.getCanonicalType(RTy)) {
+    if (LTy->isRecordType()) {
+      // The operands have class type. Make a temporary copy.
+      InitializedEntity Entity = InitializedEntity::InitializeTemporary(LTy);
+      ExprResult LHSCopy = PerformCopyInitialization(Entity, 
+                                                           SourceLocation(), 
+                                                           Owned(LHS));
+      if (LHSCopy.isInvalid())
+        return QualType();
+        
+      ExprResult RHSCopy = PerformCopyInitialization(Entity, 
+                                                           SourceLocation(), 
+                                                           Owned(RHS));
+      if (RHSCopy.isInvalid())
+        return QualType();
+      
+      LHS = LHSCopy.takeAs<Expr>();
+      RHS = RHSCopy.takeAs<Expr>();
+    }
+
     return LTy;
+  }
+
+  // Extension: conditional operator involving vector types.
+  if (LTy->isVectorType() || RTy->isVectorType()) 
+    return CheckVectorOperands(QuestionLoc, LHS, RHS);
 
   //   -- The second and third operands have arithmetic or enumeration type;
   //      the usual arithmetic conversions are performed to bring them to a
@@ -2293,16 +2420,16 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
   //   the type of the other operand.
   if (E1->isNullPointerConstant(Context, Expr::NPC_ValueDependentIsNull)) {
     if (T2->isMemberPointerType())
-      ImpCastExprToType(E1, T2, CastExpr::CK_NullToMemberPointer);
+      ImpCastExprToType(E1, T2, CK_NullToMemberPointer);
     else
-      ImpCastExprToType(E1, T2, CastExpr::CK_IntegralToPointer);
+      ImpCastExprToType(E1, T2, CK_IntegralToPointer);
     return T2;
   }
   if (E2->isNullPointerConstant(Context, Expr::NPC_ValueDependentIsNull)) {
     if (T1->isMemberPointerType())
-      ImpCastExprToType(E2, T1, CastExpr::CK_NullToMemberPointer);
+      ImpCastExprToType(E2, T1, CK_NullToMemberPointer);
     else
-      ImpCastExprToType(E2, T1, CastExpr::CK_IntegralToPointer);
+      ImpCastExprToType(E2, T1, CK_IntegralToPointer);
     return T1;
   }
 
@@ -2436,15 +2563,15 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
     }
 
     // Convert E1 to Composite1
-    OwningExprResult E1Result
-      = E1ToC1.Perform(*this, Entity1, Kind, MultiExprArg(*this,(void**)&E1,1));
+    ExprResult E1Result
+      = E1ToC1.Perform(*this, Entity1, Kind, MultiExprArg(*this,&E1,1));
     if (E1Result.isInvalid())
       return QualType();
     E1 = E1Result.takeAs<Expr>();
 
     // Convert E2 to Composite1
-    OwningExprResult E2Result
-      = E2ToC1.Perform(*this, Entity1, Kind, MultiExprArg(*this,(void**)&E2,1));
+    ExprResult E2Result
+      = E2ToC1.Perform(*this, Entity1, Kind, MultiExprArg(*this,&E2,1));
     if (E2Result.isInvalid())
       return QualType();
     E2 = E2Result.takeAs<Expr>();
@@ -2461,15 +2588,15 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
     return QualType();
   
   // Convert E1 to Composite2
-  OwningExprResult E1Result
-    = E1ToC2.Perform(*this, Entity2, Kind, MultiExprArg(*this, (void**)&E1, 1));
+  ExprResult E1Result
+    = E1ToC2.Perform(*this, Entity2, Kind, MultiExprArg(*this, &E1, 1));
   if (E1Result.isInvalid())
     return QualType();
   E1 = E1Result.takeAs<Expr>();
   
   // Convert E2 to Composite2
-  OwningExprResult E2Result
-    = E2ToC2.Perform(*this, Entity2, Kind, MultiExprArg(*this, (void**)&E2, 1));
+  ExprResult E2Result
+    = E2ToC2.Perform(*this, Entity2, Kind, MultiExprArg(*this, &E2, 1));
   if (E2Result.isInvalid())
     return QualType();
   E2 = E2Result.takeAs<Expr>();
@@ -2477,7 +2604,7 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
   return Composite2;
 }
 
-Sema::OwningExprResult Sema::MaybeBindToTemporary(Expr *E) {
+ExprResult Sema::MaybeBindToTemporary(Expr *E) {
   if (!Context.getLangOptions().CPlusPlus)
     return Owned(E);
 
@@ -2487,31 +2614,27 @@ Sema::OwningExprResult Sema::MaybeBindToTemporary(Expr *E) {
   if (!RT)
     return Owned(E);
 
-  // If this is the result of a call expression, our source might
-  // actually be a reference, in which case we shouldn't bind.
+  // If this is the result of a call or an Objective-C message send expression,
+  // our source might actually be a reference, in which case we shouldn't bind.
   if (CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    QualType Ty = CE->getCallee()->getType();
-    if (const PointerType *PT = Ty->getAs<PointerType>())
-      Ty = PT->getPointeeType();
-    else if (const BlockPointerType *BPT = Ty->getAs<BlockPointerType>())
-      Ty = BPT->getPointeeType();
-
-    const FunctionType *FTy = Ty->getAs<FunctionType>();
-    if (FTy->getResultType()->isReferenceType())
+    if (CE->getCallReturnType()->isReferenceType())
       return Owned(E);
+  } else if (ObjCMessageExpr *ME = dyn_cast<ObjCMessageExpr>(E)) {
+    if (const ObjCMethodDecl *MD = ME->getMethodDecl()) {
+      if (MD->getResultType()->isReferenceType())
+        return Owned(E);    
+    }
   }
 
   // That should be enough to guarantee that this type is complete.
   // If it has a trivial destructor, we can avoid the extra copy.
   CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-  if (RD->hasTrivialDestructor())
+  if (RD->isInvalidDecl() || RD->hasTrivialDestructor())
     return Owned(E);
 
-  CXXTemporary *Temp = CXXTemporary::Create(Context,
-                                            RD->getDestructor(Context));
+  CXXTemporary *Temp = CXXTemporary::Create(Context, LookupDestructor(RD));
   ExprTemporaries.push_back(Temp);
-  if (CXXDestructorDecl *Destructor =
-        const_cast<CXXDestructorDecl*>(RD->getDestructor(Context))) {
+  if (CXXDestructorDecl *Destructor = LookupDestructor(RD)) {
     MarkDeclarationReferenced(E->getExprLoc(), Destructor);
     CheckDestructorAccess(E->getExprLoc(), Destructor,
                           PDiag(diag::err_access_dtor_temp)
@@ -2523,6 +2646,9 @@ Sema::OwningExprResult Sema::MaybeBindToTemporary(Expr *E) {
 
 Expr *Sema::MaybeCreateCXXExprWithTemporaries(Expr *SubExpr) {
   assert(SubExpr && "sub expression can't be null!");
+
+  // Check any implicit conversions within the expression.
+  CheckImplicitConversions(SubExpr);
 
   unsigned FirstTemporary = ExprEvalContexts.back().NumTemporaries;
   assert(ExprTemporaries.size() >= FirstTemporary);
@@ -2538,8 +2664,8 @@ Expr *Sema::MaybeCreateCXXExprWithTemporaries(Expr *SubExpr) {
   return E;
 }
 
-Sema::OwningExprResult 
-Sema::MaybeCreateCXXExprWithTemporaries(OwningExprResult SubExpr) {
+ExprResult 
+Sema::MaybeCreateCXXExprWithTemporaries(ExprResult SubExpr) {
   if (SubExpr.isInvalid())
     return ExprError();
   
@@ -2562,17 +2688,16 @@ FullExpr Sema::CreateFullExpr(Expr *SubExpr) {
   return E;
 }
 
-Sema::OwningExprResult
-Sema::ActOnStartCXXMemberReference(Scope *S, ExprArg Base, SourceLocation OpLoc,
-                                   tok::TokenKind OpKind, TypeTy *&ObjectType,
+ExprResult
+Sema::ActOnStartCXXMemberReference(Scope *S, Expr *Base, SourceLocation OpLoc,
+                                   tok::TokenKind OpKind, ParsedType &ObjectType,
                                    bool &MayBePseudoDestructor) {
   // Since this might be a postfix expression, get rid of ParenListExprs.
-  Base = MaybeConvertParenListExprToParenExpr(S, move(Base));
+  ExprResult Result = MaybeConvertParenListExprToParenExpr(S, Base);
+  if (Result.isInvalid()) return ExprError();
+  Base = Result.get();
 
-  Expr *BaseExpr = (Expr*)Base.get();
-  assert(BaseExpr && "no record expansion");
-
-  QualType BaseType = BaseExpr->getType();
+  QualType BaseType = Base->getType();
   MayBePseudoDestructor = false;
   if (BaseType->isDependentType()) {
     // If we have a pointer to a dependent type and are using the -> operator,
@@ -2582,9 +2707,9 @@ Sema::ActOnStartCXXMemberReference(Scope *S, ExprArg Base, SourceLocation OpLoc,
       if (const PointerType *Ptr = BaseType->getAs<PointerType>())
         BaseType = Ptr->getPointeeType();
     
-    ObjectType = BaseType.getAsOpaquePtr();
+    ObjectType = ParsedType::make(BaseType);
     MayBePseudoDestructor = true;
-    return move(Base);
+    return Owned(Base);
   }
 
   // C++ [over.match.oper]p8:
@@ -2597,13 +2722,13 @@ Sema::ActOnStartCXXMemberReference(Scope *S, ExprArg Base, SourceLocation OpLoc,
     CTypes.insert(Context.getCanonicalType(BaseType));
     
     while (BaseType->isRecordType()) {
-      Base = BuildOverloadedArrowExpr(S, move(Base), OpLoc);
-      BaseExpr = (Expr*)Base.get();
-      if (BaseExpr == NULL)
+      Result = BuildOverloadedArrowExpr(S, Base, OpLoc);
+      if (Result.isInvalid())
         return ExprError();
-      if (CXXOperatorCallExpr *OpCall = dyn_cast<CXXOperatorCallExpr>(BaseExpr))
+      Base = Result.get();
+      if (CXXOperatorCallExpr *OpCall = dyn_cast<CXXOperatorCallExpr>(Base))
         Locations.push_back(OpCall->getDirectCallee()->getLocation());
-      BaseType = BaseExpr->getType();
+      BaseType = Base->getType();
       CanQualType CBaseType = Context.getCanonicalType(BaseType);
       if (!CTypes.insert(CBaseType)) {
         Diag(OpLoc, diag::err_operator_arrow_circular);
@@ -2628,9 +2753,9 @@ Sema::ActOnStartCXXMemberReference(Scope *S, ExprArg Base, SourceLocation OpLoc,
     //
     // This also indicates that we should be parsing a
     // pseudo-destructor-name.
-    ObjectType = 0;
+    ObjectType = ParsedType();
     MayBePseudoDestructor = true;
-    return move(Base);
+    return Owned(Base);
   }
 
   // The object type must be complete (or dependent).
@@ -2644,27 +2769,26 @@ Sema::ActOnStartCXXMemberReference(Scope *S, ExprArg Base, SourceLocation OpLoc,
   //   unqualified-id, and the type of the object expression is of a class
   //   type C (or of pointer to a class type C), the unqualified-id is looked
   //   up in the scope of class C. [...]
-  ObjectType = BaseType.getAsOpaquePtr();
+  ObjectType = ParsedType::make(BaseType);
   return move(Base);
 }
 
-Sema::OwningExprResult Sema::DiagnoseDtorReference(SourceLocation NameLoc,
-                                                   ExprArg MemExpr) {
-  Expr *E = (Expr *) MemExpr.get();
+ExprResult Sema::DiagnoseDtorReference(SourceLocation NameLoc,
+                                                   Expr *MemExpr) {
   SourceLocation ExpectedLParenLoc = PP.getLocForEndOfToken(NameLoc);
-  Diag(E->getLocStart(), diag::err_dtor_expr_without_call)
-    << isa<CXXPseudoDestructorExpr>(E)
+  Diag(MemExpr->getLocStart(), diag::err_dtor_expr_without_call)
+    << isa<CXXPseudoDestructorExpr>(MemExpr)
     << FixItHint::CreateInsertion(ExpectedLParenLoc, "()");
   
   return ActOnCallExpr(/*Scope*/ 0,
-                       move(MemExpr),
+                       MemExpr,
                        /*LPLoc*/ ExpectedLParenLoc,
-                       Sema::MultiExprArg(*this, 0, 0),
+                       MultiExprArg(),
                        /*CommaLocs*/ 0,
                        /*RPLoc*/ ExpectedLParenLoc);
 }
 
-Sema::OwningExprResult Sema::BuildPseudoDestructorExpr(ExprArg Base,
+ExprResult Sema::BuildPseudoDestructorExpr(Expr *Base,
                                                        SourceLocation OpLoc,
                                                        tok::TokenKind OpKind,
                                                        const CXXScopeSpec &SS,
@@ -2679,12 +2803,11 @@ Sema::OwningExprResult Sema::BuildPseudoDestructorExpr(ExprArg Base,
   //   The left-hand side of the dot operator shall be of scalar type. The 
   //   left-hand side of the arrow operator shall be of pointer to scalar type.
   //   This scalar type is the object type. 
-  Expr *BaseE = (Expr *)Base.get();
-  QualType ObjectType = BaseE->getType();
+  QualType ObjectType = Base->getType();
   if (OpKind == tok::arrow) {
     if (const PointerType *Ptr = ObjectType->getAs<PointerType>()) {
       ObjectType = Ptr->getPointeeType();
-    } else if (!BaseE->isTypeDependent()) {
+    } else if (!Base->isTypeDependent()) {
       // The user wrote "p->" when she probably meant "p."; fix it.
       Diag(OpLoc, diag::err_typecheck_member_reference_suggestion)
         << ObjectType << true
@@ -2698,7 +2821,7 @@ Sema::OwningExprResult Sema::BuildPseudoDestructorExpr(ExprArg Base,
   
   if (!ObjectType->isDependentType() && !ObjectType->isScalarType()) {
     Diag(OpLoc, diag::err_pseudo_dtor_base_not_scalar)
-      << ObjectType << BaseE->getSourceRange();
+      << ObjectType << Base->getSourceRange();
     return ExprError();
   }
 
@@ -2708,12 +2831,12 @@ Sema::OwningExprResult Sema::BuildPseudoDestructorExpr(ExprArg Base,
   if (DestructedTypeInfo) {
     QualType DestructedType = DestructedTypeInfo->getType();
     SourceLocation DestructedTypeStart
-      = DestructedTypeInfo->getTypeLoc().getSourceRange().getBegin();
+      = DestructedTypeInfo->getTypeLoc().getLocalSourceRange().getBegin();
     if (!DestructedType->isDependentType() && !ObjectType->isDependentType() &&
         !Context.hasSameUnqualifiedType(DestructedType, ObjectType)) {
       Diag(DestructedTypeStart, diag::err_pseudo_dtor_type_mismatch)
-        << ObjectType << DestructedType << BaseE->getSourceRange()
-        << DestructedTypeInfo->getTypeLoc().getSourceRange();
+        << ObjectType << DestructedType << Base->getSourceRange()
+        << DestructedTypeInfo->getTypeLoc().getLocalSourceRange();
       
       // Recover by setting the destructed type to the object type.
       DestructedType = ObjectType;
@@ -2733,37 +2856,34 @@ Sema::OwningExprResult Sema::BuildPseudoDestructorExpr(ExprArg Base,
   if (ScopeTypeInfo) {
     QualType ScopeType = ScopeTypeInfo->getType();
     if (!ScopeType->isDependentType() && !ObjectType->isDependentType() &&
-        !Context.hasSameType(ScopeType, ObjectType)) {
+        !Context.hasSameUnqualifiedType(ScopeType, ObjectType)) {
       
-      Diag(ScopeTypeInfo->getTypeLoc().getSourceRange().getBegin(),
+      Diag(ScopeTypeInfo->getTypeLoc().getLocalSourceRange().getBegin(),
            diag::err_pseudo_dtor_type_mismatch)
-        << ObjectType << ScopeType << BaseE->getSourceRange()
-        << ScopeTypeInfo->getTypeLoc().getSourceRange();
+        << ObjectType << ScopeType << Base->getSourceRange()
+        << ScopeTypeInfo->getTypeLoc().getLocalSourceRange();
   
       ScopeType = QualType();
       ScopeTypeInfo = 0;
     }
   }
   
-  OwningExprResult Result
-    = Owned(new (Context) CXXPseudoDestructorExpr(Context, 
-                                                  Base.takeAs<Expr>(),
-                                                  OpKind == tok::arrow,
-                                                  OpLoc,
-                                       (NestedNameSpecifier *) SS.getScopeRep(),
-                                                  SS.getRange(),
-                                                  ScopeTypeInfo,
-                                                  CCLoc,
-                                                  TildeLoc,
-                                                  Destructed));
+  Expr *Result
+    = new (Context) CXXPseudoDestructorExpr(Context, Base,
+                                            OpKind == tok::arrow, OpLoc,
+                                            SS.getScopeRep(), SS.getRange(),
+                                            ScopeTypeInfo,
+                                            CCLoc,
+                                            TildeLoc,
+                                            Destructed);
             
   if (HasTrailingLParen)
-    return move(Result);
+    return Owned(Result);
   
-  return DiagnoseDtorReference(Destructed.getLocation(), move(Result));
+  return DiagnoseDtorReference(Destructed.getLocation(), Result);
 }
 
-Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
+ExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, Expr *Base,
                                                        SourceLocation OpLoc,
                                                        tok::TokenKind OpKind,
                                                        CXXScopeSpec &SS,
@@ -2779,13 +2899,11 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
           SecondTypeName.getKind() == UnqualifiedId::IK_Identifier) &&
          "Invalid second type name in pseudo-destructor");
 
-  Expr *BaseE = (Expr *)Base.get();
-  
   // C++ [expr.pseudo]p2:
   //   The left-hand side of the dot operator shall be of scalar type. The 
   //   left-hand side of the arrow operator shall be of pointer to scalar type.
   //   This scalar type is the object type. 
-  QualType ObjectType = BaseE->getType();
+  QualType ObjectType = Base->getType();
   if (OpKind == tok::arrow) {
     if (const PointerType *Ptr = ObjectType->getAs<PointerType>()) {
       ObjectType = Ptr->getPointeeType();
@@ -2803,11 +2921,12 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
 
   // Compute the object type that we should use for name lookup purposes. Only
   // record types and dependent types matter.
-  void *ObjectTypePtrForLookup = 0;
+  ParsedType ObjectTypePtrForLookup;
   if (!SS.isSet()) {
-    ObjectTypePtrForLookup = (void *)ObjectType->getAs<RecordType>();
-    if (!ObjectTypePtrForLookup && ObjectType->isDependentType())
-      ObjectTypePtrForLookup = Context.DependentTy.getAsOpaquePtr();
+    if (const Type *T = ObjectType->getAs<RecordType>())
+      ObjectTypePtrForLookup = ParsedType::make(QualType(T, 0));
+    else if (ObjectType->isDependentType())
+      ObjectTypePtrForLookup = ParsedType::make(Context.DependentTy);
   }
   
   // Convert the name of the type being destructed (following the ~) into a 
@@ -2816,9 +2935,9 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
   TypeSourceInfo *DestructedTypeInfo = 0;
   PseudoDestructorTypeStorage Destructed;
   if (SecondTypeName.getKind() == UnqualifiedId::IK_Identifier) {
-    TypeTy *T = getTypeName(*SecondTypeName.Identifier, 
-                            SecondTypeName.StartLocation,
-                            S, &SS, true, ObjectTypePtrForLookup);
+    ParsedType T = getTypeName(*SecondTypeName.Identifier, 
+                               SecondTypeName.StartLocation,
+                               S, &SS, true, ObjectTypePtrForLookup);
     if (!T && 
         ((SS.isSet() && !computeDeclContext(SS, false)) ||
          (!SS.isSet() && ObjectType->isDependentType()))) {
@@ -2845,7 +2964,7 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
     ASTTemplateArgsPtr TemplateArgsPtr(*this,
                                        TemplateId->getTemplateArgs(),
                                        TemplateId->NumArgs);
-    TypeResult T = ActOnTemplateIdType(TemplateTy::make(TemplateId->Template),
+    TypeResult T = ActOnTemplateIdType(TemplateId->Template,
                                        TemplateId->TemplateNameLoc,
                                        TemplateId->LAngleLoc,
                                        TemplateArgsPtr,
@@ -2872,9 +2991,9 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
   if (FirstTypeName.getKind() == UnqualifiedId::IK_TemplateId || 
       FirstTypeName.Identifier) {
     if (FirstTypeName.getKind() == UnqualifiedId::IK_Identifier) {
-      TypeTy *T = getTypeName(*FirstTypeName.Identifier, 
-                              FirstTypeName.StartLocation,
-                              S, &SS, false, ObjectTypePtrForLookup);
+      ParsedType T = getTypeName(*FirstTypeName.Identifier, 
+                                 FirstTypeName.StartLocation,
+                                 S, &SS, false, ObjectTypePtrForLookup);
       if (!T) {
         Diag(FirstTypeName.StartLocation, 
              diag::err_pseudo_dtor_destructor_non_type)
@@ -2893,7 +3012,7 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
       ASTTemplateArgsPtr TemplateArgsPtr(*this,
                                          TemplateId->getTemplateArgs(),
                                          TemplateId->NumArgs);
-      TypeResult T = ActOnTemplateIdType(TemplateTy::make(TemplateId->Template),
+      TypeResult T = ActOnTemplateIdType(TemplateId->Template,
                                          TemplateId->TemplateNameLoc,
                                          TemplateId->LAngleLoc,
                                          TemplateArgsPtr,
@@ -2911,7 +3030,7 @@ Sema::OwningExprResult Sema::ActOnPseudoDestructorExpr(Scope *S, ExprArg Base,
                                                   FirstTypeName.StartLocation);
 
     
-  return BuildPseudoDestructorExpr(move(Base), OpLoc, OpKind, SS,
+  return BuildPseudoDestructorExpr(Base, OpLoc, OpKind, SS,
                                    ScopeTypeInfo, CCLoc, TildeLoc,
                                    Destructed, HasTrailingLParen);
 }
@@ -2924,9 +3043,9 @@ CXXMemberCallExpr *Sema::BuildCXXMemberCallExpr(Expr *Exp,
     assert(0 && "Calling BuildCXXMemberCallExpr with invalid call?");
 
   MemberExpr *ME = 
-      new (Context) MemberExpr(Exp, /*IsArrow=*/false, Method, 
+      new (Context) MemberExpr(Exp, /*IsArrow=*/false, Method,
                                SourceLocation(), Method->getType());
-  QualType ResultType = Method->getResultType().getNonReferenceType();
+  QualType ResultType = Method->getCallResultType();
   MarkDeclarationReferenced(Exp->getLocStart(), Method);
   CXXMemberCallExpr *CE =
     new (Context) CXXMemberCallExpr(Context, ME, 0, 0, ResultType,
@@ -2934,10 +3053,7 @@ CXXMemberCallExpr *Sema::BuildCXXMemberCallExpr(Expr *Exp,
   return CE;
 }
 
-Sema::OwningExprResult Sema::ActOnFinishFullExpr(ExprArg Arg) {
-  Expr *FullExpr = Arg.takeAs<Expr>();
-  if (FullExpr)
-    FullExpr = MaybeCreateCXXExprWithTemporaries(FullExpr);
-
-  return Owned(FullExpr);
+ExprResult Sema::ActOnFinishFullExpr(Expr *FullExpr) {
+  if (!FullExpr) return ExprError();
+  return MaybeCreateCXXExprWithTemporaries(FullExpr);
 }

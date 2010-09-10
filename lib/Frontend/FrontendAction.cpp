@@ -8,13 +8,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/FrontendAction.h"
+#include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
-#include "clang/Sema/ParseAST.h"
+#include "clang/Parse/ParseAST.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -25,33 +26,36 @@ FrontendAction::FrontendAction() : Instance(0) {}
 
 FrontendAction::~FrontendAction() {}
 
-void FrontendAction::setCurrentFile(llvm::StringRef Value, ASTUnit *AST) {
+void FrontendAction::setCurrentFile(llvm::StringRef Value, InputKind Kind,
+                                    ASTUnit *AST) {
   CurrentFile = Value;
+  CurrentFileKind = Kind;
   CurrentASTUnit.reset(AST);
 }
 
 bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
                                      llvm::StringRef Filename,
-                                     bool IsAST) {
+                                     InputKind InputKind) {
   assert(!Instance && "Already processing a source file!");
   assert(!Filename.empty() && "Unexpected empty filename!");
-  setCurrentFile(Filename);
+  setCurrentFile(Filename, InputKind);
   setCompilerInstance(&CI);
 
   // AST files follow a very different path, since they share objects via the
   // AST unit.
-  if (IsAST) {
+  if (InputKind == IK_AST) {
     assert(!usesPreprocessorOnly() &&
            "Attempt to pass AST file to preprocessor only action!");
-    assert(hasASTSupport() && "This action does not have AST support!");
+    assert(hasASTFileSupport() &&
+           "This action does not have AST file support!");
 
     llvm::IntrusiveRefCntPtr<Diagnostic> Diags(&CI.getDiagnostics());
     std::string Error;
-    ASTUnit *AST = ASTUnit::LoadFromPCHFile(Filename, Diags);
+    ASTUnit *AST = ASTUnit::LoadFromASTFile(Filename, Diags);
     if (!AST)
       goto failure;
 
-    setCurrentFile(Filename, AST);
+    setCurrentFile(Filename, InputKind, AST);
 
     // Set the shared objects, these are reset when we finish processing the
     // file, otherwise the CompilerInstance will happily destroy them.
@@ -72,6 +76,30 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     return true;
   }
 
+  // Set up the file and source managers, if needed.
+  if (!CI.hasFileManager())
+    CI.createFileManager();
+  if (!CI.hasSourceManager())
+    CI.createSourceManager();
+
+  // IR files bypass the rest of initialization.
+  if (InputKind == IK_LLVM_IR) {
+    assert(hasIRSupport() &&
+           "This action does not have IR file support!");
+
+    // Inform the diagnostic client we are processing a source file.
+    CI.getDiagnosticClient().BeginSourceFile(CI.getLangOpts(), 0);
+
+    // Initialize the action.
+    if (!BeginSourceFileAction(CI, Filename))
+      goto failure;
+
+    return true;
+  }
+
+  // Set up the preprocessor.
+  CI.createPreprocessor();
+
   // Inform the diagnostic client we are processing a source file.
   CI.getDiagnosticClient().BeginSourceFile(CI.getLangOpts(),
                                            &CI.getPreprocessor());
@@ -84,18 +112,24 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   /// action.
   if (!usesPreprocessorOnly()) {
     CI.createASTContext();
-    CI.setASTConsumer(CreateASTConsumer(CI, Filename));
-    if (!CI.hasASTConsumer())
-      goto failure;
+
+    llvm::OwningPtr<ASTConsumer> Consumer(CreateASTConsumer(CI, Filename));
 
     /// Use PCH?
     if (!CI.getPreprocessorOpts().ImplicitPCHInclude.empty()) {
       assert(hasPCHSupport() && "This action does not have PCH support!");
       CI.createPCHExternalASTSource(
-        CI.getPreprocessorOpts().ImplicitPCHInclude);
+                                CI.getPreprocessorOpts().ImplicitPCHInclude,
+                                CI.getPreprocessorOpts().DisablePCHValidation,
+                                CI.getInvocation().getFrontendOpts().ChainedPCH?
+                                 Consumer->GetASTDeserializationListener() : 0);
       if (!CI.getASTContext().getExternalSource())
         goto failure;
     }
+
+    CI.setASTConsumer(Consumer.take());
+    if (!CI.hasASTConsumer())
+      goto failure;
   }
 
   // Initialize builtin info as long as we aren't using an external AST
@@ -119,7 +153,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   }
 
   CI.getDiagnosticClient().EndSourceFile();
-  setCurrentFile("");
+  setCurrentFile("", IK_None);
   setCompilerInstance(0);
   return false;
 }
@@ -162,12 +196,16 @@ void FrontendAction::EndSourceFile() {
   // FIXME: There is more per-file stuff we could just drop here?
   if (CI.getFrontendOpts().DisableFree) {
     CI.takeASTConsumer();
-    if (!isCurrentFileAST())
+    if (!isCurrentFileAST()) {
+      CI.takeSema();
       CI.takeASTContext();
+    }
   } else {
-    CI.setASTConsumer(0);
-    if (!isCurrentFileAST())
+    if (!isCurrentFileAST()) {
+      CI.setSema(0);
       CI.setASTContext(0);
+    }
+    CI.setASTConsumer(0);
   }
 
   // Inform the preprocessor we are done.
@@ -191,6 +229,7 @@ void FrontendAction::EndSourceFile() {
   CI.getDiagnosticClient().EndSourceFile();
 
   if (isCurrentFileAST()) {
+    CI.takeSema();
     CI.takeASTContext();
     CI.takePreprocessor();
     CI.takeSourceManager();
@@ -198,7 +237,7 @@ void FrontendAction::EndSourceFile() {
   }
 
   setCompilerInstance(0);
-  setCurrentFile("");
+  setCurrentFile("", IK_None);
 }
 
 //===----------------------------------------------------------------------===//
@@ -219,9 +258,10 @@ void ASTFrontendAction::ExecuteAction() {
   if (CI.hasCodeCompletionConsumer())
     CompletionConsumer = &CI.getCodeCompletionConsumer();
 
-  ParseAST(CI.getPreprocessor(), &CI.getASTConsumer(), CI.getASTContext(),
-           CI.getFrontendOpts().ShowStats,
-           usesCompleteTranslationUnit(), CompletionConsumer);
+  if (!CI.hasSema())
+    CI.createSema(usesCompleteTranslationUnit(), CompletionConsumer);
+
+  ParseAST(CI.getSema(), CI.getFrontendOpts().ShowStats);
 }
 
 ASTConsumer *

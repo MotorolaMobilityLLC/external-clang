@@ -40,9 +40,17 @@ typedef __typeof__(*L"") wchar_t;
 
 #undef NULL
 #ifdef __cplusplus
+#undef __null  // VC++ hack.
 #define NULL __null
 #else
 #define NULL ((void*)0)
+#endif
+
+// Some C libraries expect to see a wint_t here. Others (notably MinGW) will use
+// __WINT_TYPE__ directly; accomodate both by requiring __need_wint_t
+#if defined(__need_wint_t) && !defined(_WINT_T)
+#define _WINT_T
+typedef __WINT_TYPE__ wint_t;
 #endif
 
 #define offsetof(t, d) __builtin_offsetof(t, d)

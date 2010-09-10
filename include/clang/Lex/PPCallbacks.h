@@ -16,6 +16,7 @@
 
 #include "clang/Lex/DirectoryLookup.h"
 #include "clang/Basic/SourceLocation.h"
+#include "llvm/ADT/StringRef.h"
 #include <string>
 
 namespace clang {
@@ -70,6 +71,12 @@ public:
                              const std::string &Str) {
   }
 
+  /// PragmaMessage - This callback is invoked when a #pragma message directive
+  /// is read.
+  ///
+  virtual void PragmaMessage(SourceLocation Loc, llvm::StringRef Str) {
+  }
+
   /// MacroExpands - This is called by
   /// Preprocessor::HandleMacroExpandedIdentifier when a macro invocation is
   /// found.
@@ -82,7 +89,8 @@ public:
 
   /// MacroUndefined - This hook is called whenever a macro #undef is seen.
   /// MI is released immediately following this callback.
-  virtual void MacroUndefined(const IdentifierInfo *II, const MacroInfo *MI) {
+  virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
+                              const MacroInfo *MI) {
   }
 };
 
@@ -127,6 +135,11 @@ public:
     Second->PragmaComment(Loc, Kind, Str);
   }
 
+  virtual void PragmaMessage(SourceLocation Loc, llvm::StringRef Str) {
+    First->PragmaMessage(Loc, Str);
+    Second->PragmaMessage(Loc, Str);
+  }
+
   virtual void MacroExpands(const Token &Id, const MacroInfo* MI) {
     First->MacroExpands(Id, MI);
     Second->MacroExpands(Id, MI);
@@ -137,9 +150,10 @@ public:
     Second->MacroDefined(II, MI);
   }
 
-  virtual void MacroUndefined(const IdentifierInfo *II, const MacroInfo *MI) {
-    First->MacroUndefined(II, MI);
-    Second->MacroUndefined(II, MI);
+  virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
+                              const MacroInfo *MI) {
+    First->MacroUndefined(Loc, II, MI);
+    Second->MacroUndefined(Loc, II, MI);
   }
 };
 

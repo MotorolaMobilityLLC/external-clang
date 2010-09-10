@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -analyze -inline-call -analyzer-store region -analyze-function f -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-check-objc-mem -analyzer-inline-call -analyzer-store region -verify %s
 
 int g(int a) {    
   return a;

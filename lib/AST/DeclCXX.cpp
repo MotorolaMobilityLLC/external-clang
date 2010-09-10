@@ -32,6 +32,8 @@ CXXRecordDecl::DefinitionData::DefinitionData(CXXRecordDecl *D)
     Abstract(false), HasTrivialConstructor(true),
     HasTrivialCopyConstructor(true), HasTrivialCopyAssignment(true),
     HasTrivialDestructor(true), ComputedVisibleConversions(false),
+    DeclaredDefaultConstructor(false), DeclaredCopyConstructor(false), 
+    DeclaredCopyAssignment(false), DeclaredDestructor(false),
     Bases(0), NumBases(0), VBases(0), NumVBases(0),
     Definition(D), FirstFriend(0) {
 }
@@ -58,16 +60,9 @@ CXXRecordDecl *CXXRecordDecl::Create(ASTContext &C, TagKind TK, DeclContext *DC,
   return R;
 }
 
-CXXRecordDecl::~CXXRecordDecl() {
-}
-
-void CXXRecordDecl::Destroy(ASTContext &C) {
-  if (data().Definition == this) {
-    C.Deallocate(data().Bases);
-    C.Deallocate(data().VBases);
-    C.Deallocate(&data());
-  }
-  this->RecordDecl::Destroy(C);
+CXXRecordDecl *CXXRecordDecl::Create(ASTContext &C, EmptyShell Empty) {
+  return new (C) CXXRecordDecl(CXXRecord, TTK_Struct, 0, SourceLocation(), 0, 0,
+                               SourceLocation());
 }
 
 void
@@ -126,19 +121,19 @@ CXXRecordDecl::setBases(CXXBaseSpecifier const * const *Bases,
   data().VBases = new (C) CXXBaseSpecifier[VBases.size()];
   data().NumVBases = VBases.size();
   for (int I = 0, E = VBases.size(); I != E; ++I) {
-    QualType VBaseType = VBases[I]->getType();
-    
+    TypeSourceInfo *VBaseTypeInfo = VBases[I]->getTypeSourceInfo();
+
     // Skip dependent types; we can't do any checking on them now.
-    if (VBaseType->isDependentType())
+    if (VBaseTypeInfo->getType()->isDependentType())
       continue;
 
-    CXXRecordDecl *VBaseClassDecl
-      = cast<CXXRecordDecl>(VBaseType->getAs<RecordType>()->getDecl());
+    CXXRecordDecl *VBaseClassDecl = cast<CXXRecordDecl>(
+      VBaseTypeInfo->getType()->getAs<RecordType>()->getDecl());
 
     data().VBases[I] =
       CXXBaseSpecifier(VBaseClassDecl->getSourceRange(), true,
-                       VBaseClassDecl->getTagKind() == RecordDecl::TK_class,
-                       VBases[I]->getAccessSpecifier(), VBaseType);
+                       VBaseClassDecl->getTagKind() == TTK_Class,
+                       VBases[I]->getAccessSpecifier(), VBaseTypeInfo);
   }
 }
 
@@ -159,6 +154,29 @@ bool CXXRecordDecl::hasConstCopyConstructor(ASTContext &Context) const {
   return getCopyConstructor(Context, Qualifiers::Const) != 0;
 }
 
+/// \brief Perform a simplistic form of overload resolution that only considers
+/// cv-qualifiers on a single parameter, and return the best overload candidate
+/// (if there is one).
+static CXXMethodDecl *
+GetBestOverloadCandidateSimple(
+  const llvm::SmallVectorImpl<std::pair<CXXMethodDecl *, Qualifiers> > &Cands) {
+  if (Cands.empty())
+    return 0;
+  if (Cands.size() == 1)
+    return Cands[0].first;
+  
+  unsigned Best = 0, N = Cands.size();
+  for (unsigned I = 1; I != N; ++I)
+    if (Cands[Best].second.isSupersetOf(Cands[I].second))
+      Best = I;
+  
+  for (unsigned I = 1; I != N; ++I)
+    if (Cands[Best].second.isSupersetOf(Cands[I].second))
+      return 0;
+  
+  return Cands[Best].first;
+}
+
 CXXConstructorDecl *CXXRecordDecl::getCopyConstructor(ASTContext &Context,
                                                       unsigned TypeQuals) const{
   QualType ClassType
@@ -167,6 +185,7 @@ CXXConstructorDecl *CXXRecordDecl::getCopyConstructor(ASTContext &Context,
     = Context.DeclarationNames.getCXXConstructorName(
                                           Context.getCanonicalType(ClassType));
   unsigned FoundTQs;
+  llvm::SmallVector<std::pair<CXXMethodDecl *, Qualifiers>, 4> Found;
   DeclContext::lookup_const_iterator Con, ConEnd;
   for (llvm::tie(Con, ConEnd) = this->lookup(ConstructorName);
        Con != ConEnd; ++Con) {
@@ -175,61 +194,68 @@ CXXConstructorDecl *CXXRecordDecl::getCopyConstructor(ASTContext &Context,
     if (isa<FunctionTemplateDecl>(*Con))
       continue;
 
-    if (cast<CXXConstructorDecl>(*Con)->isCopyConstructor(FoundTQs)) {
+    CXXConstructorDecl *Constructor = cast<CXXConstructorDecl>(*Con);
+    if (Constructor->isCopyConstructor(FoundTQs)) {
       if (((TypeQuals & Qualifiers::Const) == (FoundTQs & Qualifiers::Const)) ||
           (!(TypeQuals & Qualifiers::Const) && (FoundTQs & Qualifiers::Const)))
-        return cast<CXXConstructorDecl>(*Con);
-
+        Found.push_back(std::make_pair(
+                                 const_cast<CXXConstructorDecl *>(Constructor), 
+                                       Qualifiers::fromCVRMask(FoundTQs)));
     }
   }
-  return 0;
+  
+  return cast_or_null<CXXConstructorDecl>(
+                                        GetBestOverloadCandidateSimple(Found));
 }
 
-bool CXXRecordDecl::hasConstCopyAssignment(ASTContext &Context,
-                                           const CXXMethodDecl *& MD) const {
-  QualType ClassType = Context.getCanonicalType(Context.getTypeDeclType(
-    const_cast<CXXRecordDecl*>(this)));
-  DeclarationName OpName =Context.DeclarationNames.getCXXOperatorName(OO_Equal);
-
+CXXMethodDecl *CXXRecordDecl::getCopyAssignmentOperator(bool ArgIsConst) const {
+  ASTContext &Context = getASTContext();
+  QualType Class = Context.getTypeDeclType(const_cast<CXXRecordDecl *>(this));
+  DeclarationName Name = Context.DeclarationNames.getCXXOperatorName(OO_Equal);
+  
+  llvm::SmallVector<std::pair<CXXMethodDecl *, Qualifiers>, 4> Found;
   DeclContext::lookup_const_iterator Op, OpEnd;
-  for (llvm::tie(Op, OpEnd) = this->lookup(OpName);
-       Op != OpEnd; ++Op) {
+  for (llvm::tie(Op, OpEnd) = this->lookup(Name); Op != OpEnd; ++Op) {
     // C++ [class.copy]p9:
     //   A user-declared copy assignment operator is a non-static non-template
     //   member function of class X with exactly one parameter of type X, X&,
     //   const X&, volatile X& or const volatile X&.
     const CXXMethodDecl* Method = dyn_cast<CXXMethodDecl>(*Op);
-    if (!Method)
+    if (!Method || Method->isStatic() || Method->getPrimaryTemplate())
       continue;
-
-    if (Method->isStatic())
-      continue;
-    if (Method->getPrimaryTemplate())
-      continue;
-    const FunctionProtoType *FnType =
-      Method->getType()->getAs<FunctionProtoType>();
+    
+    const FunctionProtoType *FnType 
+      = Method->getType()->getAs<FunctionProtoType>();
     assert(FnType && "Overloaded operator has no prototype.");
     // Don't assert on this; an invalid decl might have been left in the AST.
     if (FnType->getNumArgs() != 1 || FnType->isVariadic())
       continue;
-    bool AcceptsConst = true;
+    
     QualType ArgType = FnType->getArgType(0);
+    Qualifiers Quals;
     if (const LValueReferenceType *Ref = ArgType->getAs<LValueReferenceType>()) {
       ArgType = Ref->getPointeeType();
-      // Is it a non-const lvalue reference?
-      if (!ArgType.isConstQualified())
-        AcceptsConst = false;
+      // If we have a const argument and we have a reference to a non-const,
+      // this function does not match.
+      if (ArgIsConst && !ArgType.isConstQualified())
+        continue;
+      
+      Quals = ArgType.getQualifiers();
+    } else {
+      // By-value copy-assignment operators are treated like const X&
+      // copy-assignment operators.
+      Quals = Qualifiers::fromCVRMask(Qualifiers::Const);
     }
-    if (!Context.hasSameUnqualifiedType(ArgType, ClassType))
+    
+    if (!Context.hasSameUnqualifiedType(ArgType, Class))
       continue;
-    MD = Method;
-    // We have a single argument of type cv X or cv X&, i.e. we've found the
-    // copy assignment operator. Return whether it accepts const arguments.
-    return AcceptsConst;
+
+    // Save this copy-assignment operator. It might be "the one".
+    Found.push_back(std::make_pair(const_cast<CXXMethodDecl *>(Method), Quals));
   }
-  assert(isInvalidDecl() &&
-         "No copy assignment operator declared in valid code.");
-  return false;
+  
+  // Use a simplistic form of overload resolution to find the candidate.
+  return GetBestOverloadCandidateSimple(Found);
 }
 
 void
@@ -239,6 +265,9 @@ CXXRecordDecl::addedConstructor(ASTContext &Context,
   // Note that we have a user-declared constructor.
   data().UserDeclaredConstructor = true;
 
+  // Note that we have no need of an implicitly-declared default constructor.
+  data().DeclaredDefaultConstructor = true;
+  
   // C++ [dcl.init.aggr]p1:
   //   An aggregate is an array or a class (clause 9) with no
   //   user-declared constructors (12.1) [...].
@@ -258,11 +287,13 @@ CXXRecordDecl::addedConstructor(ASTContext &Context,
   // suppress the implicit declaration of a copy constructor.
   if (ConDecl->isCopyConstructor()) {
     data().UserDeclaredCopyConstructor = true;
-
+    data().DeclaredCopyConstructor = true;
+    
     // C++ [class.copy]p6:
     //   A copy constructor is trivial if it is implicitly declared.
     // FIXME: C++0x: don't do this for "= default" copy constructors.
     data().HasTrivialCopyConstructor = false;
+    
   }
 }
 
@@ -294,7 +325,8 @@ void CXXRecordDecl::addedAssignmentOperator(ASTContext &Context,
 
   // Suppress the implicit declaration of a copy constructor.
   data().UserDeclaredCopyAssignment = true;
-
+  data().DeclaredCopyAssignment = true;
+  
   // C++ [class.copy]p11:
   //   A copy assignment operator is trivial if it is implicitly declared.
   // FIXME: C++0x: don't do this for "= default" copy operators.
@@ -546,7 +578,8 @@ CXXRecordDecl::setTemplateSpecializationKind(TemplateSpecializationKind TSK) {
 }
 
 CXXConstructorDecl *
-CXXRecordDecl::getDefaultConstructor(ASTContext &Context) {
+CXXRecordDecl::getDefaultConstructor() {
+  ASTContext &Context = getASTContext();
   QualType ClassType = Context.getTypeDeclType(this);
   DeclarationName ConstructorName
     = Context.DeclarationNames.getCXXConstructorName(
@@ -566,7 +599,8 @@ CXXRecordDecl::getDefaultConstructor(ASTContext &Context) {
   return 0;
 }
 
-CXXDestructorDecl *CXXRecordDecl::getDestructor(ASTContext &Context) const {
+CXXDestructorDecl *CXXRecordDecl::getDestructor() const {
+  ASTContext &Context = getASTContext();
   QualType ClassType = Context.getTypeDeclType(this);
 
   DeclarationName Name
@@ -585,10 +619,10 @@ CXXDestructorDecl *CXXRecordDecl::getDestructor(ASTContext &Context) const {
 
 CXXMethodDecl *
 CXXMethodDecl::Create(ASTContext &C, CXXRecordDecl *RD,
-                      SourceLocation L, DeclarationName N,
+                      const DeclarationNameInfo &NameInfo,
                       QualType T, TypeSourceInfo *TInfo,
                       bool isStatic, StorageClass SCAsWritten, bool isInline) {
-  return new (C) CXXMethodDecl(CXXMethod, RD, L, N, T, TInfo,
+  return new (C) CXXMethodDecl(CXXMethod, RD, NameInfo, T, TInfo,
                                isStatic, SCAsWritten, isInline);
 }
 
@@ -633,6 +667,27 @@ bool CXXMethodDecl::isUsualDeallocationFunction() const {
   return true;
 }
 
+bool CXXMethodDecl::isCopyAssignmentOperator() const {
+  // C++0x [class.copy]p19:
+  //  A user-declared copy assignment operator X::operator= is a non-static 
+  //  non-template member function of class X with exactly one parameter of 
+  //  type X, X&, const X&, volatile X& or const volatile X&.
+  if (/*operator=*/getOverloadedOperator() != OO_Equal ||
+      /*non-static*/ isStatic() || 
+      /*non-template*/getPrimaryTemplate() || getDescribedFunctionTemplate() ||
+      /*exactly one parameter*/getNumParams() != 1)
+    return false;
+      
+  QualType ParamType = getParamDecl(0)->getType();
+  if (const LValueReferenceType *Ref = ParamType->getAs<LValueReferenceType>())
+    ParamType = Ref->getPointeeType();
+  
+  ASTContext &Context = getASTContext();
+  QualType ClassType
+    = Context.getCanonicalType(Context.getTypeDeclType(getParent()));
+  return Context.hasSameUnqualifiedType(ClassType, ParamType);
+}
+
 void CXXMethodDecl::addOverriddenMethod(const CXXMethodDecl *MD) {
   assert(MD->isCanonicalDecl() && "Method is not canonical!");
   assert(!MD->getParent()->isDependentContext() &&
@@ -647,6 +702,10 @@ CXXMethodDecl::method_iterator CXXMethodDecl::begin_overridden_methods() const {
 
 CXXMethodDecl::method_iterator CXXMethodDecl::end_overridden_methods() const {
   return getASTContext().overridden_methods_end(this);
+}
+
+unsigned CXXMethodDecl::size_overridden_methods() const {
+  return getASTContext().overridden_methods_size(this);
 }
 
 QualType CXXMethodDecl::getThisType(ASTContext &C) const {
@@ -672,15 +731,16 @@ bool CXXMethodDecl::hasInlineBody() const {
     CheckFn = this;
   
   const FunctionDecl *fn;
-  return CheckFn->getBody(fn) && !fn->isOutOfLine();
+  return CheckFn->hasBody(fn) && !fn->isOutOfLine();
 }
 
 CXXBaseOrMemberInitializer::
 CXXBaseOrMemberInitializer(ASTContext &Context,
                            TypeSourceInfo *TInfo, bool IsVirtual,
                            SourceLocation L, Expr *Init, SourceLocation R)
-  : BaseOrMember(TInfo), Init(Init), AnonUnionMember(0), IsVirtual(IsVirtual),
-    LParenLoc(L), RParenLoc(R) 
+  : BaseOrMember(TInfo), Init(Init), AnonUnionMember(0),
+    LParenLoc(L), RParenLoc(R), IsVirtual(IsVirtual), IsWritten(false),
+    SourceOrderOrNumArrayIndices(0)
 {
 }
 
@@ -688,15 +748,40 @@ CXXBaseOrMemberInitializer::
 CXXBaseOrMemberInitializer(ASTContext &Context,
                            FieldDecl *Member, SourceLocation MemberLoc,
                            SourceLocation L, Expr *Init, SourceLocation R)
-  : BaseOrMember(Member), MemberLocation(MemberLoc), Init(Init), 
-    AnonUnionMember(0), LParenLoc(L), RParenLoc(R) 
+  : BaseOrMember(Member), MemberLocation(MemberLoc), Init(Init),
+    AnonUnionMember(0), LParenLoc(L), RParenLoc(R), IsVirtual(false),
+    IsWritten(false), SourceOrderOrNumArrayIndices(0)
 {
 }
 
-void CXXBaseOrMemberInitializer::Destroy(ASTContext &Context) {
-  if (Init)
-    Init->Destroy(Context);
-  this->~CXXBaseOrMemberInitializer();
+CXXBaseOrMemberInitializer::
+CXXBaseOrMemberInitializer(ASTContext &Context,
+                           FieldDecl *Member, SourceLocation MemberLoc,
+                           SourceLocation L, Expr *Init, SourceLocation R,
+                           VarDecl **Indices,
+                           unsigned NumIndices)
+  : BaseOrMember(Member), MemberLocation(MemberLoc), Init(Init), 
+    AnonUnionMember(0), LParenLoc(L), RParenLoc(R), IsVirtual(false),
+    IsWritten(false), SourceOrderOrNumArrayIndices(NumIndices)
+{
+  VarDecl **MyIndices = reinterpret_cast<VarDecl **> (this + 1);
+  memcpy(MyIndices, Indices, NumIndices * sizeof(VarDecl *));
+}
+
+CXXBaseOrMemberInitializer *
+CXXBaseOrMemberInitializer::Create(ASTContext &Context,
+                                   FieldDecl *Member, 
+                                   SourceLocation MemberLoc,
+                                   SourceLocation L,
+                                   Expr *Init,
+                                   SourceLocation R,
+                                   VarDecl **Indices,
+                                   unsigned NumIndices) {
+  void *Mem = Context.Allocate(sizeof(CXXBaseOrMemberInitializer) +
+                               sizeof(VarDecl *) * NumIndices,
+                               llvm::alignof<CXXBaseOrMemberInitializer>());
+  return new (Mem) CXXBaseOrMemberInitializer(Context, Member, MemberLoc,
+                                              L, Init, R, Indices, NumIndices);
 }
 
 TypeLoc CXXBaseOrMemberInitializer::getBaseClassLoc() const {
@@ -724,7 +809,7 @@ SourceLocation CXXBaseOrMemberInitializer::getSourceLocation() const {
   if (isMemberInitializer())
     return getMemberLocation();
   
-  return getBaseClassLoc().getSourceRange().getBegin();
+  return getBaseClassLoc().getLocalSourceRange().getBegin();
 }
 
 SourceRange CXXBaseOrMemberInitializer::getSourceRange() const {
@@ -732,15 +817,22 @@ SourceRange CXXBaseOrMemberInitializer::getSourceRange() const {
 }
 
 CXXConstructorDecl *
+CXXConstructorDecl::Create(ASTContext &C, EmptyShell Empty) {
+  return new (C) CXXConstructorDecl(0, DeclarationNameInfo(),
+                                    QualType(), 0, false, false, false);
+}
+
+CXXConstructorDecl *
 CXXConstructorDecl::Create(ASTContext &C, CXXRecordDecl *RD,
-                           SourceLocation L, DeclarationName N,
+                           const DeclarationNameInfo &NameInfo,
                            QualType T, TypeSourceInfo *TInfo,
                            bool isExplicit,
                            bool isInline,
                            bool isImplicitlyDeclared) {
-  assert(N.getNameKind() == DeclarationName::CXXConstructorName &&
+  assert(NameInfo.getName().getNameKind()
+         == DeclarationName::CXXConstructorName &&
          "Name must refer to a constructor");
-  return new (C) CXXConstructorDecl(RD, L, N, T, TInfo, isExplicit,
+  return new (C) CXXConstructorDecl(RD, NameInfo, T, TInfo, isExplicit,
                                     isInline, isImplicitlyDeclared);
 }
 
@@ -834,29 +926,39 @@ bool CXXConstructorDecl::isCopyConstructorLikeSpecialization() const {
 }
 
 CXXDestructorDecl *
-CXXDestructorDecl::Create(ASTContext &C, CXXRecordDecl *RD,
-                          SourceLocation L, DeclarationName N,
-                          QualType T, bool isInline,
-                          bool isImplicitlyDeclared) {
-  assert(N.getNameKind() == DeclarationName::CXXDestructorName &&
-         "Name must refer to a destructor");
-  return new (C) CXXDestructorDecl(RD, L, N, T, isInline, isImplicitlyDeclared);
+CXXDestructorDecl::Create(ASTContext &C, EmptyShell Empty) {
+  return new (C) CXXDestructorDecl(0, DeclarationNameInfo(),
+                                   QualType(), false, false);
 }
 
-void
-CXXConstructorDecl::Destroy(ASTContext& C) {
-  C.Deallocate(BaseOrMemberInitializers);
-  CXXMethodDecl::Destroy(C);
+CXXDestructorDecl *
+CXXDestructorDecl::Create(ASTContext &C, CXXRecordDecl *RD,
+                          const DeclarationNameInfo &NameInfo,
+                          QualType T, bool isInline,
+                          bool isImplicitlyDeclared) {
+  assert(NameInfo.getName().getNameKind()
+         == DeclarationName::CXXDestructorName &&
+         "Name must refer to a destructor");
+  return new (C) CXXDestructorDecl(RD, NameInfo, T, isInline,
+                                   isImplicitlyDeclared);
+}
+
+CXXConversionDecl *
+CXXConversionDecl::Create(ASTContext &C, EmptyShell Empty) {
+  return new (C) CXXConversionDecl(0, DeclarationNameInfo(),
+                                   QualType(), 0, false, false);
 }
 
 CXXConversionDecl *
 CXXConversionDecl::Create(ASTContext &C, CXXRecordDecl *RD,
-                          SourceLocation L, DeclarationName N,
+                          const DeclarationNameInfo &NameInfo,
                           QualType T, TypeSourceInfo *TInfo,
                           bool isInline, bool isExplicit) {
-  assert(N.getNameKind() == DeclarationName::CXXConversionFunctionName &&
+  assert(NameInfo.getName().getNameKind()
+         == DeclarationName::CXXConversionFunctionName &&
          "Name must refer to a conversion function");
-  return new (C) CXXConversionDecl(RD, L, N, T, TInfo, isInline, isExplicit);
+  return new (C) CXXConversionDecl(RD, NameInfo, T, TInfo,
+                                   isInline, isExplicit);
 }
 
 LinkageSpecDecl *LinkageSpecDecl::Create(ASTContext &C,
@@ -887,6 +989,12 @@ NamespaceDecl *UsingDirectiveDecl::getNominatedNamespace() {
   return cast_or_null<NamespaceDecl>(NominatedNamespace);
 }
 
+void UsingDirectiveDecl::setNominatedNamespace(NamedDecl* ND) {
+  assert((isa<NamespaceDecl>(ND) || isa<NamespaceAliasDecl>(ND)) &&
+    "expected a NamespaceDecl or NamespaceAliasDecl");
+  NominatedNamespace = ND;
+}
+
 NamespaceAliasDecl *NamespaceAliasDecl::Create(ASTContext &C, DeclContext *DC,
                                                SourceLocation L,
                                                SourceLocation AliasLoc,
@@ -902,10 +1010,11 @@ NamespaceAliasDecl *NamespaceAliasDecl::Create(ASTContext &C, DeclContext *DC,
 }
 
 UsingDecl *UsingDecl::Create(ASTContext &C, DeclContext *DC,
-      SourceLocation L, SourceRange NNR, SourceLocation UL,
-      NestedNameSpecifier* TargetNNS, DeclarationName Name,
-      bool IsTypeNameArg) {
-  return new (C) UsingDecl(DC, L, NNR, UL, TargetNNS, Name, IsTypeNameArg);
+                             SourceRange NNR, SourceLocation UL,
+                             NestedNameSpecifier* TargetNNS,
+                             const DeclarationNameInfo &NameInfo,
+                             bool IsTypeNameArg) {
+  return new (C) UsingDecl(DC, NNR, UL, TargetNNS, NameInfo, IsTypeNameArg);
 }
 
 UnresolvedUsingValueDecl *
@@ -913,11 +1022,9 @@ UnresolvedUsingValueDecl::Create(ASTContext &C, DeclContext *DC,
                                  SourceLocation UsingLoc,
                                  SourceRange TargetNNR,
                                  NestedNameSpecifier *TargetNNS,
-                                 SourceLocation TargetNameLoc,
-                                 DeclarationName TargetName) {
+                                 const DeclarationNameInfo &NameInfo) {
   return new (C) UnresolvedUsingValueDecl(DC, C.DependentTy, UsingLoc,
-                                          TargetNNR, TargetNNS,
-                                          TargetNameLoc, TargetName);
+                                          TargetNNR, TargetNNS, NameInfo);
 }
 
 UnresolvedUsingTypenameDecl *
@@ -940,15 +1047,6 @@ StaticAssertDecl *StaticAssertDecl::Create(ASTContext &C, DeclContext *DC,
   return new (C) StaticAssertDecl(DC, L, AssertExpr, Message);
 }
 
-void StaticAssertDecl::Destroy(ASTContext& C) {
-  AssertExpr->Destroy(C);
-  Message->Destroy(C);
-  Decl::Destroy(C);
-}
-
-StaticAssertDecl::~StaticAssertDecl() {
-}
-
 static const char *getAccessName(AccessSpecifier AS) {
   switch (AS) {
     default:
@@ -968,5 +1066,3 @@ const DiagnosticBuilder &clang::operator<<(const DiagnosticBuilder &DB,
                                            AccessSpecifier AS) {
   return DB << getAccessName(AS);
 }
-
-

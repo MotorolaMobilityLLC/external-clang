@@ -207,8 +207,12 @@ class CodeGenVTables {
   
   /// Thunks - Contains all thunks that a given method decl will need.
   ThunksMapTy Thunks;
-  
-  typedef llvm::DenseMap<const CXXRecordDecl *, uint64_t *> VTableLayoutMapTy;
+
+  // The layout entry and a bool indicating whether we've actually emitted
+  // the vtable.
+  typedef llvm::PointerIntPair<uint64_t *, 1, bool> VTableLayoutData;
+  typedef llvm::DenseMap<const CXXRecordDecl *, VTableLayoutData>
+    VTableLayoutMapTy;
   
   /// VTableLayoutMap - Stores the vtable layout for all record decls.
   /// The layout is stored as an array of 64-bit integers, where the first
@@ -216,8 +220,8 @@ class CodeGenVTables {
   /// integers are the vtable components.
   VTableLayoutMapTy VTableLayoutMap;
 
-  typedef llvm::DenseMap<std::pair<const CXXRecordDecl *, 
-                                   BaseSubobject>, uint64_t> AddressPointsMapTy;
+  typedef std::pair<const CXXRecordDecl *, BaseSubobject> BaseSubobjectPairTy;
+  typedef llvm::DenseMap<BaseSubobjectPairTy, uint64_t> AddressPointsMapTy;
   
   /// Address points - Address points for all vtables.
   AddressPointsMapTy AddressPoints;
@@ -237,24 +241,22 @@ class CodeGenVTables {
   uint64_t getNumVTableComponents(const CXXRecordDecl *RD) const {
     assert(VTableLayoutMap.count(RD) && "No vtable layout for this class!");
     
-    return VTableLayoutMap.lookup(RD)[0];
+    return VTableLayoutMap.lookup(RD).getPointer()[0];
   }
 
   const uint64_t *getVTableComponentsData(const CXXRecordDecl *RD) const {
     assert(VTableLayoutMap.count(RD) && "No vtable layout for this class!");
 
-    uint64_t *Components = VTableLayoutMap.lookup(RD);
+    uint64_t *Components = VTableLayoutMap.lookup(RD).getPointer();
     return &Components[1];
   }
 
-  typedef llvm::DenseMap<ClassPairTy, uint64_t> SubVTTIndiciesMapTy;
+  typedef llvm::DenseMap<BaseSubobjectPairTy, uint64_t> SubVTTIndiciesMapTy;
   
   /// SubVTTIndicies - Contains indices into the various sub-VTTs.
   SubVTTIndiciesMapTy SubVTTIndicies;
 
-   
-  typedef llvm::DenseMap<std::pair<const CXXRecordDecl *, 
-                                   BaseSubobject>, uint64_t>
+  typedef llvm::DenseMap<BaseSubobjectPairTy, uint64_t>
     SecondaryVirtualPointerIndicesMapTy;
 
   /// SecondaryVirtualPointerIndices - Contains the secondary virtual pointer
@@ -274,13 +276,11 @@ class CodeGenVTables {
   /// EmitThunk - Emit a single thunk.
   void EmitThunk(GlobalDecl GD, const ThunkInfo &Thunk);
   
-  /// EmitThunks - Emit the associated thunks for the given global decl.
-  void EmitThunks(GlobalDecl GD);
-  
   /// ComputeVTableRelatedInformation - Compute and store all vtable related
   /// information (vtable layout, vbase offset offsets, thunks etc) for the
   /// given record decl.
-  void ComputeVTableRelatedInformation(const CXXRecordDecl *RD);
+  void ComputeVTableRelatedInformation(const CXXRecordDecl *RD,
+                                       bool VTableRequired);
 
   /// CreateVTableInitializer - Create a vtable initializer for the given record
   /// decl.
@@ -301,7 +301,7 @@ public:
 				       const CXXRecordDecl *RD) {
     assert (RD->isDynamicClass() && "Non dynamic classes have no key.");
     const CXXMethodDecl *KeyFunction = Context.getKeyFunction(RD);
-    return KeyFunction && !KeyFunction->getBody();
+    return KeyFunction && !KeyFunction->hasBody();
   }
 
   /// needsVTTParameter - Return whether the given global decl needs a VTT
@@ -311,7 +311,7 @@ public:
 
   /// getSubVTTIndex - Return the index of the sub-VTT for the base class of the
   /// given record decl.
-  uint64_t getSubVTTIndex(const CXXRecordDecl *RD, const CXXRecordDecl *Base);
+  uint64_t getSubVTTIndex(const CXXRecordDecl *RD, BaseSubobject Base);
   
   /// getSecondaryVirtualPointerIndex - Return the index in the VTT where the
   /// virtual pointer for the given subobject is located.
@@ -351,11 +351,10 @@ public:
                              VTableAddressPointsMapTy& AddressPoints);
   
   llvm::GlobalVariable *getVTT(const CXXRecordDecl *RD);
-  
-  // EmitVTableRelatedData - Will emit any thunks that the global decl might
-  // have, as well as the vtable itself if the global decl is the key function.
-  void EmitVTableRelatedData(GlobalDecl GD);
 
+  /// EmitThunks - Emit the associated thunks for the given global decl.
+  void EmitThunks(GlobalDecl GD);
+    
   /// GenerateClassData - Generate all the class data required to be generated
   /// upon definition of a KeyFunction.  This includes the vtable, the
   /// rtti data structure and the VTT.

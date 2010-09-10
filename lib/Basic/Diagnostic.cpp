@@ -38,6 +38,8 @@ using namespace clang;
 // Builtin Diagnostic information
 //===----------------------------------------------------------------------===//
 
+namespace {
+
 // Diagnostic classes.
 enum {
   CLASS_NOTE       = 0x01,
@@ -51,20 +53,21 @@ struct StaticDiagInfoRec {
   unsigned Mapping : 3;
   unsigned Class : 3;
   bool SFINAE : 1;
+  unsigned Category : 5;
+  
   const char *Description;
   const char *OptionGroup;
 
   bool operator<(const StaticDiagInfoRec &RHS) const {
     return DiagID < RHS.DiagID;
   }
-  bool operator>(const StaticDiagInfoRec &RHS) const {
-    return DiagID > RHS.DiagID;
-  }
 };
 
+}
+
 static const StaticDiagInfoRec StaticDiagInfo[] = {
-#define DIAG(ENUM,CLASS,DEFAULT_MAPPING,DESC,GROUP,SFINAE)    \
-  { diag::ENUM, DEFAULT_MAPPING, CLASS, SFINAE, DESC, GROUP },
+#define DIAG(ENUM,CLASS,DEFAULT_MAPPING,DESC,GROUP,SFINAE, CATEGORY)    \
+  { diag::ENUM, DEFAULT_MAPPING, CLASS, SFINAE, CATEGORY, DESC, GROUP },
 #include "clang/Basic/DiagnosticCommonKinds.inc"
 #include "clang/Basic/DiagnosticDriverKinds.inc"
 #include "clang/Basic/DiagnosticFrontendKinds.inc"
@@ -73,7 +76,7 @@ static const StaticDiagInfoRec StaticDiagInfo[] = {
 #include "clang/Basic/DiagnosticASTKinds.inc"
 #include "clang/Basic/DiagnosticSemaKinds.inc"
 #include "clang/Basic/DiagnosticAnalysisKinds.inc"
-  { 0, 0, 0, 0, 0, 0}
+  { 0, 0, 0, 0, 0, 0, 0}
 };
 #undef DIAG
 
@@ -99,7 +102,7 @@ static const StaticDiagInfoRec *GetDiagInfo(unsigned DiagID) {
 #endif
 
   // Search the diagnostic table with a binary search.
-  StaticDiagInfoRec Find = { DiagID, 0, 0, 0, 0, 0 };
+  StaticDiagInfoRec Find = { DiagID, 0, 0, 0, 0, 0, 0 };
 
   const StaticDiagInfoRec *Found =
     std::lower_bound(StaticDiagInfo, StaticDiagInfo + NumDiagEntries, Find);
@@ -124,6 +127,35 @@ const char *Diagnostic::getWarningOptionForDiag(unsigned DiagID) {
     return Info->OptionGroup;
   return 0;
 }
+
+/// getWarningOptionForDiag - Return the category number that a specified
+/// DiagID belongs to, or 0 if no category.
+unsigned Diagnostic::getCategoryNumberForDiag(unsigned DiagID) {
+  if (const StaticDiagInfoRec *Info = GetDiagInfo(DiagID))
+    return Info->Category;
+  return 0;
+}
+
+/// getCategoryNameFromID - Given a category ID, return the name of the
+/// category, an empty string if CategoryID is zero, or null if CategoryID is
+/// invalid.
+const char *Diagnostic::getCategoryNameFromID(unsigned CategoryID) {
+  // Second the table of options, sorted by name for fast binary lookup.
+  static const char *CategoryNameTable[] = {
+#define GET_CATEGORY_TABLE
+#define CATEGORY(X) X,
+#include "clang/Basic/DiagnosticGroups.inc"
+#undef GET_CATEGORY_TABLE
+    "<<END>>"
+  };
+  static const size_t CategoryNameTableSize =
+    sizeof(CategoryNameTable) / sizeof(CategoryNameTable[0])-1;
+  
+  if (CategoryID >= CategoryNameTableSize) return 0;
+  return CategoryNameTable[CategoryID];
+}
+
+
 
 Diagnostic::SFINAEResponse 
 Diagnostic::getDiagnosticSFINAEResponse(unsigned DiagID) {
@@ -213,34 +245,27 @@ static void DummyArgToStringFn(Diagnostic::ArgumentKind AK, intptr_t QT,
 
 
 Diagnostic::Diagnostic(DiagnosticClient *client) : Client(client) {
+  ArgToStringFn = DummyArgToStringFn;
+  ArgToStringCookie = 0;
+
   AllExtensionsSilenced = 0;
   IgnoreAllWarnings = false;
   WarningsAsErrors = false;
   ErrorsAsFatal = false;
   SuppressSystemWarnings = false;
   SuppressAllDiagnostics = false;
+  ShowOverloads = Ovl_All;
   ExtBehavior = Ext_Ignore;
 
-  ErrorOccurred = false;
-  FatalErrorOccurred = false;
   ErrorLimit = 0;
   TemplateBacktraceLimit = 0;
-
-  NumWarnings = 0;
-  NumErrors = 0;
-  NumErrorsSuppressed = 0;
   CustomDiagInfo = 0;
-  CurDiagID = ~0U;
-  LastDiagLevel = Ignored;
-
-  ArgToStringFn = DummyArgToStringFn;
-  ArgToStringCookie = 0;
-
-  DelayedDiagID = 0;
 
   // Set all mappings to 'unset'.
-  DiagMappings BlankDiags(diag::DIAG_UPPER_LIMIT/2, 0);
-  DiagMappingsStack.push_back(BlankDiags);
+  DiagMappingsStack.clear();
+  DiagMappingsStack.push_back(DiagMappings());
+
+  Reset();
 }
 
 Diagnostic::~Diagnostic() {
@@ -299,10 +324,21 @@ bool Diagnostic::isBuiltinExtensionDiag(unsigned DiagID,
       getBuiltinDiagClass(DiagID) != CLASS_EXTENSION)
     return false;
   
-  EnabledByDefault = StaticDiagInfo[DiagID].Mapping != diag::MAP_IGNORE;
+  EnabledByDefault = GetDefaultDiagMapping(DiagID) != diag::MAP_IGNORE;
   return true;
 }
 
+void Diagnostic::Reset() {
+  ErrorOccurred = false;
+  FatalErrorOccurred = false;
+  
+  NumWarnings = 0;
+  NumErrors = 0;
+  NumErrorsSuppressed = 0;
+  CurDiagID = ~0U;
+  LastDiagLevel = Ignored;
+  DelayedDiagID = 0;
+}
 
 /// getDescription - Given a diagnostic ID, return a description of the
 /// issue.
@@ -430,7 +466,7 @@ Diagnostic::getDiagnosticLevel(unsigned DiagID, unsigned DiagClass) const {
 struct WarningOption {
   const char  *Name;
   const short *Members;
-  const char  *SubGroups;
+  const short *SubGroups;
 };
 
 #define GET_DIAG_ARRAYS
@@ -460,9 +496,9 @@ static void MapGroupMembers(const WarningOption *Group, diag::Mapping Mapping,
   }
 
   // Enable/disable all subgroups along with this one.
-  if (const char *SubGroups = Group->SubGroups) {
-    for (; *SubGroups != (char)-1; ++SubGroups)
-      MapGroupMembers(&OptionTable[(unsigned char)*SubGroups], Mapping, Diags);
+  if (const short *SubGroups = Group->SubGroups) {
+    for (; *SubGroups != (short)-1; ++SubGroups)
+      MapGroupMembers(&OptionTable[(short)*SubGroups], Mapping, Diags);
   }
 }
 
@@ -540,11 +576,11 @@ bool Diagnostic::ProcessDiag() {
   // If a fatal error has already been emitted, silence all subsequent
   // diagnostics.
   if (FatalErrorOccurred) {
-    if (DiagLevel >= Diagnostic::Error) {
+    if (DiagLevel >= Diagnostic::Error && Client->IncludeInDiagnosticCounts()) {
       ++NumErrors;
       ++NumErrorsSuppressed;
     }
-    
+
     return false;
   }
 
@@ -565,9 +601,11 @@ bool Diagnostic::ProcessDiag() {
   }
 
   if (DiagLevel >= Diagnostic::Error) {
-    ErrorOccurred = true;
-    ++NumErrors;
-    
+    if (Client->IncludeInDiagnosticCounts()) {
+      ErrorOccurred = true;
+      ++NumErrors;
+    }
+
     // If we've emitted a lot of errors, emit a fatal error after it to stop a
     // flood of bogus errors.
     if (ErrorLimit && NumErrors >= ErrorLimit &&
@@ -1011,8 +1049,7 @@ StoredDiagnostic::StoredDiagnostic(Diagnostic::Level Level,
 
 StoredDiagnostic::StoredDiagnostic(Diagnostic::Level Level, 
                                    const DiagnosticInfo &Info)
-  : Level(Level), Loc(Info.getLocation()) 
-{
+  : Level(Level), Loc(Info.getLocation()) {
   llvm::SmallString<64> Message;
   Info.FormatDiagnostic(Message);
   this->Message.assign(Message.begin(), Message.end());
@@ -1099,6 +1136,7 @@ void StoredDiagnostic::Serialize(llvm::raw_ostream &OS) const {
       
       WriteSourceLocation(OS, SM, R->getBegin());
       WriteSourceLocation(OS, SM, R->getEnd());
+      WriteUnsigned(OS, R->isTokenRange());
     }
   }
 
@@ -1114,11 +1152,6 @@ void StoredDiagnostic::Serialize(llvm::raw_ostream &OS) const {
       break;
     }
 
-    if (F->InsertionLoc.isValid() && F->InsertionLoc.isMacroID()) {
-      NumFixIts = 0;
-      break;
-    }
-
     ++NumFixIts;
   }
 
@@ -1127,7 +1160,7 @@ void StoredDiagnostic::Serialize(llvm::raw_ostream &OS) const {
   for (fixit_iterator F = fixit_begin(), FEnd = fixit_end(); F != FEnd; ++F) {
     WriteSourceLocation(OS, SM, F->RemoveRange.getBegin());
     WriteSourceLocation(OS, SM, F->RemoveRange.getEnd());
-    WriteSourceLocation(OS, SM, F->InsertionLoc);
+    WriteUnsigned(OS, F->RemoveRange.isTokenRange());
     WriteString(OS, F->CodeToInsert);
   }
 }
@@ -1240,11 +1273,14 @@ StoredDiagnostic::Deserialize(FileManager &FM, SourceManager &SM,
     return Diag;
   for (unsigned I = 0; I != NumSourceRanges; ++I) {
     SourceLocation Begin, End;
+    unsigned IsTokenRange;
     if (ReadSourceLocation(FM, SM, Memory, MemoryEnd, Begin) ||
-        ReadSourceLocation(FM, SM, Memory, MemoryEnd, End))
+        ReadSourceLocation(FM, SM, Memory, MemoryEnd, End) ||
+        ReadUnsigned(Memory, MemoryEnd, IsTokenRange))
       return Diag;
 
-    Diag.Ranges.push_back(SourceRange(Begin, End));
+    Diag.Ranges.push_back(CharSourceRange(SourceRange(Begin, End),
+                                          IsTokenRange));
   }
 
   // Read the fix-it hints.
@@ -1252,11 +1288,11 @@ StoredDiagnostic::Deserialize(FileManager &FM, SourceManager &SM,
   if (ReadUnsigned(Memory, MemoryEnd, NumFixIts))
     return Diag;
   for (unsigned I = 0; I != NumFixIts; ++I) {
-    SourceLocation RemoveBegin, RemoveEnd, InsertionLoc;
-    unsigned InsertLen = 0;
+    SourceLocation RemoveBegin, RemoveEnd;
+    unsigned InsertLen = 0, RemoveIsTokenRange;
     if (ReadSourceLocation(FM, SM, Memory, MemoryEnd, RemoveBegin) ||
         ReadSourceLocation(FM, SM, Memory, MemoryEnd, RemoveEnd) ||
-        ReadSourceLocation(FM, SM, Memory, MemoryEnd, InsertionLoc) ||
+        ReadUnsigned(Memory, MemoryEnd, RemoveIsTokenRange) ||
         ReadUnsigned(Memory, MemoryEnd, InsertLen) ||
         Memory + InsertLen > MemoryEnd) {
       Diag.FixIts.clear();
@@ -1264,8 +1300,8 @@ StoredDiagnostic::Deserialize(FileManager &FM, SourceManager &SM,
     }
 
     FixItHint Hint;
-    Hint.RemoveRange = SourceRange(RemoveBegin, RemoveEnd);
-    Hint.InsertionLoc = InsertionLoc;
+    Hint.RemoveRange = CharSourceRange(SourceRange(RemoveBegin, RemoveEnd),
+                                       RemoveIsTokenRange);
     Hint.CodeToInsert.assign(Memory, Memory + InsertLen);
     Memory += InsertLen;
     Diag.FixIts.push_back(Hint);

@@ -17,6 +17,7 @@ int main() {
 
   const int (^CICC) () = CIC;
 
+
   int * const (^IPCC) () = 0;
 
   int * const (^IPCC1) () = IPCC;

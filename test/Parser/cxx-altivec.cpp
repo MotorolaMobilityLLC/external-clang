@@ -1,5 +1,4 @@
 // RUN: %clang_cc1 -triple=powerpc-apple-darwin8 -faltivec -fsyntax-only -verify %s
-// This is the same as the C version:
 
 __vector char vv_c;
 __vector signed char vv_sc;
@@ -14,7 +13,9 @@ __vector int vv_i;
 __vector signed int vv_sint;
 __vector unsigned int vv_ui;
 __vector float vv_f;
-__vector bool vv_b;
+__vector bool char vv_bc;
+__vector bool short vv_bs;
+__vector bool int vv_bi;
 __vector __pixel vv_p;
 __vector pixel vv__p;
 __vector int vf__r();
@@ -34,7 +35,9 @@ vector int v_i;
 vector signed int v_sint;
 vector unsigned int v_ui;
 vector float v_f;
-vector bool v_b;
+vector bool char v_bc;
+vector bool short v_bs;
+vector bool int v_bi;
 vector __pixel v_p;
 vector pixel v__p;
 vector int f__r();
@@ -64,6 +67,14 @@ __vector double vv_d1;               // expected-error {{cannot use 'double' wit
 vector double v_d2;                  // expected-error {{cannot use 'double' with '__vector'}}
 __vector long double  vv_ld3;        // expected-warning {{Use of 'long' with '__vector' is deprecated}} expected-error {{cannot use 'double' with '__vector'}}
 vector long double  v_ld4;           // expected-warning {{Use of 'long' with '__vector' is deprecated}} expected-error {{cannot use 'double' with '__vector'}}
+vector bool v_b;                     // expected-error {{error: C++ requires a type specifier for all declarations}}
+vector bool float v_bf;              // expected-error {{cannot use 'float' with '__vector bool'}}
+vector bool double v_bd;             // expected-error {{cannot use 'double' with '__vector bool'}}
+vector bool pixel v_bp;              // expected-error {{cannot use '__pixel' with '__vector bool'}}
+vector bool signed char v_bsc;       // expected-error {{cannot use 'signed' with '__vector bool'}}
+vector bool unsigned int v_bsc2;      // expected-error {{cannot use 'unsigned' with '__vector bool'}}
+vector bool long v_bl;               // expected-error {{cannot use 'long' with '__vector bool'}}
+vector bool long long v_bll;         // expected-error {{cannot use 'long long' with '__vector bool'}}
 
 void f() {
   __vector unsigned int v = {0,0,0,0};
@@ -107,3 +118,46 @@ class c_v {
   void f__a2(int b, vector int a);
 };
 
+
+// bug 6895 - Vectorl literal casting confusion.
+vector char v1 = (vector char)((vector int)(1, 2, 3, 4));
+vector char v2 = (vector char)((vector float)(1.0f, 2.0f, 3.0f, 4.0f));
+vector char v3 = (vector char)((vector int)('a', 'b', 'c', 'd'));
+vector int v4 = (vector int)(1, 2, 3, 4);
+vector float v5 = (vector float)(1.0f, 2.0f, 3.0f, 4.0f);
+vector char v6 = (vector char)((vector int)(1+2, -2, (int)(2.0 * 3), -(5-3)));
+
+#if 0 // Not ready yet.
+// bug 7553 - Problem with '==' and vectors
+void func() {
+  vector int v10i = (vector int)(1, 2, 3, 4);
+  vector int v11i = (vector int)(1, 2, 3, 4);
+  bool r10ieq = (v10i == v11i);
+  bool r10ine = (v10i != v11i);
+  bool r10igt = (v10i > v11i);
+  bool r10ige = (v10i >= v11i);
+  bool r10ilt = (v10i < v11i);
+  bool r10ile = (v10i <= v11i);
+  vector float v10f = (vector float)(1.0f, 2.0f, 3.0f, 4.0f);
+  vector float v11f = (vector float)(1.0f, 2.0f, 3.0f, 4.0f);
+  bool r10feq = (v10f == v11f);
+  bool r10fne = (v10f != v11f);
+  bool r10fgt = (v10f > v11f);
+  bool r10fge = (v10f >= v11f);
+  bool r10flt = (v10f < v11f);
+  bool r10fle = (v10f <= v11f);
+}
+#endif
+
+// vecreturn attribute test
+struct Vector
+{
+	__vector float xyzw;
+} __attribute__((vecreturn));
+
+Vector Add(Vector lhs, Vector rhs)
+{
+	Vector result;
+	result.xyzw = vec_add(lhs.xyzw, rhs.xyzw);
+	return result; // This will (eventually) be returned in a register
+}

@@ -25,16 +25,13 @@ namespace toolchains {
 /// Generic_GCC - A tool chain using the 'gcc' command to perform
 /// all subcommands; this relies on gcc translating the majority of
 /// command line options.
-class VISIBILITY_HIDDEN Generic_GCC : public ToolChain {
+class LLVM_LIBRARY_VISIBILITY Generic_GCC : public ToolChain {
 protected:
   mutable llvm::DenseMap<unsigned, Tool*> Tools;
 
 public:
   Generic_GCC(const HostInfo &Host, const llvm::Triple& Triple);
   ~Generic_GCC();
-
-  virtual DerivedArgList *TranslateArgs(InputArgList &Args,
-                                        const char *BoundArch) const;
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 
@@ -44,7 +41,12 @@ public:
 };
 
 /// Darwin - The base Darwin tool chain.
-class VISIBILITY_HIDDEN Darwin : public ToolChain {
+class LLVM_LIBRARY_VISIBILITY Darwin : public ToolChain {
+public:
+  /// The host version.
+  unsigned DarwinVersion[3];
+
+private:
   mutable llvm::DenseMap<unsigned, Tool*> Tools;
 
   /// Whether the information on the target has been initialized.
@@ -56,7 +58,7 @@ class VISIBILITY_HIDDEN Darwin : public ToolChain {
 
   /// Whether we are targetting iPhoneOS target.
   mutable bool TargetIsIPhoneOS;
-  
+
   /// The OS version we are targetting.
   mutable unsigned TargetVersion[3];
 
@@ -64,10 +66,14 @@ class VISIBILITY_HIDDEN Darwin : public ToolChain {
   /// initialized.
   std::string MacosxVersionMin;
 
+private:
+  void AddDeploymentTarget(DerivedArgList &Args) const;
+
 public:
-  Darwin(const HostInfo &Host, const llvm::Triple& Triple,
-         const unsigned (&DarwinVersion)[3]);
+  Darwin(const HostInfo &Host, const llvm::Triple& Triple);
   ~Darwin();
+
+  std::string ComputeEffectiveClangTriple(const ArgList &Args) const;
 
   /// @name Darwin Specific Toolchain API
   /// {
@@ -147,17 +153,26 @@ public:
   /// @name ToolChain Implementation
   /// {
 
-  virtual DerivedArgList *TranslateArgs(InputArgList &Args,
+  virtual types::ID LookupTypeForExtension(const char *Ext) const;
+
+  virtual DerivedArgList *TranslateArgs(const DerivedArgList &Args,
                                         const char *BoundArch) const;
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 
   virtual bool IsBlocksDefault() const {
-    // Blocks default to on for OS X 10.6 and iPhoneOS 3.0 and beyond.
-    if (isTargetIPhoneOS())
-      return !isIPhoneOSVersionLT(3);
-    else
-      return !isMacosxVersionLT(10, 6);
+    // Always allow blocks on Darwin; users interested in versioning are
+    // expected to use /usr/include/Blocks.h.
+    return true;
+  }
+  virtual bool IsIntegratedAssemblerDefault() const {
+#ifdef DISABLE_DEFAULT_INTEGRATED_ASSEMBLER
+    return false;
+#else
+    // Default integrated assembler to on for x86.
+    return (getTriple().getArch() == llvm::Triple::x86 ||
+            getTriple().getArch() == llvm::Triple::x86_64);
+#endif
   }
   virtual bool IsObjCNonFragileABIDefault() const {
     // Non-fragile ABI is default for everything but i386.
@@ -193,10 +208,9 @@ public:
 };
 
 /// DarwinClang - The Darwin toolchain used by Clang.
-class VISIBILITY_HIDDEN DarwinClang : public Darwin {
+class LLVM_LIBRARY_VISIBILITY DarwinClang : public Darwin {
 public:
-  DarwinClang(const HostInfo &Host, const llvm::Triple& Triple,
-              const unsigned (&DarwinVersion)[3]);
+  DarwinClang(const HostInfo &Host, const llvm::Triple& Triple);
 
   /// @name Darwin ToolChain Implementation
   /// {
@@ -211,7 +225,7 @@ public:
 };
 
 /// DarwinGCC - The Darwin toolchain used by GCC.
-class VISIBILITY_HIDDEN DarwinGCC : public Darwin {
+class LLVM_LIBRARY_VISIBILITY DarwinGCC : public Darwin {
   /// GCC version to use.
   unsigned GCCVersion[3];
 
@@ -219,9 +233,7 @@ class VISIBILITY_HIDDEN DarwinGCC : public Darwin {
   std::string ToolChainDir;
 
 public:
-  DarwinGCC(const HostInfo &Host, const llvm::Triple& Triple,
-            const unsigned (&DarwinVersion)[3],
-            const unsigned (&GCCVersion)[3]);
+  DarwinGCC(const HostInfo &Host, const llvm::Triple& Triple);
 
   /// @name Darwin ToolChain Implementation
   /// {
@@ -236,57 +248,66 @@ public:
 };
 
 /// Darwin_Generic_GCC - Generic Darwin tool chain using gcc.
-class VISIBILITY_HIDDEN Darwin_Generic_GCC : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY Darwin_Generic_GCC : public Generic_GCC {
 public:
   Darwin_Generic_GCC(const HostInfo &Host, const llvm::Triple& Triple)
     : Generic_GCC(Host, Triple) {}
 
+  std::string ComputeEffectiveClangTriple(const ArgList &Args) const;
+
   virtual const char *GetDefaultRelocationModel() const { return "pic"; }
 };
 
-class VISIBILITY_HIDDEN AuroraUX : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY AuroraUX : public Generic_GCC {
 public:
   AuroraUX(const HostInfo &Host, const llvm::Triple& Triple);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 };
 
-class VISIBILITY_HIDDEN OpenBSD : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY OpenBSD : public Generic_GCC {
 public:
   OpenBSD(const HostInfo &Host, const llvm::Triple& Triple);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 };
 
-class VISIBILITY_HIDDEN FreeBSD : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY FreeBSD : public Generic_GCC {
 public:
-  FreeBSD(const HostInfo &Host, const llvm::Triple& Triple, bool Lib32);
+  FreeBSD(const HostInfo &Host, const llvm::Triple& Triple);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 };
 
-class VISIBILITY_HIDDEN DragonFly : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY Minix : public Generic_GCC {
+public:
+  Minix(const HostInfo &Host, const llvm::Triple& Triple);
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
+};
+
+class LLVM_LIBRARY_VISIBILITY DragonFly : public Generic_GCC {
 public:
   DragonFly(const HostInfo &Host, const llvm::Triple& Triple);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 };
 
-class VISIBILITY_HIDDEN Linux : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY Linux : public Generic_GCC {
 public:
   Linux(const HostInfo &Host, const llvm::Triple& Triple);
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 };
 
 
 /// TCEToolChain - A tool chain using the llvm bitcode tools to perform
 /// all subcommands. See http://tce.cs.tut.fi for our peculiar target.
-class VISIBILITY_HIDDEN TCEToolChain : public ToolChain {
+class LLVM_LIBRARY_VISIBILITY TCEToolChain : public ToolChain {
 public:
   TCEToolChain(const HostInfo &Host, const llvm::Triple& Triple);
   ~TCEToolChain();
 
-  virtual DerivedArgList *TranslateArgs(InputArgList &Args,
-                                        const char *BoundArch) const;
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
   bool IsMathErrnoDefault() const;
   bool IsUnwindTablesDefault() const;
@@ -296,6 +317,20 @@ public:
 private:
   mutable llvm::DenseMap<unsigned, Tool*> Tools;
 
+};
+
+class LLVM_LIBRARY_VISIBILITY Windows : public ToolChain {
+  mutable llvm::DenseMap<unsigned, Tool*> Tools;
+
+public:
+  Windows(const HostInfo &Host, const llvm::Triple& Triple);
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
+
+  virtual bool IsIntegratedAssemblerDefault() const;
+  virtual bool IsUnwindTablesDefault() const;
+  virtual const char *GetDefaultRelocationModel() const;
+  virtual const char *GetForcedPicModel() const;
 };
 
 } // end namespace toolchains

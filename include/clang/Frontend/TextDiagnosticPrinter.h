@@ -18,14 +18,9 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceLocation.h"
 
-namespace llvm {
-  class raw_ostream;
-}
-
 namespace clang {
 class DiagnosticOptions;
 class LangOptions;
-class SourceManager;
 
 class TextDiagnosticPrinter : public DiagnosticClient {
   llvm::raw_ostream &OS;
@@ -60,23 +55,26 @@ public:
 
   void PrintIncludeStack(SourceLocation Loc, const SourceManager &SM);
 
-  void HighlightRange(const SourceRange &R,
+  void HighlightRange(const CharSourceRange &R,
                       const SourceManager &SrcMgr,
                       unsigned LineNo, FileID FID,
                       std::string &CaretLine,
                       const std::string &SourceLine);
 
   void EmitCaretDiagnostic(SourceLocation Loc,
-                           SourceRange *Ranges, unsigned NumRanges,
+                           CharSourceRange *Ranges, unsigned NumRanges,
                            const SourceManager &SM,
                            const FixItHint *Hints,
                            unsigned NumHints,
-                           unsigned Columns);
+                           unsigned Columns,  
+                           unsigned OnMacroInst,
+                           unsigned MacroSkipStart,
+                           unsigned MacroSkipEnd);
 
   virtual void HandleDiagnostic(Diagnostic::Level DiagLevel,
                                 const DiagnosticInfo &Info);
 };
 
-} // end namspace clang
+} // end namespace clang
 
 #endif

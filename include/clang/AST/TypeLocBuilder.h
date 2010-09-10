@@ -59,13 +59,34 @@ class TypeLocBuilder {
       grow(Requested);
   }
 
+  /// Pushes a copy of the given TypeLoc onto this builder.  The builder
+  /// must be empty for this to work.
+  void pushFullCopy(TypeLoc L) {
+#ifndef NDEBUG
+    assert(LastTy.isNull() && "pushing copy on non-empty TypeLocBuilder");
+    LastTy = L.getNextTypeLoc().getType();
+#endif
+    assert(Index == Capacity && "pushing copy on non-empty TypeLocBuilder");
+
+    unsigned Size = L.getFullDataSize();
+    TypeLoc Copy = pushImpl(L.getType(), Size);
+    memcpy(Copy.getOpaqueData(), L.getOpaqueData(), Size);
+  }
+
   /// Pushes space for a typespec TypeLoc.  Invalidates any TypeLocs
   /// previously retrieved from this builder.
   TypeSpecTypeLoc pushTypeSpec(QualType T) {
     size_t LocalSize = TypeSpecTypeLoc::LocalDataSize;
     return cast<TypeSpecTypeLoc>(pushImpl(T, LocalSize));
   }
-  
+
+  /// Resets this builder to the newly-initialized state.
+  void clear() {
+#ifndef NDEBUG
+    LastTy = QualType();
+#endif
+    Index = Capacity;
+  }  
 
   /// Pushes space for a new TypeLoc of the given type.  Invalidates
   /// any TypeLocs previously retrieved from this builder.

@@ -28,22 +28,22 @@ static void print(llvm::raw_ostream& os, BinaryOperator::Opcode Op) {
     default:
       assert(false && "operator printing not implemented");
       break;
-    case BinaryOperator::Mul: os << '*'  ; break;
-    case BinaryOperator::Div: os << '/'  ; break;
-    case BinaryOperator::Rem: os << '%'  ; break;
-    case BinaryOperator::Add: os << '+'  ; break;
-    case BinaryOperator::Sub: os << '-'  ; break;
-    case BinaryOperator::Shl: os << "<<" ; break;
-    case BinaryOperator::Shr: os << ">>" ; break;
-    case BinaryOperator::LT:  os << "<"  ; break;
-    case BinaryOperator::GT:  os << '>'  ; break;
-    case BinaryOperator::LE:  os << "<=" ; break;
-    case BinaryOperator::GE:  os << ">=" ; break;
-    case BinaryOperator::EQ:  os << "==" ; break;
-    case BinaryOperator::NE:  os << "!=" ; break;
-    case BinaryOperator::And: os << '&'  ; break;
-    case BinaryOperator::Xor: os << '^'  ; break;
-    case BinaryOperator::Or:  os << '|'  ; break;
+    case BO_Mul: os << '*'  ; break;
+    case BO_Div: os << '/'  ; break;
+    case BO_Rem: os << '%'  ; break;
+    case BO_Add: os << '+'  ; break;
+    case BO_Sub: os << '-'  ; break;
+    case BO_Shl: os << "<<" ; break;
+    case BO_Shr: os << ">>" ; break;
+    case BO_LT:  os << "<"  ; break;
+    case BO_GT:  os << '>'  ; break;
+    case BO_LE:  os << "<=" ; break;
+    case BO_GE:  os << ">=" ; break;
+    case BO_EQ:  os << "==" ; break;
+    case BO_NE:  os << "!=" ; break;
+    case BO_And: os << '&'  ; break;
+    case BO_Xor: os << '^'  ; break;
+    case BO_Or:  os << '|'  ; break;
   }
 }
 
@@ -72,6 +72,15 @@ void SymbolConjured::dumpToStream(llvm::raw_ostream& os) const {
 void SymbolDerived::dumpToStream(llvm::raw_ostream& os) const {
   os << "derived_$" << getSymbolID() << '{'
      << getParentSymbol() << ',' << getRegion() << '}';
+}
+
+void SymbolExtent::dumpToStream(llvm::raw_ostream& os) const {
+  os << "extent_$" << getSymbolID() << '{' << getRegion() << '}';
+}
+
+void SymbolMetadata::dumpToStream(llvm::raw_ostream& os) const {
+  os << "meta_$" << getSymbolID() << '{'
+     << getRegion() << ',' << T.getAsString() << '}';
 }
 
 void SymbolRegionValue::dumpToStream(llvm::raw_ostream& os) const {
@@ -130,6 +139,40 @@ SymbolManager::getDerivedSymbol(SymbolRef parentSymbol,
   return cast<SymbolDerived>(SD);
 }
 
+const SymbolExtent*
+SymbolManager::getExtentSymbol(const SubRegion *R) {
+  llvm::FoldingSetNodeID profile;
+  SymbolExtent::Profile(profile, R);
+  void* InsertPos;
+  SymExpr *SD = DataSet.FindNodeOrInsertPos(profile, InsertPos);
+  if (!SD) {
+    SD = (SymExpr*) BPAlloc.Allocate<SymbolExtent>();
+    new (SD) SymbolExtent(SymbolCounter, R);
+    DataSet.InsertNode(SD, InsertPos);
+    ++SymbolCounter;
+  }
+
+  return cast<SymbolExtent>(SD);
+}
+
+const SymbolMetadata*
+SymbolManager::getMetadataSymbol(const MemRegion* R, const Stmt* S, QualType T,
+                                 unsigned Count, const void* SymbolTag) {
+
+  llvm::FoldingSetNodeID profile;
+  SymbolMetadata::Profile(profile, R, S, T, Count, SymbolTag);
+  void* InsertPos;
+  SymExpr *SD = DataSet.FindNodeOrInsertPos(profile, InsertPos);
+  if (!SD) {
+    SD = (SymExpr*) BPAlloc.Allocate<SymbolMetadata>();
+    new (SD) SymbolMetadata(SymbolCounter, R, S, T, Count, SymbolTag);
+    DataSet.InsertNode(SD, InsertPos);
+    ++SymbolCounter;
+  }
+
+  return cast<SymbolMetadata>(SD);
+}
+
 const SymIntExpr *SymbolManager::getSymIntExpr(const SymExpr *lhs,
                                                BinaryOperator::Opcode op,
                                                const llvm::APSInt& v,
@@ -170,24 +213,45 @@ QualType SymbolConjured::getType(ASTContext&) const {
   return T;
 }
 
-
 QualType SymbolDerived::getType(ASTContext& Ctx) const {
-  return R->getValueType(Ctx);
+  return R->getValueType();
+}
+
+QualType SymbolExtent::getType(ASTContext& Ctx) const {
+  return Ctx.getSizeType();
+}
+
+QualType SymbolMetadata::getType(ASTContext&) const {
+  return T;
 }
 
 QualType SymbolRegionValue::getType(ASTContext& C) const {
-  return R->getValueType(C);
+  return R->getValueType();
 }
 
 SymbolManager::~SymbolManager() {}
 
 bool SymbolManager::canSymbolicate(QualType T) {
-  return Loc::IsLocType(T) || (T->isIntegerType() && T->isScalarType());
+  if (Loc::IsLocType(T))
+    return true;
+
+  if (T->isIntegerType())
+    return T->isScalarType();
+
+  if (T->isRecordType())
+    return true;
+
+  return false;
 }
 
 void SymbolReaper::markLive(SymbolRef sym) {
   TheLiving.insert(sym);
   TheDead.erase(sym);
+}
+
+void SymbolReaper::markInUse(SymbolRef sym) {
+  if (isa<SymbolMetadata>(sym))
+    MetadataInUse.insert(sym);
 }
 
 bool SymbolReaper::maybeDead(SymbolRef sym) {
@@ -196,6 +260,31 @@ bool SymbolReaper::maybeDead(SymbolRef sym) {
 
   TheDead.insert(sym);
   return true;
+}
+
+static bool IsLiveRegion(SymbolReaper &Reaper, const MemRegion *MR) {
+  MR = MR->getBaseRegion();
+
+  if (const SymbolicRegion *SR = dyn_cast<SymbolicRegion>(MR))
+    return Reaper.isLive(SR->getSymbol());
+
+  if (const VarRegion *VR = dyn_cast<VarRegion>(MR))
+    return Reaper.isLive(VR);
+
+  // FIXME: This is a gross over-approximation. What we really need is a way to
+  // tell if anything still refers to this region. Unlike SymbolicRegions,
+  // AllocaRegions don't have associated symbols, though, so we don't actually
+  // have a way to track their liveness.
+  if (isa<AllocaRegion>(MR))
+    return true;
+
+  if (isa<CXXThisRegion>(MR))
+    return true;
+
+  if (isa<MemSpaceRegion>(MR))
+    return true;
+
+  return false;
 }
 
 bool SymbolReaper::isLive(SymbolRef sym) {
@@ -210,22 +299,44 @@ bool SymbolReaper::isLive(SymbolRef sym) {
     return false;
   }
 
+  if (const SymbolExtent *extent = dyn_cast<SymbolExtent>(sym)) {
+    if (IsLiveRegion(*this, extent->getRegion())) {
+      markLive(sym);
+      return true;
+    }
+    return false;
+  }
+
+  if (const SymbolMetadata *metadata = dyn_cast<SymbolMetadata>(sym)) {
+    if (MetadataInUse.count(sym)) {
+      if (IsLiveRegion(*this, metadata->getRegion())) {
+        markLive(sym);
+        MetadataInUse.erase(sym);
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Interogate the symbol.  It may derive from an input value to
   // the analyzed function/method.
   return isa<SymbolRegionValue>(sym);
 }
 
-bool SymbolReaper::isLive(const Stmt* Loc, const Stmt* ExprVal) const {
-  return LCtx->getLiveVariables()->isLive(Loc, ExprVal);
+bool SymbolReaper::isLive(const Stmt* ExprVal) const {
+  return LCtx->getAnalysisContext()->getRelaxedLiveVariables()->
+      isLive(Loc, ExprVal);
 }
 
-bool SymbolReaper::isLive(const Stmt *Loc, const VarRegion *VR) const {
-  const StackFrameContext *SFC = VR->getStackFrame();
+bool SymbolReaper::isLive(const VarRegion *VR) const {
+  const StackFrameContext *VarContext = VR->getStackFrame();
+  const StackFrameContext *CurrentContext = LCtx->getCurrentStackFrame();
 
-  if (SFC == LCtx->getCurrentStackFrame())
-    return LCtx->getLiveVariables()->isLive(Loc, VR->getDecl());
-  else
-    return SFC->isParentOf(LCtx->getCurrentStackFrame());
+  if (VarContext == CurrentContext)
+    return LCtx->getAnalysisContext()->getRelaxedLiveVariables()->
+        isLive(Loc, VR->getDecl());
+
+  return VarContext->isParentOf(CurrentContext);
 }
 
 SymbolVisitor::~SymbolVisitor() {}
