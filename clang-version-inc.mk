@@ -9,7 +9,7 @@ intermediates := $(call local-intermediates-dir)
 
 LLVMVersion := $(shell grep PACKAGE_VERSION $(LLVM_ROOT_PATH)/host/include/llvm/Config/config.h | sed -e 's/\#define PACKAGE_VERSION "\(.*\)"/\1/g')
 
-# Compute the Clang version from the LLVM version, unless specified explicitly. 
+# Compute the Clang version from the LLVM version, unless specified explicitly.
 # (Copy from include/clang/Basic/Makefile)
 CLANG_VERSION := $(subst svn,,$(LLVMVersion))
 CLANG_VERSION_COMPONENTS := $(subst ., ,$(CLANG_VERSION))
@@ -25,7 +25,7 @@ endif
 LOCAL_GENERATED_SOURCES += $(intermediates)/clang/Basic/Version.inc
 $(intermediates)/clang/Basic/Version.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Version.inc.in
 	@echo "Updating Clang version info."
- 	@mkdir -p $(dir $@)
+	@mkdir -p $(dir $@)
 	$(hide) sed -e "s#@CLANG_VERSION@#$(CLANG_VERSION)#g" \
 	-e "s#@CLANG_VERSION_MAJOR@#$(CLANG_VERSION_MAJOR)#g" \
 	-e "s#@CLANG_VERSION_MINOR@#$(CLANG_VERSION_MINOR)#g" \
