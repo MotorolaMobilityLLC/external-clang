@@ -24,7 +24,7 @@ endif
 
 LOCAL_GENERATED_SOURCES += $(intermediates)/clang/Basic/Version.inc
 $(intermediates)/clang/Basic/Version.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Version.inc.in
-        @echo "Updating Clang version info."
+	@echo "Updating Clang version info."
  	@mkdir -p $(dir $@)
 	$(hide) sed -e "s#@CLANG_VERSION@#$(CLANG_VERSION)#g" \
 	-e "s#@CLANG_VERSION_MAJOR@#$(CLANG_VERSION_MAJOR)#g" \
