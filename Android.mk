@@ -11,6 +11,7 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
 		lib/Sema	\
 		lib/CodeGen	\
 		lib/Analysis	\
+		lib/Frontend	\
 	))
 
 include $(LOCAL_PATH)/clang.mk
