@@ -33,6 +33,7 @@ clang_lex_SRC_FILES :=	\
 LOCAL_SRC_FILES := $(clang_lex_SRC_FILES)
 
 LOCAL_MODULE:= libclangLex
+LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)

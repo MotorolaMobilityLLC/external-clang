@@ -29,6 +29,7 @@ clang_analysis_SRC_FILES :=	\
 LOCAL_SRC_FILES := $(clang_analysis_SRC_FILES)
 
 LOCAL_MODULE:= libclangAnalysis
+LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
