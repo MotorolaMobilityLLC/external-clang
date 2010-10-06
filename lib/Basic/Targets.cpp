@@ -1602,6 +1602,9 @@ public:
 
     // ARM targets default to using the ARM C++ ABI.
     CXXABI = CXXABI_ARM;
+
+    // RenderScript uses a 64-bit long type
+    LongWidth = LongAlign = 64;
   }
   virtual const char *getABI() const { return ABI.c_str(); }
   virtual bool setABI(const std::string &Name) {
