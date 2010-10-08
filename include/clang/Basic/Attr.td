@@ -10,8 +10,8 @@
 // allow attributes on a given Decl or Stmt).
 class AttrSubject;
 
-include "DeclNodes.td"
-include "StmtNodes.td"
+include "clang/Basic/DeclNodes.td"
+include "clang/Basic/StmtNodes.td"
 
 // A subset-subject is an AttrSubject constrained to operate only on some subset
 // of that subject.
