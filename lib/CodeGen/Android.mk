@@ -55,6 +55,8 @@ LOCAL_SRC_FILES := $(clang_codegen_SRC_FILES)
 LOCAL_MODULE:= libclangCodeGen
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_MODULE_TAGS := optional
+
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_VERSION_INC_MK)
 include $(CLANG_TBLGEN_RULES_MK)

@@ -23,6 +23,20 @@ $(intermediates)/clang/Basic/AttrList.inc: $(CLANG_ROOT_PATH)/include/clang/Basi
 	$(call transform-host-td-to-out,clang-attr-list)
 endif
 
+ifneq ($(findstring AttrPCHRead.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/clang/Serialization/AttrPCHRead.inc
+$(intermediates)/clang/Serialization/AttrPCHRead.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(TBLGEN)
+	@echo "Building Clang attribute pch read with tblgen"
+	$(call transform-host-td-to-out,clang-attr-pch-read)
+endif
+
+ifneq ($(findstring AttrPCHWrite.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/clang/Serialization/AttrPCHWrite.inc
+$(intermediates)/clang/Serialization/AttrPCHWrite.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(TBLGEN)
+	@echo "Building Clang attribute pch write with tblgen"
+	$(call transform-host-td-to-out,clang-attr-pch-write)
+endif
+
 ifneq ($(findstring Attrs.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/clang/AST/Attrs.inc
 $(intermediates)/clang/AST/Attrs.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(TBLGEN)
@@ -76,6 +90,13 @@ ifneq ($(findstring CC1Options.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/clang/Driver/CC1Options.inc
 $(intermediates)/clang/Driver/CC1Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td $(TBLGEN)
 	@echo "Building Clang CC1 Option tables with tblgen"
+	$(call transform-host-td-to-out,opt-parser-defs)
+endif
+
+ifneq ($(findstring CC1AsOptions.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/clang/Driver/CC1AsOptions.inc
+$(intermediates)/clang/Driver/CC1AsOptions.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/CC1AsOptions.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td $(TBLGEN)
+	@echo "Building Clang CC1 As Option tables with tblgen"
 	$(call transform-host-td-to-out,opt-parser-defs)
 endif
 
