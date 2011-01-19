@@ -15,14 +15,6 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
 		lib/Driver	\
 	))
 
-#		lib/FrontendTool \
-
-#		lib/Serialization \
-#		lib/Checker \
-#		lib/Index \
-#		lib/Rewrite \
-#		tools/driver \
-
 include $(LOCAL_PATH)/clang.mk
 
 include $(subdirs)
