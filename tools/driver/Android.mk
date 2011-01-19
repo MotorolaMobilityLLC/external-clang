@@ -5,9 +5,11 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-LOCAL_MODULE:= clang-bin
+LOCAL_MODULE := clang-bin
 
 LOCAL_MODULE_TAGS := optional tests
+
+LOCAL_MODULE_CLASS := EXECUTABLES
 
 TBLGEN_TABLES := \
   DiagnosticCommonKinds.inc \
@@ -70,7 +72,6 @@ LOCAL_STATIC_LIBRARIES := \
 
 LOCAL_LDLIBS += -lpthread -lm -ldl
 
-include $(LLVM_HOST_BUILD_MK)
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_EXECUTABLE)
