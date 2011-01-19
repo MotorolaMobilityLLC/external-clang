@@ -17,8 +17,7 @@ TBLGEN_TABLES := \
   DiagnosticFrontendKinds.inc \
   Attrs.inc \
   DeclNodes.inc \
-  StmtNodes.inc \
-  Version.inc
+  StmtNodes.inc
 
 clang_serialization_SRC_FILES :=\
   GeneratePCH.cpp \
@@ -35,4 +34,5 @@ LOCAL_SRC_FILES := $(clang_serialization_SRC_FILES)
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
+include $(CLANG_VERSION_INC_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)
