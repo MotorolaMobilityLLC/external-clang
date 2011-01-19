@@ -5,7 +5,7 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-LOCAL_MODULE := clang-bin
+LOCAL_MODULE := clang
 
 LOCAL_MODULE_TAGS := optional tests
 
