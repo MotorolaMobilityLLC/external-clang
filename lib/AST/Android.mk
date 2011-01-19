@@ -60,6 +60,8 @@ LOCAL_SRC_FILES := $(clang_ast_SRC_FILES)
 LOCAL_MODULE:= libclangAST
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_MODULE_TAGS := optional
+
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)
