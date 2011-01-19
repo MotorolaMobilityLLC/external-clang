@@ -7,7 +7,6 @@ LOCAL_CFLAGS :=	\
 # Make sure bionic is first so we can include system headers.
 LOCAL_C_INCLUDES :=	\
 	$(CLANG_ROOT_PATH)/include	\
-	$(CLANG_ROOT_PATH)/host/include	\
 	$(LOCAL_C_INCLUDES)
 
 LLVM_ROOT_PATH := external/llvm
