@@ -49,6 +49,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMX86AsmParser \
   libLLVMX86CodeGen \
   libLLVMX86Disassembler \
+  libLLVMX86InstPrinter \
   libLLVMARMInfo \
   libLLVMAsmParser \
   libLLVMAsmPrinter \

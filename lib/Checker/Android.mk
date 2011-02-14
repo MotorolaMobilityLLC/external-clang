@@ -26,6 +26,7 @@ clang_checker_SRC_FILES := \
   AggExprVisitor.cpp \
   AnalysisConsumer.cpp \
   AnalysisManager.cpp \
+  AnalyzerStatsChecker.cpp \
   ArrayBoundChecker.cpp \
   AttrNonNullChecker.cpp \
   BasicConstraintManager.cpp \
@@ -46,6 +47,7 @@ clang_checker_SRC_FILES := \
   CheckSizeofPointer.cpp \
   Checker.cpp \
   CheckerHelpers.cpp \
+  ChrootChecker.cpp \
   CocoaConventions.cpp \
   CStringChecker.cpp \
   DereferenceChecker.cpp \
@@ -73,6 +75,7 @@ clang_checker_SRC_FILES := \
   NoReturnFunctionChecker.cpp \
   OSAtomicChecker.cpp \
   ObjCUnusedIVarsChecker.cpp \
+  ObjCAtSyncChecker.cpp \
   PathDiagnostic.cpp \
   PlistDiagnostics.cpp \
   PointerArithChecker.cpp \
