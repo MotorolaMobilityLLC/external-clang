@@ -5,9 +5,10 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-TBLGEN_TABLES :=    \
-	DiagnosticLexKinds.inc	\
-    DiagnosticCommonKinds.inc
+TBLGEN_TABLES := \
+	DiagnosticLexKinds.inc \
+	DiagnosticCommonKinds.inc \
+	AttrSpellings.inc
 
 clang_lex_SRC_FILES :=	\
 	HeaderMap.cpp	\
