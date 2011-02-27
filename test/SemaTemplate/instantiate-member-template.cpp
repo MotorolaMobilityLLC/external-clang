@@ -189,3 +189,29 @@ namespace PR7587 {
   };
 
 }
+
+namespace PR7669 {
+  template<class> struct X {
+    template<class> struct Y {
+      template<int,class> struct Z;
+      template<int Dummy> struct Z<Dummy,int> {};
+    };
+  };
+
+  void a()
+  {
+    X<int>::Y<int>::Z<0,int>();
+  }
+}
+
+namespace PR8489 {
+  template <typename CT>
+  class C {
+    template<typename FT>
+    void F() {} // expected-note{{FT}}
+  };
+  void f() {
+    C<int> c;
+    c.F(); // expected-error{{no matching member function}}
+  }
+}

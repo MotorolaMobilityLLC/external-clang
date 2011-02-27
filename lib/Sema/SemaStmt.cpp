@@ -67,9 +67,18 @@ void Sema::ActOnForEachDeclStmt(DeclGroupPtrTy dg) {
 }
 
 void Sema::DiagnoseUnusedExprResult(const Stmt *S) {
+  if (const LabelStmt *Label = dyn_cast_or_null<LabelStmt>(S))
+    return DiagnoseUnusedExprResult(Label->getSubStmt());
+
   const Expr *E = dyn_cast_or_null<Expr>(S);
   if (!E)
     return;
+
+  if (E->isBoundMemberFunction(Context)) {
+    Diag(E->getLocStart(), diag::err_invalid_use_of_bound_member_func)
+      << E->getSourceRange();
+    return;
+  }
 
   SourceLocation Loc;
   SourceRange R1, R2;
@@ -224,13 +233,34 @@ Sema::ActOnDefaultStmt(SourceLocation DefaultLoc, SourceLocation ColonLoc,
 
 StmtResult
 Sema::ActOnLabelStmt(SourceLocation IdentLoc, IdentifierInfo *II,
-                     SourceLocation ColonLoc, Stmt *SubStmt) {
+                     SourceLocation ColonLoc, Stmt *SubStmt,
+                     const AttributeList *Attr) {
+  // According to GCC docs, "the only attribute that makes sense after a label
+  // is 'unused'".
+  bool HasUnusedAttr = false;
+  for ( ; Attr; Attr = Attr->getNext()) {
+    if (Attr->getKind() == AttributeList::AT_unused) {
+      HasUnusedAttr = true;
+    } else {
+      Diag(Attr->getLoc(), diag::warn_label_attribute_not_unused);
+      Attr->setInvalid(true);
+    }
+  }
+
+  return ActOnLabelStmt(IdentLoc, II, ColonLoc, SubStmt, HasUnusedAttr);
+}
+
+StmtResult
+Sema::ActOnLabelStmt(SourceLocation IdentLoc, IdentifierInfo *II,
+                     SourceLocation ColonLoc, Stmt *SubStmt,
+                     bool HasUnusedAttr) {
   // Look up the record for this label identifier.
   LabelStmt *&LabelDecl = getCurFunction()->LabelMap[II];
 
   // If not forward referenced or defined already, just create a new LabelStmt.
   if (LabelDecl == 0)
-    return Owned(LabelDecl = new (Context) LabelStmt(IdentLoc, II, SubStmt));
+    return Owned(LabelDecl = new (Context) LabelStmt(IdentLoc, II, SubStmt,
+                                                     HasUnusedAttr));
 
   assert(LabelDecl->getID() == II && "Label mismatch!");
 
@@ -246,6 +276,7 @@ Sema::ActOnLabelStmt(SourceLocation IdentLoc, IdentifierInfo *II,
   // definition.  Fill in the forward definition and return it.
   LabelDecl->setIdentLoc(IdentLoc);
   LabelDecl->setSubStmt(SubStmt);
+  LabelDecl->setUnusedAttribute(HasUnusedAttr);
   return Owned(LabelDecl);
 }
 
@@ -272,9 +303,12 @@ Sema::ActOnIfStmt(SourceLocation IfLoc, FullExprArg CondVal, Decl *CondVar,
   // this helps prevent bugs due to typos, such as
   // if (condition);
   //   do_stuff();
+  //
+  // NOTE: Do not emit this warning if the body is expanded from a macro.
   if (!elseStmt) {
     if (NullStmt* stmt = dyn_cast<NullStmt>(thenStmt))
-      Diag(stmt->getSemiLoc(), diag::warn_empty_if_body);
+      if (!stmt->getLocStart().isMacroID())
+        Diag(stmt->getSemiLoc(), diag::warn_empty_if_body);
   }
 
   DiagnoseUnusedExprResult(elseStmt);
@@ -417,6 +451,7 @@ Sema::ActOnStartOfSwitchStmt(SourceLocation SwitchLoc, Expr *Cond,
   Cond = CondResult.take();
   
   if (!CondVar) {
+    CheckImplicitConversions(Cond, SwitchLoc);
     CondResult = MaybeCreateCXXExprWithTemporaries(Cond);
     if (CondResult.isInvalid())
       return StmtError();
@@ -428,6 +463,14 @@ Sema::ActOnStartOfSwitchStmt(SourceLocation SwitchLoc, Expr *Cond,
   SwitchStmt *SS = new (Context) SwitchStmt(Context, ConditionVar, Cond);
   getCurFunction()->SwitchStack.push_back(SS);
   return Owned(SS);
+}
+
+static void AdjustAPSInt(llvm::APSInt &Val, unsigned BitWidth, bool IsSigned) {
+  if (Val.getBitWidth() < BitWidth)
+    Val.extend(BitWidth);
+  else if (Val.getBitWidth() > BitWidth)
+    Val.trunc(BitWidth);
+  Val.setIsSigned(IsSigned);
 }
 
 StmtResult
@@ -531,7 +574,7 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
 
       // Convert the value to the same width/sign as the condition.
       ConvertIntegerToTypeWarnOnOverflow(LoVal, CondWidth, CondIsSigned,
-                                         CS->getLHS()->getLocStart(),
+                                         Lo->getLocStart(),
                                          diag::warn_case_value_overflow);
 
       // If the LHS is not the same type as the condition, insert an implicit
@@ -610,7 +653,7 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
 
         // Convert the value to the same width/sign as the condition.
         ConvertIntegerToTypeWarnOnOverflow(HiVal, CondWidth, CondIsSigned,
-                                           CR->getRHS()->getLocStart(),
+                                           Hi->getLocStart(),
                                            diag::warn_case_value_overflow);
 
         // If the LHS is not the same type as the condition, insert an implicit
@@ -622,7 +665,7 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
         if (LoVal > HiVal) {
           Diag(CR->getLHS()->getLocStart(), diag::warn_case_empty_range)
             << SourceRange(CR->getLHS()->getLocStart(),
-                           CR->getRHS()->getLocEnd());
+                           Hi->getLocEnd());
           CaseRanges.erase(CaseRanges.begin()+i);
           --i, --e;
           continue;
@@ -696,14 +739,14 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
     }
 
     // Check to see if switch is over an Enum and handles all of its
-    // values.  We don't need to do this if there's a default
-    // statement or if we have a constant condition.
+    // values.  We only issue a warning if there is not 'default:', but
+    // we still do the analysis to preserve this information in the AST
+    // (which can be used by flow-based analyes).
     //
-    // TODO: we might want to check whether case values are out of the
-    // enum even if we don't want to check whether all cases are handled.
-    const EnumType* ET = CondTypeBeforePromotion->getAs<EnumType>();
+    const EnumType *ET = CondTypeBeforePromotion->getAs<EnumType>();
+
     // If switch has default case, then ignore it.
-    if (!CaseListIsErroneous && !TheDefaultStmt && !HasConstantCond && ET) {
+    if (!CaseListIsErroneous  && !HasConstantCond && ET) {
       const EnumDecl *ED = ET->getDecl();
       typedef llvm::SmallVector<std::pair<llvm::APSInt, EnumConstantDecl*>, 64> EnumValsTy;
       EnumValsTy EnumVals;
@@ -711,53 +754,59 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
       // Gather all enum values, set their type and sort them,
       // allowing easier comparison with CaseVals.
       for (EnumDecl::enumerator_iterator EDI = ED->enumerator_begin();
-             EDI != ED->enumerator_end(); EDI++) {
-        llvm::APSInt Val = (*EDI)->getInitVal();
-        if(Val.getBitWidth() < CondWidth)
-          Val.extend(CondWidth);
-        else if (Val.getBitWidth() > CondWidth)
-          Val.trunc(CondWidth);
-        Val.setIsSigned(CondIsSigned);
-        EnumVals.push_back(std::make_pair(Val, (*EDI)));
+           EDI != ED->enumerator_end(); ++EDI) {
+        llvm::APSInt Val = EDI->getInitVal();
+        AdjustAPSInt(Val, CondWidth, CondIsSigned);
+        EnumVals.push_back(std::make_pair(Val, *EDI));
       }
       std::stable_sort(EnumVals.begin(), EnumVals.end(), CmpEnumVals);
       EnumValsTy::iterator EIend =
         std::unique(EnumVals.begin(), EnumVals.end(), EqEnumVals);
-      // See which case values aren't in enum 
-      EnumValsTy::const_iterator EI = EnumVals.begin();
-      for (CaseValsTy::const_iterator CI = CaseVals.begin();
+
+      // See which case values aren't in enum.
+      // TODO: we might want to check whether case values are out of the
+      // enum even if we don't want to check whether all cases are handled.
+      if (!TheDefaultStmt) {
+        EnumValsTy::const_iterator EI = EnumVals.begin();
+        for (CaseValsTy::const_iterator CI = CaseVals.begin();
              CI != CaseVals.end(); CI++) {
-        while (EI != EIend && EI->first < CI->first)
-          EI++;
-        if (EI == EIend || EI->first > CI->first)
+          while (EI != EIend && EI->first < CI->first)
+            EI++;
+          if (EI == EIend || EI->first > CI->first)
             Diag(CI->second->getLHS()->getExprLoc(), diag::warn_not_in_enum)
               << ED->getDeclName();
-      }
-      // See which of case ranges aren't in enum
-      EI = EnumVals.begin();
-      for (CaseRangesTy::const_iterator RI = CaseRanges.begin();
-             RI != CaseRanges.end() && EI != EIend; RI++) {
-        while (EI != EIend && EI->first < RI->first)
-          EI++;
-        
-        if (EI == EIend || EI->first != RI->first) {
-          Diag(RI->second->getLHS()->getExprLoc(), diag::warn_not_in_enum)
-            << ED->getDeclName();
         }
+        // See which of case ranges aren't in enum
+        EI = EnumVals.begin();
+        for (CaseRangesTy::const_iterator RI = CaseRanges.begin();
+             RI != CaseRanges.end() && EI != EIend; RI++) {
+          while (EI != EIend && EI->first < RI->first)
+            EI++;
+        
+          if (EI == EIend || EI->first != RI->first) {
+            Diag(RI->second->getLHS()->getExprLoc(), diag::warn_not_in_enum)
+              << ED->getDeclName();
+          }
 
-        llvm::APSInt Hi = RI->second->getRHS()->EvaluateAsInt(Context);
-        while (EI != EIend && EI->first < Hi)
-          EI++;
-        if (EI == EIend || EI->first != Hi)
-          Diag(RI->second->getRHS()->getExprLoc(), diag::warn_not_in_enum)
-            << ED->getDeclName();
+          llvm::APSInt Hi = RI->second->getRHS()->EvaluateAsInt(Context);
+          AdjustAPSInt(Hi, CondWidth, CondIsSigned);
+          while (EI != EIend && EI->first < Hi)
+            EI++;
+          if (EI == EIend || EI->first != Hi)
+            Diag(RI->second->getRHS()->getExprLoc(), diag::warn_not_in_enum)
+              << ED->getDeclName();
+        }
       }
-      //Check which enum vals aren't in switch
+      
+      // Check which enum vals aren't in switch
       CaseValsTy::const_iterator CI = CaseVals.begin();
       CaseRangesTy::const_iterator RI = CaseRanges.begin();
-      EI = EnumVals.begin();
-      for (; EI != EIend; EI++) {
-        //Drop unneeded case values
+      bool hasCasesNotInSwitch = false;
+
+      llvm::SmallVector<DeclarationName,8> UnhandledNames;
+      
+      for (EnumValsTy::const_iterator EI = EnumVals.begin(); EI != EIend; EI++){
+        // Drop unneeded case values
         llvm::APSInt CIVal;
         while (CI != CaseVals.end() && CI->first < EI->first)
           CI++;
@@ -765,17 +814,45 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
         if (CI != CaseVals.end() && CI->first == EI->first)
           continue;
 
-        //Drop unneeded case ranges
+        // Drop unneeded case ranges
         for (; RI != CaseRanges.end(); RI++) {
           llvm::APSInt Hi = RI->second->getRHS()->EvaluateAsInt(Context);
+          AdjustAPSInt(Hi, CondWidth, CondIsSigned);
           if (EI->first <= Hi)
             break;
         }
 
-        if (RI == CaseRanges.end() || EI->first < RI->first)
-          Diag(CondExpr->getExprLoc(), diag::warn_missing_cases)
-            << EI->second->getDeclName();
+        if (RI == CaseRanges.end() || EI->first < RI->first) {
+          hasCasesNotInSwitch = true;
+          if (!TheDefaultStmt)
+            UnhandledNames.push_back(EI->second->getDeclName());
+        }
       }
+      
+      // Produce a nice diagnostic if multiple values aren't handled.
+      switch (UnhandledNames.size()) {
+      case 0: break;
+      case 1:
+        Diag(CondExpr->getExprLoc(), diag::warn_missing_case1)
+          << UnhandledNames[0];
+        break;
+      case 2:
+        Diag(CondExpr->getExprLoc(), diag::warn_missing_case2)
+          << UnhandledNames[0] << UnhandledNames[1];
+        break;
+      case 3:
+        Diag(CondExpr->getExprLoc(), diag::warn_missing_case3)
+          << UnhandledNames[0] << UnhandledNames[1] << UnhandledNames[2];
+        break;
+      default:
+        Diag(CondExpr->getExprLoc(), diag::warn_missing_cases)
+          << (unsigned)UnhandledNames.size()
+          << UnhandledNames[0] << UnhandledNames[1] << UnhandledNames[2];
+        break;
+      }
+
+      if (!hasCasesNotInSwitch)
+        SS->setAllEnumCasesCovered();
     }
   }
 
@@ -818,6 +895,7 @@ Sema::ActOnDoStmt(SourceLocation DoLoc, Stmt *Body,
   if (CheckBooleanCondition(Cond, DoLoc))
     return StmtError();
 
+  CheckImplicitConversions(Cond, DoLoc);
   ExprResult CondResult = MaybeCreateCXXExprWithTemporaries(Cond);
   if (CondResult.isInvalid())
     return StmtError();
@@ -841,7 +919,7 @@ Sema::ActOnForStmt(SourceLocation ForLoc, SourceLocation LParenLoc,
       for (DeclStmt::decl_iterator DI=DS->decl_begin(), DE=DS->decl_end();
            DI!=DE; ++DI) {
         VarDecl *VD = dyn_cast<VarDecl>(*DI);
-        if (VD && VD->isBlockVarDecl() && !VD->hasLocalStorage())
+        if (VD && VD->isLocalVarDecl() && !VD->hasLocalStorage())
           VD = 0;
         if (VD == 0)
           Diag((*DI)->getLocation(), diag::err_non_variable_decl_in_for);
@@ -889,7 +967,7 @@ Sema::ActOnObjCForCollectionStmt(SourceLocation ForLoc,
       // declare identifiers for objects having storage class 'auto' or
       // 'register'.
       VarDecl *VD = cast<VarDecl>(D);
-      if (VD->isBlockVarDecl() && !VD->hasLocalStorage())
+      if (VD->isLocalVarDecl() && !VD->hasLocalStorage())
         return StmtError(Diag(VD->getLocation(),
                               diag::err_non_variable_decl_in_for));
     } else {
@@ -952,6 +1030,7 @@ Sema::ActOnGotoStmt(SourceLocation GotoLoc, SourceLocation LabelLoc,
   if (LabelDecl == 0)
     LabelDecl = new (Context) LabelStmt(LabelLoc, LabelII, 0);
 
+  LabelDecl->setUsed();
   return Owned(new (Context) GotoStmt(LabelDecl, GotoLoc, LabelLoc));
 }
 
@@ -1101,8 +1180,10 @@ Sema::ActOnBlockReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
         return StmtError();
       }
       
-      if (RetValExp)
+      if (RetValExp) {
+        CheckImplicitConversions(RetValExp, ReturnLoc);
         RetValExp = MaybeCreateCXXExprWithTemporaries(RetValExp);
+      }
 
       RetValExp = Res.takeAs<Expr>();
       if (RetValExp) 
@@ -1155,6 +1236,7 @@ Sema::ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
           << RetValExp->getSourceRange();
       }
 
+      CheckImplicitConversions(RetValExp, ReturnLoc);
       RetValExp = MaybeCreateCXXExprWithTemporaries(RetValExp);
     }
     
@@ -1197,8 +1279,10 @@ Sema::ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
         CheckReturnStackAddr(RetValExp, FnRetType, ReturnLoc);
     }
     
-    if (RetValExp)
+    if (RetValExp) {
+      CheckImplicitConversions(RetValExp, ReturnLoc);
       RetValExp = MaybeCreateCXXExprWithTemporaries(RetValExp);
+    }
     Result = new (Context) ReturnStmt(ReturnLoc, RetValExp, NRVOCandidate);
   }
   
@@ -1368,7 +1452,6 @@ StmtResult Sema::ActOnAsmStmt(SourceLocation AsmLoc,
   if (unsigned DiagID = NS->AnalyzeAsmString(Pieces, Context, DiagOffs)) {
     Diag(getLocationOfStringLiteralByte(AsmString, DiagOffs), DiagID)
            << AsmString->getSourceRange();
-    DeleteStmt(NS);
     return StmtError();
   }
 
@@ -1459,7 +1542,6 @@ StmtResult Sema::ActOnAsmStmt(SourceLocation AsmLoc,
          diag::err_asm_tying_incompatible_types)
       << InTy << OutTy << OutputExpr->getSourceRange()
       << InputExpr->getSourceRange();
-    DeleteStmt(NS);
     return StmtError();
   }
 
@@ -1578,7 +1660,6 @@ public:
     return t == other.t;
   }
 
-  QualType getQualType() const { return t; }
   CXXCatchStmt *getCatchStmt() const { return stmt; }
   SourceLocation getTypeSpecStartLoc() const {
     return stmt->getExceptionDecl()->getTypeSpecStartLoc();

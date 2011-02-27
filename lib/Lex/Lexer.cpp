@@ -242,7 +242,8 @@ unsigned Lexer::MeasureTokenLength(SourceLocation Loc,
     return 0;
 
   // Create a lexer starting at the beginning of this token.
-  Lexer TheLexer(Loc, LangOpts, Buffer.begin(), StrData, Buffer.end());
+  Lexer TheLexer(SM.getLocForStartOfFile(LocInfo.first), LangOpts,
+                 Buffer.begin(), StrData, Buffer.end());
   TheLexer.SetCommentRetentionState(true);
   Token TheTok;
   TheLexer.LexFromRawLexer(TheTok);
@@ -584,10 +585,8 @@ static inline bool isNumberBody(unsigned char c) {
 /// lexer buffer was all instantiated at a single point, perform the mapping.
 /// This is currently only used for _Pragma implementation, so it is the slow
 /// path of the hot getSourceLocation method.  Do not allow it to be inlined.
-static DISABLE_INLINE SourceLocation GetMappedTokenLoc(Preprocessor &PP,
-                                                       SourceLocation FileLoc,
-                                                       unsigned CharNo,
-                                                       unsigned TokLen);
+static LLVM_ATTRIBUTE_NOINLINE SourceLocation GetMappedTokenLoc(
+    Preprocessor &PP, SourceLocation FileLoc, unsigned CharNo, unsigned TokLen);
 static SourceLocation GetMappedTokenLoc(Preprocessor &PP,
                                         SourceLocation FileLoc,
                                         unsigned CharNo, unsigned TokLen) {
@@ -920,6 +919,16 @@ FinishIdentifier:
   }
 }
 
+/// isHexaLiteral - Return true if Start points to a hex constant.
+/// in microsoft mode (where this is supposed to be several different tokens).
+static bool isHexaLiteral(const char *Start, const LangOptions &Features) {
+  unsigned Size;
+  char C1 = Lexer::getCharAndSizeNoWarn(Start, Size, Features);
+  if (C1 != '0')
+    return false;
+  char C2 = Lexer::getCharAndSizeNoWarn(Start + Size, Size, Features);
+  return (C2 == 'x' || C2 == 'X');
+}
 
 /// LexNumericConstant - Lex the remainder of a integer or floating point
 /// constant. From[-1] is the first character lexed.  Return the end of the
@@ -935,12 +944,16 @@ void Lexer::LexNumericConstant(Token &Result, const char *CurPtr) {
   }
 
   // If we fell out, check for a sign, due to 1e+12.  If we have one, continue.
-  if ((C == '-' || C == '+') && (PrevCh == 'E' || PrevCh == 'e'))
-    return LexNumericConstant(Result, ConsumeChar(CurPtr, Size, Result));
+  if ((C == '-' || C == '+') && (PrevCh == 'E' || PrevCh == 'e')) {
+    // If we are in Microsoft mode, don't continue if the constant is hex.
+    // For example, MSVC will accept the following as 3 tokens: 0x1234567e+1
+    if (!Features.Microsoft || !isHexaLiteral(BufferPtr, Features))
+      return LexNumericConstant(Result, ConsumeChar(CurPtr, Size, Result));
+  }
 
   // If we have a hex FP constant, continue.
   if ((C == '-' || C == '+') && (PrevCh == 'P' || PrevCh == 'p') &&
-      (!PP || !PP->getLangOptions().CPlusPlus0x))
+      !Features.CPlusPlus0x)
     return LexNumericConstant(Result, ConsumeChar(CurPtr, Size, Result));
 
   // Update the location of token as well as BufferPtr.

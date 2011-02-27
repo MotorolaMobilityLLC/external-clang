@@ -22,7 +22,6 @@
 #include "CGCall.h"
 #include "CGCXX.h"
 #include "CGVTables.h"
-#include "CGCXXABI.h"
 #include "CodeGenTypes.h"
 #include "GlobalDecl.h"
 #include "Mangle.h"
@@ -71,6 +70,8 @@ namespace clang {
 namespace CodeGen {
 
   class CodeGenFunction;
+  class CodeGenTBAA;
+  class CGCXXABI;
   class CGDebugInfo;
   class CGObjCRuntime;
   class MangleBuffer;
@@ -111,6 +112,7 @@ class CodeGenModule : public BlockModule {
   Diagnostic &Diags;
   CGCXXABI &ABI;
   CodeGenTypes Types;
+  CodeGenTBAA *TBAA;
 
   /// VTables - Holds information about C++ vtables.
   CodeGenVTables VTables;
@@ -183,9 +185,9 @@ class CodeGenModule : public BlockModule {
   /// strings. This value has type int * but is actually an Obj-C class pointer.
   llvm::Constant *CFConstantStringClassRef;
 
-  /// NSConstantStringClassRef - Cached reference to the class for constant
+  /// ConstantStringClassRef - Cached reference to the class for constant
   /// strings. This value has type int * but is actually an Obj-C class pointer.
-  llvm::Constant *NSConstantStringClassRef;
+  llvm::Constant *ConstantStringClassRef;
 
   /// Lazily create the Objective-C runtime
   void createObjCRuntime();
@@ -243,9 +245,6 @@ public:
   const LangOptions &getLangOptions() const { return Features; }
   llvm::Module &getModule() const { return TheModule; }
   CodeGenTypes &getTypes() { return Types; }
-  MangleContext &getMangleContext() {
-    return ABI.getMangleContext();
-  }
   CodeGenVTables &getVTables() { return VTables; }
   Diagnostic &getDiags() const { return Diags; }
   const llvm::TargetData &getTargetData() const { return TheTargetData; }
@@ -253,17 +252,20 @@ public:
   const TargetCodeGenInfo &getTargetCodeGenInfo();
   bool isTargetDarwin() const;
 
-  /// getDeclVisibilityMode - Compute the visibility of the decl \arg D.
-  LangOptions::VisibilityMode getDeclVisibilityMode(const Decl *D) const;
+  llvm::MDNode *getTBAAInfo(QualType QTy);
+
+  static void DecorateInstruction(llvm::Instruction *Inst,
+                                  llvm::MDNode *TBAAInfo);
 
   /// setGlobalVisibility - Set the visibility for the given LLVM
   /// GlobalValue.
-  void setGlobalVisibility(llvm::GlobalValue *GV, const Decl *D) const;
+  void setGlobalVisibility(llvm::GlobalValue *GV, const NamedDecl *D,
+                           bool IsForDefinition) const;
 
   /// setTypeVisibility - Set the visibility for the given global
   /// value which holds information about a type.
   void setTypeVisibility(llvm::GlobalValue *GV, const CXXRecordDecl *D,
-                         bool IsForRTTI) const;
+                         bool IsForRTTI, bool IsForDefinition) const;
 
   llvm::Constant *GetAddrOfGlobal(GlobalDecl GD) {
     if (isa<CXXConstructorDecl>(GD.getDecl()))
@@ -317,9 +319,10 @@ public:
   /// for the given string.
   llvm::Constant *GetAddrOfConstantCFString(const StringLiteral *Literal);
   
-  /// GetAddrOfConstantNSString - Return a pointer to a constant NSString object
-  /// for the given string.
-  llvm::Constant *GetAddrOfConstantNSString(const StringLiteral *Literal);
+  /// GetAddrOfConstantString - Return a pointer to a constant NSString object
+  /// for the given string. Or a user defined String object as defined via
+  /// -fconstant-string-class=class_name option.
+  llvm::Constant *GetAddrOfConstantString(const StringLiteral *Literal);
 
   /// GetAddrOfConstantStringFromLiteral - Return a pointer to a constant array
   /// for the given string literal.
@@ -509,7 +512,13 @@ public:
   /// GetTargetTypeStoreSize - Return the store size, in character units, of
   /// the given LLVM type.
   CharUnits GetTargetTypeStoreSize(const llvm::Type *Ty) const;
-
+  
+  /// GetLLVMLinkageVarDefinition - Returns LLVM linkage for a global 
+  /// variable.
+  llvm::GlobalValue::LinkageTypes 
+  GetLLVMLinkageVarDefinition(const VarDecl *D,
+                              llvm::GlobalVariable *GV);
+  
   std::vector<const CXXRecordDecl*> DeferredVTables;
 
 private:
@@ -550,7 +559,7 @@ private:
   void EmitAliasDefinition(GlobalDecl GD);
   void EmitObjCPropertyImplementations(const ObjCImplementationDecl *D);
   void EmitObjCIvarInitializations(ObjCImplementationDecl *D);
-
+  
   // C++ related functions.
 
   bool TryEmitDefinitionAsAlias(GlobalDecl Alias, GlobalDecl Target);
@@ -581,7 +590,8 @@ private:
   /// EmitCXXGlobalDtorFunc - Emit the function that destroys C++ globals.
   void EmitCXXGlobalDtorFunc();
 
-  void EmitCXXGlobalVarDeclInitFunc(const VarDecl *D);
+  void EmitCXXGlobalVarDeclInitFunc(const VarDecl *D,
+                                    llvm::GlobalVariable *Addr);
 
   // FIXME: Hardcoding priority here is gross.
   void AddGlobalCtor(llvm::Function *Ctor, int Priority=65535);
@@ -616,6 +626,10 @@ private:
   /// lazily; this is only relevant for definitions. The given decl
   /// must be either a function or var decl.
   bool MayDeferGeneration(const ValueDecl *D);
+
+  /// SimplifyPersonality - Check whether we can use a "simpler", more
+  /// core exceptions personality function.
+  void SimplifyPersonality();
 };
 }  // end namespace CodeGen
 }  // end namespace clang

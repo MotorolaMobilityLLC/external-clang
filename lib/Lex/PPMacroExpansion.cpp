@@ -20,11 +20,27 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/LexDiagnostic.h"
 #include "clang/Lex/CodeCompletionHandler.h"
+#include "clang/Lex/ExternalPreprocessorSource.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Config/config.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdio>
 #include <ctime>
 using namespace clang;
+
+MacroInfo *Preprocessor::getInfoForMacro(IdentifierInfo *II) const {
+  assert(II->hasMacroDefinition() && "Identifier is not a macro!");
+  
+  llvm::DenseMap<IdentifierInfo*, MacroInfo*>::const_iterator Pos
+    = Macros.find(II);
+  if (Pos == Macros.end()) {
+    // Load this macro from the external source.
+    getExternalSource()->LoadMacroDefinition(II);
+    Pos = Macros.find(II);
+  }
+  assert(Pos != Macros.end() && "Identifier macro info is missing!");
+  return Pos->second;
+}
 
 /// setMacroInfo - Specify a macro for this identifier.
 ///
@@ -70,8 +86,15 @@ void Preprocessor::RegisterBuiltinMacros() {
   // Clang Extensions.
   Ident__has_feature      = RegisterBuiltinMacro(*this, "__has_feature");
   Ident__has_builtin      = RegisterBuiltinMacro(*this, "__has_builtin");
+  Ident__has_attribute    = RegisterBuiltinMacro(*this, "__has_attribute");
   Ident__has_include      = RegisterBuiltinMacro(*this, "__has_include");
   Ident__has_include_next = RegisterBuiltinMacro(*this, "__has_include_next");
+
+  // Microsoft Extensions.
+  if (Features.Microsoft) 
+    Ident__pragma = RegisterBuiltinMacro(*this, "__pragma");
+  else
+    Ident__pragma = 0;
 }
 
 /// isTrivialSingleTokenExpansion - Return true if MI, which has a single token
@@ -475,16 +498,25 @@ static void ComputeDATE_TIME(SourceLocation &DATELoc, SourceLocation &TIMELoc,
     "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"
   };
 
-  char TmpBuffer[100];
+  char TmpBuffer[32];
+#ifdef LLVM_ON_WIN32
   sprintf(TmpBuffer, "\"%s %2d %4d\"", Months[TM->tm_mon], TM->tm_mday,
           TM->tm_year+1900);
+#else
+  snprintf(TmpBuffer, sizeof(TmpBuffer), "\"%s %2d %4d\"", Months[TM->tm_mon], TM->tm_mday,
+          TM->tm_year+1900);
+#endif
 
   Token TmpTok;
   TmpTok.startToken();
   PP.CreateString(TmpBuffer, strlen(TmpBuffer), TmpTok);
   DATELoc = TmpTok.getLocation();
 
+#ifdef LLVM_ON_WIN32
   sprintf(TmpBuffer, "\"%02d:%02d:%02d\"", TM->tm_hour, TM->tm_min, TM->tm_sec);
+#else
+  snprintf(TmpBuffer, sizeof(TmpBuffer), "\"%02d:%02d:%02d\"", TM->tm_hour, TM->tm_min, TM->tm_sec);
+#endif
   PP.CreateString(TmpBuffer, strlen(TmpBuffer), TmpTok);
   TIMELoc = TmpTok.getLocation();
 }
@@ -499,24 +531,30 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("attribute_analyzer_noreturn", true)
            .Case("attribute_cf_returns_not_retained", true)
            .Case("attribute_cf_returns_retained", true)
+           .Case("attribute_deprecated_with_message", true)
            .Case("attribute_ext_vector_type", true)
            .Case("attribute_ns_returns_not_retained", true)
            .Case("attribute_ns_returns_retained", true)
            .Case("attribute_objc_ivar_unused", true)
            .Case("attribute_overloadable", true)
+           .Case("attribute_unavailable_with_message", true)
            .Case("blocks", LangOpts.Blocks)
            .Case("cxx_attributes", LangOpts.CPlusPlus0x)
            .Case("cxx_auto_type", LangOpts.CPlusPlus0x)
            .Case("cxx_decltype", LangOpts.CPlusPlus0x)
-           .Case("cxx_deleted_functions", LangOpts.CPlusPlus0x)
+           .Case("cxx_deleted_functions", true) // Accepted as an extension.
            .Case("cxx_exceptions", LangOpts.Exceptions)
            .Case("cxx_rtti", LangOpts.RTTI)
+           .Case("cxx_strong_enums", LangOpts.CPlusPlus0x)
            .Case("cxx_static_assert", LangOpts.CPlusPlus0x)
+           .Case("cxx_trailing_return", LangOpts.CPlusPlus0x)
+           .Case("enumerator_attributes", true)
            .Case("objc_nonfragile_abi", LangOpts.ObjCNonFragileABI)
            .Case("objc_weak_class", LangOpts.ObjCNonFragileABI)
            .Case("ownership_holds", true)
            .Case("ownership_returns", true)
            .Case("ownership_takes", true)
+           .Case("cxx_inline_namespaces", true)
          //.Case("cxx_concepts", false)
          //.Case("cxx_lambdas", false)
          //.Case("cxx_nullptr", false)
@@ -524,6 +562,14 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
          //.Case("cxx_variadic_templates", false)
            .Case("tls", PP.getTargetInfo().isTLSSupported())
            .Default(false);
+}
+
+/// HasAttribute -  Return true if we recognize and implement the attribute
+/// specified by the given identifier.
+static bool HasAttribute(const IdentifierInfo *II) {
+    return llvm::StringSwitch<bool>(II->getName())
+#include "clang/Lex/AttrSpellings.inc"
+        .Default(false);
 }
 
 /// EvaluateHasIncludeCommon - Process a '__has_include("path")'
@@ -552,7 +598,8 @@ static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
   // Reserve a buffer to get the spelling.
   llvm::SmallString<128> FilenameBuffer;
   llvm::StringRef Filename;
-
+  SourceLocation EndLoc;
+  
   switch (Tok.getKind()) {
   case tok::eom:
     // If the token kind is EOM, the error has already been diagnosed.
@@ -571,7 +618,7 @@ static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
     // This could be a <foo/bar.h> file coming from a macro expansion.  In this
     // case, glue the tokens together into FilenameBuffer and interpret those.
     FilenameBuffer.push_back('<');
-    if (PP.ConcatenateIncludeName(FilenameBuffer))
+    if (PP.ConcatenateIncludeName(FilenameBuffer, EndLoc))
       return false;   // Found <eom> but no ">"?  Diagnostic already emitted.
     Filename = FilenameBuffer.str();
     break;
@@ -641,10 +688,12 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
   IdentifierInfo *II = Tok.getIdentifierInfo();
   assert(II && "Can't be a macro without id info!");
 
-  // If this is an _Pragma directive, expand it, invoke the pragma handler, then
-  // lex the token after it.
+  // If this is an _Pragma or Microsoft __pragma directive, expand it,
+  // invoke the pragma handler, then lex the token after it.
   if (II == Ident_Pragma)
     return Handle_Pragma(Tok);
+  else if (II == Ident__pragma) // in non-MS mode this is null
+    return HandleMicrosoft__pragma(Tok);
 
   ++NumBuiltinMacroExpanded;
 
@@ -756,7 +805,8 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
     OS << CounterValue++;
     Tok.setKind(tok::numeric_constant);
   } else if (II == Ident__has_feature ||
-             II == Ident__has_builtin) {
+             II == Ident__has_builtin ||
+             II == Ident__has_attribute) {
     // The argument to these two builtins should be a parenthesized identifier.
     SourceLocation StartLoc = Tok.getLocation();
 
@@ -784,7 +834,9 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
     else if (II == Ident__has_builtin) {
       // Check for a builtin is trivial.
       Value = FeatureII->getBuiltinID() != 0;
-    } else {
+    } else if (II == Ident__has_attribute)
+      Value = HasAttribute(FeatureII);
+    else {
       assert(II == Ident__has_feature && "Must be feature check");
       Value = HasFeature(*this, FeatureII);
     }

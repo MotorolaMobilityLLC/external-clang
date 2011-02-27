@@ -340,9 +340,11 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
       // Since we define wchar_t in C++ mode.
       Builder.defineMacro("_WCHAR_T_DEFINED");
       Builder.defineMacro("_NATIVE_WCHAR_T_DEFINED");
-      // FIXME:  This should be temporary until we have a __pragma
-      // solution, to avoid some errors flagged in VC++ headers.
-      Builder.defineMacro("_CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES", "0");
+      Builder.append("class type_info;");
+    }
+
+    if (LangOpts.CPlusPlus0x) {
+      Builder.defineMacro("_HAS_CHAR16_T_LANGUAGE_SUPPORT", "1");
     }
   }
 
@@ -476,6 +478,7 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
 static void InitializeFileRemapping(Diagnostic &Diags,
                                     SourceManager &SourceMgr,
                                     FileManager &FileMgr,
+                                    const FileSystemOptions &FSOpts,
                                     const PreprocessorOptions &InitOpts) {
   // Remap files in the source manager (with buffers).
   for (PreprocessorOptions::const_remapped_file_buffer_iterator
@@ -486,7 +489,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
     // Create the file entry for the file that we're mapping from.
     const FileEntry *FromFile = FileMgr.getVirtualFile(Remap->first,
                                                 Remap->second->getBufferSize(),
-                                                       0);
+                                                       0, FSOpts);
     if (!FromFile) {
       Diags.Report(diag::err_fe_remap_missing_from_file)
         << Remap->first;
@@ -508,7 +511,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
        Remap != RemapEnd;
        ++Remap) {
     // Find the file that we're mapping to.
-    const FileEntry *ToFile = FileMgr.getFile(Remap->second);
+    const FileEntry *ToFile = FileMgr.getFile(Remap->second, FSOpts);
     if (!ToFile) {
       Diags.Report(diag::err_fe_remap_missing_to_file)
       << Remap->first << Remap->second;
@@ -518,7 +521,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
     // Create the file entry for the file that we're mapping from.
     const FileEntry *FromFile = FileMgr.getVirtualFile(Remap->first,
                                                        ToFile->getSize(),
-                                                       0);
+                                                       0, FSOpts);
     if (!FromFile) {
       Diags.Report(diag::err_fe_remap_missing_from_file)
       << Remap->first;
@@ -528,7 +531,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
     // Load the contents of the file we're mapping to.
     std::string ErrorStr;
     const llvm::MemoryBuffer *Buffer
-    = llvm::MemoryBuffer::getFile(ToFile->getName(), &ErrorStr);
+    = FileMgr.getBufferForFile(ToFile->getName(), FSOpts, &ErrorStr);
     if (!Buffer) {
       Diags.Report(diag::err_fe_error_opening)
         << Remap->second << ErrorStr;
@@ -545,6 +548,7 @@ static void InitializeFileRemapping(Diagnostic &Diags,
 /// environment ready to process a single file. This returns true on error.
 ///
 void clang::InitializePreprocessor(Preprocessor &PP,
+                                   const FileSystemOptions &FSOpts,
                                    const PreprocessorOptions &InitOpts,
                                    const HeaderSearchOptions &HSOpts,
                                    const FrontendOptions &FEOpts) {
@@ -554,7 +558,7 @@ void clang::InitializePreprocessor(Preprocessor &PP,
   MacroBuilder Builder(Predefines);
 
   InitializeFileRemapping(PP.getDiagnostics(), PP.getSourceManager(),
-                          PP.getFileManager(), InitOpts);
+                          PP.getFileManager(), FSOpts, InitOpts);
 
   // Emit line markers for various builtin sections of the file.  We don't do
   // this in asm preprocessor mode, because "# 4" is not a line marker directive

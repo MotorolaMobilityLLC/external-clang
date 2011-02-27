@@ -172,3 +172,65 @@ int false6() {
 
   return localInt;
 }
+
+// Check that assignments filter out false positives correctly
+int false7() {
+  int zero = 0; // psuedo-constant
+  int one = 1;
+
+  int a = 55;
+  a = a; // expected-warning{{Assigned value is always the same as the existing value}}
+  a = enum1 * a; // no-warning
+
+  int b = 123;
+  b = b; // no-warning
+
+  return a;
+}
+
+// Check truncations do not flag as self-assignments
+void false8() {
+  int a = 10000000;
+  a = (short)a; // no-warning
+  test(a);
+}
+
+// This test case previously flagged a warning at 'b == c' because the
+// analyzer previously allowed 'UnknownVal' as the index for ElementRegions.
+typedef struct RDar8431728_F {
+  int RDar8431728_A;
+  unsigned char *RDar8431728_B;
+  int RDar8431728_E[6];
+} RDar8431728_D;
+static inline int RDar8431728_C(RDar8431728_D * s, int n,
+    unsigned char **RDar8431728_B_ptr) {
+  int xy, wrap, pred, a, b, c;
+
+  xy = s->RDar8431728_E[n];
+  wrap = s->RDar8431728_A;
+
+  a = s->RDar8431728_B[xy - 1];
+  b = s->RDar8431728_B[xy - 1 - wrap];
+  c = s->RDar8431728_B[xy - wrap];
+
+  if (b == c) { // no-warning
+    pred = a;
+  } else {
+    pred = c;
+  }
+
+  *RDar8431728_B_ptr = &s->RDar8431728_B[xy];
+
+  return pred;
+}
+
+// <rdar://problem/8601243> - Don't warn on pointer arithmetic.  This
+// is often idiomatic.
+unsigned rdar8601243_aux(unsigned n);
+void rdar8601243() {
+  char arr[100];
+  char *start = arr;
+  start = start + rdar8601243_aux(sizeof(arr) - (arr - start)); // no-warning
+  (void) start;
+}
+

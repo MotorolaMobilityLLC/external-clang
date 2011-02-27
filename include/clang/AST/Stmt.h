@@ -104,13 +104,7 @@ public:
         first##BASE##Constant=FIRST##Class, last##BASE##Constant=LAST##Class
 #define ABSTRACT_STMT(STMT)
 #include "clang/AST/StmtNodes.inc"
-};
-private:
-  /// \brief The statement class.
-  const unsigned sClass : 8;
-
-  /// \brief The reference count for this statement.
-  unsigned RefCount : 24;
+  };
 
   // Make vanilla 'new' and 'delete' illegal for Stmts.
 protected:
@@ -121,6 +115,58 @@ protected:
   void operator delete(void* data) throw() {
     assert(0 && "Stmts cannot be released with regular 'delete'.");
   }
+
+  class StmtBitfields {
+    friend class Stmt;
+
+    /// \brief The statement class.
+    unsigned sClass : 8;
+  };
+  enum { NumStmtBits = 8 };
+
+  class CompoundStmtBitfields {
+    friend class CompoundStmt;
+    unsigned : NumStmtBits;
+
+    unsigned NumStmts : 32 - NumStmtBits;
+  };
+
+  class LabelStmtBitfields {
+    friend class LabelStmt;
+    unsigned : NumStmtBits;
+
+    unsigned Used : 1;
+    unsigned HasUnusedAttr : 1;
+  };
+
+  class ExprBitfields {
+    friend class Expr;
+    friend class DeclRefExpr; // computeDependence
+    friend class InitListExpr; // ctor
+    friend class DesignatedInitExpr; // ctor
+    unsigned : NumStmtBits;
+
+    unsigned ValueKind : 2;
+    unsigned TypeDependent : 1;
+    unsigned ValueDependent : 1;
+  };
+  enum { NumExprBits = 12 };
+
+  class CastExprBitfields {
+    friend class CastExpr;
+    unsigned : NumExprBits;
+
+    unsigned Kind : 5;
+    unsigned BasePathSize : 32 - NumExprBits - 5;
+  };
+
+  union {
+    StmtBitfields StmtBits;
+    CompoundStmtBitfields CompoundStmtBits;
+    LabelStmtBitfields LabelStmtBits;
+    ExprBitfields ExprBits;
+    CastExprBitfields CastExprBits;
+  };
 
 public:
   // Only allow allocation of Stmts using the allocator in ASTContext
@@ -152,37 +198,20 @@ public:
 
 protected:
   /// \brief Construct an empty statement.
-  explicit Stmt(StmtClass SC, EmptyShell) : sClass(SC), RefCount(1) {
+  explicit Stmt(StmtClass SC, EmptyShell) {
+    StmtBits.sClass = SC;
     if (Stmt::CollectingStats()) Stmt::addStmtClass(SC);
   }
 
 public:
-  Stmt(StmtClass SC) : sClass(SC), RefCount(1) {
+  Stmt(StmtClass SC) {
+    StmtBits.sClass = SC;
     if (Stmt::CollectingStats()) Stmt::addStmtClass(SC);
   }
   virtual ~Stmt() {}
 
-#ifndef NDEBUG
-  /// \brief True if this statement's refcount is in a valid state.
-  /// Should be used only in assertions.
-  bool isRetained() const {
-    return (RefCount >= 1);
-  }
-#endif
-
-  /// \brief Increases the reference count for this statement.
-  ///
-  /// Invoke the Retain() operation when this statement or expression
-  /// is being shared by another owner.
-  Stmt *Retain() {
-    assert(RefCount >= 1);
-    ++RefCount;
-    return this;
-  }
-
   StmtClass getStmtClass() const { 
-    assert(RefCount >= 1 && "Referencing already-destroyed statement!");
-    return (StmtClass)sClass; 
+    return static_cast<StmtClass>(StmtBits.sClass);
   }
   const char *getStmtClassName() const;
 
@@ -355,39 +384,47 @@ public:
 ///
 class CompoundStmt : public Stmt {
   Stmt** Body;
-  unsigned NumStmts;
   SourceLocation LBracLoc, RBracLoc;
 public:
-  CompoundStmt(ASTContext& C, Stmt **StmtStart, unsigned numStmts,
-                             SourceLocation LB, SourceLocation RB)
-  : Stmt(CompoundStmtClass), NumStmts(numStmts), LBracLoc(LB), RBracLoc(RB) {
+  CompoundStmt(ASTContext& C, Stmt **StmtStart, unsigned NumStmts,
+               SourceLocation LB, SourceLocation RB)
+  : Stmt(CompoundStmtClass), LBracLoc(LB), RBracLoc(RB) {
+    CompoundStmtBits.NumStmts = NumStmts;
+
     if (NumStmts == 0) {
       Body = 0;
       return;
     }
 
     Body = new (C) Stmt*[NumStmts];
-    memcpy(Body, StmtStart, numStmts * sizeof(*Body));
+    memcpy(Body, StmtStart, NumStmts * sizeof(*Body));
   }
 
   // \brief Build an empty compound statement.
   explicit CompoundStmt(EmptyShell Empty)
-    : Stmt(CompoundStmtClass, Empty), Body(0), NumStmts(0) { }
+    : Stmt(CompoundStmtClass, Empty), Body(0) {
+    CompoundStmtBits.NumStmts = 0;
+  }
 
   void setStmts(ASTContext &C, Stmt **Stmts, unsigned NumStmts);
 
-  bool body_empty() const { return NumStmts == 0; }
-  unsigned size() const { return NumStmts; }
+  bool body_empty() const { return CompoundStmtBits.NumStmts == 0; }
+  unsigned size() const { return CompoundStmtBits.NumStmts; }
 
   typedef Stmt** body_iterator;
   body_iterator body_begin() { return Body; }
-  body_iterator body_end() { return Body + NumStmts; }
-  Stmt *body_back() { return NumStmts ? Body[NumStmts-1] : 0; }
+  body_iterator body_end() { return Body + size(); }
+  Stmt *body_back() { return !body_empty() ? Body[size()-1] : 0; }
+  
+  void setLastStmt(Stmt *S) {
+    assert(!body_empty() && "setLastStmt");
+    Body[size()-1] = S;
+  }
 
   typedef Stmt* const * const_body_iterator;
   const_body_iterator body_begin() const { return Body; }
-  const_body_iterator body_end() const { return Body + NumStmts; }
-  const Stmt *body_back() const { return NumStmts ? Body[NumStmts-1] : 0; }
+  const_body_iterator body_end() const { return Body + size(); }
+  const Stmt *body_back() const { return !body_empty() ? Body[size()-1] : 0; }
 
   typedef std::reverse_iterator<body_iterator> reverse_body_iterator;
   reverse_body_iterator body_rbegin() {
@@ -562,9 +599,12 @@ class LabelStmt : public Stmt {
   Stmt *SubStmt;
   SourceLocation IdentLoc;
 public:
-  LabelStmt(SourceLocation IL, IdentifierInfo *label, Stmt *substmt)
-    : Stmt(LabelStmtClass), Label(label),
-      SubStmt(substmt), IdentLoc(IL) {}
+  LabelStmt(SourceLocation IL, IdentifierInfo *label, Stmt *substmt,
+            bool hasUnusedAttr = false)
+    : Stmt(LabelStmtClass), Label(label), SubStmt(substmt), IdentLoc(IL) {
+    LabelStmtBits.Used = false;
+    LabelStmtBits.HasUnusedAttr = hasUnusedAttr;
+  }
 
   // \brief Build an empty label statement.
   explicit LabelStmt(EmptyShell Empty) : Stmt(LabelStmtClass, Empty) { }
@@ -577,6 +617,16 @@ public:
   const Stmt *getSubStmt() const { return SubStmt; }
   void setIdentLoc(SourceLocation L) { IdentLoc = L; }
   void setSubStmt(Stmt *SS) { SubStmt = SS; }
+
+  /// \brief Whether this label was used.
+  bool isUsed(bool CheckUnusedAttr = true) const {
+    return LabelStmtBits.Used ||
+           (CheckUnusedAttr && LabelStmtBits.HasUnusedAttr);
+  }
+  void setUsed(bool U = true) { LabelStmtBits.Used = U; }
+
+  bool HasUnusedAttribute() const { return LabelStmtBits.HasUnusedAttr; }
+  void setUnusedAttribute(bool U) { LabelStmtBits.HasUnusedAttr = U; }
 
   virtual SourceRange getSourceRange() const {
     return SourceRange(IdentLoc, SubStmt->getLocEnd());
@@ -662,6 +712,11 @@ class SwitchStmt : public Stmt {
   SwitchCase *FirstCase;
   SourceLocation SwitchLoc;
 
+  /// If the SwitchStmt is a switch on an enum value, this records whether
+  /// all the enum values were covered by CaseStmts.  This value is meant to
+  /// be a hint for possible clients.
+  unsigned AllEnumCasesCovered : 1;
+
 public:
   SwitchStmt(ASTContext &C, VarDecl *Var, Expr *cond);
 
@@ -705,10 +760,22 @@ public:
   }
   void addSwitchCase(SwitchCase *SC) {
     assert(!SC->getNextSwitchCase() && "case/default already added to a switch");
-    SC->Retain();
     SC->setNextSwitchCase(FirstCase);
     FirstCase = SC;
   }
+
+  /// Set a flag in the SwitchStmt indicating that if the 'switch (X)' is a
+  /// switch over an enum value then all cases have been explicitly covered.
+  void setAllEnumCasesCovered() {
+    AllEnumCasesCovered = 1;
+  }
+
+  /// Returns true if the SwitchStmt is a switch of an enum value and all cases
+  /// have been explicitly covered.
+  bool isAllEnumCasesCovered() const {
+    return (bool) AllEnumCasesCovered;
+  }
+
   virtual SourceRange getSourceRange() const {
     return SourceRange(SwitchLoc, SubExprs[BODY]->getLocEnd());
   }
@@ -938,9 +1005,16 @@ public:
   void setStarLoc(SourceLocation L) { StarLoc = L; }
   SourceLocation getStarLoc() const { return StarLoc; }
 
-  Expr *getTarget();
-  const Expr *getTarget() const;
+  Expr *getTarget() { return reinterpret_cast<Expr*>(Target); }
+  const Expr *getTarget() const {return reinterpret_cast<const Expr*>(Target);}
   void setTarget(Expr *E) { Target = reinterpret_cast<Stmt*>(E); }
+
+  /// getConstantTarget - Returns the fixed target of this indirect
+  /// goto, if one exists.
+  LabelStmt *getConstantTarget();
+  const LabelStmt *getConstantTarget() const {
+    return const_cast<IndirectGotoStmt*>(this)->getConstantTarget();
+  }
 
   virtual SourceRange getSourceRange() const {
     return SourceRange(GotoLoc, Target->getLocEnd());

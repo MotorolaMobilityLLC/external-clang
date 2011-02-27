@@ -16,11 +16,63 @@
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Parse/ParseAST.h"
+#include "clang/Serialization/ASTDeserializationListener.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace clang;
+
+namespace {
+
+/// \brief Dumps deserialized declarations.
+class DeserializedDeclsDumper : public ASTDeserializationListener {
+  ASTDeserializationListener *Previous;
+
+public:
+  DeserializedDeclsDumper(ASTDeserializationListener *Previous)
+    : Previous(Previous) { }
+
+  virtual void DeclRead(serialization::DeclID ID, const Decl *D) {
+    llvm::outs() << "PCH DECL: " << D->getDeclKindName();
+    if (const NamedDecl *ND = dyn_cast<NamedDecl>(D))
+      llvm::outs() << " - " << ND->getNameAsString();
+    llvm::outs() << "\n";
+
+    if (Previous)
+      Previous->DeclRead(ID, D);
+  }
+};
+
+  /// \brief Checks deserialized declarations and emits error if a name
+  /// matches one given in command-line using -error-on-deserialized-decl.
+  class DeserializedDeclsChecker : public ASTDeserializationListener {
+    ASTContext &Ctx;
+    std::set<std::string> NamesToCheck;
+    ASTDeserializationListener *Previous;
+
+  public:
+    DeserializedDeclsChecker(ASTContext &Ctx,
+                             const std::set<std::string> &NamesToCheck, 
+                             ASTDeserializationListener *Previous)
+      : Ctx(Ctx), NamesToCheck(NamesToCheck), Previous(Previous) { }
+
+    virtual void DeclRead(serialization::DeclID ID, const Decl *D) {
+      if (const NamedDecl *ND = dyn_cast<NamedDecl>(D))
+        if (NamesToCheck.find(ND->getNameAsString()) != NamesToCheck.end()) {
+          unsigned DiagID
+            = Ctx.getDiagnostics().getCustomDiagID(Diagnostic::Error,
+                                                   "%0 was deserialized");
+          Ctx.getDiagnostics().Report(Ctx.getFullLoc(D->getLocation()), DiagID)
+              << ND->getNameAsString();
+        }
+
+      if (Previous)
+        Previous->DeclRead(ID, D);
+    }
+};
+
+} // end anonymous namespace
 
 FrontendAction::FrontendAction() : Instance(0) {}
 
@@ -51,7 +103,8 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
 
     llvm::IntrusiveRefCntPtr<Diagnostic> Diags(&CI.getDiagnostics());
     std::string Error;
-    ASTUnit *AST = ASTUnit::LoadFromASTFile(Filename, Diags);
+    ASTUnit *AST = ASTUnit::LoadFromASTFile(Filename, Diags,
+                                            CI.getFileSystemOpts());
     if (!AST)
       goto failure;
 
@@ -80,7 +133,7 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
   if (!CI.hasFileManager())
     CI.createFileManager();
   if (!CI.hasSourceManager())
-    CI.createSourceManager();
+    CI.createSourceManager(CI.getFileManager(), CI.getFileSystemOpts());
 
   // IR files bypass the rest of initialization.
   if (InputKind == IK_LLVM_IR) {
@@ -114,15 +167,27 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     CI.createASTContext();
 
     llvm::OwningPtr<ASTConsumer> Consumer(CreateASTConsumer(CI, Filename));
+    if (!Consumer)
+      goto failure;
+
+    CI.getASTContext().setASTMutationListener(Consumer->GetASTMutationListener());
 
     /// Use PCH?
     if (!CI.getPreprocessorOpts().ImplicitPCHInclude.empty()) {
       assert(hasPCHSupport() && "This action does not have PCH support!");
+      ASTDeserializationListener *DeserialListener
+          = CI.getInvocation().getFrontendOpts().ChainedPCH ?
+                  Consumer->GetASTDeserializationListener() : 0;
+      if (CI.getPreprocessorOpts().DumpDeserializedPCHDecls)
+        DeserialListener = new DeserializedDeclsDumper(DeserialListener);
+      if (!CI.getPreprocessorOpts().DeserializedPCHDeclsToErrorOn.empty())
+        DeserialListener = new DeserializedDeclsChecker(CI.getASTContext(),
+                         CI.getPreprocessorOpts().DeserializedPCHDeclsToErrorOn,
+                                                        DeserialListener);
       CI.createPCHExternalASTSource(
                                 CI.getPreprocessorOpts().ImplicitPCHInclude,
                                 CI.getPreprocessorOpts().DisablePCHValidation,
-                                CI.getInvocation().getFrontendOpts().ChainedPCH?
-                                 Consumer->GetASTDeserializationListener() : 0);
+                                DeserialListener);
       if (!CI.getASTContext().getExternalSource())
         goto failure;
     }

@@ -24,7 +24,7 @@ if( NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR )
 endif()
 
 # Compute the Clang version from the LLVM version.
-string(REGEX MATCH "[0-9]+\\.[0-9]+(\\.[0-9]+)?" CLANG_VERSION 
+string(REGEX MATCH "[0-9]+\\.[0-9]+(\\.[0-9]+)?" CLANG_VERSION
   ${PACKAGE_VERSION})
 message(STATUS "Clang version: ${CLANG_VERSION}")
 
@@ -49,7 +49,7 @@ configure_file(
 if (CMAKE_COMPILER_IS_GNUCXX)
   # FIXME: Turn off exceptions, RTTI:
   # -fno-exceptions -fno-rtti
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-common -Woverloaded-virtual -pedantic -Wno-long-long -Wall -W -Wno-unused-parameter -Wwrite-strings")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-common -Woverloaded-virtual -Wcast-qual -fno-strict-aliasing -pedantic -Wno-long-long -Wall -W -Wno-unused-parameter -Wwrite-strings")
 endif ()
 
 if (APPLE)
@@ -63,7 +63,7 @@ macro(add_clang_library name)
     set(srcs ${srcs} ${headers})
     string( REGEX MATCHALL "/[^/]+" split_path ${CMAKE_CURRENT_SOURCE_DIR})
     list( GET split_path -1 dir)
-    file( GLOB_RECURSE headers 
+    file( GLOB_RECURSE headers
       ../../include/clang${dir}/*.h
       ../../include/clang${dir}/*.td
       ../../include/clang${dir}/*.def)
@@ -88,10 +88,15 @@ macro(add_clang_library name)
   if( LLVM_LINK_COMPONENTS )
     llvm_config(${name} ${LLVM_LINK_COMPONENTS})
   endif( LLVM_LINK_COMPONENTS )
-  get_system_libs(llvm_system_libs)
-  if( llvm_system_libs )
-    target_link_libraries(${name} ${llvm_system_libs})
-  endif( llvm_system_libs )
+  if (LLVM_COMMON_LIBS)
+    target_link_libraries(${name} ${LLVM_COMMON_LIBS})
+  endif()
+  if( NOT MINGW )
+    get_system_libs(llvm_system_libs)
+    if( llvm_system_libs )
+      target_link_libraries(${name} ${llvm_system_libs})
+    endif()
+  endif()
   add_dependencies(${name} ClangDiagnosticCommon)
   if(MSVC)
     get_target_property(cflag ${name} COMPILE_FLAGS)

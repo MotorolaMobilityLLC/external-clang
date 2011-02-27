@@ -244,3 +244,17 @@ namespace PR7133 {
     return false;
   }
 }
+
+class CLASS {
+  void CLASS::foo2(); // expected-warning {{extra qualification on member 'foo2'}}
+};
+
+namespace PR8159 {
+  class B { };
+
+  class A {
+    int A::a; // expected-warning{{extra qualification on member 'a'}}
+    static int A::b; // expected-warning{{extra qualification on member 'b'}}
+    int ::c; // expected-error{{non-friend class member 'c' cannot have a qualified name}}
+  };
+}

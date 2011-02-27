@@ -18,6 +18,7 @@
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/Linkage.h"
 #include "clang/Basic/PartialDiagnostic.h"
+#include "clang/Basic/Visibility.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/TemplateName.h"
 #include "llvm/Support/Casting.h"
@@ -410,7 +411,8 @@ enum CallingConv {
   CC_C,           // __attribute__((cdecl))
   CC_X86StdCall,  // __attribute__((stdcall))
   CC_X86FastCall, // __attribute__((fastcall))
-  CC_X86ThisCall  // __attribute__((thiscall))
+  CC_X86ThisCall, // __attribute__((thiscall))
+  CC_X86Pascal    // __attribute__((pascal))
 };
 
 
@@ -784,48 +786,227 @@ private:
 
   QualType CanonicalType;
 
-  /// TypeClass bitfield - Enum that specifies what subclass this belongs to.
-  unsigned TC : 8;
+  /// Bitfields required by the Type class.
+  class TypeBitfields {
+    friend class Type;
 
-  /// Dependent - Whether this type is a dependent type (C++ [temp.dep.type]).
-  /// Note that this should stay at the end of the ivars for Type so that
-  /// subclasses can pack their bitfields into the same word.
-  bool Dependent : 1;
+    /// TypeClass bitfield - Enum that specifies what subclass this belongs to.
+    unsigned TC : 8;
+
+    /// Dependent - Whether this type is a dependent type (C++ [temp.dep.type]).
+    /// Note that this should stay at the end of the ivars for Type so that
+    /// subclasses can pack their bitfields into the same word.
+    unsigned Dependent : 1;
   
-  /// \brief Whether the linkage of this type is already known.
-  mutable bool LinkageKnown : 1;
+    /// \brief Whether this type is a variably-modified type (C99 6.7.5).
+    unsigned VariablyModified : 1;
   
-  /// \brief Linkage of this type.
-  mutable unsigned CachedLinkage : 2;
+    /// \brief Nonzero if the cache (i.e. the bitfields here starting
+    /// with 'Cache') is valid.  If so, then this is a
+    /// LangOptions::VisibilityMode+1.
+    mutable unsigned CacheValidAndVisibility : 2;
+  
+    /// \brief Linkage of this type.
+    mutable unsigned CachedLinkage : 2;
 
-  /// \brief FromAST - Whether this type comes from an AST file.
-  mutable bool FromAST : 1;
+    /// \brief Whether this type involves and local or unnamed types. 
+    mutable unsigned CachedLocalOrUnnamed : 1;
+  
+    /// \brief FromAST - Whether this type comes from an AST file.
+    mutable unsigned FromAST : 1;
 
-  /// \brief Set whether this type comes from an AST file.
-  void setFromAST(bool V = true) const { 
-    FromAST = V;
-  }
+    bool isCacheValid() const {
+      return (CacheValidAndVisibility != 0);
+    }
+    Visibility getVisibility() const {
+      assert(isCacheValid() && "getting linkage from invalid cache");
+      return static_cast<Visibility>(CacheValidAndVisibility-1);
+    }
+    Linkage getLinkage() const {
+      assert(isCacheValid() && "getting linkage from invalid cache");
+      return static_cast<Linkage>(CachedLinkage);
+    }
+    bool hasLocalOrUnnamedType() const {
+      assert(isCacheValid() && "getting linkage from invalid cache");
+      return CachedLocalOrUnnamed;
+    }
+  };
+  enum { NumTypeBits = 16 };
 
 protected:
-  /// \brief Compute the linkage of this type.
-  virtual Linkage getLinkageImpl() const;
-  
-  enum { BitsRemainingInType = 19 };
+  // These classes allow subclasses to somewhat cleanly pack bitfields
+  // into Type.
+
+  class ArrayTypeBitfields {
+    friend class ArrayType;
+
+    unsigned : NumTypeBits;
+
+    /// IndexTypeQuals - CVR qualifiers from declarations like
+    /// 'int X[static restrict 4]'. For function parameters only.
+    unsigned IndexTypeQuals : 3;
+
+    /// SizeModifier - storage class qualifiers from declarations like
+    /// 'int X[static restrict 4]'. For function parameters only.
+    /// Actually an ArrayType::ArraySizeModifier.
+    unsigned SizeModifier : 3;
+  };
+
+  class BuiltinTypeBitfields {
+    friend class BuiltinType;
+
+    unsigned : NumTypeBits;
+
+    /// The kind (BuiltinType::Kind) of builtin type this is.
+    unsigned Kind : 8;
+  };
+
+  class FunctionTypeBitfields {
+    friend class FunctionType;
+
+    unsigned : NumTypeBits;
+
+    /// Extra information which affects how the function is called, like
+    /// regparm and the calling convention.
+    unsigned ExtInfo : 8;
+
+    /// A bit to be used by the subclass.
+    unsigned SubclassInfo : 1;
+
+    /// TypeQuals - Used only by FunctionProtoType, put here to pack with the
+    /// other bitfields.
+    /// The qualifiers are part of FunctionProtoType because...
+    ///
+    /// C++ 8.3.5p4: The return type, the parameter type list and the
+    /// cv-qualifier-seq, [...], are part of the function type.
+    unsigned TypeQuals : 3;
+  };
+
+  class ObjCObjectTypeBitfields {
+    friend class ObjCObjectType;
+
+    unsigned : NumTypeBits;
+
+    /// NumProtocols - The number of protocols stored directly on this
+    /// object type.
+    unsigned NumProtocols : 32 - NumTypeBits;
+  };
+
+  class ReferenceTypeBitfields {
+    friend class ReferenceType;
+
+    unsigned : NumTypeBits;
+
+    /// True if the type was originally spelled with an lvalue sigil.
+    /// This is never true of rvalue references but can also be false
+    /// on lvalue references because of C++0x [dcl.typedef]p9,
+    /// as follows:
+    ///
+    ///   typedef int &ref;    // lvalue, spelled lvalue
+    ///   typedef int &&rvref; // rvalue
+    ///   ref &a;              // lvalue, inner ref, spelled lvalue
+    ///   ref &&a;             // lvalue, inner ref
+    ///   rvref &a;            // lvalue, inner ref, spelled lvalue
+    ///   rvref &&a;           // rvalue, inner ref
+    unsigned SpelledAsLValue : 1;
+
+    /// True if the inner type is a reference type.  This only happens
+    /// in non-canonical forms.
+    unsigned InnerRef : 1;
+  };
+
+  class TypeWithKeywordBitfields {
+    friend class TypeWithKeyword;
+
+    unsigned : NumTypeBits;
+
+    /// An ElaboratedTypeKeyword.  8 bits for efficient access.
+    unsigned Keyword : 8;
+  };
+
+  class VectorTypeBitfields {
+    friend class VectorType;
+
+    unsigned : NumTypeBits;
+
+    /// AltiVecSpec - AltiVec-specific vector information, used
+    /// to differentiate things like 'pixel'.
+    unsigned AltiVecSpec : 2;
+
+    /// NumElements - The number of elements in the vector.
+    unsigned NumElements : 30 - NumTypeBits;
+  };
+
+  union {
+    TypeBitfields TypeBits;
+    ArrayTypeBitfields ArrayTypeBits;
+    BuiltinTypeBitfields BuiltinTypeBits;
+    FunctionTypeBitfields FunctionTypeBits;
+    ObjCObjectTypeBitfields ObjCObjectTypeBits;
+    ReferenceTypeBitfields ReferenceTypeBits;
+    TypeWithKeywordBitfields TypeWithKeywordBits;
+    VectorTypeBitfields VectorTypeBits;
+  };
+
+private:
+  /// \brief Set whether this type comes from an AST file.
+  void setFromAST(bool V = true) const { 
+    TypeBits.FromAST = V;
+  }
+
+  void ensureCachedProperties() const;
+
+protected:
+  /// \brief Compute the cached properties of this type.
+  class CachedProperties {
+    char linkage;
+    char visibility;
+    bool local;
+
+  public:
+    CachedProperties(Linkage linkage, Visibility visibility, bool local)
+      : linkage(linkage), visibility(visibility), local(local) {}
+
+    Linkage getLinkage() const { return (Linkage) linkage; }
+    Visibility getVisibility() const { return (Visibility) visibility; }
+    bool hasLocalOrUnnamedType() const { return local; }
+
+    friend CachedProperties merge(CachedProperties L, CachedProperties R) {
+      return CachedProperties(minLinkage(L.getLinkage(), R.getLinkage()),
+                         minVisibility(L.getVisibility(), R.getVisibility()),
+                      L.hasLocalOrUnnamedType() | R.hasLocalOrUnnamedType());
+    }
+  };
+
+  virtual CachedProperties getCachedProperties() const;
+  static CachedProperties getCachedProperties(QualType T) {
+    return getCachedProperties(T.getTypePtr());
+  }
+  static CachedProperties getCachedProperties(const Type *T);
 
   // silence VC++ warning C4355: 'this' : used in base member initializer list
   Type *this_() { return this; }
-  Type(TypeClass tc, QualType Canonical, bool dependent)
-    : CanonicalType(Canonical.isNull() ? QualType(this_(), 0) : Canonical),
-      TC(tc), Dependent(dependent), LinkageKnown(false), 
-      CachedLinkage(NoLinkage), FromAST(false) {}
+  Type(TypeClass tc, QualType Canonical, bool Dependent, bool VariablyModified)
+    : CanonicalType(Canonical.isNull() ? QualType(this_(), 0) : Canonical) {
+    TypeBits.TC = tc;
+    TypeBits.Dependent = Dependent;
+    TypeBits.VariablyModified = VariablyModified;
+    TypeBits.CacheValidAndVisibility = 0;
+    TypeBits.CachedLocalOrUnnamed = false;
+    TypeBits.CachedLinkage = NoLinkage;
+    TypeBits.FromAST = false;
+  }
   virtual ~Type();
   friend class ASTContext;
 
+  void setDependent(bool D = true) { TypeBits.Dependent = D; }
+  void setVariablyModified(bool VM = true) { TypeBits.VariablyModified = VM; }
+  
 public:
-  TypeClass getTypeClass() const { return static_cast<TypeClass>(TC); }
+  TypeClass getTypeClass() const { return static_cast<TypeClass>(TypeBits.TC); }
 
   /// \brief Whether this type comes from an AST file.
-  bool isFromAST() const { return FromAST; }
+  bool isFromAST() const { return TypeBits.FromAST; }
 
   bool isCanonicalUnqualified() const {
     return CanonicalType.getTypePtr() == this;
@@ -853,10 +1034,6 @@ public:
   /// (C++0x [basic.types]p10)
   bool isLiteralType() const;
 
-  /// isVariablyModifiedType (C99 6.7.5.2p2) - Return true for variable array
-  /// types that have a non-constant expression. This does not include "[]".
-  bool isVariablyModifiedType() const;
-
   /// Helper methods to distinguish type categories. All type predicates
   /// operate on the canonical type, ignoring typedefs and qualifiers.
 
@@ -865,6 +1042,12 @@ public:
 
   /// isSpecificBuiltinType - Test for a particular builtin type.
   bool isSpecificBuiltinType(unsigned K) const;
+
+  /// isPlaceholderType - Test for a type which does not represent an
+  /// actual type-system type but is instead used as a placeholder for
+  /// various convenient purposes within Clang.  All such types are
+  /// BuiltinTypes.
+  bool isPlaceholderType() const;
 
   /// isIntegerType() does *not* include complex integers (a GCC extension).
   /// isComplexIntegerType() can be used to test for complex integers.
@@ -878,6 +1061,9 @@ public:
   
   /// \brief Determine whether this type is an integral or enumeration type.
   bool isIntegralOrEnumerationType() const;
+  /// \brief Determine whether this type is an integral or unscoped enumeration
+  /// type.
+  bool isIntegralOrUnscopedEnumerationType() const;
                                    
   /// Floating point categories.
   bool isRealFloatingType() const; // C99 6.2.5p10 (float, double, long double)
@@ -940,7 +1126,14 @@ public:
   /// isDependentType - Whether this type is a dependent type, meaning
   /// that its definition somehow depends on a template parameter
   /// (C++ [temp.dep.type]).
-  bool isDependentType() const { return Dependent; }
+  bool isDependentType() const { return TypeBits.Dependent; }
+  
+  /// \brief Whether this type is a variably-modified type (C99 6.7.5).
+  bool isVariablyModifiedType() const { return TypeBits.VariablyModified; }
+  
+  /// \brief Whether this type is or contains a local or unnamed type.
+  bool hasUnnamedOrLocalType() const;
+  
   bool isOverloadableType() const;
 
   /// \brief Determine wither this type is a C++ elaborated-type-specifier.
@@ -1039,6 +1232,12 @@ public:
 
   /// \brief Determine the linkage of this type.
   Linkage getLinkage() const;
+
+  /// \brief Determine the visibility of this type.
+  Visibility getVisibility() const;
+
+  /// \brief Determine the linkage and visibility of this type.
+  std::pair<Linkage,Visibility> getLinkageAndVisibility() const;
   
   /// \brief Note that the linkage is no longer known.
   void ClearLinkageCache();
@@ -1101,8 +1300,13 @@ public:
 
     NullPtr,  // This is the type of C++0x 'nullptr'.
 
+    /// This represents the type of an expression whose type is
+    /// totally unknown, e.g. 'T::foo'.  It is permitted for this to
+    /// appear in situations where the structure of the type is
+    /// theoretically deducible.
+    Dependent,
+
     Overload,  // This represents the type of an overloaded function declaration.
-    Dependent, // This represents the type of a type-dependent expression.
 
     UndeducedAuto, // In C++0x, this represents the type of an auto variable
                    // that has not been deduced yet.
@@ -1119,37 +1323,45 @@ public:
 
     ObjCSel    // This represents the ObjC 'SEL' type.
   };
-private:
-  Kind TypeKind;
-  
+
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   BuiltinType(Kind K)
-    : Type(Builtin, QualType(), /*Dependent=*/(K == Dependent)),
-      TypeKind(K) {}
+    : Type(Builtin, QualType(), /*Dependent=*/(K == Dependent),
+           /*VariablyModified=*/false) {
+    BuiltinTypeBits.Kind = K;
+  }
 
-  Kind getKind() const { return TypeKind; }
+  Kind getKind() const { return static_cast<Kind>(BuiltinTypeBits.Kind); }
   const char *getName(const LangOptions &LO) const;
 
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
 
   bool isInteger() const {
-    return TypeKind >= Bool && TypeKind <= Int128;
+    return getKind() >= Bool && getKind() <= Int128;
   }
 
   bool isSignedInteger() const {
-    return TypeKind >= Char_S && TypeKind <= Int128;
+    return getKind() >= Char_S && getKind() <= Int128;
   }
 
   bool isUnsignedInteger() const {
-    return TypeKind >= Bool && TypeKind <= UInt128;
+    return getKind() >= Bool && getKind() <= UInt128;
   }
 
   bool isFloatingPoint() const {
-    return TypeKind >= Float && TypeKind <= LongDouble;
+    return getKind() >= Float && getKind() <= LongDouble;
+  }
+
+  /// Determines whether this type is a "forbidden" placeholder type,
+  /// i.e. a type which cannot appear in arbitrary positions in a
+  /// fully-formed expression.
+  bool isPlaceholderType() const {
+    return getKind() == Overload ||
+           getKind() == UndeducedAuto;
   }
 
   static bool classof(const Type *T) { return T->getTypeClass() == Builtin; }
@@ -1162,13 +1374,14 @@ public:
 class ComplexType : public Type, public llvm::FoldingSetNode {
   QualType ElementType;
   ComplexType(QualType Element, QualType CanonicalPtr) :
-    Type(Complex, CanonicalPtr, Element->isDependentType()),
+    Type(Complex, CanonicalPtr, Element->isDependentType(),
+         Element->isVariablyModifiedType()),
     ElementType(Element) {
   }
   friend class ASTContext;  // ASTContext creates these.
 
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   QualType getElementType() const { return ElementType; }
@@ -1193,12 +1406,14 @@ class PointerType : public Type, public llvm::FoldingSetNode {
   QualType PointeeType;
 
   PointerType(QualType Pointee, QualType CanonicalPtr) :
-    Type(Pointer, CanonicalPtr, Pointee->isDependentType()), PointeeType(Pointee) {
+    Type(Pointer, CanonicalPtr, Pointee->isDependentType(),
+         Pointee->isVariablyModifiedType()), 
+    PointeeType(Pointee) {
   }
   friend class ASTContext;  // ASTContext creates these.
 
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
 
@@ -1225,13 +1440,14 @@ public:
 class BlockPointerType : public Type, public llvm::FoldingSetNode {
   QualType PointeeType;  // Block is some kind of pointer type
   BlockPointerType(QualType Pointee, QualType CanonicalCls) :
-    Type(BlockPointer, CanonicalCls, Pointee->isDependentType()),
+    Type(BlockPointer, CanonicalCls, Pointee->isDependentType(),
+         Pointee->isVariablyModifiedType()),
     PointeeType(Pointee) {
   }
   friend class ASTContext;  // ASTContext creates these.
   
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
 
@@ -1259,48 +1475,32 @@ public:
 class ReferenceType : public Type, public llvm::FoldingSetNode {
   QualType PointeeType;
 
-  /// True if the type was originally spelled with an lvalue sigil.
-  /// This is never true of rvalue references but can also be false
-  /// on lvalue references because of C++0x [dcl.typedef]p9,
-  /// as follows:
-  ///
-  ///   typedef int &ref;    // lvalue, spelled lvalue
-  ///   typedef int &&rvref; // rvalue
-  ///   ref &a;              // lvalue, inner ref, spelled lvalue
-  ///   ref &&a;             // lvalue, inner ref
-  ///   rvref &a;            // lvalue, inner ref, spelled lvalue
-  ///   rvref &&a;           // rvalue, inner ref
-  bool SpelledAsLValue;
-
-  /// True if the inner type is a reference type.  This only happens
-  /// in non-canonical forms.
-  bool InnerRef;
-
 protected:
   ReferenceType(TypeClass tc, QualType Referencee, QualType CanonicalRef,
                 bool SpelledAsLValue) :
-    Type(tc, CanonicalRef, Referencee->isDependentType()),
-    PointeeType(Referencee), SpelledAsLValue(SpelledAsLValue),
-    InnerRef(Referencee->isReferenceType()) {
+    Type(tc, CanonicalRef, Referencee->isDependentType(),
+         Referencee->isVariablyModifiedType()), PointeeType(Referencee) {
+    ReferenceTypeBits.SpelledAsLValue = SpelledAsLValue;
+    ReferenceTypeBits.InnerRef = Referencee->isReferenceType();
   }
   
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
-  bool isSpelledAsLValue() const { return SpelledAsLValue; }
-  bool isInnerRef() const { return InnerRef; }
+  bool isSpelledAsLValue() const { return ReferenceTypeBits.SpelledAsLValue; }
+  bool isInnerRef() const { return ReferenceTypeBits.InnerRef; }
   
   QualType getPointeeTypeAsWritten() const { return PointeeType; }
   QualType getPointeeType() const {
     // FIXME: this might strip inner qualifiers; okay?
     const ReferenceType *T = this;
-    while (T->InnerRef)
+    while (T->isInnerRef())
       T = T->PointeeType->getAs<ReferenceType>();
     return T->PointeeType;
   }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, PointeeType, SpelledAsLValue);
+    Profile(ID, PointeeType, isSpelledAsLValue());
   }
   static void Profile(llvm::FoldingSetNodeID &ID,
                       QualType Referencee,
@@ -1361,13 +1561,14 @@ class MemberPointerType : public Type, public llvm::FoldingSetNode {
 
   MemberPointerType(QualType Pointee, const Type *Cls, QualType CanonicalPtr) :
     Type(MemberPointer, CanonicalPtr,
-         Cls->isDependentType() || Pointee->isDependentType()),
+         Cls->isDependentType() || Pointee->isDependentType(),
+         Pointee->isVariablyModifiedType()),
     PointeeType(Pointee), Class(Cls) {
   }
   friend class ASTContext; // ASTContext creates these.
   
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   QualType getPointeeType() const { return PointeeType; }
@@ -1419,14 +1620,6 @@ private:
   /// ElementType - The element type of the array.
   QualType ElementType;
 
-  // NOTE: VC++ treats enums as signed, avoid using the ArraySizeModifier enum
-  /// NOTE: These fields are packed into the bitfields space in the Type class.
-  unsigned SizeModifier : 2;
-
-  /// IndexTypeQuals - Capture qualifiers in declarations like:
-  /// 'int X[static restrict 4]'. For function parameters only.
-  unsigned IndexTypeQuals : 3;
-
 protected:
   // C++ [temp.dep.type]p1:
   //   A type is dependent if it is...
@@ -1435,22 +1628,28 @@ protected:
   //       value-dependent,
   ArrayType(TypeClass tc, QualType et, QualType can,
             ArraySizeModifier sm, unsigned tq)
-    : Type(tc, can, et->isDependentType() || tc == DependentSizedArray),
-      ElementType(et), SizeModifier(sm), IndexTypeQuals(tq) {}
+    : Type(tc, can, et->isDependentType() || tc == DependentSizedArray,
+           (tc == VariableArray || et->isVariablyModifiedType())),
+      ElementType(et) {
+    ArrayTypeBits.IndexTypeQuals = tq;
+    ArrayTypeBits.SizeModifier = sm;
+  }
 
   friend class ASTContext;  // ASTContext creates these.
 
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   QualType getElementType() const { return ElementType; }
   ArraySizeModifier getSizeModifier() const {
-    return ArraySizeModifier(SizeModifier);
+    return ArraySizeModifier(ArrayTypeBits.SizeModifier);
   }
   Qualifiers getIndexTypeQualifiers() const {
-    return Qualifiers::fromCVRMask(IndexTypeQuals);
+    return Qualifiers::fromCVRMask(getIndexTypeCVRQualifiers());
   }
-  unsigned getIndexTypeCVRQualifiers() const { return IndexTypeQuals; }
+  unsigned getIndexTypeCVRQualifiers() const {
+    return ArrayTypeBits.IndexTypeQuals;
+  }
 
   static bool classof(const Type *T) {
     return T->getTypeClass() == ConstantArray ||
@@ -1679,7 +1878,8 @@ class DependentSizedExtVectorType : public Type, public llvm::FoldingSetNode {
 
   DependentSizedExtVectorType(ASTContext &Context, QualType ElementType,
                               QualType can, Expr *SizeExpr, SourceLocation loc)
-    : Type (DependentSizedExtVector, can, true),
+    : Type(DependentSizedExtVector, can, /*Dependent=*/true,
+           ElementType->isVariablyModifiedType()),
       Context(Context), SizeExpr(SizeExpr), ElementType(ElementType),
       loc(loc) {}
   friend class ASTContext;
@@ -1723,39 +1923,44 @@ protected:
   /// ElementType - The element type of the vector.
   QualType ElementType;
 
-  /// NumElements - The number of elements in the vector.
-  unsigned NumElements;
-
-  AltiVecSpecific AltiVecSpec;
-
   VectorType(QualType vecType, unsigned nElements, QualType canonType,
       AltiVecSpecific altiVecSpec) :
-    Type(Vector, canonType, vecType->isDependentType()),
-    ElementType(vecType), NumElements(nElements), AltiVecSpec(altiVecSpec) {}
+    Type(Vector, canonType, vecType->isDependentType(),
+         vecType->isVariablyModifiedType()), ElementType(vecType) {
+    VectorTypeBits.AltiVecSpec = altiVecSpec;
+    VectorTypeBits.NumElements = nElements;
+  }
+  
   VectorType(TypeClass tc, QualType vecType, unsigned nElements,
              QualType canonType, AltiVecSpecific altiVecSpec)
-    : Type(tc, canonType, vecType->isDependentType()), ElementType(vecType),
-      NumElements(nElements), AltiVecSpec(altiVecSpec) {}
+    : Type(tc, canonType, vecType->isDependentType(),
+           vecType->isVariablyModifiedType()), ElementType(vecType) {
+    VectorTypeBits.AltiVecSpec = altiVecSpec;
+    VectorTypeBits.NumElements = nElements;
+  }
   friend class ASTContext;  // ASTContext creates these.
   
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
 
   QualType getElementType() const { return ElementType; }
-  unsigned getNumElements() const { return NumElements; }
+  unsigned getNumElements() const { return VectorTypeBits.NumElements; }
 
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
 
-  AltiVecSpecific getAltiVecSpecific() const { return AltiVecSpec; }
+  AltiVecSpecific getAltiVecSpecific() const {
+    return AltiVecSpecific(VectorTypeBits.AltiVecSpec);
+  }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getElementType(), getNumElements(), getTypeClass(), AltiVecSpec);
+    Profile(ID, getElementType(), getNumElements(),
+            getTypeClass(), getAltiVecSpecific());
   }
   static void Profile(llvm::FoldingSetNodeID &ID, QualType ElementType,
                       unsigned NumElements, TypeClass TypeClass,
-                      unsigned AltiVecSpec) {
+                      AltiVecSpecific AltiVecSpec) {
     ID.AddPointer(ElementType.getAsOpaquePtr());
     ID.AddInteger(NumElements);
     ID.AddInteger(TypeClass);
@@ -1822,7 +2027,7 @@ public:
 
   bool isAccessorWithinNumElements(char c) const {
     if (int idx = getAccessorIdx(c)+1)
-      return unsigned(idx-1) < NumElements;
+      return unsigned(idx-1) < getNumElements();
     return false;
   }
   bool isSugared() const { return false; }
@@ -1839,28 +2044,6 @@ public:
 ///
 class FunctionType : public Type {
   virtual void ANCHOR(); // Key function for FunctionType.
-  
-  /// SubClassData - This field is owned by the subclass, put here to pack
-  /// tightly with the ivars in Type.
-  bool SubClassData : 1;
-
-  /// TypeQuals - Used only by FunctionProtoType, put here to pack with the
-  /// other bitfields.
-  /// The qualifiers are part of FunctionProtoType because...
-  ///
-  /// C++ 8.3.5p4: The return type, the parameter type list and the
-  /// cv-qualifier-seq, [...], are part of the function type.
-  ///
-  unsigned TypeQuals : 3;
-
-  /// NoReturn - Indicates if the function type is attribute noreturn.
-  unsigned NoReturn : 1;
-
-  /// RegParm - How many arguments to pass inreg.
-  unsigned RegParm : 3;
-
-  /// CallConv - The calling convention used by the function.
-  unsigned CallConv : 3;
 
   // The type returned by the function.
   QualType ResultType;
@@ -1884,74 +2067,83 @@ class FunctionType : public Type {
   // * Codegen
 
   class ExtInfo {
+    enum { CallConvMask = 0x7 };
+    enum { NoReturnMask = 0x8 };
+    enum { RegParmMask = ~(CallConvMask | NoReturnMask),
+           RegParmOffset = 4 };
+
+    unsigned Bits;
+
+    ExtInfo(unsigned Bits) : Bits(Bits) {}
+
+    friend class FunctionType;
+
    public:
     // Constructor with no defaults. Use this when you know that you
     // have all the elements (when reading an AST file for example).
-    ExtInfo(bool noReturn, unsigned regParm, CallingConv cc) :
-        NoReturn(noReturn), RegParm(regParm), CC(cc) {}
+    ExtInfo(bool noReturn, unsigned regParm, CallingConv cc) {
+      Bits = ((unsigned) cc) |
+             (noReturn ? NoReturnMask : 0) |
+             (regParm << RegParmOffset);
+    }
 
     // Constructor with all defaults. Use when for example creating a
     // function know to use defaults.
-    ExtInfo() : NoReturn(false), RegParm(0), CC(CC_Default) {}
+    ExtInfo() : Bits(0) {}
 
-    bool getNoReturn() const { return NoReturn; }
-    unsigned getRegParm() const { return RegParm; }
-    CallingConv getCC() const { return CC; }
+    bool getNoReturn() const { return Bits & NoReturnMask; }
+    unsigned getRegParm() const { return Bits >> RegParmOffset; }
+    CallingConv getCC() const { return CallingConv(Bits & CallConvMask); }
 
-    bool operator==(const ExtInfo &Other) const {
-      return getNoReturn() == Other.getNoReturn() &&
-          getRegParm() == Other.getRegParm() &&
-          getCC() == Other.getCC();
+    bool operator==(ExtInfo Other) const {
+      return Bits == Other.Bits;
     }
-    bool operator!=(const ExtInfo &Other) const {
-      return !(*this == Other);
+    bool operator!=(ExtInfo Other) const {
+      return Bits != Other.Bits;
     }
 
     // Note that we don't have setters. That is by design, use
     // the following with methods instead of mutating these objects.
 
     ExtInfo withNoReturn(bool noReturn) const {
-      return ExtInfo(noReturn, getRegParm(), getCC());
+      if (noReturn)
+        return ExtInfo(Bits | NoReturnMask);
+      else
+        return ExtInfo(Bits & ~NoReturnMask);
     }
 
     ExtInfo withRegParm(unsigned RegParm) const {
-      return ExtInfo(getNoReturn(), RegParm, getCC());
+      return ExtInfo((Bits & ~RegParmMask) | (RegParm << RegParmOffset));
     }
 
     ExtInfo withCallingConv(CallingConv cc) const {
-      return ExtInfo(getNoReturn(), getRegParm(), cc);
+      return ExtInfo((Bits & ~CallConvMask) | (unsigned) cc);
     }
 
-   private:
-    // True if we have __attribute__((noreturn))
-    bool NoReturn;
-    // The value passed to __attribute__((regparm(x)))
-    unsigned RegParm;
-    // The calling convention as specified via
-    // __attribute__((cdecl|stdcall|fastcall|thiscall))
-    CallingConv CC;
+    void Profile(llvm::FoldingSetNodeID &ID) {
+      ID.AddInteger(Bits);
+    }
   };
 
 protected:
   FunctionType(TypeClass tc, QualType res, bool SubclassInfo,
                unsigned typeQuals, QualType Canonical, bool Dependent,
-               const ExtInfo &Info)
-    : Type(tc, Canonical, Dependent),
-      SubClassData(SubclassInfo), TypeQuals(typeQuals),
-      NoReturn(Info.getNoReturn()),
-      RegParm(Info.getRegParm()), CallConv(Info.getCC()), ResultType(res) {}
-  bool getSubClassData() const { return SubClassData; }
-  unsigned getTypeQuals() const { return TypeQuals; }
+               bool VariablyModified, ExtInfo Info)
+    : Type(tc, Canonical, Dependent, VariablyModified), ResultType(res) {
+    FunctionTypeBits.ExtInfo = Info.Bits;
+    FunctionTypeBits.SubclassInfo = SubclassInfo;
+    FunctionTypeBits.TypeQuals = typeQuals;
+  }
+  bool getSubClassData() const { return FunctionTypeBits.SubclassInfo; }
+  unsigned getTypeQuals() const { return FunctionTypeBits.TypeQuals; }
 public:
 
   QualType getResultType() const { return ResultType; }
   
-  unsigned getRegParmType() const { return RegParm; }
-  bool getNoReturnAttr() const { return NoReturn; }
-  CallingConv getCallConv() const { return (CallingConv)CallConv; }
-  ExtInfo getExtInfo() const {
-    return ExtInfo(NoReturn, RegParm, (CallingConv)CallConv);
-  }
+  unsigned getRegParmType() const { return getExtInfo().getRegParm(); }
+  bool getNoReturnAttr() const { return getExtInfo().getNoReturn(); }
+  CallingConv getCallConv() const { return getExtInfo().getCC(); }
+  ExtInfo getExtInfo() const { return ExtInfo(FunctionTypeBits.ExtInfo); }
 
   /// \brief Determine the type of an expression that calls a function of
   /// this type.
@@ -1971,14 +2163,14 @@ public:
 /// FunctionNoProtoType - Represents a K&R-style 'int foo()' function, which has
 /// no information available about its arguments.
 class FunctionNoProtoType : public FunctionType, public llvm::FoldingSetNode {
-  FunctionNoProtoType(QualType Result, QualType Canonical,
-                      const ExtInfo &Info)
+  FunctionNoProtoType(QualType Result, QualType Canonical, ExtInfo Info)
     : FunctionType(FunctionNoProto, Result, false, 0, Canonical,
-                   /*Dependent=*/false, Info) {}
+                   /*Dependent=*/false, Result->isVariablyModifiedType(), 
+                   Info) {}
   friend class ASTContext;  // ASTContext creates these.
   
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   // No additional state past what FunctionType provides.
@@ -1990,10 +2182,8 @@ public:
     Profile(ID, getResultType(), getExtInfo());
   }
   static void Profile(llvm::FoldingSetNodeID &ID, QualType ResultType,
-                      const ExtInfo &Info) {
-    ID.AddInteger(Info.getCC());
-    ID.AddInteger(Info.getRegParm());
-    ID.AddInteger(Info.getNoReturn());
+                      ExtInfo Info) {
+    Info.Profile(ID);
     ID.AddPointer(ResultType.getAsOpaquePtr());
   }
 
@@ -2009,36 +2199,11 @@ public:
 /// exception specification, but this specification is not part of the canonical
 /// type.
 class FunctionProtoType : public FunctionType, public llvm::FoldingSetNode {
-  /// hasAnyDependentType - Determine whether there are any dependent
-  /// types within the arguments passed in.
-  static bool hasAnyDependentType(const QualType *ArgArray, unsigned numArgs) {
-    for (unsigned Idx = 0; Idx < numArgs; ++Idx)
-      if (ArgArray[Idx]->isDependentType())
-    return true;
-
-    return false;
-  }
-
   FunctionProtoType(QualType Result, const QualType *ArgArray, unsigned numArgs,
                     bool isVariadic, unsigned typeQuals, bool hasExs,
                     bool hasAnyExs, const QualType *ExArray,
                     unsigned numExs, QualType Canonical,
-                    const ExtInfo &Info)
-    : FunctionType(FunctionProto, Result, isVariadic, typeQuals, Canonical,
-                   (Result->isDependentType() ||
-                    hasAnyDependentType(ArgArray, numArgs)),
-                   Info),
-      NumArgs(numArgs), NumExceptions(numExs), HasExceptionSpec(hasExs),
-      AnyExceptionSpec(hasAnyExs) {
-    // Fill in the trailing argument array.
-    QualType *ArgInfo = reinterpret_cast<QualType*>(this+1);
-    for (unsigned i = 0; i != numArgs; ++i)
-      ArgInfo[i] = ArgArray[i];
-    // Fill in the exception array.
-    QualType *Ex = ArgInfo + numArgs;
-    for (unsigned i = 0; i != numExs; ++i)
-      Ex[i] = ExArray[i];
-  }
+                    const ExtInfo &Info);
 
   /// NumArgs - The number of arguments this function has, not counting '...'.
   unsigned NumArgs : 20;
@@ -2061,7 +2226,7 @@ class FunctionProtoType : public FunctionType, public llvm::FoldingSetNode {
   friend class ASTContext;  // ASTContext creates these.
 
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   unsigned getNumArgs() const { return NumArgs; }
@@ -2114,7 +2279,7 @@ public:
                       bool isVariadic, unsigned TypeQuals,
                       bool hasExceptionSpec, bool anyExceptionSpec,
                       unsigned NumExceptions, exception_iterator Exs,
-                      const ExtInfo &ExtInfo);
+                      ExtInfo ExtInfo);
 };
 
 
@@ -2126,7 +2291,7 @@ class UnresolvedUsingType : public Type {
   UnresolvedUsingTypenameDecl *Decl;
 
   UnresolvedUsingType(const UnresolvedUsingTypenameDecl *D)
-    : Type(UnresolvedUsing, QualType(), true),
+    : Type(UnresolvedUsing, QualType(), true, false),
       Decl(const_cast<UnresolvedUsingTypenameDecl*>(D)) {}
   friend class ASTContext; // ASTContext creates these.
 public:
@@ -2155,7 +2320,7 @@ class TypedefType : public Type {
   TypedefDecl *Decl;
 protected:
   TypedefType(TypeClass tc, const TypedefDecl *D, QualType can)
-    : Type(tc, can, can->isDependentType()),
+    : Type(tc, can, can->isDependentType(), can->isVariablyModifiedType()),
       Decl(const_cast<TypedefDecl*>(D)) {
     assert(!isa<TypedefType>(can) && "Invalid canonical type");
   }
@@ -2228,7 +2393,8 @@ public:
 class TypeOfType : public Type {
   QualType TOType;
   TypeOfType(QualType T, QualType can)
-    : Type(TypeOf, can, T->isDependentType()), TOType(T) {
+    : Type(TypeOf, can, T->isDependentType(), T->isVariablyModifiedType()), 
+      TOType(T) {
     assert(!isa<TypedefType>(can) && "Invalid canonical type");
   }
   friend class ASTContext;  // ASTContext creates these.
@@ -2302,7 +2468,7 @@ class TagType : public Type {
 protected:
   TagType(TypeClass TC, const TagDecl *D, QualType can);
 
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   TagDecl *getDecl() const;
@@ -2377,18 +2543,20 @@ public:
 
 class TemplateTypeParmType : public Type, public llvm::FoldingSetNode {
   unsigned Depth : 15;
-  unsigned Index : 16;
   unsigned ParameterPack : 1;
+  unsigned Index : 16;
   IdentifierInfo *Name;
 
   TemplateTypeParmType(unsigned D, unsigned I, bool PP, IdentifierInfo *N,
                        QualType Canon)
-    : Type(TemplateTypeParm, Canon, /*Dependent=*/true),
-      Depth(D), Index(I), ParameterPack(PP), Name(N) { }
+    : Type(TemplateTypeParm, Canon, /*Dependent=*/true,
+           /*VariablyModified=*/false),
+      Depth(D), ParameterPack(PP), Index(I), Name(N) { }
 
   TemplateTypeParmType(unsigned D, unsigned I, bool PP)
-    : Type(TemplateTypeParm, QualType(this, 0), /*Dependent=*/true),
-      Depth(D), Index(I), ParameterPack(PP), Name(0) { }
+    : Type(TemplateTypeParm, QualType(this, 0), /*Dependent=*/true,
+           /*VariablyModified=*/false),
+      Depth(D), ParameterPack(PP), Index(I), Name(0) { }
 
   friend class ASTContext;  // ASTContext creates these
 
@@ -2432,7 +2600,8 @@ class SubstTemplateTypeParmType : public Type, public llvm::FoldingSetNode {
   const TemplateTypeParmType *Replaced;
 
   SubstTemplateTypeParmType(const TemplateTypeParmType *Param, QualType Canon)
-    : Type(SubstTemplateTypeParm, Canon, Canon->isDependentType()),
+    : Type(SubstTemplateTypeParm, Canon, Canon->isDependentType(),
+           Canon->isVariablyModifiedType()),
       Replaced(Param) { }
 
   friend class ASTContext;
@@ -2606,7 +2775,8 @@ class InjectedClassNameType : public Type {
                           // currently suitable for AST reading, too much
                           // interdependencies.
   InjectedClassNameType(CXXRecordDecl *D, QualType TST)
-    : Type(InjectedClassName, QualType(), true),
+    : Type(InjectedClassName, QualType(), /*Dependent=*/true,
+           /*VariablyModified=*/false),
       Decl(D), InjectedType(TST) {
     assert(isa<TemplateSpecializationType>(TST));
     assert(!TST.hasQualifiers());
@@ -2665,19 +2835,18 @@ enum ElaboratedTypeKeyword {
 /// Also provides a few static helpers for converting and printing
 /// elaborated type keyword and tag type kind enumerations.
 class TypeWithKeyword : public Type {
-  /// Keyword - Encodes an ElaboratedTypeKeyword enumeration constant.
-  unsigned Keyword : 3;
-
 protected:
   TypeWithKeyword(ElaboratedTypeKeyword Keyword, TypeClass tc,
-                  QualType Canonical, bool dependent)
-    : Type(tc, Canonical, dependent), Keyword(Keyword) {}
+                  QualType Canonical, bool Dependent, bool VariablyModified)
+    : Type(tc, Canonical, Dependent, VariablyModified) {
+    TypeWithKeywordBits.Keyword = Keyword;
+  }
 
 public:
   virtual ~TypeWithKeyword(); // pin vtable to Type.cpp
 
   ElaboratedTypeKeyword getKeyword() const {
-    return static_cast<ElaboratedTypeKeyword>(Keyword);
+    return static_cast<ElaboratedTypeKeyword>(TypeWithKeywordBits.Keyword);
   }
 
   /// getKeywordForTypeSpec - Converts a type specifier (DeclSpec::TST)
@@ -2729,7 +2898,8 @@ class ElaboratedType : public TypeWithKeyword, public llvm::FoldingSetNode {
   ElaboratedType(ElaboratedTypeKeyword Keyword, NestedNameSpecifier *NNS,
                  QualType NamedType, QualType CanonType)
     : TypeWithKeyword(Keyword, Elaborated, CanonType,
-                      NamedType->isDependentType()),
+                      NamedType->isDependentType(),
+                      NamedType->isVariablyModifiedType()),
       NNS(NNS), NamedType(NamedType) {
     assert(!(Keyword == ETK_None && NNS == 0) &&
            "ElaboratedType cannot have elaborated type keyword "
@@ -2789,7 +2959,8 @@ class DependentNameType : public TypeWithKeyword, public llvm::FoldingSetNode {
 
   DependentNameType(ElaboratedTypeKeyword Keyword, NestedNameSpecifier *NNS, 
                     const IdentifierInfo *Name, QualType CanonType)
-    : TypeWithKeyword(Keyword, DependentName, CanonType, true),
+    : TypeWithKeyword(Keyword, DependentName, CanonType, /*Dependent=*/true,
+                      /*VariablyModified=*/false),
       NNS(NNS), Name(Name) {
     assert(NNS->isDependent() &&
            "DependentNameType requires a dependent nested-name-specifier");
@@ -2929,19 +3100,15 @@ public:
 /// with base BuiltinType::ObjCIdType and protocol list [P].  Eventually
 /// this should get its own sugar class to better represent the source.
 class ObjCObjectType : public Type {
-  // Pad the bit count up so that NumProtocols is 2-byte aligned
-  unsigned : BitsRemainingInType - 16;
-
-  /// \brief The number of protocols stored after the
-  /// ObjCObjectPointerType node.
-  ///
-  /// These protocols are those written directly on the type.  If
-  /// protocol qualifiers ever become additive, the iterators will
-  /// get kindof complicated.
-  ///
-  /// In the canonical object type, these are sorted alphabetically
-  /// and uniqued.
-  unsigned NumProtocols : 16;
+  // ObjCObjectType.NumProtocols - the number of protocols stored
+  // after the ObjCObjectPointerType node.
+  //
+  // These protocols are those written directly on the type.  If
+  // protocol qualifiers ever become additive, the iterators will need
+  // to get kindof complicated.
+  //
+  // In the canonical object type, these are sorted alphabetically
+  // and uniqued.
 
   /// Either a BuiltinType or an InterfaceType or sugar for either.
   QualType BaseType;
@@ -2958,12 +3125,13 @@ protected:
 
   enum Nonce_ObjCInterface { Nonce_ObjCInterface };
   ObjCObjectType(enum Nonce_ObjCInterface)
-    : Type(ObjCInterface, QualType(), false),
-      NumProtocols(0),
-      BaseType(QualType(this_(), 0)) {}
+    : Type(ObjCInterface, QualType(), false, false),
+      BaseType(QualType(this_(), 0)) {
+    ObjCObjectTypeBits.NumProtocols = 0;
+  }
 
 protected:
-  Linkage getLinkageImpl() const; // key function
+  CachedProperties getCachedProperties() const; // key function
   
 public:
   /// getBaseType - Gets the base type of this object type.  This is
@@ -3005,7 +3173,7 @@ public:
 
   /// getNumProtocols - Return the number of qualifying protocols in this
   /// interface type, or 0 if there are none.
-  unsigned getNumProtocols() const { return NumProtocols; }
+  unsigned getNumProtocols() const { return ObjCObjectTypeBits.NumProtocols; }
 
   /// \brief Fetch a protocol by index.
   ObjCProtocolDecl *getProtocol(unsigned I) const {
@@ -3071,6 +3239,10 @@ class ObjCInterfaceType : public ObjCObjectType {
     : ObjCObjectType(Nonce_ObjCInterface),
       Decl(const_cast<ObjCInterfaceDecl*>(D)) {}
   friend class ASTContext;  // ASTContext creates these.
+
+protected:
+  virtual CachedProperties getCachedProperties() const;
+  
 public:
   /// getDecl - Get the declaration of this interface.
   ObjCInterfaceDecl *getDecl() const { return Decl; }
@@ -3116,12 +3288,12 @@ class ObjCObjectPointerType : public Type, public llvm::FoldingSetNode {
   QualType PointeeType;
 
   ObjCObjectPointerType(QualType Canonical, QualType Pointee)
-    : Type(ObjCObjectPointer, Canonical, false),
+    : Type(ObjCObjectPointer, Canonical, false, false),
       PointeeType(Pointee) {}
   friend class ASTContext;  // ASTContext creates these.
 
 protected:
-  virtual Linkage getLinkageImpl() const;
+  virtual CachedProperties getCachedProperties() const;
   
 public:
   /// getPointeeType - Gets the type pointed to by this ObjC pointer.
@@ -3280,7 +3452,17 @@ inline bool QualType::isCanonical() const {
 
 inline bool QualType::isCanonicalAsParam() const {
   if (hasLocalQualifiers()) return false;
+  
   const Type *T = getTypePtr();
+  if ((*this)->isPointerType()) {
+    QualType BaseType = (*this)->getAs<PointerType>()->getPointeeType();
+    if (isa<VariableArrayType>(BaseType)) {
+      ArrayType *AT = dyn_cast<ArrayType>(BaseType);
+      VariableArrayType *VAT = cast<VariableArrayType>(AT);
+      if (VAT->getSizeExpr())
+        T = BaseType.getTypePtr();
+    }
+  }
   return T->isCanonicalUnqualified() &&
            !isa<FunctionType>(T) && !isa<ArrayType>(T);
 }
@@ -3530,8 +3712,14 @@ inline bool Type::isVariableArrayType() const {
 inline bool Type::isDependentSizedArrayType() const {
   return isa<DependentSizedArrayType>(CanonicalType);
 }
+inline bool Type::isBuiltinType() const {
+  return isa<BuiltinType>(CanonicalType);
+}
 inline bool Type::isRecordType() const {
   return isa<RecordType>(CanonicalType);
+}
+inline bool Type::isEnumeralType() const {
+  return isa<EnumType>(CanonicalType);
 }
 inline bool Type::isAnyComplexType() const {
   return isa<ComplexType>(CanonicalType);
@@ -3585,14 +3773,16 @@ inline bool Type::isTemplateTypeParmType() const {
   return isa<TemplateTypeParmType>(CanonicalType);
 }
 
-inline bool Type::isBuiltinType() const {
-  return getAs<BuiltinType>();
-}
-
 inline bool Type::isSpecificBuiltinType(unsigned K) const {
   if (const BuiltinType *BT = getAs<BuiltinType>())
     if (BT->getKind() == (BuiltinType::Kind) K)
       return true;
+  return false;
+}
+
+inline bool Type::isPlaceholderType() const {
+  if (const BuiltinType *BT = getAs<BuiltinType>())
+    return BT->isPlaceholderType();
   return false;
 }
 

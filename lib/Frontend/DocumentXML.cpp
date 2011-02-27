@@ -17,6 +17,8 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Config/config.h"
+#include <cstdio>
 
 namespace clang {
 
@@ -104,7 +106,11 @@ std::string DocumentXML::escapeString(const char* pStr,
       if (isprint(C))
         value += C;
       else {
+#ifdef LLVM_ON_WIN32
         sprintf(buffer, "\\%03o", C);
+#else
+        snprintf(buffer, sizeof(buffer), "\\%03o", C);
+#endif
         value += buffer;
       }
       break;

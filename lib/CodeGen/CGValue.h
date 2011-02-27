@@ -157,8 +157,13 @@ class LValue {
   bool ThreadLocalRef : 1;
 
   Expr *BaseIvarExp;
+
+  /// TBAAInfo - TBAA information to attach to dereferences of this LValue.
+  llvm::MDNode *TBAAInfo;
+
 private:
-  void Initialize(Qualifiers Quals, unsigned Alignment = 0) {
+  void Initialize(Qualifiers Quals, unsigned Alignment = 0,
+                  llvm::MDNode *TBAAInfo = 0) {
     this->Quals = Quals;
     this->Alignment = Alignment;
     assert(this->Alignment == Alignment && "Alignment exceeds allowed max!");
@@ -167,6 +172,7 @@ private:
     this->Ivar = this->ObjIsArray = this->NonGC = this->GlobalObjCRef = false;
     this->ThreadLocalRef = false;
     this->BaseIvarExp = 0;
+    this->TBAAInfo = TBAAInfo;
   }
 
 public:
@@ -207,6 +213,9 @@ public:
   
   Expr *getBaseIvarExp() const { return BaseIvarExp; }
   void setBaseIvarExp(Expr *V) { BaseIvarExp = V; }
+
+  llvm::MDNode *getTBAAInfo() const { return TBAAInfo; }
+  void setTBAAInfo(llvm::MDNode *N) { TBAAInfo = N; }
 
   const Qualifiers &getQuals() const { return Quals; }
   Qualifiers &getQuals() { return Quals; }
@@ -252,14 +261,15 @@ public:
   }
 
   static LValue MakeAddr(llvm::Value *V, QualType T, unsigned Alignment,
-                         ASTContext &Context) {
+                         ASTContext &Context,
+                         llvm::MDNode *TBAAInfo = 0) {
     Qualifiers Quals = Context.getCanonicalType(T).getQualifiers();
     Quals.setObjCGCAttr(Context.getObjCGCAttrKind(T));
 
     LValue R;
     R.LVType = Simple;
     R.V = V;
-    R.Initialize(Quals, Alignment);
+    R.Initialize(Quals, Alignment, TBAAInfo);
     return R;
   }
 
@@ -319,6 +329,80 @@ public:
     R.Initialize(Qualifiers::fromCVRMask(CVR));
     return R;
   }
+};
+
+/// An aggregate value slot.
+class AggValueSlot {
+  /// The address.
+  llvm::Value *Addr;
+  
+  // Associated flags.
+  bool VolatileFlag : 1;
+  bool LifetimeFlag : 1;
+  bool RequiresGCollection : 1;
+
+public:
+  /// ignored - Returns an aggregate value slot indicating that the
+  /// aggregate value is being ignored.
+  static AggValueSlot ignored() {
+    AggValueSlot AV;
+    AV.Addr = 0;
+    AV.VolatileFlag = AV.LifetimeFlag = AV.RequiresGCollection = 0;
+    return AV;
+  }
+
+  /// forAddr - Make a slot for an aggregate value.
+  ///
+  /// \param Volatile - true if the slot should be volatile-initialized
+  /// \param LifetimeExternallyManaged - true if the slot's lifetime
+  ///   is being externally managed; false if a destructor should be
+  ///   registered for any temporaries evaluated into the slot
+  /// \param RequiresGCollection - true if the slot is located
+  ///   somewhere that ObjC GC calls should be emitted for
+  static AggValueSlot forAddr(llvm::Value *Addr, bool Volatile,
+                              bool LifetimeExternallyManaged,
+                              bool RequiresGCollection=false) {
+    AggValueSlot AV;
+    AV.Addr = Addr;
+    AV.VolatileFlag = Volatile;
+    AV.LifetimeFlag = LifetimeExternallyManaged;
+    AV.RequiresGCollection = RequiresGCollection;
+    return AV;
+  }
+
+  static AggValueSlot forLValue(LValue LV, bool LifetimeExternallyManaged,
+                                bool RequiresGCollection=false) {
+    return forAddr(LV.getAddress(), LV.isVolatileQualified(),
+                   LifetimeExternallyManaged, RequiresGCollection);
+  }
+
+  bool isLifetimeExternallyManaged() const {
+    return LifetimeFlag;
+  }
+  void setLifetimeExternallyManaged() {
+    LifetimeFlag = true;
+  }
+
+  bool isVolatile() const {
+    return VolatileFlag;
+  }
+
+  bool requiresGCollection() const {
+    return RequiresGCollection;
+  }
+  
+  llvm::Value *getAddr() const {
+    return Addr;
+  }
+
+  bool isIgnored() const {
+    return Addr == 0;
+  }
+
+  RValue asRValue() const {
+    return RValue::getAggregate(getAddr(), isVolatile());
+  }
+  
 };
 
 }  // end namespace CodeGen

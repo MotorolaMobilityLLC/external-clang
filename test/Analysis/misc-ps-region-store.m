@@ -394,7 +394,7 @@ void rdar_7332673_test1() {
 int rdar_7332673_test2_aux(char *x);
 void rdar_7332673_test2() {
     char *value;
-    if ( rdar_7332673_test2_aux(value) != 1 ) {} // expected-warning{{Pass-by-value argument in function call is undefined}}
+    if ( rdar_7332673_test2_aux(value) != 1 ) {} // expected-warning{{Function call argument is an uninitialized value}}
 }
 
 //===----------------------------------------------------------------------===//
@@ -671,7 +671,7 @@ typedef void (^RDar_7462324_Callback)(id obj);
   builder = ^(id object) {
     id x;
     if (object) {
-      builder(x); // expected-warning{{Pass-by-value argument in function call is undefined}}
+      builder(x); // expected-warning{{Function call argument is an uninitialized value}}
     }
   };
   builder(target);
@@ -708,7 +708,7 @@ int pr5857(char *src) {
   long long *z = (long long *) (intptr_t) src;
   long long w = 0;
   int n = 0;
-  for (n = 0; n < y; ++n) { // expected-warning{{Assigned value is always the same as the existing value}}
+  for (n = 0; n < y; ++n) {
     // Previously we crashed analyzing this statement.
     w = *z++;
   }
@@ -1066,3 +1066,140 @@ int r8258814()
   // Do not warn that the value of 'foo' is uninitialized.
   return foo; // no-warning
 }
+
+// PR 8052 - Don't crash when reasoning about loads from a function address.\n
+typedef unsigned int __uint32_t;
+typedef unsigned long vm_offset_t;
+typedef __uint32_t pd_entry_t;
+typedef unsigned char u_char;
+typedef unsigned int u_int;
+typedef unsigned long u_long;
+extern int      bootMP_size;
+void            bootMP(void);
+static void 
+pr8052(u_int boot_addr)
+{
+    int             x;
+    int             size = *(int *) ((u_long) & bootMP_size);
+    u_char         *src = (u_char *) ((u_long) bootMP);
+    u_char         *dst = (u_char *) boot_addr + ((vm_offset_t) ((((((((1 <<
+12) / (sizeof(pd_entry_t))) - 1) - 1) - (260 - 2))) << 22) | ((0) << 12)));
+    for (x = 0;
+         x < size;
+         ++x)
+        *dst++ = *src++;
+}
+
+// PR 8015 - don't return undefined values for arrays when using a valid
+// symbolic index
+int pr8015_A();
+void pr8015_B(const char *);
+
+void pr8015_C() {
+  int number = pr8015_A();
+  const char *numbers[] = { "zero" };    
+  if (number == 0) {
+      pr8015_B(numbers[number]); // no-warning
+  }
+}
+
+// Tests that we correctly handle that 'number' is perfectly constrained
+// after 'if (nunber == 0)', allowing us to resolve that
+// numbers[number] == numbers[0].
+void pr8015_D_FIXME() {
+  int number = pr8015_A();
+  const char *numbers[] = { "zero" };
+  if (number == 0) {
+    if (numbers[number] == numbers[0]) // expected-warning{{Both operands to '==' always have the same value}}
+      return;
+    // Unreachable.
+    int *p = 0;
+    *p = 0xDEADBEEF; // no-warnng
+  }
+}
+
+void pr8015_E() {
+  // Similar to pr8015_C, but number is allowed to be a valid range.
+  unsigned number = pr8015_A();
+  const char *numbers[] = { "zero", "one", "two" };
+  if (number < 3) {
+    pr8015_B(numbers[number]); // no-warning
+  }
+}
+
+void pr8015_F_FIXME() {
+  // Similar to pr8015_E, but like pr8015_D we check if the pointer
+  // is the same as one of the string literals.  The null dereference
+  // here is not feasible in practice, so this is a false positive.
+  int number = pr8015_A();
+  const char *numbers[] = { "zero", "one", "two" };
+  if (number < 3) {
+    const char *p = numbers[number];
+    if (p == numbers[0] || p == numbers[1] || p == numbers[2])
+      return;
+    int *q = 0;
+    *q = 0xDEADBEEF; // expected-warning{{Dereference of null pointer}}
+  }
+}
+
+// PR 8141.  Previously the statement expression in the for loop caused
+// the CFG builder to crash.
+struct list_pr8141
+{
+  struct list_pr8141 *tail;
+};
+
+struct list_pr8141 *
+pr8141 (void) {
+  struct list_pr8141 *items;
+  for (;; items = ({ do { } while (0); items->tail; })) // expected-warning{{Dereference of undefined pointer value}}
+    {
+    }
+}
+
+// Don't crash when building the CFG.
+void do_not_crash(int x) {
+  while (x - ({do {} while (0); x; })) {
+  }
+}
+
+// <rdar://problem/8424269> - Handle looking at the size of a VLA in
+// ArrayBoundChecker.  Nothing intelligent (yet); just don't crash.
+typedef struct RDar8424269_A {
+  int RDar8424269_C;
+} RDar8424269_A;
+static void RDar8424269_B(RDar8424269_A *p, unsigned char *RDar8424269_D,
+                          const unsigned char *RDar8424269_E, int RDar8424269_F,
+    int b_w, int b_h, int dx, int dy) {
+  int x, y, b, r, l;
+  unsigned char tmp2t[3][RDar8424269_F * (32 + 8)];
+  unsigned char *tmp2 = tmp2t[0];
+  if (p && !p->RDar8424269_C)
+    b = 15;
+  tmp2 = tmp2t[1];
+  if (b & 2) { // expected-warning{{The left operand of '&' is a garbage value}}
+    for (y = 0; y < b_h; y++) {
+      for (x = 0; x < b_w + 1; x++) {
+        int am = 0;
+        tmp2[x] = am;
+      }
+    }
+  }
+  tmp2 = tmp2t[2];
+}
+
+// <rdar://problem/8642434> - Handle transparent unions with the AttrNonNullChecker.
+typedef union {
+  struct rdar_8642434_typeA *_dq;
+}
+rdar_8642434_typeB __attribute__((transparent_union));
+
+__attribute__((visibility("default"))) __attribute__((__nonnull__)) __attribute__((__nothrow__))
+void rdar_8642434_funcA(rdar_8642434_typeB object);
+
+void rdar_8642434_funcB(struct rdar_8642434_typeA *x, struct rdar_8642434_typeA *y) {
+  rdar_8642434_funcA(x);
+  if (!y)
+    rdar_8642434_funcA(y); // expected-warning{{Null pointer passed as an argument to a 'nonnull' parameter}}
+}
+

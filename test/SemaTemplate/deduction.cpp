@@ -121,3 +121,32 @@ namespace test1 {
     foo(a);
   }
 }
+
+// PR7708
+namespace test2 {
+  template<typename T> struct Const { typedef void const type; };
+
+  template<typename T> void f(T, typename Const<T>::type*);
+  template<typename T> void f(T, void const *);
+
+  void test() {
+    void *p = 0;
+    f(0, p);
+  }
+}
+
+// rdar://problem/8537391
+namespace test3 {
+  struct Foo {
+    template <void F(char)> static inline void foo();
+  };
+
+  class Bar {
+    template<typename T> static inline void wobble(T ch);
+
+  public:
+    static void madness() {
+      Foo::foo<wobble<char> >();
+    }
+  };
+}

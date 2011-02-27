@@ -568,6 +568,42 @@ bool PointerExprEvaluator::VisitCastExpr(CastExpr* E) {
   case CK_AnyPointerToBlockPointerCast:
     return Visit(SubExpr);
 
+  case CK_DerivedToBase:
+  case CK_UncheckedDerivedToBase: {
+    LValue BaseLV;
+    if (!EvaluatePointer(E->getSubExpr(), BaseLV, Info))
+      return false;
+
+    // Now figure out the necessary offset to add to the baseLV to get from
+    // the derived class to the base class.
+    uint64_t Offset = 0;
+
+    QualType Ty = E->getSubExpr()->getType();
+    const CXXRecordDecl *DerivedDecl = 
+      Ty->getAs<PointerType>()->getPointeeType()->getAsCXXRecordDecl();
+
+    for (CastExpr::path_const_iterator PathI = E->path_begin(), 
+         PathE = E->path_end(); PathI != PathE; ++PathI) {
+      const CXXBaseSpecifier *Base = *PathI;
+
+      // FIXME: If the base is virtual, we'd need to determine the type of the
+      // most derived class and we don't support that right now.
+      if (Base->isVirtual())
+        return false;
+
+      const CXXRecordDecl *BaseDecl = Base->getType()->getAsCXXRecordDecl();
+      const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(DerivedDecl);
+
+      Offset += Layout.getBaseClassOffsetInBits(BaseDecl);
+      DerivedDecl = BaseDecl;
+    }
+
+    Result.Base = BaseLV.getLValueBase();
+    Result.Offset = BaseLV.getLValueOffset() + 
+      CharUnits::fromQuantity(Offset / Info.Ctx.getCharWidth());
+    return true;
+  }
+
   case CK_IntegralToPointer: {
     APValue Value;
     if (!EvaluateIntegerOrLValue(SubExpr, Value, Info))
@@ -948,7 +984,7 @@ public:
   }
 
   bool VisitUnaryTypeTraitExpr(const UnaryTypeTraitExpr *E) {
-    return Success(E->EvaluateTrait(Info.Ctx), E);
+    return Success(E->getValue(), E);
   }
 
   bool VisitChooseExpr(const ChooseExpr *E) {
@@ -957,6 +993,8 @@ public:
 
   bool VisitUnaryReal(const UnaryOperator *E);
   bool VisitUnaryImag(const UnaryOperator *E);
+
+  bool VisitCXXNoexceptExpr(const CXXNoexceptExpr *E);
 
 private:
   CharUnits GetAlignOfExpr(const Expr *E);
@@ -1008,14 +1046,16 @@ bool IntExprEvaluator::CheckReferencedDecl(const Expr* E, const Decl* D) {
 
         VD->setEvaluatingValue();
 
-        if (Visit(const_cast<Expr*>(Init))) {
+        Expr::EvalResult EResult;
+        if (Init->Evaluate(EResult, Info.Ctx) && !EResult.HasSideEffects &&
+            EResult.Val.isInt()) {
           // Cache the evaluated value in the variable declaration.
+          Result = EResult.Val;
           VD->setEvaluatedValue(Result);
           return true;
         }
 
         VD->setEvaluatedValue(APValue());
-        return false;
       }
     }
   }
@@ -1157,6 +1197,24 @@ bool IntExprEvaluator::VisitCallExpr(CallExpr *E) {
 
   case Builtin::BI__builtin_expect:
     return Visit(E->getArg(0));
+      
+  case Builtin::BIstrlen:
+  case Builtin::BI__builtin_strlen:
+    // As an extension, we support strlen() and __builtin_strlen() as constant
+    // expressions when the argument is a string literal.
+    if (StringLiteral *S
+               = dyn_cast<StringLiteral>(E->getArg(0)->IgnoreParenImpCasts())) {
+      // The string literal may have embedded null characters. Find the first
+      // one and truncate there.
+      llvm::StringRef Str = S->getString();
+      llvm::StringRef::size_type Pos = Str.find(0);
+      if (Pos != llvm::StringRef::npos)
+        Str = Str.substr(0, Pos);
+      
+      return Success(Str.size(), E);
+    }
+      
+    return Error(E->getLocStart(), diag::note_invalid_subexpr_in_ice, E);
   }
 }
 
@@ -1400,12 +1458,25 @@ bool IntExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
       return Error(E->getOperatorLoc(), diag::note_expr_divide_by_zero, E);
     return Success(Result.getInt() % RHS, E);
   case BO_Shl: {
-    // FIXME: Warn about out of range shift amounts!
-    unsigned SA =
-      (unsigned) RHS.getLimitedValue(Result.getInt().getBitWidth()-1);
+    // During constant-folding, a negative shift is an opposite shift.
+    if (RHS.isSigned() && RHS.isNegative()) {
+      RHS = -RHS;
+      goto shift_right;
+    }
+
+  shift_left:
+    unsigned SA
+      = (unsigned) RHS.getLimitedValue(Result.getInt().getBitWidth()-1);
     return Success(Result.getInt() << SA, E);
   }
   case BO_Shr: {
+    // During constant-folding, a negative shift is an opposite shift.
+    if (RHS.isSigned() && RHS.isNegative()) {
+      RHS = -RHS;
+      goto shift_left;
+    }
+
+  shift_right:
     unsigned SA =
       (unsigned) RHS.getLimitedValue(Result.getInt().getBitWidth()-1);
     return Success(Result.getInt() >> SA, E);
@@ -1563,7 +1634,7 @@ bool IntExprEvaluator::VisitOffsetOfExpr(const OffsetOfExpr *E) {
       
       // Add the offset to the base.
       Result += CharUnits::fromQuantity(
-                RL.getBaseClassOffset(cast<CXXRecordDecl>(BaseRT->getDecl()))
+             RL.getBaseClassOffsetInBits(cast<CXXRecordDecl>(BaseRT->getDecl()))
                                         / Info.Ctx.getCharWidth());
       break;
     }
@@ -1720,6 +1791,10 @@ bool IntExprEvaluator::VisitUnaryImag(const UnaryOperator *E) {
   return Success(0, E);
 }
 
+bool IntExprEvaluator::VisitCXXNoexceptExpr(const CXXNoexceptExpr *E) {
+  return Success(E->getValue(), E);
+}
+
 //===----------------------------------------------------------------------===//
 // Float Evaluation
 //===----------------------------------------------------------------------===//
@@ -1753,6 +1828,8 @@ public:
     { return Visit(E->getSubExpr()); }
   bool VisitUnaryReal(const UnaryOperator *E);
   bool VisitUnaryImag(const UnaryOperator *E);
+
+  bool VisitDeclRefExpr(const DeclRefExpr *E);
 
   // FIXME: Missing: array subscript of vector, member of vector,
   //                 ImplicitValueInitExpr
@@ -1841,6 +1918,45 @@ bool FloatExprEvaluator::VisitCallExpr(const CallExpr *E) {
   }
 }
 
+bool FloatExprEvaluator::VisitDeclRefExpr(const DeclRefExpr *E) {
+  const Decl *D = E->getDecl();
+  if (!isa<VarDecl>(D) || isa<ParmVarDecl>(D)) return false;
+  const VarDecl *VD = cast<VarDecl>(D);
+
+  // Require the qualifiers to be const and not volatile.
+  CanQualType T = Info.Ctx.getCanonicalType(E->getType());
+  if (!T.isConstQualified() || T.isVolatileQualified())
+    return false;
+
+  const Expr *Init = VD->getAnyInitializer();
+  if (!Init) return false;
+
+  if (APValue *V = VD->getEvaluatedValue()) {
+    if (V->isFloat()) {
+      Result = V->getFloat();
+      return true;
+    }
+    return false;
+  }
+
+  if (VD->isEvaluatingValue())
+    return false;
+
+  VD->setEvaluatingValue();
+
+  Expr::EvalResult InitResult;
+  if (Init->Evaluate(InitResult, Info.Ctx) && !InitResult.HasSideEffects &&
+      InitResult.Val.isFloat()) {
+    // Cache the evaluated value in the variable declaration.
+    Result = InitResult.Val.getFloat();
+    VD->setEvaluatedValue(InitResult.Val);
+    return true;
+  }
+
+  VD->setEvaluatedValue(APValue());
+  return false;
+}
+
 bool FloatExprEvaluator::VisitUnaryReal(const UnaryOperator *E) {
   if (E->getSubExpr()->getType()->isAnyComplexType()) {
     ComplexValue CV;
@@ -1898,6 +2014,10 @@ bool FloatExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
 
     return true;
   }
+
+  // We can't evaluate pointer-to-member operations.
+  if (E->isPtrMemOp())
+    return false;
 
   // FIXME: Diagnostics?  I really don't understand how the warnings
   // and errors are supposed to work.
@@ -2377,6 +2497,7 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
   case Expr::CXXMemberCallExprClass:
   case Expr::CXXDynamicCastExprClass:
   case Expr::CXXTypeidExprClass:
+  case Expr::CXXUuidofExprClass:
   case Expr::CXXNullPtrLiteralExprClass:
   case Expr::CXXThisExprClass:
   case Expr::CXXThrowExprClass:
@@ -2387,7 +2508,6 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
   case Expr::DependentScopeDeclRefExprClass:
   case Expr::CXXConstructExprClass:
   case Expr::CXXBindTemporaryExprClass:
-  case Expr::CXXBindReferenceExprClass:
   case Expr::CXXExprWithTemporariesClass:
   case Expr::CXXTemporaryObjectExprClass:
   case Expr::CXXUnresolvedConstructExprClass:
@@ -2401,7 +2521,6 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
   case Expr::ObjCIvarRefExprClass:
   case Expr::ObjCPropertyRefExprClass:
   case Expr::ObjCImplicitSetterGetterRefExprClass:
-  case Expr::ObjCSuperExprClass:
   case Expr::ObjCIsaExprClass:
   case Expr::ShuffleVectorExprClass:
   case Expr::BlockExprClass:
@@ -2421,6 +2540,7 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
   case Expr::CXXScalarValueInitExprClass:
   case Expr::TypesCompatibleExprClass:
   case Expr::UnaryTypeTraitExprClass:
+  case Expr::CXXNoexceptExprClass:
     return NoDiag();
   case Expr::CallExprClass:
   case Expr::CXXOperatorCallExprClass: {

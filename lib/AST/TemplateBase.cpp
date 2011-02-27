@@ -26,25 +26,6 @@ using namespace clang;
 // TemplateArgument Implementation
 //===----------------------------------------------------------------------===//
 
-/// \brief Construct a template argument pack.
-void TemplateArgument::setArgumentPack(TemplateArgument *args, unsigned NumArgs,
-                                       bool CopyArgs) {
-  assert(isNull() && "Must call setArgumentPack on a null argument");
-
-  Kind = Pack;
-  Args.NumArgs = NumArgs;
-  Args.CopyArgs = CopyArgs;
-  if (!Args.CopyArgs) {
-    Args.Args = args;
-    return;
-  }
-
-  // FIXME: Allocate in ASTContext
-  Args.Args = new TemplateArgument[NumArgs];
-  for (unsigned I = 0; I != Args.NumArgs; ++I)
-    Args.Args[I] = args[I];
-}
-
 void TemplateArgument::Profile(llvm::FoldingSetNodeID &ID,
                                ASTContext &Context) const {
   ID.AddInteger(Kind);
@@ -125,19 +106,22 @@ SourceRange TemplateArgumentLoc::getSourceRange() const {
   switch (Argument.getKind()) {
   case TemplateArgument::Expression:
     return getSourceExpression()->getSourceRange();
-      
+
   case TemplateArgument::Declaration:
     return getSourceDeclExpression()->getSourceRange();
-      
+
   case TemplateArgument::Type:
-    return getTypeSourceInfo()->getTypeLoc().getSourceRange();
-      
+    if (TypeSourceInfo *TSI = getTypeSourceInfo())
+      return TSI->getTypeLoc().getSourceRange();
+    else
+      return SourceRange();
+
   case TemplateArgument::Template:
     if (getTemplateQualifierRange().isValid())
       return SourceRange(getTemplateQualifierRange().getBegin(),
                          getTemplateNameLoc());
     return SourceRange(getTemplateNameLoc());
-      
+
   case TemplateArgument::Integral:
   case TemplateArgument::Pack:
   case TemplateArgument::Null:

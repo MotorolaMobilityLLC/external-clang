@@ -20,12 +20,12 @@
 #include "clang/Checker/PathSensitive/GRSubEngine.h"
 #include "clang/Checker/PathSensitive/GRCoreEngine.h"
 #include "clang/Checker/PathSensitive/GRState.h"
-#include "clang/Checker/PathSensitive/GRSimpleAPICheck.h"
 #include "clang/Checker/PathSensitive/GRTransferFuncs.h"
 #include "clang/Checker/BugReporter/BugReporter.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/StmtObjC.h"
 
 namespace clang {
 class AnalysisManager;
@@ -73,8 +73,6 @@ class GRExprEngine : public GRSubEngine {
   Selector* NSExceptionInstanceRaiseSelectors;
   Selector RaiseSel;
 
-  llvm::OwningPtr<GRSimpleAPICheck> BatchAuditor;
-
   enum CallbackKind {
     PreVisitStmtCallback,
     PostVisitStmtCallback,
@@ -114,15 +112,6 @@ class GRExprEngine : public GRSubEngine {
   GRBugReporter BR;
   
   llvm::OwningPtr<GRTransferFuncs> TF;
-
-  class CallExprWLItem {
-  public:
-    CallExpr::const_arg_iterator I;
-    ExplodedNode *N;
-
-    CallExprWLItem(const CallExpr::const_arg_iterator &i, ExplodedNode *n)
-      : I(i), N(n) {}
-  };
 
 public:
   GRExprEngine(AnalysisManager &mgr, GRTransferFuncs *tf);
@@ -185,9 +174,6 @@ public:
   CHECKER *getChecker() const {
      return static_cast<CHECKER*>(lookupChecker(CHECKER::getTag()));
   }
-
-  void AddCheck(GRSimpleAPICheck* A, Stmt::StmtClass C);
-  void AddCheck(GRSimpleAPICheck* A);
 
   /// ProcessStmt - Called by GRCoreEngine. Used to generate new successor
   ///  nodes by processing the 'effects' of a block-level statement.
@@ -264,6 +250,7 @@ public:
 
   // Functions for external checking of whether we have unfinished work
   bool wasBlockAborted() const { return CoreEngine.wasBlockAborted(); }
+  bool hasEmptyWorkList() const { return !CoreEngine.getWorkList()->hasWork(); }
   bool hasWorkRemaining() const {
     return wasBlockAborted() || CoreEngine.getWorkList()->hasWork();
   }
@@ -295,10 +282,9 @@ public:
                               const GRState *state,
                               ExplodedNode *Pred);
   
-  void CheckerVisitBind(const Stmt *AssignE, const Stmt *StoreE,
-                        ExplodedNodeSet &Dst, ExplodedNodeSet &Src, 
-                        SVal location, SVal val, bool isPrevisit);
-
+  void CheckerVisitBind(const Stmt *StoreE, ExplodedNodeSet &Dst,
+                        ExplodedNodeSet &Src,  SVal location, SVal val,
+                        bool isPrevisit);
 
   /// Visit - Transfer function logic for all statements.  Dispatches to
   ///  other functions that handle specific kinds of statements.
@@ -386,6 +372,10 @@ public:
   void VisitMemberExpr(const MemberExpr* M, ExplodedNode* Pred, 
                        ExplodedNodeSet& Dst, bool asLValue);
 
+  /// Transfer function logic for ObjCAtSynchronizedStmts.
+  void VisitObjCAtSynchronizedStmt(const ObjCAtSynchronizedStmt *S,
+                                   ExplodedNode *Pred, ExplodedNodeSet &Dst);
+
   /// VisitObjCIvarRefExpr - Transfer function logic for ObjCIvarRefExprs.
   void VisitObjCIvarRefExpr(const ObjCIvarRefExpr* DR, ExplodedNode* Pred,
                             ExplodedNodeSet& Dst, bool asLValue);
@@ -422,9 +412,8 @@ public:
   void VisitCXXThisExpr(const CXXThisExpr *TE, ExplodedNode *Pred, 
                         ExplodedNodeSet & Dst);
   
-  void VisitCXXConstructExpr(const CXXConstructExpr *E, SVal Dest,
-                             ExplodedNode *Pred,
-                             ExplodedNodeSet &Dst);
+  void VisitCXXConstructExpr(const CXXConstructExpr *E, const MemRegion *Dest,
+                             ExplodedNode *Pred, ExplodedNodeSet &Dst);
 
   void VisitCXXMemberCallExpr(const CXXMemberCallExpr *MCE, ExplodedNode *Pred,
                               ExplodedNodeSet &Dst);
@@ -435,7 +424,7 @@ public:
   void VisitCXXDeleteExpr(const CXXDeleteExpr *CDE, ExplodedNode *Pred,
                           ExplodedNodeSet &Dst);
 
-  void VisitAggExpr(const Expr *E, SVal Dest, ExplodedNode *Pred,
+  void VisitAggExpr(const Expr *E, const MemRegion *Dest, ExplodedNode *Pred,
                     ExplodedNodeSet &Dst);
 
   /// Create a C++ temporary object for an rvalue.
@@ -494,8 +483,7 @@ protected:
 
   /// EvalBind - Handle the semantics of binding a value to a specific location.
   ///  This method is used by EvalStore, VisitDeclStmt, and others.
-  void EvalBind(ExplodedNodeSet& Dst, const Stmt *AssignE,
-                const Stmt* StoreE, ExplodedNode* Pred,
+  void EvalBind(ExplodedNodeSet& Dst, const Stmt* StoreE, ExplodedNode* Pred,
                 const GRState* St, SVal location, SVal Val,
                 bool atDeclInit = false);
 

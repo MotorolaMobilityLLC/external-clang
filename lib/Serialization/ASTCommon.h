@@ -20,6 +20,12 @@ namespace clang {
 
 namespace serialization {
 
+enum DeclUpdateKind {
+  UPD_CXX_SET_DEFINITIONDATA,
+  UPD_CXX_ADDED_IMPLICIT_MEMBER,
+  UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION
+};
+
 TypeIdx TypeIdxFromBuiltin(const BuiltinType *BT);
 
 template <typename IdxForTypeTy>

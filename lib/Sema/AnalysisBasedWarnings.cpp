@@ -108,11 +108,15 @@ static ControlFlowKind CheckFallThrough(AnalysisContext &AC) {
   bool HasFakeEdge = false;
   bool HasPlainEdge = false;
   bool HasAbnormalEdge = false;
-  for (CFGBlock::pred_iterator I=cfg->getExit().pred_begin(),
-       E = cfg->getExit().pred_end();
-       I != E;
-       ++I) {
-    CFGBlock& B = **I;
+
+  // Ignore default cases that aren't likely to be reachable because all
+  // enums in a switch(X) have explicit case statements.
+  CFGBlock::FilterOptions FO;
+  FO.IgnoreDefaultsWithCoveredEnums = 1;
+
+  for (CFGBlock::filtered_pred_iterator
+	 I = cfg->getExit().filtered_pred_start_end(FO); I.hasMore(); ++I) {
+    const CFGBlock& B = **I;
     if (!live[B.getBlockID()])
       continue;
     if (B.size() == 0) {
@@ -125,7 +129,11 @@ static ControlFlowKind CheckFallThrough(AnalysisContext &AC) {
       HasPlainEdge = true;
       continue;
     }
-    Stmt *S = B[B.size()-1];
+    CFGElement CE = B[B.size()-1];
+    CFGStmt CS = CE.getAs<CFGStmt>();
+    if (!CS.isValid())
+      continue;
+    Stmt *S = CS.getStmt();
     if (isa<ReturnStmt>(S)) {
       HasLiveReturn = true;
       continue;

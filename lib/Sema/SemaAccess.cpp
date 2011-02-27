@@ -516,6 +516,11 @@ static AccessResult MatchesFriend(Sema &S,
 static AccessResult MatchesFriend(Sema &S,
                                   const EffectiveContext &EC,
                                   FriendDecl *FriendD) {
+  // Whitelist accesses if there's an invalid or unsupported friend
+  // declaration.
+  if (FriendD->isInvalidDecl() || FriendD->isUnsupportedFriend())
+    return AR_accessible;
+
   if (TypeSourceInfo *T = FriendD->getFriendType())
     return MatchesFriend(S, EC, T->getType()->getCanonicalTypeUnqualified());
 
@@ -930,6 +935,57 @@ static CXXBasePath *FindBestPath(Sema &S,
   return BestPath;
 }
 
+/// Given that an entity has protected natural access, check whether
+/// access might be denied because of the protected member access
+/// restriction.
+///
+/// \return true if a note was emitted
+static bool TryDiagnoseProtectedAccess(Sema &S, const EffectiveContext &EC,
+                                       AccessTarget &Target) {
+  // Only applies to instance accesses.
+  if (!Target.hasInstanceContext())
+    return false;
+  assert(Target.isMemberAccess());
+  NamedDecl *D = Target.getTargetDecl();
+
+  const CXXRecordDecl *DeclaringClass = Target.getDeclaringClass();
+  DeclaringClass = DeclaringClass->getCanonicalDecl();
+
+  for (EffectiveContext::record_iterator
+         I = EC.Records.begin(), E = EC.Records.end(); I != E; ++I) {
+    const CXXRecordDecl *ECRecord = *I;
+    switch (IsDerivedFromInclusive(ECRecord, DeclaringClass)) {
+    case AR_accessible: break;
+    case AR_inaccessible: continue;
+    case AR_dependent: continue;
+    }
+
+    // The effective context is a subclass of the declaring class.
+    // If that class isn't a superclass of the instance context,
+    // then the [class.protected] restriction applies.
+
+    // To get this exactly right, this might need to be checked more
+    // holistically;  it's not necessarily the case that gaining
+    // access here would grant us access overall.
+
+    const CXXRecordDecl *InstanceContext = Target.resolveInstanceContext(S);
+    assert(InstanceContext && "diagnosing dependent access");
+
+    switch (IsDerivedFromInclusive(InstanceContext, ECRecord)) {
+    case AR_accessible: continue;
+    case AR_dependent: continue;
+    case AR_inaccessible:
+      S.Diag(D->getLocation(), diag::note_access_protected_restricted)
+        << (InstanceContext != Target.getNamingClass()->getCanonicalDecl())
+        << S.Context.getTypeDeclType(InstanceContext)
+        << S.Context.getTypeDeclType(ECRecord);
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /// Diagnose the path which caused the given declaration or base class
 /// to become inaccessible.
 static void DiagnoseAccessPath(Sema &S,
@@ -948,9 +1004,55 @@ static void DiagnoseAccessPath(Sema &S,
   if (D && (Access == D->getAccess() || D->getAccess() == AS_private)) {
     switch (HasAccess(S, EC, DeclaringClass, D->getAccess(), Entity)) {
     case AR_inaccessible: {
+      if (Access == AS_protected &&
+          TryDiagnoseProtectedAccess(S, EC, Entity))
+        return;
+
+      // Find an original declaration.
+      while (D->isOutOfLine()) {
+        NamedDecl *PrevDecl = 0;
+        if (isa<VarDecl>(D))
+          PrevDecl = cast<VarDecl>(D)->getPreviousDeclaration();
+        else if (isa<FunctionDecl>(D))
+          PrevDecl = cast<FunctionDecl>(D)->getPreviousDeclaration();
+        else if (isa<TypedefDecl>(D))
+          PrevDecl = cast<TypedefDecl>(D)->getPreviousDeclaration();
+        else if (isa<TagDecl>(D)) {
+          if (isa<RecordDecl>(D) && cast<RecordDecl>(D)->isInjectedClassName())
+            break;
+          PrevDecl = cast<TagDecl>(D)->getPreviousDeclaration();
+        }
+        if (!PrevDecl) break;
+        D = PrevDecl;
+      }
+
+      CXXRecordDecl *DeclaringClass = FindDeclaringClass(D);
+      Decl *ImmediateChild;
+      if (D->getDeclContext() == DeclaringClass)
+        ImmediateChild = D;
+      else {
+        DeclContext *DC = D->getDeclContext();
+        while (DC->getParent() != DeclaringClass)
+          DC = DC->getParent();
+        ImmediateChild = cast<Decl>(DC);
+      }
+      
+      // Check whether there's an AccessSpecDecl preceding this in the
+      // chain of the DeclContext.
+      bool Implicit = true;
+      for (CXXRecordDecl::decl_iterator
+             I = DeclaringClass->decls_begin(), E = DeclaringClass->decls_end();
+           I != E; ++I) {
+        if (*I == ImmediateChild) break;
+        if (isa<AccessSpecDecl>(*I)) {
+          Implicit = false;
+          break;
+        }
+      }
+
       S.Diag(D->getLocation(), diag::note_access_natural)
         << (unsigned) (Access == AS_protected)
-        << /*FIXME: not implicitly*/ 0;
+        << Implicit;
       return;
     }
 

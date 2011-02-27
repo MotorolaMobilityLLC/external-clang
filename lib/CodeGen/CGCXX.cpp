@@ -1,4 +1,4 @@
-//===--- CGDecl.cpp - Emit LLVM Code for declarations ---------------------===//
+//===--- CGCXX.cpp - Emit LLVM Code for declarations ----------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -103,7 +103,7 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
 
   // If the base is at a non-zero offset, give up.
   const ASTRecordLayout &ClassLayout = Context.getASTRecordLayout(Class);
-  if (ClassLayout.getBaseClassOffset(UniqueBase) != 0)
+  if (ClassLayout.getBaseClassOffsetInBits(UniqueBase) != 0)
     return true;
 
   return TryEmitDefinitionAsAlias(GlobalDecl(D, Dtor_Base),
@@ -180,7 +180,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   }
 
   // Finally, set up the alias with its proper name and attributes.
-  SetCommonAttributes(AliasDecl.getDecl(), Alias);
+  SetCommonAttributes(cast<NamedDecl>(AliasDecl.getDecl()), Alias);
 
   return false;
 }
@@ -289,11 +289,9 @@ CodeGenModule::GetAddrOfCXXDestructor(const CXXDestructorDecl *D,
 
 static llvm::Value *BuildVirtualCall(CodeGenFunction &CGF, uint64_t VTableIndex, 
                                      llvm::Value *This, const llvm::Type *Ty) {
-  Ty = Ty->getPointerTo()->getPointerTo()->getPointerTo();
+  Ty = Ty->getPointerTo()->getPointerTo();
   
-  llvm::Value *VTable = CGF.Builder.CreateBitCast(This, Ty);
-  VTable = CGF.Builder.CreateLoad(VTable);
-  
+  llvm::Value *VTable = CGF.GetVTablePtr(This, Ty);
   llvm::Value *VFuncPtr = 
     CGF.Builder.CreateConstInBoundsGEP1_64(VTable, VTableIndex, "vfn");
   return CGF.Builder.CreateLoad(VFuncPtr);
@@ -321,13 +319,13 @@ CodeGenFunction::BuildVirtualCall(const CXXDestructorDecl *DD, CXXDtorType Type,
 /// Implementation for CGCXXABI.  Possibly this should be moved into
 /// the incomplete ABI implementations?
 
-CGCXXABI::~CGCXXABI() {}
+void CGCXXABI::_anchor() {}
 
 static void ErrorUnsupportedABI(CodeGenFunction &CGF,
                                 llvm::StringRef S) {
   Diagnostic &Diags = CGF.CGM.getDiags();
   unsigned DiagID = Diags.getCustomDiagID(Diagnostic::Error,
-                                          "cannot yet compile %s in this ABI");
+                                          "cannot yet compile %1 in this ABI");
   Diags.Report(CGF.getContext().getFullLoc(CGF.CurCodeDecl->getLocation()),
                DiagID)
     << S;
@@ -357,6 +355,15 @@ llvm::Value *CGCXXABI::EmitLoadOfMemberFunctionPointer(CodeGenFunction &CGF,
     CGM.getTypes().GetFunctionType(CGM.getTypes().getFunctionInfo(RD, FPT),
                                    FPT->isVariadic());
   return llvm::Constant::getNullValue(FTy->getPointerTo());
+}
+
+llvm::Value *CGCXXABI::EmitMemberDataPointerAddress(CodeGenFunction &CGF,
+                                                    llvm::Value *Base,
+                                                    llvm::Value *MemPtr,
+                                              const MemberPointerType *MPT) {
+  ErrorUnsupportedABI(CGF, "loads of member pointers");
+  const llvm::Type *Ty = CGF.ConvertType(MPT->getPointeeType())->getPointerTo();
+  return llvm::Constant::getNullValue(Ty);
 }
 
 llvm::Value *CGCXXABI::EmitMemberPointerConversion(CodeGenFunction &CGF,
@@ -409,4 +416,60 @@ llvm::Constant *CGCXXABI::EmitMemberPointer(const FieldDecl *FD) {
 bool CGCXXABI::isZeroInitializable(const MemberPointerType *MPT) {
   // Fake answer.
   return true;
+}
+
+void CGCXXABI::BuildThisParam(CodeGenFunction &CGF, FunctionArgList &Params) {
+  const CXXMethodDecl *MD = cast<CXXMethodDecl>(CGF.CurGD.getDecl());
+
+  // FIXME: I'm not entirely sure I like using a fake decl just for code
+  // generation. Maybe we can come up with a better way?
+  ImplicitParamDecl *ThisDecl
+    = ImplicitParamDecl::Create(CGM.getContext(), 0, MD->getLocation(),
+                                &CGM.getContext().Idents.get("this"),
+                                MD->getThisType(CGM.getContext()));
+  Params.push_back(std::make_pair(ThisDecl, ThisDecl->getType()));
+  getThisDecl(CGF) = ThisDecl;
+}
+
+void CGCXXABI::EmitThisParam(CodeGenFunction &CGF) {
+  /// Initialize the 'this' slot.
+  assert(getThisDecl(CGF) && "no 'this' variable for function");
+  getThisValue(CGF)
+    = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(getThisDecl(CGF)),
+                             "this");
+}
+
+void CGCXXABI::EmitReturnFromThunk(CodeGenFunction &CGF,
+                                   RValue RV, QualType ResultType) {
+  CGF.EmitReturnOfRValue(RV, ResultType);
+}
+
+CharUnits CGCXXABI::GetArrayCookieSize(QualType ElementType) {
+  return CharUnits::Zero();
+}
+
+llvm::Value *CGCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
+                                             llvm::Value *NewPtr,
+                                             llvm::Value *NumElements,
+                                             QualType ElementType) {
+  // Should never be called.
+  ErrorUnsupportedABI(CGF, "array cookie initialization");
+  return 0;
+}
+
+void CGCXXABI::ReadArrayCookie(CodeGenFunction &CGF, llvm::Value *Ptr,
+                               QualType ElementType, llvm::Value *&NumElements,
+                               llvm::Value *&AllocPtr, CharUnits &CookieSize) {
+  ErrorUnsupportedABI(CGF, "array cookie reading");
+
+  // This should be enough to avoid assertions.
+  NumElements = 0;
+  AllocPtr = llvm::Constant::getNullValue(CGF.Builder.getInt8PtrTy());
+  CookieSize = CharUnits::Zero();
+}
+
+void CGCXXABI::EmitGuardedInit(CodeGenFunction &CGF,
+                               const VarDecl &D,
+                               llvm::GlobalVariable *GV) {
+  ErrorUnsupportedABI(CGF, "static local variable initialization");
 }

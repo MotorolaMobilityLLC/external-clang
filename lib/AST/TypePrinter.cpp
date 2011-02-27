@@ -66,7 +66,19 @@ void TypePrinter::Print(QualType T, std::string &S) {
   
   // Print qualifiers as appropriate.
   Qualifiers Quals = T.getLocalQualifiers();
-  if (!Quals.empty()) {
+  
+  // CanPrefixQualifiers - We prefer to print type qualifiers before the type,
+  // so that we get "const int" instead of "int const", but we can't do this if
+  // the type is complex.  For example if the type is "int*", we *must* print
+  // "int * const", printing "const int *" is different.  Only do this when the
+  // type expands to a simple string.
+  bool CanPrefixQualifiers =
+    isa<BuiltinType>(T) || isa<TypedefType>(T) || isa<TagType>(T) || 
+    isa<ComplexType>(T) || isa<TemplateSpecializationType>(T) ||
+    isa<ObjCObjectType>(T) || isa<ObjCInterfaceType>(T) ||
+    T->isObjCIdType() || T->isObjCQualifiedIdType();
+  
+  if (!CanPrefixQualifiers && !Quals.empty()) {
     std::string TQS;
     Quals.getAsStringInternal(TQS, Policy);
     
@@ -83,6 +95,18 @@ void TypePrinter::Print(QualType T, std::string &S) {
     Print##CLASS(cast<CLASS##Type>(T.getTypePtr()), S);      \
     break;
 #include "clang/AST/TypeNodes.def"
+  }
+  
+  // If we're adding the qualifiers as a prefix, do it now.
+  if (CanPrefixQualifiers && !Quals.empty()) {
+    std::string TQS;
+    Quals.getAsStringInternal(TQS, Policy);
+    
+    if (!S.empty()) {
+      TQS += ' ';
+      TQS += S;
+    }
+    std::swap(S, TQS);
   }
 }
 
@@ -299,6 +323,9 @@ void TypePrinter::PrintFunctionProto(const FunctionProtoType *T,
   case CC_X86ThisCall:
     S += " __attribute__((thiscall))";
     break;
+  case CC_X86Pascal:
+    S += " __attribute__((pascal))";
+    break;
   }
   if (Info.getNoReturn())
     S += " __attribute__((noreturn))";
@@ -399,8 +426,8 @@ void TypePrinter::AppendScope(DeclContext *DC, std::string &Buffer) {
     const TemplateArgumentList &TemplateArgs = Spec->getTemplateArgs();
     std::string TemplateArgsStr
       = TemplateSpecializationType::PrintTemplateArgumentList(
-                                            TemplateArgs.getFlatArgumentList(),
-                                            TemplateArgs.flat_size(),
+                                            TemplateArgs.data(),
+                                            TemplateArgs.size(),
                                             Policy);
     Buffer += Spec->getIdentifier()->getName();
     Buffer += TemplateArgsStr;
@@ -430,9 +457,10 @@ void TypePrinter::PrintTag(TagDecl *D, std::string &InnerString) {
     Buffer += ' ';
   }
 
+  // Compute the full nested-name-specifier for this type.
+  // In C, this will always be empty except when the type
+  // being printed is anonymous within other Record.
   if (!Policy.SuppressScope)
-    // Compute the full nested-name-specifier for this type. In C,
-    // this will always be empty.
     AppendScope(D->getDeclContext(), Buffer);
 
   if (const IdentifierInfo *II = D->getIdentifier())
@@ -478,8 +506,8 @@ void TypePrinter::PrintTag(TagDecl *D, std::string &InnerString) {
       NumArgs = TST->getNumArgs();
     } else {
       const TemplateArgumentList &TemplateArgs = Spec->getTemplateArgs();
-      Args = TemplateArgs.getFlatArgumentList();
-      NumArgs = TemplateArgs.flat_size();
+      Args = TemplateArgs.data();
+      NumArgs = TemplateArgs.size();
     }
     Buffer += TemplateSpecializationType::PrintTemplateArgumentList(Args,
                                                                     NumArgs,
@@ -652,14 +680,19 @@ void TypePrinter::PrintObjCObjectPointer(const ObjCObjectPointerType *T,
                                          std::string &S) { 
   std::string ObjCQIString;
   
+  T->getPointeeType().getLocalQualifiers().getAsStringInternal(ObjCQIString, 
+                                                               Policy);
+  if (!ObjCQIString.empty())
+    ObjCQIString += ' ';
+    
   if (T->isObjCIdType() || T->isObjCQualifiedIdType())
-    ObjCQIString = "id";
+    ObjCQIString += "id";
   else if (T->isObjCClassType() || T->isObjCQualifiedClassType())
-    ObjCQIString = "Class";
+    ObjCQIString += "Class";
   else if (T->isObjCSelType())
-    ObjCQIString = "SEL";
+    ObjCQIString += "SEL";
   else
-    ObjCQIString = T->getInterfaceDecl()->getNameAsString();
+    ObjCQIString += T->getInterfaceDecl()->getNameAsString();
   
   if (!T->qual_empty()) {
     ObjCQIString += '<';
@@ -672,9 +705,6 @@ void TypePrinter::PrintObjCObjectPointer(const ObjCObjectPointerType *T,
     }
     ObjCQIString += '>';
   }
-  
-  T->getPointeeType().getLocalQualifiers().getAsStringInternal(ObjCQIString, 
-                                                               Policy);
   
   if (!T->isObjCIdType() && !T->isObjCQualifiedIdType())
     ObjCQIString += " *"; // Don't forget the implicit pointer.

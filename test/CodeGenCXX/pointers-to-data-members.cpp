@@ -18,23 +18,26 @@ namespace ZeroInit {
   // CHECK: @_ZN8ZeroInit1bE = global i64 -1,
   int A::* b = 0;
 
-  // CHECK: @_ZN8ZeroInit2saE = global %struct.anon { i64 -1 }
+  // CHECK: @_ZN8ZeroInit2saE = internal global %struct.anon { i64 -1 }
   struct {
     int A::*a;
   } sa;
+  void test_sa() { (void) sa; } // force emission
   
-  // CHECK: @_ZN8ZeroInit3ssaE = 
+  // CHECK: @_ZN8ZeroInit3ssaE = internal
   // CHECK: [2 x i64] [i64 -1, i64 -1]
   struct {
     int A::*aa[2];
   } ssa[2];
+  void test_ssa() { (void) ssa; }
   
-  // CHECK: @_ZN8ZeroInit2ssE = global %1 { %struct.anon { i64 -1 } }
+  // CHECK: @_ZN8ZeroInit2ssE = internal global %1 { %struct.anon { i64 -1 } }
   struct {
     struct {
       int A::*pa;
     } s;
   } ss;
+  void test_ss() { (void) ss; }
   
   struct A {
     int A::*a;
@@ -189,3 +192,28 @@ struct A {
 A a;
 
 }
+
+namespace BoolPtrToMember {
+  struct X {
+    bool member;
+  };
+
+  // CHECK: define i8* @_ZN15BoolPtrToMember1fERNS_1XEMS0_b
+  bool &f(X &x, bool X::*member) {
+    // CHECK: {{bitcast.* to i8\*}}
+    // CHECK-NEXT: getelementptr inbounds i8*
+    // CHECK-NEXT: ret i8*
+    return x.*member;
+  }
+}
+
+namespace PR8507 {
+  
+struct S;
+void f(S* p, double S::*pm) {
+  if (0 < p->*pm) {
+  }
+}
+
+}
+

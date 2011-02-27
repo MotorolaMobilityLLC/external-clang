@@ -889,7 +889,9 @@ bug-reporting guidelines somewhere?).</p>
 <li>clang does not support the gcc extension that allows variable-length arrays
 in structures.  This is for a few of reasons: one, it is tricky
 to implement, two, the extension is completely undocumented, and three, the
-extension appears to be rarely used.</li>
+extension appears to be rarely used.  Note that clang <em>does</em> support
+flexible array members (arrays with a zero or unspecified size at the end of
+a structure).</li>
 
 <li>clang does not support duplicate definitions of a function where one is
 inline. This complicates clients of the AST which normally can expect there is
@@ -922,6 +924,12 @@ support is incomplete; enabling Microsoft extensions will silently drop
 certain constructs (including __declspec and Microsoft-style asm statements).
 </p>
 
+<li>clang allows setting _MCS_VER with -fmsc-version=. It defaults to 1300 which
+is the same as Visual C/C++ 2003. Any number is supported and can greatly affect
+what Windows SDK and c++stdlib headers clang can compile. This option will be
+removed when clang supports the full set of MS extensions required for these
+headers.</li>
+
 <li>clang does not support the Microsoft extension where anonymous
 record members can be declared using user defined typedefs.</li>
 
@@ -942,16 +950,26 @@ definition.</li>
 <!-- ======================== -->
 <h4 id="target_arch_x86">X86</h4>
 <!-- ======================== -->
-<p>The support for X86 (both 32-bit and 64-bit) is considered stable
-on Darwin (Mac OS/X), Linux, FreeBSD, and Dragonfly BSD: it has been tested to
-correctly compile large C and Objective-C codebases. (FIXME: Anything specific
-we want to say here? Possibly mention some LLVM x86 limitations?)
+
+<p>The support for X86 (both 32-bit and 64-bit) is considered stable on Darwin
+(Mac OS/X), Linux, FreeBSD, and Dragonfly BSD: it has been tested to correctly
+compile many large C, C++, Objective-C, and Objective-C++ codebases.</p>
 
 <!-- ======================== -->
 <h4 id="target_arch_arm">ARM</h4>
 <!-- ======================== -->
-ARM support is mostly feature-complete, but still experimental; it hasn't
-undergone significant testing.
+
+<p>The support for ARM (specifically ARMv6 and ARMv7) is considered stable on
+Darwin (iOS): it has been tested to correctly compile many large C, C++,
+Objective-C, and Objective-C++ codebases.</p>
+
+<p>It is not quite feature complete, the following areas still need work:</p>
+<ul>
+  <li>Vector support (NEON in particular) is not yet well tested and may have
+    ABI errors.</li>
+  <li>Clang only supports a limited number of ARM architectures. It does not yet
+    fully support ARMv5, for example.</li>
+</ul>
 
 <!-- ======================== -->
 <h4 id="target_arch_other">Other platforms</h4>
@@ -959,9 +977,6 @@ undergone significant testing.
 clang currently contains some support for PPC and Sparc; however, significant
 pieces of code generation are still missing, and they haven't undergone
 significant testing.
-
-<p>clang contains some support for the embedded PIC16 processor
-(FIXME: I haven't been keeping track of this; what should this say?).
 
 <p>clang contains limited support for the MSP430 embedded processor, but both
 the clang support and the LLVM backend support are highly experimental.

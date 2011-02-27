@@ -54,6 +54,9 @@ namespace clang {
     /// reserved for the translation unit declaration.
     typedef uint32_t DeclID;
 
+    /// \brief a Decl::Kind/DeclID pair.
+    typedef std::pair<uint32_t, DeclID> KindDeclIDPair;
+
     /// \brief An ID number that refers to a type in an AST file.
     ///
     /// The ID of a type is partitioned into two parts: the lower
@@ -112,12 +115,19 @@ namespace clang {
     typedef llvm::DenseMap<QualType, TypeIdx, UnsafeQualTypeDenseMapInfo>
         TypeIdxMap;
 
-    /// \brief An ID number that refers to an identifier in an AST
-    /// file.
+    /// \brief An ID number that refers to an identifier in an AST file.
     typedef uint32_t IdentID;
 
+    /// \brief An ID number that refers to a macro in an AST file.
+    typedef uint32_t MacroID;
+
+    /// \brief An ID number that refers to an ObjC selctor in an AST file.
     typedef uint32_t SelectorID;
 
+    /// \brief An ID number that refers to a set of CXXBaseSpecifiers in an 
+    /// AST file.
+    typedef uint32_t CXXBaseSpecifiersID;
+    
     /// \brief Describes the various kinds of blocks that occur within
     /// an AST file.
     enum BlockIDs {
@@ -135,7 +145,10 @@ namespace clang {
 
       /// \brief The block containing the definitions of all of the
       /// types and decls used within the AST file.
-      DECLTYPES_BLOCK_ID
+      DECLTYPES_BLOCK_ID,
+
+      /// \brief The block containing DECL_UPDATES records.
+      DECL_UPDATES_BLOCK_ID
     };
 
     /// \brief Record types that occur within the AST block itself.
@@ -318,9 +331,20 @@ namespace clang {
       /// In practice, this should only be used for the TU and namespaces.
       UPDATE_VISIBLE = 34,
 
-      /// \brief Record code for template specializations introduced after
-      /// serializations of the original template decl.
-      ADDITIONAL_TEMPLATE_SPECIALIZATIONS = 35
+      /// \brief Record for offsets of DECL_UPDATES records for declarations
+      /// that were modified after being deserialized and need updates.
+      DECL_UPDATE_OFFSETS = 35,
+
+      /// \brief Record of updates for a declaration that was modified after
+      /// being deserialized.
+      DECL_UPDATES = 36,
+      
+      /// \brief Record code for the table of offsets to CXXBaseSpecifier
+      /// sets.
+      CXX_BASE_SPECIFIER_OFFSETS = 37,
+
+      /// \brief Record code for diagnostic mappings specified by the user.
+      DIAG_USER_MAPPINGS = 38
     };
 
     /// \brief Record types used within a source manager block.
@@ -366,7 +390,11 @@ namespace clang {
       PP_MACRO_INSTANTIATION = 4,
       
       /// \brief Describes a macro definition within the preprocessing record.
-      PP_MACRO_DEFINITION = 5
+      PP_MACRO_DEFINITION = 5,
+      
+      /// \brief Describes am inclusion directive within the preprocessing
+      /// record.
+      PP_INCLUSION_DIRECTIVE = 6
     };
 
     /// \defgroup ASTAST AST file AST constants
@@ -573,10 +601,8 @@ namespace clang {
     /// constant describes a record for a specific declaration class
     /// in the AST.
     enum DeclCode {
-      /// \brief Attributes attached to a declaration.
-      DECL_ATTR = 50,
       /// \brief A TranslationUnitDecl record.
-      DECL_TRANSLATION_UNIT,
+      DECL_TRANSLATION_UNIT = 50,
       /// \brief A TypedefDecl record.
       DECL_TYPEDEF,
       /// \brief An EnumDecl record.
@@ -690,7 +716,9 @@ namespace clang {
       /// \brief A TemplateTemplateParmDecl record.
       DECL_TEMPLATE_TEMPLATE_PARM,
       /// \brief A StaticAssertDecl record.
-      DECL_STATIC_ASSERT
+      DECL_STATIC_ASSERT,
+      /// \brief A record containing CXXBaseSpecifiers.
+      DECL_CXX_BASE_SPECIFIERS
     };
 
     /// \brief Record codes for each kind of statement or expression.
@@ -827,8 +855,6 @@ namespace clang {
       EXPR_OBJC_KVC_REF_EXPR,
       /// \brief An ObjCMessageExpr record.
       EXPR_OBJC_MESSAGE_EXPR,
-      /// \brief An ObjCSuperExpr record.
-      EXPR_OBJC_SUPER_EXPR,
       /// \brief An ObjCIsa Expr record.
       EXPR_OBJC_ISA,
 
@@ -875,26 +901,28 @@ namespace clang {
       EXPR_CXX_NULL_PTR_LITERAL,  // CXXNullPtrLiteralExpr
       EXPR_CXX_TYPEID_EXPR,       // CXXTypeidExpr (of expr).
       EXPR_CXX_TYPEID_TYPE,       // CXXTypeidExpr (of type).
+      EXPR_CXX_UUIDOF_EXPR,       // CXXUuidofExpr (of expr).
+      EXPR_CXX_UUIDOF_TYPE,       // CXXUuidofExpr (of type).
       EXPR_CXX_THIS,              // CXXThisExpr
       EXPR_CXX_THROW,             // CXXThrowExpr
       EXPR_CXX_DEFAULT_ARG,       // CXXDefaultArgExpr
       EXPR_CXX_BIND_TEMPORARY,    // CXXBindTemporaryExpr
-      EXPR_CXX_BIND_REFERENCE,    // CXXBindReferenceExpr
 
       EXPR_CXX_SCALAR_VALUE_INIT, // CXXScalarValueInitExpr
       EXPR_CXX_NEW,               // CXXNewExpr
       EXPR_CXX_DELETE,            // CXXDeleteExpr
       EXPR_CXX_PSEUDO_DESTRUCTOR, // CXXPseudoDestructorExpr
       
-      EXPR_CXX_EXPR_WITH_TEMPORARIES, // CXXExprWithTemporaries
+      EXPR_CXX_EXPR_WITH_TEMPORARIES,    // CXXExprWithTemporaries
       
-      EXPR_CXX_DEPENDENT_SCOPE_MEMBER, // CXXDependentScopeMemberExpr
-      EXPR_CXX_DEPENDENT_SCOPE_DECL_REF,   // DependentScopeDeclRefExpr
-      EXPR_CXX_UNRESOLVED_CONSTRUCT, // CXXUnresolvedConstructExpr
-      EXPR_CXX_UNRESOLVED_MEMBER,    // UnresolvedMemberExpr
-      EXPR_CXX_UNRESOLVED_LOOKUP,     // UnresolvedLookupExpr
+      EXPR_CXX_DEPENDENT_SCOPE_MEMBER,   // CXXDependentScopeMemberExpr
+      EXPR_CXX_DEPENDENT_SCOPE_DECL_REF, // DependentScopeDeclRefExpr
+      EXPR_CXX_UNRESOLVED_CONSTRUCT,     // CXXUnresolvedConstructExpr
+      EXPR_CXX_UNRESOLVED_MEMBER,        // UnresolvedMemberExpr
+      EXPR_CXX_UNRESOLVED_LOOKUP,        // UnresolvedLookupExpr
 
-      EXPR_CXX_UNARY_TYPE_TRAIT   // UnaryTypeTraitExpr  
+      EXPR_CXX_UNARY_TYPE_TRAIT,  // UnaryTypeTraitExpr
+      EXPR_CXX_NOEXCEPT           // CXXNoexceptExpr
     };
 
     /// \brief The kinds of designators that can occur in a

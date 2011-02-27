@@ -159,8 +159,16 @@ bool GRCoreEngine::ExecuteWorkList(const LocationContext *L, unsigned Steps,
       GenerateNode(StartLoc, InitState, 0);
   }
 
-  while (Steps && WList->hasWork()) {
-    --Steps;
+  // Check if we have a steps limit
+  bool UnlimitedSteps = Steps == 0;
+
+  while (WList->hasWork()) {
+    if (!UnlimitedSteps) {
+      if (Steps == 0)
+        break;
+      --Steps;
+    }
+
     const GRWorkListUnit& WU = WList->Dequeue();
 
     // Set the current block counter.
@@ -409,7 +417,7 @@ void GRCoreEngine::GenerateNode(const ProgramPoint& Loc,
 GRStmtNodeBuilder::GRStmtNodeBuilder(const CFGBlock* b, unsigned idx,
                                      ExplodedNode* N, GRCoreEngine* e,
                                      GRStateManager &mgr)
-  : Eng(*e), B(*b), Idx(idx), Pred(N), Mgr(mgr), Auditor(0),
+  : Eng(*e), B(*b), Idx(idx), Pred(N), Mgr(mgr),
     PurgingDeadSymbols(false), BuildSinks(false), HasGeneratedNode(false),
     PointKind(ProgramPoint::PostStmtKind), Tag(0) {
   Deferred.insert(N);
@@ -453,25 +461,14 @@ void GRStmtNodeBuilder::GenerateAutoTransition(ExplodedNode* N) {
 ExplodedNode* GRStmtNodeBuilder::MakeNode(ExplodedNodeSet& Dst, const Stmt* S, 
                                           ExplodedNode* Pred, const GRState* St,
                                           ProgramPoint::Kind K) {
-  const GRState* PredState = GetState(Pred);
-
-  // If the state hasn't changed, don't generate a new node.
-  if (!BuildSinks && St == PredState && Auditor == 0) {
-    Dst.Add(Pred);
-    return NULL;
-  }
 
   ExplodedNode* N = generateNode(S, St, Pred, K);
 
   if (N) {
     if (BuildSinks)
       N->markAsSink();
-    else {
-      if (Auditor && Auditor->Audit(N, Mgr))
-        N->markAsSink();
-      
+    else
       Dst.Add(N);
-    }
   }
   
   return N;
@@ -703,14 +700,16 @@ void GRCallEnterNodeBuilder::GenerateNode(const GRState *state,
                          OldMgr.getStoreManagerCreator(),
                          OldMgr.getConstraintManagerCreator(),
                          OldMgr.getIndexer(),
-                         OldMgr.getMaxNodes(), OldMgr.getMaxLoop(),
+                         OldMgr.getMaxNodes(), OldMgr.getMaxVisit(),
                          OldMgr.shouldVisualizeGraphviz(),
                          OldMgr.shouldVisualizeUbigraph(),
                          OldMgr.shouldPurgeDead(),
                          OldMgr.shouldEagerlyAssume(),
                          OldMgr.shouldTrimGraph(),
                          OldMgr.shouldInlineCall(),
-                     OldMgr.getAnalysisContextManager().getUseUnoptimizedCFG());
+                     OldMgr.getAnalysisContextManager().getUseUnoptimizedCFG(),
+                     OldMgr.getAnalysisContextManager().getAddImplicitDtors(),
+                     OldMgr.getAnalysisContextManager().getAddInitializers());
     llvm::OwningPtr<GRTransferFuncs> TF(MakeCFRefCountTF(AMgr.getASTContext(),
                                                          /* GCEnabled */ false,
                                                         AMgr.getLangOptions()));

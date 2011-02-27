@@ -4,6 +4,7 @@ __int8 x1  = 3i8;
 __int16 x2 = 4i16;
 __int32 x3 = 5i32;
 __int64 x5 = 0x42i64;
+__int64 x6 = 0x42I64;
 __int64 x4 = 70000000i128;
 
 __int64 y = 0x42i64u;  // expected-error {{invalid suffix}}
@@ -23,3 +24,19 @@ void a() {
         unsigned short s = USHORT;
         unsigned char c = UCHAR;
 }
+
+void pr_7968()
+{
+  int var1 = 0x1111111e+1;
+  int var2 = 0X1111111e+1;
+  int var3 = 0xe+1;
+  int var4 = 0XE+1;
+
+  int var5=    0\
+x1234e+1;
+
+  int var6=
+  /*expected-warning {{backslash and newline separated by space}} */    0\       
+x1234e+1;                      
+}
+

@@ -31,7 +31,7 @@
 using namespace clang;
 
 namespace {
-class UnreachableCodeChecker : public CheckerVisitor<UnreachableCodeChecker> {
+class UnreachableCodeChecker : public Checker {
 public:
   static void *getTag();
   void VisitEndAnalysis(ExplodedGraph &G,
@@ -91,7 +91,7 @@ void UnreachableCodeChecker::VisitEndAnalysis(ExplodedGraph &G,
   ASTContext &Ctx = B.getContext();
 
   // Find CFGBlocks that were not covered by any node
-  for (CFG::const_iterator I = C->begin(); I != C->end(); ++I) {
+  for (CFG::const_iterator I = C->begin(), E = C->end(); I != E; ++I) {
     const CFGBlock *CB = *I;
     // Check if the block is unreachable
     if (reachable.count(CB->getBlockID()))
@@ -102,7 +102,8 @@ void UnreachableCodeChecker::VisitEndAnalysis(ExplodedGraph &G,
       continue;
 
     // Find the entry points for this block
-    FindUnreachableEntryPoints(CB);
+    if (!visited.count(CB->getBlockID()))
+      FindUnreachableEntryPoints(CB);
 
     // This block may have been pruned; check if we still want to report it
     if (reachable.count(CB->getBlockID()))
@@ -116,10 +117,12 @@ void UnreachableCodeChecker::VisitEndAnalysis(ExplodedGraph &G,
     // FIXME: This should be extended to include other unreachable markers,
     // such as llvm_unreachable.
     if (!CB->empty()) {
-      const Stmt *First = CB->front();
-      if (const CallExpr *CE = dyn_cast<CallExpr>(First)) {
-        if (CE->isBuiltinCall(Ctx) == Builtin::BI__builtin_unreachable)
-          continue;
+      CFGElement First = CB->front();
+      if (CFGStmt S = First.getAs<CFGStmt>()) {
+        if (const CallExpr *CE = dyn_cast<CallExpr>(S.getStmt())) {
+          if (CE->isBuiltinCall(Ctx) == Builtin::BI__builtin_unreachable)
+            continue;
+        }
       }
     }
 
@@ -147,35 +150,28 @@ void UnreachableCodeChecker::VisitEndAnalysis(ExplodedGraph &G,
 
 // Recursively finds the entry point(s) for this dead CFGBlock.
 void UnreachableCodeChecker::FindUnreachableEntryPoints(const CFGBlock *CB) {
-  bool allPredecessorsReachable = true;
-
   visited.insert(CB->getBlockID());
 
-  for (CFGBlock::const_pred_iterator I = CB->pred_begin(); I != CB->pred_end();
-      ++I) {
-    // Recurse over all unreachable blocks
+  for (CFGBlock::const_pred_iterator I = CB->pred_begin(), E = CB->pred_end();
+      I != E; ++I) {
     if (!reachable.count((*I)->getBlockID())) {
-      // At least one predeccessor was unreachable
-      allPredecessorsReachable = false;
-
-      // Only visit the block once
+      // If we find an unreachable predecessor, mark this block as reachable so
+      // we don't report this block
+      reachable.insert(CB->getBlockID());
       if (!visited.count((*I)->getBlockID()))
+        // If we haven't previously visited the unreachable predecessor, recurse
         FindUnreachableEntryPoints(*I);
     }
-  }
-
-  // If at least one predecessor is unreachable, mark this block as reachable
-  // so we don't report this block.
-  if (!allPredecessorsReachable) {
-    reachable.insert(CB->getBlockID());
   }
 }
 
 // Find the Stmt* in a CFGBlock for reporting a warning
 const Stmt *UnreachableCodeChecker::getUnreachableStmt(const CFGBlock *CB) {
-  if (CB->size() > 0)
-    return CB->front().getStmt();
-  else if (const Stmt *S = CB->getTerminator())
+  for (CFGBlock::const_iterator I = CB->begin(), E = CB->end(); I != E; ++I) {
+    if (CFGStmt S = I->getAs<CFGStmt>())
+      return S;
+  }
+  if (const Stmt *S = CB->getTerminator())
     return S;
   else
     return 0;

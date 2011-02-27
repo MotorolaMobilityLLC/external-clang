@@ -61,6 +61,7 @@ def : DiagGroup<"inline">;
 def : DiagGroup<"int-to-pointer-cast">;
 def : DiagGroup<"invalid-pch">;
 def LiteralRange : DiagGroup<"literal-range">;
+def LocalTypeTemplateArgs : DiagGroup<"local-type-template-args">;
 def : DiagGroup<"main">;
 def MissingBraces : DiagGroup<"missing-braces">;
 def MissingDeclarations: DiagGroup<"missing-declarations">;
@@ -83,7 +84,8 @@ def OutOfLineDeclaration : DiagGroup<"out-of-line-declaration">;
 def : DiagGroup<"overflow">;
 def OverlengthStrings : DiagGroup<"overlength-strings">;
 def : DiagGroup<"overloaded-virtual">;
-def : DiagGroup<"packed">;
+def Packed : DiagGroup<"packed">;
+def Padded : DiagGroup<"padded">;
 def PointerArith : DiagGroup<"pointer-arith">;
 def PoundWarning : DiagGroup<"#warnings">,
                    DiagCategory<"#warning Directive">;
@@ -100,6 +102,7 @@ def SignCompare : DiagGroup<"sign-compare">;
 def : DiagGroup<"stack-protector">;
 def : DiagGroup<"switch-default">;
 def : DiagGroup<"synth">;
+def TautologicalCompare : DiagGroup<"tautological-compare">;
 
 // Preprocessor warnings.
 def : DiagGroup<"builtin-macro-redefined">;
@@ -130,6 +133,7 @@ def : DiagGroup<"type-limits">;
 def Uninitialized  : DiagGroup<"uninitialized">;
 def UnknownPragmas : DiagGroup<"unknown-pragmas">;
 def UnknownAttributes : DiagGroup<"unknown-attributes">;
+def UnnamedTypeTemplateArgs : DiagGroup<"unnamed-type-template-args">;
 def UnusedArgument : DiagGroup<"unused-argument">;
 def UnusedExceptionParameter : DiagGroup<"unused-exception-parameter">;
 def UnusedFunction : DiagGroup<"unused-function">;
@@ -138,6 +142,7 @@ def UnusedLabel : DiagGroup<"unused-label">;
 def UnusedParameter : DiagGroup<"unused-parameter">;
 def UnusedValue    : DiagGroup<"unused-value">;
 def UnusedVariable : DiagGroup<"unused-variable">;
+def UsedButMarkedUnused : DiagGroup<"used-but-marked-unused">;
 def ReadOnlySetterAttrs : DiagGroup<"readonly-setter-attrs">;
 def Reorder : DiagGroup<"reorder">;
 def UndeclaredSelector : DiagGroup<"undeclared-selector">;
@@ -159,10 +164,15 @@ def CharSubscript : DiagGroup<"char-subscripts">;
 // missing parentheses;  it is off by default.
 def Parentheses : DiagGroup<"parentheses", [DiagGroup<"idiomatic-parentheses">]>;
 
-// -Wconversion has its own warnings, but we split this one out for
-// legacy reasons.
+// -Wconversion has its own warnings, but we split a few out for
+// legacy reasons:
+//   - some people want just 64-to-32 warnings
+//   - conversion warnings with constant sources are on by default
+//   - bool-to-pointer conversion warnings are on by default
 def Conversion : DiagGroup<"conversion",
-                           [DiagGroup<"shorten-64-to-32">, BoolConversions]>,
+                           [DiagGroup<"shorten-64-to-32">,
+                            DiagGroup<"constant-conversion">,
+                            BoolConversions]>,
                  DiagCategory<"Value Conversion Issue">;
 
 def Unused : DiagGroup<"unused",
@@ -222,5 +232,12 @@ def : DiagGroup<"comments", [Comment]>;         // -Wcomments = -Wcomment
 def NonGCC : DiagGroup<"non-gcc",
     [SignCompare, Conversion, LiteralRange]>;
 
+// A warning group for warnings about using C++0x features as extensions in
+// earlier C++ versions.
+def CXX0x : DiagGroup<"c++0x-extensions">;
+
 // A warning group for warnings about GCC extensions.
 def GNU : DiagGroup<"gnu", [GNUDesignator, VLA]>;
+
+// A warning group for warnings about Microsoft extensions.
+def Microsoft : DiagGroup<"microsoft">;

@@ -32,10 +32,10 @@ public:
   RefState(Kind k, const Stmt *s) : K(k), S(s) {}
 
   bool isAllocated() const { return K == AllocateUnchecked; }
-  bool isFailed() const { return K == AllocateFailed; }
+  //bool isFailed() const { return K == AllocateFailed; }
   bool isReleased() const { return K == Released; }
-  bool isEscaped() const { return K == Escaped; }
-  bool isRelinquished() const { return K == Relinquished; }
+  //bool isEscaped() const { return K == Escaped; }
+  //bool isRelinquished() const { return K == Relinquished; }
 
   bool operator==(const RefState &X) const {
     return K == X.K && S == X.S;
@@ -82,9 +82,8 @@ public:
   const GRState *EvalAssume(const GRState *state, SVal Cond, bool Assumption,
                             bool *respondsToCallback);
   void VisitLocation(CheckerContext &C, const Stmt *S, SVal l);
-  virtual void PreVisitBind(CheckerContext &C, const Stmt *AssignE,
-                            const Stmt *StoreE, SVal location,
-                            SVal val);
+  virtual void PreVisitBind(CheckerContext &C, const Stmt *StoreE,
+                            SVal location, SVal val);
 
 private:
   void MallocMem(CheckerContext &C, const CallExpr *CE);
@@ -676,7 +675,6 @@ void MallocChecker::VisitLocation(CheckerContext &C, const Stmt *S, SVal l) {
 }
 
 void MallocChecker::PreVisitBind(CheckerContext &C,
-                                 const Stmt *AssignE,
                                  const Stmt *StoreE,
                                  SVal location,
                                  SVal val) {

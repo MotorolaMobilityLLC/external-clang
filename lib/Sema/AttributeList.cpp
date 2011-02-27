@@ -16,35 +16,24 @@
 #include "llvm/ADT/StringSwitch.h"
 using namespace clang;
 
-AttributeList::AttributeList(IdentifierInfo *aName, SourceLocation aLoc,
+AttributeList::AttributeList(llvm::BumpPtrAllocator &Alloc,
+                             IdentifierInfo *aName, SourceLocation aLoc,
                              IdentifierInfo *sName, SourceLocation sLoc,
                              IdentifierInfo *pName, SourceLocation pLoc,
                              Expr **ExprList, unsigned numArgs,
                              AttributeList *n, bool declspec, bool cxx0x)
-  : AttrName(aName), AttrLoc(aLoc), ScopeName(sName), ScopeLoc(sLoc),
+  : AttrName(aName), AttrLoc(aLoc), ScopeName(sName),
+    ScopeLoc(sLoc),
     ParmName(pName), ParmLoc(pLoc), NumArgs(numArgs), Next(n),
     DeclspecAttribute(declspec), CXX0XAttribute(cxx0x), Invalid(false) {
 
   if (numArgs == 0)
     Args = 0;
   else {
-    Args = new Expr*[numArgs];
+    // Allocate the Args array using the BumpPtrAllocator.
+    Args = Alloc.Allocate<Expr*>(numArgs);
     memcpy(Args, ExprList, numArgs*sizeof(Args[0]));
   }
-}
-
-AttributeList::~AttributeList() {
-  if (Args) {
-    // FIXME: before we delete the vector, we need to make sure the Expr's
-    // have been deleted. Since ActionBase::ExprTy is "void", we are dependent
-    // on the actions module for actually freeing the memory. The specific
-    // hooks are ActOnDeclarator, ActOnTypeName, ActOnParamDeclaratorType,
-    // ParseField, ParseTag. Once these routines have freed the expression,
-    // they should zero out the Args slot (to indicate the memory has been
-    // freed). If any element of the vector is non-null, we should assert.
-    delete [] Args;
-  }
-  delete Next;
 }
 
 AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
@@ -65,6 +54,7 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("final", AT_final)
     .Case("cdecl", AT_cdecl)
     .Case("const", AT_const)
+    .Case("__const", AT_const) // some GCC headers do contain this spelling
     .Case("blocks", AT_blocks)
     .Case("format", AT_format)
     .Case("hiding", AT_hiding)
@@ -73,6 +63,7 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("unused", AT_unused)
     .Case("aligned", AT_aligned)
     .Case("cleanup", AT_cleanup)
+    .Case("naked", AT_naked)
     .Case("nodebug", AT_nodebug)
     .Case("nonnull", AT_nonnull)
     .Case("nothrow", AT_nothrow)
@@ -126,9 +117,11 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("init_priority", AT_init_priority)
     .Case("no_instrument_function", AT_no_instrument_function)
     .Case("thiscall", AT_thiscall)
+    .Case("pascal", AT_pascal)
     .Case("__cdecl", AT_cdecl)
     .Case("__stdcall", AT_stdcall)
     .Case("__fastcall", AT_fastcall)
     .Case("__thiscall", AT_thiscall)
+    .Case("__pascal", AT_pascal)
     .Default(UnknownAttribute);
 }

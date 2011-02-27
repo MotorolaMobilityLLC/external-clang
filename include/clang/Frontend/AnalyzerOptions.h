@@ -65,6 +65,7 @@ public:
   unsigned AnalyzeAll : 1;
   unsigned AnalyzerDisplayProgress : 1;
   unsigned AnalyzeNestedBlocks : 1;
+  unsigned AnalyzerStats : 1;
   unsigned EagerlyAssume : 1;
   unsigned IdempotentOps : 1;
   unsigned PurgeDead : 1;
@@ -73,9 +74,10 @@ public:
   unsigned VisualizeEGUbi : 1;
   unsigned EnableExperimentalChecks : 1;
   unsigned EnableExperimentalInternalChecks : 1;
-  unsigned EnableIdempotentOperationChecker : 1;
   unsigned InlineCall : 1;
   unsigned UnoptimizedCFG : 1;
+  unsigned CFGAddImplicitDtors : 1;
+  unsigned CFGAddInitializers : 1;
 
 public:
   AnalyzerOptions() {
@@ -85,6 +87,7 @@ public:
     AnalyzeAll = 0;
     AnalyzerDisplayProgress = 0;
     AnalyzeNestedBlocks = 0;
+    AnalyzerStats = 0;
     EagerlyAssume = 0;
     PurgeDead = 1;
     TrimGraph = 0;
@@ -93,6 +96,8 @@ public:
     EnableExperimentalChecks = 0;
     EnableExperimentalInternalChecks = 0;
     UnoptimizedCFG = 0;
+    CFGAddImplicitDtors = 0;
+    CFGAddInitializers = 0;
   }
 };
 

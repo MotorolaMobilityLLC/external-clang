@@ -687,6 +687,12 @@ void StmtProfiler::VisitCXXTypeidExpr(CXXTypeidExpr *S) {
     VisitType(S->getTypeOperand());
 }
 
+void StmtProfiler::VisitCXXUuidofExpr(CXXUuidofExpr *S) {
+  VisitExpr(S);
+  if (S->isTypeOperand())
+    VisitType(S->getTypeOperand());
+}
+
 void StmtProfiler::VisitCXXThisExpr(CXXThisExpr *S) {
   VisitExpr(S);
 }
@@ -704,10 +710,6 @@ void StmtProfiler::VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *S) {
   VisitExpr(S);
   VisitDecl(
          const_cast<CXXDestructorDecl *>(S->getTemporary()->getDestructor()));
-}
-
-void StmtProfiler::VisitCXXBindReferenceExpr(CXXBindReferenceExpr *S) {
-  VisitExpr(S);
 }
 
 void StmtProfiler::VisitCXXConstructExpr(CXXConstructExpr *S) {
@@ -828,6 +830,10 @@ void StmtProfiler::VisitUnresolvedMemberExpr(UnresolvedMemberExpr *S) {
     VisitTemplateArguments(S->getTemplateArgs(), S->getNumTemplateArgs());
 }
 
+void StmtProfiler::VisitCXXNoexceptExpr(CXXNoexceptExpr *S) {
+  VisitExpr(S);
+}
+
 void StmtProfiler::VisitObjCStringLiteral(ObjCStringLiteral *S) {
   VisitExpr(S);
 }
@@ -857,6 +863,10 @@ void StmtProfiler::VisitObjCIvarRefExpr(ObjCIvarRefExpr *S) {
 void StmtProfiler::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *S) {
   VisitExpr(S);
   VisitDecl(S->getProperty());
+  if (S->isSuperReceiver()) {
+    ID.AddBoolean(S->isSuperReceiver());
+    VisitType(S->getSuperType());
+  }
 }
 
 void StmtProfiler::VisitObjCImplicitSetterGetterRefExpr(
@@ -865,16 +875,16 @@ void StmtProfiler::VisitObjCImplicitSetterGetterRefExpr(
   VisitDecl(S->getGetterMethod());
   VisitDecl(S->getSetterMethod());
   VisitDecl(S->getInterfaceDecl());
+  if (S->isSuperReceiver()) {
+    ID.AddBoolean(S->isSuperReceiver());
+    VisitType(S->getSuperType());
+  }
 }
 
 void StmtProfiler::VisitObjCMessageExpr(ObjCMessageExpr *S) {
   VisitExpr(S);
   VisitName(S->getSelector());
   VisitDecl(S->getMethodDecl());
-}
-
-void StmtProfiler::VisitObjCSuperExpr(ObjCSuperExpr *S) {
-  VisitExpr(S);
 }
 
 void StmtProfiler::VisitObjCIsaExpr(ObjCIsaExpr *S) {

@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenFunction.h"
+#include "CGCXXABI.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/Intrinsics.h"
 
@@ -37,10 +38,12 @@ static void EmitDeclInit(CodeGenFunction &CGF, const VarDecl &D,
   } else if (T->isAnyComplexType()) {
     CGF.EmitComplexExprIntoAddr(Init, DeclPtr, isVolatile);
   } else {
-    CGF.EmitAggExpr(Init, DeclPtr, isVolatile);
+    CGF.EmitAggExpr(Init, AggValueSlot::forAddr(DeclPtr, isVolatile, true));
   }
 }
 
+/// Emit code to cause the destruction of the given variable with
+/// static storage duration.
 static void EmitDeclDestroy(CodeGenFunction &CGF, const VarDecl &D,
                             llvm::Constant *DeclPtr) {
   CodeGenModule &CGM = CGF.CGM;
@@ -137,6 +140,11 @@ CodeGenFunction::EmitCXXGlobalDtorRegistration(llvm::Constant *DtorFn,
   Builder.CreateCall(AtExitFn, &Args[0], llvm::array_endof(Args));
 }
 
+void CodeGenFunction::EmitCXXGuardedInit(const VarDecl &D,
+                                         llvm::GlobalVariable *DeclPtr) {
+  CGM.getCXXABI().EmitGuardedInit(*this, D, DeclPtr);
+}
+
 static llvm::Function *
 CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
                                    const llvm::FunctionType *FTy,
@@ -157,7 +165,8 @@ CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
 }
 
 void
-CodeGenModule::EmitCXXGlobalVarDeclInitFunc(const VarDecl *D) {
+CodeGenModule::EmitCXXGlobalVarDeclInitFunc(const VarDecl *D,
+                                            llvm::GlobalVariable *Addr) {
   const llvm::FunctionType *FTy
     = llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
                               false);
@@ -166,7 +175,7 @@ CodeGenModule::EmitCXXGlobalVarDeclInitFunc(const VarDecl *D) {
   llvm::Function *Fn =
     CreateGlobalInitOrDestructFunction(*this, FTy, "__cxx_global_var_init");
 
-  CodeGenFunction(*this).GenerateCXXGlobalVarDeclInitFunc(Fn, D);
+  CodeGenFunction(*this).GenerateCXXGlobalVarDeclInitFunc(Fn, D, Addr);
 
   if (D->hasAttr<InitPriorityAttr>()) {
     unsigned int order = D->getAttr<InitPriorityAttr>()->getPriority();
@@ -239,13 +248,20 @@ void CodeGenModule::EmitCXXGlobalDtorFunc() {
   AddGlobalDtor(Fn);
 }
 
+/// Emit the code necessary to initialize the given global variable.
 void CodeGenFunction::GenerateCXXGlobalVarDeclInitFunc(llvm::Function *Fn,
-                                                       const VarDecl *D) {
+                                                       const VarDecl *D,
+                                                 llvm::GlobalVariable *Addr) {
   StartFunction(GlobalDecl(), getContext().VoidTy, Fn, FunctionArgList(),
                 SourceLocation());
 
-  llvm::Constant *DeclPtr = CGM.GetAddrOfGlobalVar(D);
-  EmitCXXGlobalVarDeclInit(*D, DeclPtr);
+  // Use guarded initialization if the global variable is weak due to
+  // being a class template's static data member.
+  if (Addr->hasWeakLinkage() && D->getInstantiatedFromStaticDataMember()) {
+    EmitCXXGuardedInit(*D, Addr);
+  } else {
+    EmitCXXGlobalVarDeclInit(*D, Addr);
+  }
 
   FinishFunction();
 }
@@ -280,143 +296,6 @@ void CodeGenFunction::GenerateCXXGlobalDtorFunc(llvm::Function *Fn,
   }
 
   FinishFunction();
-}
-
-static llvm::Constant *getGuardAcquireFn(CodeGenFunction &CGF) {
-  // int __cxa_guard_acquire(__int64_t *guard_object);
-  
-  const llvm::Type *Int64PtrTy = 
-    llvm::Type::getInt64PtrTy(CGF.getLLVMContext());
-  
-  std::vector<const llvm::Type*> Args(1, Int64PtrTy);
-  
-  const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(CGF.ConvertType(CGF.getContext().IntTy),
-                            Args, /*isVarArg=*/false);
-  
-  return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_guard_acquire");
-}
-
-static llvm::Constant *getGuardReleaseFn(CodeGenFunction &CGF) {
-  // void __cxa_guard_release(__int64_t *guard_object);
-  
-  const llvm::Type *Int64PtrTy = 
-    llvm::Type::getInt64PtrTy(CGF.getLLVMContext());
-  
-  std::vector<const llvm::Type*> Args(1, Int64PtrTy);
-  
-  const llvm::FunctionType *FTy =
-  llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()),
-                          Args, /*isVarArg=*/false);
-  
-  return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_guard_release");
-}
-
-static llvm::Constant *getGuardAbortFn(CodeGenFunction &CGF) {
-  // void __cxa_guard_abort(__int64_t *guard_object);
-  
-  const llvm::Type *Int64PtrTy = 
-    llvm::Type::getInt64PtrTy(CGF.getLLVMContext());
-  
-  std::vector<const llvm::Type*> Args(1, Int64PtrTy);
-  
-  const llvm::FunctionType *FTy =
-  llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()),
-                          Args, /*isVarArg=*/false);
-  
-  return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_guard_abort");
-}
-
-namespace {
-  struct CallGuardAbort : EHScopeStack::Cleanup {
-    llvm::GlobalVariable *Guard;
-    CallGuardAbort(llvm::GlobalVariable *Guard) : Guard(Guard) {}
-
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
-      // It shouldn't be possible for this to throw, but if it can,
-      // this should allow for the possibility of an invoke.
-      CGF.Builder.CreateCall(getGuardAbortFn(CGF), Guard)
-        ->setDoesNotThrow();
-    }
-  };
-}
-
-void
-CodeGenFunction::EmitStaticCXXBlockVarDeclInit(const VarDecl &D,
-                                               llvm::GlobalVariable *GV) {
-  // Bail out early if this initializer isn't reachable.
-  if (!Builder.GetInsertBlock()) return;
-
-  bool ThreadsafeStatics = getContext().getLangOptions().ThreadsafeStatics;
-  
-  llvm::SmallString<256> GuardVName;
-  CGM.getMangleContext().mangleGuardVariable(&D, GuardVName);
-
-  // Create the guard variable.
-  llvm::GlobalVariable *GuardVariable =
-    new llvm::GlobalVariable(CGM.getModule(), Int64Ty,
-                             false, GV->getLinkage(),
-                             llvm::Constant::getNullValue(Int64Ty),
-                             GuardVName.str());
-
-  // Load the first byte of the guard variable.
-  const llvm::Type *PtrTy
-    = llvm::PointerType::get(llvm::Type::getInt8Ty(VMContext), 0);
-  llvm::Value *V = 
-    Builder.CreateLoad(Builder.CreateBitCast(GuardVariable, PtrTy), "tmp");
-
-  llvm::BasicBlock *InitCheckBlock = createBasicBlock("init.check");
-  llvm::BasicBlock *EndBlock = createBasicBlock("init.end");
-
-  // Check if the first byte of the guard variable is zero.
-  Builder.CreateCondBr(Builder.CreateIsNull(V, "tobool"), 
-                       InitCheckBlock, EndBlock);
-
-  EmitBlock(InitCheckBlock);
-
-  // Variables used when coping with thread-safe statics and exceptions.
-  if (ThreadsafeStatics) {    
-    // Call __cxa_guard_acquire.
-    V = Builder.CreateCall(getGuardAcquireFn(*this), GuardVariable);
-               
-    llvm::BasicBlock *InitBlock = createBasicBlock("init");
-  
-    Builder.CreateCondBr(Builder.CreateIsNotNull(V, "tobool"),
-                         InitBlock, EndBlock);
-  
-    // Call __cxa_guard_abort along the exceptional edge.
-    if (Exceptions)
-      EHStack.pushCleanup<CallGuardAbort>(EHCleanup, GuardVariable);
-    
-    EmitBlock(InitBlock);
-  }
-
-  if (D.getType()->isReferenceType()) {
-    unsigned Alignment = getContext().getDeclAlign(&D).getQuantity();
-    QualType T = D.getType();
-    RValue RV = EmitReferenceBindingToExpr(D.getInit(), &D);
-    EmitStoreOfScalar(RV.getScalarVal(), GV, /*Volatile=*/false, Alignment, T);
-  } else
-    EmitDeclInit(*this, D, GV);
-
-  if (ThreadsafeStatics) {
-    // Pop the guard-abort cleanup if we pushed one.
-    if (Exceptions)
-      PopCleanupBlock();
-
-    // Call __cxa_guard_release.  This cannot throw.
-    Builder.CreateCall(getGuardReleaseFn(*this), GuardVariable);    
-  } else {
-    llvm::Value *One = 
-      llvm::ConstantInt::get(llvm::Type::getInt8Ty(VMContext), 1);
-    Builder.CreateStore(One, Builder.CreateBitCast(GuardVariable, PtrTy));
-  }
-
-  // Register the call to the destructor.
-  if (!D.getType()->isReferenceType())
-    EmitDeclDestroy(*this, D, GV);
-  
-  EmitBlock(EndBlock);
 }
 
 /// GenerateCXXAggrDestructorHelper - Generates a helper function which when

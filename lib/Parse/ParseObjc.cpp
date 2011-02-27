@@ -13,6 +13,7 @@
 
 #include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Parse/Parser.h"
+#include "RAIIObjectsForParser.h"
 #include "clang/Sema/DeclSpec.h"
 #include "clang/Sema/PrettyDeclStackTrace.h"
 #include "clang/Sema/Scope.h"
@@ -401,7 +402,13 @@ void Parser::ParseObjCInterfaceDeclList(Decl *interfaceDecl,
       // Skip until we see an '@' or '}' or ';'.
       SkipUntil(tok::r_brace, tok::at);
       break;
-
+        
+    case tok::objc_implementation:
+    case tok::objc_interface:
+      Diag(Tok, diag::err_objc_missing_end);
+      ConsumeToken();
+      break;
+        
     case tok::objc_required:
     case tok::objc_optional:
       // This is only valid on protocols.
@@ -503,13 +510,17 @@ void Parser::ParseObjCPropertyAttribute(ObjCDeclSpec &DS, Decl *ClassDecl,
     else if (II->isStr("nonatomic"))
       DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_nonatomic);
     else if (II->isStr("getter") || II->isStr("setter")) {
+      bool IsSetter = II->getNameStart()[0] == 's';
+
       // getter/setter require extra treatment.
-      if (ExpectAndConsume(tok::equal, diag::err_objc_expected_equal, "",
-                           tok::r_paren))
+      unsigned DiagID = IsSetter ? diag::err_objc_expected_equal_for_setter :
+        diag::err_objc_expected_equal_for_getter;
+
+      if (ExpectAndConsume(tok::equal, DiagID, "", tok::r_paren))
         return;
 
       if (Tok.is(tok::code_completion)) {
-        if (II->getNameStart()[0] == 's')
+        if (IsSetter)
           Actions.CodeCompleteObjCPropertySetter(getCurScope(), ClassDecl,
                                                  Methods, NumMethods);
         else
@@ -518,16 +529,20 @@ void Parser::ParseObjCPropertyAttribute(ObjCDeclSpec &DS, Decl *ClassDecl,
         ConsumeCodeCompletionToken();
       }
 
-      if (Tok.isNot(tok::identifier)) {
-        Diag(Tok, diag::err_expected_ident);
+      
+      SourceLocation SelLoc;
+      IdentifierInfo *SelIdent = ParseObjCSelectorPiece(SelLoc);
+
+      if (!SelIdent) {
+        Diag(Tok, diag::err_objc_expected_selector_for_getter_setter)
+          << IsSetter;
         SkipUntil(tok::r_paren);
         return;
       }
 
-      if (II->getNameStart()[0] == 's') {
+      if (IsSetter) {
         DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_setter);
-        DS.setSetterName(Tok.getIdentifierInfo());
-        ConsumeToken();  // consume method name
+        DS.setSetterName(SelIdent);
 
         if (ExpectAndConsume(tok::colon, 
                              diag::err_expected_colon_after_setter_name, "",
@@ -535,8 +550,7 @@ void Parser::ParseObjCPropertyAttribute(ObjCDeclSpec &DS, Decl *ClassDecl,
           return;
       } else {
         DS.setPropertyAttributes(ObjCDeclSpec::DQ_PR_getter);
-        DS.setGetterName(Tok.getIdentifierInfo());
-        ConsumeToken();  // consume method name
+        DS.setGetterName(SelIdent);
       }
     } else {
       Diag(AttrName, diag::err_objc_expected_property_attr) << II;
@@ -569,7 +583,6 @@ Decl *Parser::ParseObjCMethodPrototype(Decl *IDecl,
 
   tok::TokenKind methodType = Tok.getKind();
   SourceLocation mLoc = ConsumeToken();
-
   Decl *MDecl = ParseObjCMethodDecl(mLoc, methodType, IDecl,MethodImplKind);
   // Since this rule is used for both method declarations and definitions,
   // the caller is (optionally) responsible for consuming the ';'.
@@ -585,9 +598,31 @@ Decl *Parser::ParseObjCMethodPrototype(Decl *IDecl,
 ///       in out inout bycopy byref oneway int char float double void _Bool
 ///
 IdentifierInfo *Parser::ParseObjCSelectorPiece(SourceLocation &SelectorLoc) {
+
   switch (Tok.getKind()) {
   default:
     return 0;
+  case tok::ampamp:
+  case tok::ampequal:
+  case tok::amp:
+  case tok::pipe:
+  case tok::tilde:
+  case tok::exclaim:
+  case tok::exclaimequal:
+  case tok::pipepipe:
+  case tok::pipeequal:
+  case tok::caret:
+  case tok::caretequal: {
+    std::string ThisTok(PP.getSpelling(Tok));
+    if (isalpha(ThisTok[0])) {
+      IdentifierInfo *II = &PP.getIdentifierTable().get(ThisTok.data());
+      Tok.setKind(tok::identifier);
+      SelectorLoc = ConsumeToken();
+      return II;
+    }
+    return 0; 
+  }
+      
   case tok::identifier:
   case tok::kw_asm:
   case tok::kw_auto:
@@ -798,9 +833,9 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
     ReturnType = ParseObjCTypeName(DSRet, false);
 
   // If attributes exist before the method, parse them.
-  llvm::OwningPtr<AttributeList> MethodAttrs;
+  AttributeList *MethodAttrs = 0;
   if (getLang().ObjC2 && Tok.is(tok::kw___attribute))
-    MethodAttrs.reset(ParseGNUAttributes());
+    MethodAttrs = ParseGNUAttributes();
 
   if (Tok.is(tok::code_completion)) {
     Actions.CodeCompleteObjCMethodDecl(getCurScope(), mType == tok::minus, 
@@ -825,8 +860,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
   if (Tok.isNot(tok::colon)) {
     // If attributes exist after the method, parse them.
     if (getLang().ObjC2 && Tok.is(tok::kw___attribute))
-      MethodAttrs.reset(addAttributeLists(MethodAttrs.take(),
-                                          ParseGNUAttributes()));
+      MethodAttrs = addAttributeLists(MethodAttrs, ParseGNUAttributes());
 
     Selector Sel = PP.getSelectorTable().getNullarySelector(SelIdent);
     Decl *Result
@@ -834,8 +868,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
                                           mType, IDecl, DSRet, ReturnType, Sel,
                                           0, 
                                           CParamInfo.data(), CParamInfo.size(),
-                                          MethodAttrs.get(),
-                                          MethodImplKind);
+                                          MethodAttrs, MethodImplKind);
     PD.complete(Result);
     return Result;
   }
@@ -932,11 +965,10 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
 
   }
 
-  // FIXME: Add support for optional parmameter list...
+  // FIXME: Add support for optional parameter list...
   // If attributes exist after the method, parse them.
   if (getLang().ObjC2 && Tok.is(tok::kw___attribute))
-    MethodAttrs.reset(addAttributeLists(MethodAttrs.take(),
-                                        ParseGNUAttributes()));
+    MethodAttrs = addAttributeLists(MethodAttrs, ParseGNUAttributes());
 
   if (KeyIdents.size() == 0)
     return 0;
@@ -947,15 +979,9 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
                                         mType, IDecl, DSRet, ReturnType, Sel,
                                         &ArgInfos[0], 
                                         CParamInfo.data(), CParamInfo.size(),
-                                        MethodAttrs.get(),
+                                        MethodAttrs,
                                         MethodImplKind, isVariadic);
   PD.complete(Result);
-  
-  // Delete referenced AttributeList objects.
-  for (llvm::SmallVectorImpl<Sema::ObjCArgInfo>::iterator
-       I = ArgInfos.begin(), E = ArgInfos.end(); I != E; ++I)
-    delete I->ArgAttrs;
-  
   return Result;
 }
 
@@ -1009,6 +1035,23 @@ ParseObjCProtocolReferences(llvm::SmallVectorImpl<Decl *> &Protocols,
                                   Protocols);
   return false;
 }
+
+/// \brief Parse the Objective-C protocol qualifiers that follow a typename
+/// in a decl-specifier-seq, starting at the '<'.
+void Parser::ParseObjCProtocolQualifiers(DeclSpec &DS) {
+  assert(Tok.is(tok::less) && "Protocol qualifiers start with '<'");
+  assert(getLang().ObjC1 && "Protocol qualifiers only exist in Objective-C");
+  SourceLocation LAngleLoc, EndProtoLoc;
+  llvm::SmallVector<Decl *, 8> ProtocolDecl;
+  llvm::SmallVector<SourceLocation, 8> ProtocolLocs;
+  ParseObjCProtocolReferences(ProtocolDecl, ProtocolLocs, false,
+                              LAngleLoc, EndProtoLoc);
+  DS.setProtocolQualifiers(ProtocolDecl.data(), ProtocolDecl.size(),
+                           ProtocolLocs.data(), LAngleLoc);
+  if (EndProtoLoc.isValid())
+    DS.SetRangeEnd(EndProtoLoc);
+}
+
 
 ///   objc-class-instance-variables:
 ///     '{' objc-instance-variable-decl-list[opt] '}'
@@ -1710,7 +1753,7 @@ StmtResult Parser::ParseObjCAtStatement(SourceLocation AtLoc) {
   }
   
   // Otherwise, eat the semicolon.
-  ExpectAndConsume(tok::semi, diag::err_expected_semi_after_expr);
+  ExpectAndConsumeSemi(diag::err_expected_semi_after_expr);
   return Actions.ActOnExprStmt(Actions.MakeFullExpr(Res.take()));
 }
 
@@ -1764,6 +1807,8 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
 ///     simple-type-specifier
 ///     typename-specifier
 bool Parser::ParseObjCXXMessageReceiver(bool &IsExpr, void *&TypeOrExpr) {
+  InMessageExpressionRAIIObject InMessage(*this, true);
+
   if (Tok.is(tok::identifier) || Tok.is(tok::coloncolon) || 
       Tok.is(tok::kw_typename) || Tok.is(tok::annot_cxxscope))
     TryAnnotateTypeOrScopeToken();
@@ -1838,6 +1883,35 @@ bool Parser::isSimpleObjCMessageExpression() {
          GetLookAheadToken(2).is(tok::identifier);
 }
 
+bool Parser::isStartOfObjCClassMessageMissingOpenBracket() {
+  if (!getLang().ObjC1 || !NextToken().is(tok::identifier) || 
+      InMessageExpression)
+    return false;
+  
+  
+  ParsedType Type;
+
+  if (Tok.is(tok::annot_typename)) 
+    Type = getTypeAnnotation(Tok);
+  else if (Tok.is(tok::identifier))
+    Type = Actions.getTypeName(*Tok.getIdentifierInfo(), Tok.getLocation(), 
+                               getCurScope());
+  else
+    return false;
+  
+  if (!Type.get().isNull() && Type.get()->isObjCObjectOrInterfaceType()) {
+    const Token &AfterNext = GetLookAheadToken(2);
+    if (AfterNext.is(tok::colon) || AfterNext.is(tok::r_square)) {
+      if (Tok.is(tok::identifier))
+        TryAnnotateTypeOrScopeToken();
+      
+      return Tok.is(tok::annot_typename);
+    }
+  }
+
+  return false;
+}
+
 ///   objc-message-expr:
 ///     '[' objc-receiver objc-message-args ']'
 ///
@@ -1858,6 +1932,8 @@ ExprResult Parser::ParseObjCMessageExpression() {
     return ExprError();
   }
   
+  InMessageExpressionRAIIObject InMessage(*this, true);
+  
   if (getLang().CPlusPlus) {
     // We completely separate the C and C++ cases because C++ requires
     // more complicated (read: slower) parsing. 
@@ -1872,7 +1948,7 @@ ExprResult Parser::ParseObjCMessageExpression() {
 
     // Parse the receiver, which is either a type or an expression.
     bool IsExpr;
-    void *TypeOrExpr;
+    void *TypeOrExpr = NULL;
     if (ParseObjCXXMessageReceiver(IsExpr, TypeOrExpr)) {
       SkipUntil(tok::r_square);
       return ExprError();
@@ -1971,14 +2047,18 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
                                        SourceLocation SuperLoc,
                                        ParsedType ReceiverType,
                                        ExprArg ReceiverExpr) {
+  InMessageExpressionRAIIObject InMessage(*this, true);
+
   if (Tok.is(tok::code_completion)) {
     if (SuperLoc.isValid())
-      Actions.CodeCompleteObjCSuperMessage(getCurScope(), SuperLoc, 0, 0);
+      Actions.CodeCompleteObjCSuperMessage(getCurScope(), SuperLoc, 0, 0,
+                                           false);
     else if (ReceiverType)
-      Actions.CodeCompleteObjCClassMessage(getCurScope(), ReceiverType, 0, 0);
+      Actions.CodeCompleteObjCClassMessage(getCurScope(), ReceiverType, 0, 0,
+                                           false);
     else
       Actions.CodeCompleteObjCInstanceMessage(getCurScope(), ReceiverExpr,
-                                              0, 0);
+                                              0, 0, false);
     ConsumeCodeCompletionToken();
   }
   
@@ -2007,6 +2087,29 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
 
       ConsumeToken(); // Eat the ':'.
       ///  Parse the expression after ':'
+      
+      if (Tok.is(tok::code_completion)) {
+        if (SuperLoc.isValid())
+          Actions.CodeCompleteObjCSuperMessage(getCurScope(), SuperLoc, 
+                                               KeyIdents.data(), 
+                                               KeyIdents.size(),
+                                               /*AtArgumentEpression=*/true);
+        else if (ReceiverType)
+          Actions.CodeCompleteObjCClassMessage(getCurScope(), ReceiverType,
+                                               KeyIdents.data(), 
+                                               KeyIdents.size(),
+                                               /*AtArgumentEpression=*/true);
+        else
+          Actions.CodeCompleteObjCInstanceMessage(getCurScope(), ReceiverExpr,
+                                                  KeyIdents.data(), 
+                                                  KeyIdents.size(),
+                                                  /*AtArgumentEpression=*/true);
+
+        ConsumeCodeCompletionToken();
+        SkipUntil(tok::r_square);
+        return ExprError();
+      }
+      
       ExprResult Res(ParseAssignmentExpression());
       if (Res.isInvalid()) {
         // We must manually skip to a ']', otherwise the expression skipper will
@@ -2024,16 +2127,21 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
         if (SuperLoc.isValid())
           Actions.CodeCompleteObjCSuperMessage(getCurScope(), SuperLoc, 
                                                KeyIdents.data(), 
-                                               KeyIdents.size());
+                                               KeyIdents.size(),
+                                               /*AtArgumentEpression=*/false);
         else if (ReceiverType)
           Actions.CodeCompleteObjCClassMessage(getCurScope(), ReceiverType,
                                                KeyIdents.data(), 
-                                               KeyIdents.size());
+                                               KeyIdents.size(),
+                                               /*AtArgumentEpression=*/false);
         else
           Actions.CodeCompleteObjCInstanceMessage(getCurScope(), ReceiverExpr,
                                                   KeyIdents.data(), 
-                                                  KeyIdents.size());
+                                                  KeyIdents.size(),
+                                                /*AtArgumentEpression=*/false);
         ConsumeCodeCompletionToken();
+        SkipUntil(tok::r_square);
+        return ExprError();
       }
             
       // Check for another keyword selector.

@@ -31,7 +31,8 @@ Decl *Sema::ActOnProperty(Scope *S, SourceLocation AtLoc,
                           Selector SetterSel,
                           Decl *ClassCategory,
                           bool *isOverridingProperty,
-                          tok::ObjCKeywordKind MethodImplKind) {
+                          tok::ObjCKeywordKind MethodImplKind,
+                          DeclContext *lexicalDC) {
   unsigned Attributes = ODS.getPropertyAttributes();
   bool isReadWrite = ((Attributes & ObjCDeclSpec::DQ_PR_readwrite) ||
                       // default is readwrite!
@@ -70,6 +71,9 @@ Decl *Sema::ActOnProperty(Scope *S, SourceLocation AtLoc,
                                  GetterSel, SetterSel,
                                  isAssign, isReadWrite,
                                  Attributes, TSI, MethodImplKind);
+  if (lexicalDC)
+    Res->setLexicalDeclContext(lexicalDC);
+
   // Validate the attributes on the @property.
   CheckObjCPropertyAttributes(Res, AtLoc, Attributes);
   return Res;
@@ -137,9 +141,9 @@ Sema::HandlePropertyInClassExtension(Scope *S, ObjCCategoryDecl *CDecl,
     // A case of continuation class adding a new property in the class. This
     // is not what it was meant for. However, gcc supports it and so should we.
     // Make sure setter/getters are declared here.
-    ProcessPropertyDecl(PDecl, CCPrimary);
+    ProcessPropertyDecl(PDecl, CCPrimary, /* redeclaredProperty = */ 0,
+                        /* lexicalDC = */ CDecl);
     return PDecl;
-
   }
 
   // The property 'PIDecl's readonly attribute will be over-ridden
@@ -172,7 +176,8 @@ Sema::HandlePropertyInClassExtension(Scope *S, ObjCCategoryDecl *CDecl,
                       PIDecl->getGetterName(),
                       PIDecl->getSetterName(),
                       CCPrimary, isOverridingProperty,
-                      MethodImplKind);
+                      MethodImplKind,
+                      /* lexicalDC = */ CDecl);
       PIDecl = cast<ObjCPropertyDecl>(ProtocolPtrTy);
     }
     PIDecl->makeitReadWriteAttribute();
@@ -182,13 +187,22 @@ Sema::HandlePropertyInClassExtension(Scope *S, ObjCCategoryDecl *CDecl,
       PIDecl->setPropertyAttributes(ObjCPropertyDecl::OBJC_PR_copy);
     PIDecl->setSetterName(SetterSel);
   } else {
-    Diag(AtLoc, diag::err_use_continuation_class)
+    // Tailor the diagnostics for the common case where a readwrite
+    // property is declared both in the @interface and the continuation.
+    // This is a common error where the user often intended the original
+    // declaration to be readonly.
+    unsigned diag =
+      (Attributes & ObjCDeclSpec::DQ_PR_readwrite) &&
+      (PIkind & ObjCPropertyDecl::OBJC_PR_readwrite)
+      ? diag::err_use_continuation_class_redeclaration_readwrite
+      : diag::err_use_continuation_class;
+    Diag(AtLoc, diag)
       << CCPrimary->getDeclName();
     Diag(PIDecl->getLocation(), diag::note_property_declare);
   }
   *isOverridingProperty = true;
   // Make sure setter decl is synthesized, and added to primary class's list.
-  ProcessPropertyDecl(PIDecl, CCPrimary);
+  ProcessPropertyDecl(PIDecl, CCPrimary, PDecl, CDecl);
   return 0;
 }
 
@@ -455,7 +469,8 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
                                Ivar);
   if (ObjCMethodDecl *getterMethod = property->getGetterMethodDecl()) {
     getterMethod->createImplicitParams(Context, IDecl);
-    if (getLangOptions().CPlusPlus && Synthesize) {
+    if (getLangOptions().CPlusPlus && Synthesize &&
+        Ivar->getType()->isRecordType()) {
       // For Objective-C++, need to synthesize the AST for the IVAR object to be
       // returned by the getter as it must conform to C++'s copy-return rules.
       // FIXME. Eventually we want to do this for Objective-C as well.
@@ -483,7 +498,8 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
   }
   if (ObjCMethodDecl *setterMethod = property->getSetterMethodDecl()) {
     setterMethod->createImplicitParams(Context, IDecl);
-    if (getLangOptions().CPlusPlus && Synthesize) {
+    if (getLangOptions().CPlusPlus && Synthesize
+        && Ivar->getType()->isRecordType()) {
       // FIXME. Eventually we want to do this for Objective-C as well.
       ImplicitParamDecl *SelfDecl = setterMethod->getSelfDecl();
       DeclRefExpr *SelfExpr = 
@@ -496,7 +512,7 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
       ParmVarDecl *Param = (*P);
       Expr *rhs = new (Context) DeclRefExpr(Param,Param->getType(),
                                             SourceLocation());
-      ExprResult Res = BuildBinOp(S, SourceLocation(), 
+      ExprResult Res = BuildBinOp(S, lhs->getLocEnd(), 
                                   BO_Assign, lhs, rhs);
       PIDecl->setSetterCXXAssignment(Res.takeAs<Expr>());
     }
@@ -731,15 +747,17 @@ void Sema::CompareProperties(Decl *CDecl, Decl *ClassOrProtocol) {
   }
 
   if (ObjCInterfaceDecl *MDecl = dyn_cast<ObjCInterfaceDecl>(ClassDecl)) {
-    for (ObjCInterfaceDecl::protocol_iterator P = MDecl->protocol_begin(),
-         E = MDecl->protocol_end(); P != E; ++P)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+          P = MDecl->all_referenced_protocol_begin(),
+          E = MDecl->all_referenced_protocol_end(); P != E; ++P)
       // Match properties of class IDecl with those of protocol (*P).
       MatchOneProtocolPropertiesInClass(IDecl, *P);
 
     // Go thru the list of protocols for this class and recursively match
     // their properties with those declared in the class.
-    for (ObjCInterfaceDecl::protocol_iterator P = IDecl->protocol_begin(),
-         E = IDecl->protocol_end(); P != E; ++P)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+          P = IDecl->all_referenced_protocol_begin(),
+          E = IDecl->all_referenced_protocol_end(); P != E; ++P)
       CompareProperties(IDecl, *P);
   } else {
     ObjCProtocolDecl *MD = cast<ObjCProtocolDecl>(ClassDecl);
@@ -812,8 +830,9 @@ void Sema::CollectImmediateProperties(ObjCContainerDecl *CDecl,
       PropMap[Prop->getIdentifier()] = Prop;
     }
     // scan through class's protocols.
-    for (ObjCInterfaceDecl::protocol_iterator PI = IDecl->protocol_begin(),
-         E = IDecl->protocol_end(); PI != E; ++PI)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+         PI = IDecl->all_referenced_protocol_begin(),
+         E = IDecl->all_referenced_protocol_end(); PI != E; ++PI)
         CollectImmediateProperties((*PI), PropMap, SuperPropMap);
   }
   if (ObjCCategoryDecl *CATDecl = dyn_cast<ObjCCategoryDecl>(CDecl)) {
@@ -824,7 +843,7 @@ void Sema::CollectImmediateProperties(ObjCContainerDecl *CDecl,
         PropMap[Prop->getIdentifier()] = Prop;
       }
     // scan through class's protocols.
-    for (ObjCInterfaceDecl::protocol_iterator PI = CATDecl->protocol_begin(),
+    for (ObjCCategoryDecl::protocol_iterator PI = CATDecl->protocol_begin(),
          E = CATDecl->protocol_end(); PI != E; ++PI)
       CollectImmediateProperties((*PI), PropMap, SuperPropMap);
   }
@@ -859,8 +878,9 @@ static void CollectClassPropertyImplementations(ObjCContainerDecl *CDecl,
       ObjCPropertyDecl *Prop = (*P);
       PropMap[Prop->getIdentifier()] = Prop;
     }
-    for (ObjCInterfaceDecl::protocol_iterator PI = IDecl->protocol_begin(),
-         E = IDecl->protocol_end(); PI != E; ++PI)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+         PI = IDecl->all_referenced_protocol_begin(),
+         E = IDecl->all_referenced_protocol_end(); PI != E; ++PI)
       CollectClassPropertyImplementations((*PI), PropMap);
   }
   else if (ObjCProtocolDecl *PDecl = dyn_cast<ObjCProtocolDecl>(CDecl)) {
@@ -902,8 +922,9 @@ ObjCPropertyDecl *Sema::LookupPropertyDecl(const ObjCContainerDecl *CDecl,
         return Prop;
     }
     // scan through class's protocols.
-    for (ObjCInterfaceDecl::protocol_iterator PI = IDecl->protocol_begin(),
-         E = IDecl->protocol_end(); PI != E; ++PI) {
+    for (ObjCInterfaceDecl::all_protocol_iterator
+         PI = IDecl->all_referenced_protocol_begin(),
+         E = IDecl->all_referenced_protocol_end(); PI != E; ++PI) {
       ObjCPropertyDecl *Prop = LookupPropertyDecl((*PI), II);
       if (Prop)
         return Prop;
@@ -961,10 +982,15 @@ void Sema::DefaultSynthesizeProperties (Scope *S, ObjCImplDecl* IMPDecl,
         continue;
     }
 
-    ActOnPropertyImplDecl(S, IMPDecl->getLocation(), IMPDecl->getLocation(),
-                          true, IMPDecl,
+
+    // We use invalid SourceLocations for the synthesized ivars since they
+    // aren't really synthesized at a particular location; they just exist.
+    // Saying that they are located at the @implementation isn't really going
+    // to help users.
+    ActOnPropertyImplDecl(S, SourceLocation(), SourceLocation(),
+                          true,IMPDecl,
                           Prop->getIdentifier(), Prop->getIdentifier());
-  }    
+  }
 }
 
 void Sema::DiagnoseUnimplementedProperties(Scope *S, ObjCImplDecl* IMPDecl,
@@ -1050,13 +1076,27 @@ Sema::AtomicPropertySetterGetterRules (ObjCImplDecl* IMPDecl,
   }
 }
 
+/// AddPropertyAttrs - Propagates attributes from a property to the
+/// implicitly-declared getter or setter for that property.
+static void AddPropertyAttrs(Sema &S, ObjCMethodDecl *PropertyMethod,
+                             ObjCPropertyDecl *Property) {
+  // Should we just clone all attributes over?
+  if (DeprecatedAttr *A = Property->getAttr<DeprecatedAttr>())
+    PropertyMethod->addAttr(A->clone(S.Context));
+  if (UnavailableAttr *A = Property->getAttr<UnavailableAttr>())
+    PropertyMethod->addAttr(A->clone(S.Context));
+}
+
 /// ProcessPropertyDecl - Make sure that any user-defined setter/getter methods
 /// have the property type and issue diagnostics if they don't.
 /// Also synthesize a getter/setter method if none exist (and update the
 /// appropriate lookup tables. FIXME: Should reconsider if adding synthesized
 /// methods is the "right" thing to do.
 void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
-                               ObjCContainerDecl *CD) {
+                               ObjCContainerDecl *CD,
+                               ObjCPropertyDecl *redeclaredProperty,
+                               ObjCContainerDecl *lexicalDC) {
+
   ObjCMethodDecl *GetterMethod, *SetterMethod;
 
   GetterMethod = CD->getInstanceMethod(property->getGetterName());
@@ -1091,8 +1131,12 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
     // No instance method of same name as property getter name was found.
     // Declare a getter method and add it to the list of methods
     // for this class.
-    GetterMethod = ObjCMethodDecl::Create(Context, property->getLocation(),
-                             property->getLocation(), property->getGetterName(),
+    SourceLocation Loc = redeclaredProperty ? 
+      redeclaredProperty->getLocation() :
+      property->getLocation();
+
+    GetterMethod = ObjCMethodDecl::Create(Context, Loc, Loc,
+                             property->getGetterName(),
                              property->getType(), 0, CD, true, false, true, 
                              false,
                              (property->getPropertyImplementation() ==
@@ -1100,11 +1144,13 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
                              ObjCMethodDecl::Optional :
                              ObjCMethodDecl::Required);
     CD->addDecl(GetterMethod);
+
+    AddPropertyAttrs(*this, GetterMethod, property);
+
     // FIXME: Eventually this shouldn't be needed, as the lexical context
     // and the real context should be the same.
-    if (DeclContext *lexicalDC = property->getLexicalDeclContext())
+    if (lexicalDC)
       GetterMethod->setLexicalDeclContext(lexicalDC);
-
   } else
     // A user declared getter will be synthesize when @synthesize of
     // the property with the same name is seen in the @implementation
@@ -1118,19 +1164,22 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
       // No instance method of same name as property setter name was found.
       // Declare a setter method and add it to the list of methods
       // for this class.
-      SetterMethod = ObjCMethodDecl::Create(Context, property->getLocation(),
-                               property->getLocation(),
-                               property->getSetterName(),
-                               Context.VoidTy, 0, CD, true, false, true,
-                               false,
+      SourceLocation Loc = redeclaredProperty ? 
+        redeclaredProperty->getLocation() :
+        property->getLocation();
+
+      SetterMethod =
+        ObjCMethodDecl::Create(Context, Loc, Loc,
+                               property->getSetterName(), Context.VoidTy, 0,
+                               CD, true, false, true, false,
                                (property->getPropertyImplementation() ==
                                 ObjCPropertyDecl::Optional) ?
-                               ObjCMethodDecl::Optional :
-                               ObjCMethodDecl::Required);
+                                ObjCMethodDecl::Optional :
+                                ObjCMethodDecl::Required);
+
       // Invent the arguments for the setter. We don't bother making a
       // nice name for the argument.
-      ParmVarDecl *Argument = ParmVarDecl::Create(Context, SetterMethod,
-                                                  property->getLocation(),
+      ParmVarDecl *Argument = ParmVarDecl::Create(Context, SetterMethod, Loc,
                                                   property->getIdentifier(),
                                                   property->getType(),
                                                   /*TInfo=*/0,
@@ -1138,10 +1187,13 @@ void Sema::ProcessPropertyDecl(ObjCPropertyDecl *property,
                                                   SC_None,
                                                   0);
       SetterMethod->setMethodParams(Context, &Argument, 1, 1);
+
+      AddPropertyAttrs(*this, SetterMethod, property);
+
       CD->addDecl(SetterMethod);
       // FIXME: Eventually this shouldn't be needed, as the lexical context
       // and the real context should be the same.
-      if (DeclContext *lexicalDC = property->getLexicalDeclContext())
+      if (lexicalDC)
         SetterMethod->setLexicalDeclContext(lexicalDC);
     } else
       // A user declared setter will be synthesize when @synthesize of

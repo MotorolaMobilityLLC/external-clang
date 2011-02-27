@@ -1622,7 +1622,7 @@ Decl *ASTNodeImporter::VisitEnumDecl(EnumDecl *D) {
   EnumDecl *D2 = EnumDecl::Create(Importer.getToContext(), DC, Loc,
                                       Name.getAsIdentifierInfo(),
                                       Importer.Import(D->getTagKeywordLoc()),
-                                      0);
+                                      0, D->isScoped(), D->isFixed());
   // Import the qualifier, if any.
   if (D->getQualifier()) {
     NestedNameSpecifier *NNS = Importer.Import(D->getQualifier());
@@ -1939,7 +1939,7 @@ Decl *ASTNodeImporter::VisitFunctionDecl(FunctionDecl *D) {
   } else if (isa<CXXDestructorDecl>(D)) {
     ToFunction = CXXDestructorDecl::Create(Importer.getToContext(),
                                            cast<CXXRecordDecl>(DC),
-                                           NameInfo, T, 
+                                           NameInfo, T, TInfo,
                                            D->isInlineSpecified(),
                                            D->isImplicit());
   } else if (CXXConversionDecl *FromConversion
@@ -1966,7 +1966,6 @@ Decl *ASTNodeImporter::VisitFunctionDecl(FunctionDecl *D) {
   ToFunction->setAccess(D->getAccess());
   ToFunction->setLexicalDeclContext(LexicalDC);
   Importer.Imported(D, ToFunction);
-  LexicalDC->addDecl(ToFunction);
 
   // Set the parameters.
   for (unsigned I = 0, N = Parameters.size(); I != N; ++I) {
@@ -1976,7 +1975,10 @@ Decl *ASTNodeImporter::VisitFunctionDecl(FunctionDecl *D) {
   ToFunction->setParams(Parameters.data(), Parameters.size());
 
   // FIXME: Other bits to merge?
-  
+
+  // Add this function to the lexical context.
+  LexicalDC->addDecl(ToFunction);
+
   return ToFunction;
 }
 
@@ -2553,6 +2555,8 @@ Decl *ASTNodeImporter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
     llvm::SmallVector<SourceLocation, 4> ProtocolLocs;
     ObjCInterfaceDecl::protocol_loc_iterator 
       FromProtoLoc = D->protocol_loc_begin();
+    
+    // FIXME: Should we be usng all_referenced_protocol_begin() here?
     for (ObjCInterfaceDecl::protocol_iterator FromProto = D->protocol_begin(),
                                            FromProtoEnd = D->protocol_end();
        FromProto != FromProtoEnd;
@@ -2976,9 +2980,12 @@ Expr *ASTNodeImporter::VisitCStyleCastExpr(CStyleCastExpr *E) {
 
 ASTImporter::ASTImporter(Diagnostic &Diags,
                          ASTContext &ToContext, FileManager &ToFileManager,
-                         ASTContext &FromContext, FileManager &FromFileManager)
+                         const FileSystemOptions &ToFileSystemOpts,
+                         ASTContext &FromContext, FileManager &FromFileManager,
+                         const FileSystemOptions &FromFileSystemOpts)
   : ToContext(ToContext), FromContext(FromContext),
     ToFileManager(ToFileManager), FromFileManager(FromFileManager),
+    ToFileSystemOpts(ToFileSystemOpts), FromFileSystemOpts(FromFileSystemOpts),
     Diags(Diags) {
   ImportedDecls[FromContext.getTranslationUnitDecl()]
     = ToContext.getTranslationUnitDecl();
@@ -3128,8 +3135,8 @@ SourceRange ASTImporter::Import(SourceRange FromRange) {
 }
 
 FileID ASTImporter::Import(FileID FromID) {
-  llvm::DenseMap<unsigned, FileID>::iterator Pos
-    = ImportedFileIDs.find(FromID.getHashValue());
+  llvm::DenseMap<FileID, FileID>::iterator Pos
+    = ImportedFileIDs.find(FromID);
   if (Pos != ImportedFileIDs.end())
     return Pos->second;
   
@@ -3149,7 +3156,8 @@ FileID ASTImporter::Import(FileID FromID) {
     // disk again
     // FIXME: We definitely want to re-use the existing MemoryBuffer, rather
     // than mmap the files several times.
-    const FileEntry *Entry = ToFileManager.getFile(Cache->Entry->getName());
+    const FileEntry *Entry = ToFileManager.getFile(Cache->Entry->getName(),
+                                                   ToFileSystemOpts);
     ToID = ToSM.createFileID(Entry, ToIncludeLoc, 
                              FromSLoc.getFile().getFileCharacteristic());
   } else {
@@ -3162,7 +3170,7 @@ FileID ASTImporter::Import(FileID FromID) {
   }
   
   
-  ImportedFileIDs[FromID.getHashValue()] = ToID;
+  ImportedFileIDs[FromID] = ToID;
   return ToID;
 }
 

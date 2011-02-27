@@ -103,7 +103,6 @@ def UnaryTypeTraitExpr : DStmt<Expr>;
 def DependentScopeDeclRefExpr : DStmt<Expr>;
 def CXXConstructExpr : DStmt<Expr>;
 def CXXBindTemporaryExpr : DStmt<Expr>;
-def CXXBindReferenceExpr : DStmt<Expr>;
 def CXXExprWithTemporaries : DStmt<Expr>;
 def CXXTemporaryObjectExpr : DStmt<CXXConstructExpr>;
 def CXXUnresolvedConstructExpr : DStmt<Expr>;
@@ -111,6 +110,7 @@ def CXXDependentScopeMemberExpr : DStmt<Expr>;
 def OverloadExpr : DStmt<Expr, 1>;
 def UnresolvedLookupExpr : DStmt<OverloadExpr>;
 def UnresolvedMemberExpr : DStmt<OverloadExpr>;
+def CXXNoexceptExpr : DStmt<Expr>;
 
 // Obj-C Expressions.
 def ObjCStringLiteral : DStmt<Expr>;
@@ -121,10 +121,13 @@ def ObjCProtocolExpr : DStmt<Expr>;
 def ObjCIvarRefExpr : DStmt<Expr>;
 def ObjCPropertyRefExpr : DStmt<Expr>;
 def ObjCImplicitSetterGetterRefExpr : DStmt<Expr>;
-def ObjCSuperExpr : DStmt<Expr>;
 def ObjCIsaExpr : DStmt<Expr>;
 
 // Clang Extensions.
 def ShuffleVectorExpr : DStmt<Expr>;
 def BlockExpr : DStmt<Expr>;
 def BlockDeclRefExpr : DStmt<Expr>;
+
+// Microsoft Extensions.
+def CXXUuidofExpr : DStmt<Expr>; 
+

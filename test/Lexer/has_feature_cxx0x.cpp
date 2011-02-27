@@ -70,7 +70,7 @@ int no_static_assert();
 // CHECK-0X: has_static_assert
 // CHECK-NO-0X: no_static_assert
 
-
+// We accept this as an extension.
 #if __has_feature(cxx_deleted_functions)
 int deleted_functions();
 #else
@@ -78,7 +78,7 @@ int no_deleted_functions();
 #endif
 
 // CHECK-0X: deleted_functions
-// CHECK-NO-0X: no_deleted_functions
+// CHECK-NO-0X: deleted_functions
 
 
 #if __has_feature(cxx_rvalue_references)
@@ -99,3 +99,13 @@ int no_variadic_templates();
 
 // CHECK-0X: no_variadic_templates
 // CHECK-NO-0X: no_variadic_templates
+
+
+#if __has_feature(cxx_inline_namespaces)
+int inline_namespaces();
+#else
+int no_inline_namespaces();
+#endif
+
+// CHECK-0X: inline_namespaces
+// CHECK-NO-0X: inline_namespaces

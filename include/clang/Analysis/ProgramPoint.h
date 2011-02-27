@@ -47,7 +47,7 @@ public:
               CallEnterKind,
               CallExitKind,
               MinPostStmtKind = PostStmtKind,
-              MaxPostStmtKind = PostLValueKind };
+              MaxPostStmtKind = CallExitKind };
 
 private:
   std::pair<const void *, const void *> Data;
@@ -118,10 +118,6 @@ public:
     return B->empty() ? CFGElement() : B->front();
   }
   
-  const Stmt *getFirstStmt() const {
-    return getFirstElement().getStmt();
-  }
-
   static bool classof(const ProgramPoint* Location) {
     return Location->getKind() == BlockEntranceKind;
   }
@@ -134,11 +130,6 @@ public:
 
   const CFGBlock* getBlock() const {
     return reinterpret_cast<const CFGBlock*>(getData1());
-  }
-
-  const Stmt* getLastStmt() const {
-    const CFGBlock* B = getBlock();
-    return B->empty() ? CFGElement() : B->back();
   }
 
   const Stmt* getTerminator() const {

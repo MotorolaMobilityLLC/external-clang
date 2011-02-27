@@ -1,10 +1,13 @@
 set(LLVM_NO_RTTI 1)
 
+set(LLVM_USED_LIBS clangBasic clangLex clangAST clangFrontend clangRewrite)
+
 add_clang_library(clangChecker
   AdjustedReturnValueChecker.cpp
   AggExprVisitor.cpp
   AnalysisConsumer.cpp
   AnalysisManager.cpp
+  AnalyzerStatsChecker.cpp
   ArrayBoundChecker.cpp
   AttrNonNullChecker.cpp
   BasicConstraintManager.cpp
@@ -15,6 +18,7 @@ add_clang_library(clangChecker
   BugReporterVisitors.cpp
   BuiltinFunctionChecker.cpp
   CFRefCount.cpp
+  CStringChecker.cpp
   CallAndMessageChecker.cpp
   CastSizeChecker.cpp
   CastToStructChecker.cpp
@@ -25,8 +29,8 @@ add_clang_library(clangChecker
   CheckSizeofPointer.cpp
   Checker.cpp
   CheckerHelpers.cpp
+  ChrootChecker.cpp
   CocoaConventions.cpp
-  CStringChecker.cpp
   DereferenceChecker.cpp
   DivZeroChecker.cpp
   Environment.cpp
@@ -51,6 +55,7 @@ add_clang_library(clangChecker
   NSErrorChecker.cpp
   NoReturnFunctionChecker.cpp
   OSAtomicChecker.cpp
+  ObjCAtSyncChecker.cpp
   ObjCUnusedIVarsChecker.cpp
   PathDiagnostic.cpp
   PlistDiagnostics.cpp

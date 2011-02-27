@@ -77,6 +77,7 @@ static uint64_t LookupFieldBitOffset(CodeGen::CodeGenModule &CGM,
     ++Index;
   }
   assert(Index != Ivars.size() && "Ivar is not inside container!");
+  assert(Index < RL->getFieldCount() && "Ivar is not inside record layout!");
 
   return RL->getFieldOffset(Index);
 }
@@ -113,11 +114,27 @@ LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
     return LV;
   }
 
-  // We need to compute the bit offset for the bit-field, the offset is to the
-  // byte. Note, there is a subtle invariant here: we can only call this routine
-  // on non-synthesized ivars but we may be called for synthesized ivars.
-  // However, a synthesized ivar can never be a bit-field, so this is safe.
-  uint64_t BitOffset = LookupFieldBitOffset(CGF.CGM, OID, 0, Ivar) % 8;
+  // We need to compute an access strategy for this bit-field. We are given the
+  // offset to the first byte in the bit-field, the sub-byte offset is taken
+  // from the original layout. We reuse the normal bit-field access strategy by
+  // treating this as an access to a struct where the bit-field is in byte 0,
+  // and adjust the containing type size as appropriate.
+  //
+  // FIXME: Note that currently we make a very conservative estimate of the
+  // alignment of the bit-field, because (a) it is not clear what guarantees the
+  // runtime makes us, and (b) we don't have a way to specify that the struct is
+  // at an alignment plus offset.
+  //
+  // Note, there is a subtle invariant here: we can only call this routine on
+  // non-synthesized ivars but we may be called for synthesized ivars.  However,
+  // a synthesized ivar can never be a bit-field, so this is safe.
+  const ASTRecordLayout &RL =
+    CGF.CGM.getContext().getASTObjCInterfaceLayout(OID);
+  uint64_t TypeSizeInBits = RL.getSize();
+  uint64_t FieldBitOffset = LookupFieldBitOffset(CGF.CGM, OID, 0, Ivar);
+  uint64_t BitOffset = FieldBitOffset % 8;
+  uint64_t ContainingTypeAlign = 8;
+  uint64_t ContainingTypeSize = TypeSizeInBits - (FieldBitOffset - BitOffset);
   uint64_t BitFieldSize =
     Ivar->getBitWidth()->EvaluateAsInt(CGF.getContext()).getZExtValue();
 
@@ -127,23 +144,10 @@ LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
   // layout object. However, this is blocked on other cleanups to the
   // Objective-C code, so for now we just live with allocating a bunch of these
   // objects.
+  CGBitFieldInfo *Info = new (CGF.CGM.getContext()) CGBitFieldInfo(
+    CGBitFieldInfo::MakeInfo(CGF.CGM.getTypes(), Ivar, BitOffset, BitFieldSize,
+                             ContainingTypeSize, ContainingTypeAlign));
 
-  // We always construct a single, possibly unaligned, access for this case.
-  CGBitFieldInfo::AccessInfo AI;
-  AI.FieldIndex = 0;
-  AI.FieldByteOffset = 0;
-  AI.FieldBitStart = BitOffset;
-  AI.AccessWidth = CGF.CGM.getContext().getTypeSize(IvarTy);
-  AI.AccessAlignment = 0;
-  AI.TargetBitOffset = 0;
-  AI.TargetBitWidth = BitFieldSize;
-
-  CGBitFieldInfo *Info =
-    new (CGF.CGM.getContext()) CGBitFieldInfo(BitFieldSize, 1, &AI,
-                                              IvarTy->isSignedIntegerType());
-
-  // FIXME: We need to set a very conservative alignment on this, or make sure
-  // that the runtime is doing the right thing.
   return LValue::MakeBitfield(V, *Info,
                               IvarTy.getCVRQualifiers() | CVRQualifiers);
 }
@@ -459,7 +463,7 @@ public:
     // void objc_exception_rethrow(void)
     std::vector<const llvm::Type*> Args;
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Args, true);
+      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_exception_rethrow");
   }
   
@@ -997,7 +1001,7 @@ public:
   /// definition is seen. The return value has type ProtocolPtrTy.
   virtual llvm::Constant *GetOrEmitProtocolRef(const ObjCProtocolDecl *PD)=0;
   virtual llvm::Constant *GCBlockLayout(CodeGen::CodeGenFunction &CGF,
-                      const llvm::SmallVectorImpl<const BlockDeclRefExpr *> &);
+                      const llvm::SmallVectorImpl<const Expr *> &);
   
 };
 
@@ -1517,7 +1521,7 @@ llvm::Constant *CGObjCCommonMac::GenerateConstantString(
   const StringLiteral *SL) {
   return (CGM.getLangOptions().NoConstantCFStrings == 0 ? 
           CGM.GetAddrOfConstantCFString(SL) :
-          CGM.GetAddrOfConstantNSString(SL));
+          CGM.GetAddrOfConstantString(SL));
 }
 
 /// Generates a message send where the super is the receiver.  This is
@@ -1660,11 +1664,10 @@ static Qualifiers::GC GetGCAttrTypeForType(ASTContext &Ctx, QualType FQT) {
 }
 
 llvm::Constant *CGObjCCommonMac::GCBlockLayout(CodeGen::CodeGenFunction &CGF,
-              const llvm::SmallVectorImpl<const BlockDeclRefExpr *> &DeclRefs) {
+              const llvm::SmallVectorImpl<const Expr *> &BlockLayout) {
   llvm::Constant *NullPtr = 
     llvm::Constant::getNullValue(llvm::Type::getInt8PtrTy(VMContext));
-  if ((CGM.getLangOptions().getGCMode() == LangOptions::NonGC) ||
-      DeclRefs.empty())
+  if (CGM.getLangOptions().getGCMode() == LangOptions::NonGC)
     return NullPtr;
   bool hasUnion = false;
   SkipIvars.clear();
@@ -1672,8 +1675,14 @@ llvm::Constant *CGObjCCommonMac::GCBlockLayout(CodeGen::CodeGenFunction &CGF,
   unsigned WordSizeInBits = CGM.getContext().Target.getPointerWidth(0);
   unsigned ByteSizeInBits = CGM.getContext().Target.getCharWidth();
   
-  for (size_t i = 0; i < DeclRefs.size(); ++i) {
-    const BlockDeclRefExpr *BDRE = DeclRefs[i];
+  // __isa is the first field in block descriptor and must assume by runtime's
+  // convention that it is GC'able.
+  IvarsInfo.push_back(GC_IVAR(0, 1));
+  for (size_t i = 0; i < BlockLayout.size(); ++i) {
+    const Expr *E = BlockLayout[i];
+    const BlockDeclRefExpr *BDRE = dyn_cast<BlockDeclRefExpr>(E);
+    if (!BDRE)
+      continue;
     const ValueDecl *VD = BDRE->getDecl();
     CharUnits Offset = CGF.BlockDecls[VD];
     uint64_t FieldOffset = Offset.getQuantity();
@@ -1990,8 +1999,9 @@ llvm::Constant *CGObjCCommonMac::EmitPropertyList(llvm::Twine Name,
                                                    Prop));
   }
   if (const ObjCInterfaceDecl *OID = dyn_cast<ObjCInterfaceDecl>(OCD)) {
-    for (ObjCInterfaceDecl::protocol_iterator P = OID->protocol_begin(),
-         E = OID->protocol_end(); P != E; ++P)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+         P = OID->all_referenced_protocol_begin(),
+         E = OID->all_referenced_protocol_end(); P != E; ++P)
       PushProtocolProperties(PropertySet, Properties, Container, (*P), 
                              ObjCTypes);
   }
@@ -2179,8 +2189,8 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
     const_cast<ObjCInterfaceDecl*>(ID->getClassInterface());
   llvm::Constant *Protocols =
     EmitProtocolList("\01L_OBJC_CLASS_PROTOCOLS_" + ID->getName(),
-                     Interface->protocol_begin(),
-                     Interface->protocol_end());
+                     Interface->all_referenced_protocol_begin(),
+                     Interface->all_referenced_protocol_end());
   unsigned Flags = eClassFlags_Factory;
   if (ID->getNumIvarInitializers())
     Flags |= eClassFlags_HasCXXStructors;
@@ -2188,7 +2198,7 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
     CGM.getContext().getASTObjCImplementationLayout(ID).getSize() / 8;
 
   // FIXME: Set CXX-structors flag.
-  if (CGM.getDeclVisibilityMode(ID->getClassInterface()) == LangOptions::Hidden)
+  if (ID->getClassInterface()->getVisibility() == HiddenVisibility)
     Flags |= eClassFlags_Hidden;
 
   std::vector<llvm::Constant*> InstanceMethods, ClassMethods;
@@ -2273,7 +2283,7 @@ llvm::Constant *CGObjCMac::EmitMetaClass(const ObjCImplementationDecl *ID,
   unsigned Flags = eClassFlags_Meta;
   unsigned Size = CGM.getTargetData().getTypeAllocSize(ObjCTypes.ClassTy);
 
-  if (CGM.getDeclVisibilityMode(ID->getClassInterface()) == LangOptions::Hidden)
+  if (ID->getClassInterface()->getVisibility() == HiddenVisibility)
     Flags |= eClassFlags_Hidden;
 
   std::vector<llvm::Constant*> Values(12);
@@ -2964,6 +2974,10 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
   llvm::Value *CallTryExitVar = CGF.CreateTempAlloca(CGF.Builder.getInt1Ty(),
                                                      "_call_try_exit");
 
+  // A slot containing the exception to rethrow.  Only needed when we
+  // have both a @catch and a @finally.
+  llvm::Value *PropagatingExnVar = 0;
+
   // Push a normal cleanup to leave the try scope.
   CGF.EHStack.pushCleanup<PerformFragileFinally>(NormalCleanup, &S,
                                                  SyncArgSlot,
@@ -3035,6 +3049,12 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
     llvm::BasicBlock *CatchBlock = 0;
     llvm::BasicBlock *CatchHandler = 0;
     if (HasFinally) {
+      // Save the currently-propagating exception before
+      // objc_exception_try_enter clears the exception slot.
+      PropagatingExnVar = CGF.CreateTempAlloca(Caught->getType(),
+                                               "propagating_exception");
+      CGF.Builder.CreateStore(Caught, PropagatingExnVar);
+
       // Enter a new exception try block (in case a @catch block
       // throws an exception).
       CGF.Builder.CreateCall(ObjCTypes.getExceptionTryEnterFn(), ExceptionData)
@@ -3086,7 +3106,7 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
         CodeGenFunction::RunCleanupsScope CatchVarCleanups(CGF);
 
         if (CatchParam) {
-          CGF.EmitLocalBlockVarDecl(*CatchParam);
+          CGF.EmitAutoVarDecl(*CatchParam);
           assert(CGF.HaveInsertPoint() && "DeclStmt destroyed insert point?");
 
           // These types work out because ConvertType(id) == i8*.
@@ -3130,7 +3150,7 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
       // the end of the catch body.
       CodeGenFunction::RunCleanupsScope CatchVarCleanups(CGF);
 
-      CGF.EmitLocalBlockVarDecl(*CatchParam);
+      CGF.EmitAutoVarDecl(*CatchParam);
       assert(CGF.HaveInsertPoint() && "DeclStmt destroyed insert point?");
 
       // Initialize the catch variable.
@@ -3169,6 +3189,15 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
       // the try's write hazard and here.
       //Hazards.emitWriteHazard();
 
+      // Extract the new exception and save it to the
+      // propagating-exception slot.
+      assert(PropagatingExnVar);
+      llvm::CallInst *NewCaught =
+        CGF.Builder.CreateCall(ObjCTypes.getExceptionExtractFn(),
+                               ExceptionData, "caught");
+      NewCaught->setDoesNotThrow();
+      CGF.Builder.CreateStore(NewCaught, PropagatingExnVar);
+
       // Don't pop the catch handler; the throw already did.
       CGF.Builder.CreateStore(CGF.Builder.getFalse(), CallTryExitVar);
       CGF.EmitBranchThroughCleanup(FinallyRethrow);
@@ -3189,13 +3218,21 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
   CGBuilderTy::InsertPoint SavedIP = CGF.Builder.saveAndClearIP();
   CGF.EmitBlock(FinallyRethrow.getBlock(), true);
   if (CGF.HaveInsertPoint()) {
-    // Just look in the buffer for the exception to throw.
-    llvm::CallInst *Caught =
-      CGF.Builder.CreateCall(ObjCTypes.getExceptionExtractFn(),
-                             ExceptionData);
-    Caught->setDoesNotThrow();
+    // If we have a propagating-exception variable, check it.
+    llvm::Value *PropagatingExn;
+    if (PropagatingExnVar) {
+      PropagatingExn = CGF.Builder.CreateLoad(PropagatingExnVar);
 
-    CGF.Builder.CreateCall(ObjCTypes.getExceptionThrowFn(), Caught)
+    // Otherwise, just look in the buffer for the exception to throw.
+    } else {
+      llvm::CallInst *Caught =
+        CGF.Builder.CreateCall(ObjCTypes.getExceptionExtractFn(),
+                               ExceptionData);
+      Caught->setDoesNotThrow();
+      PropagatingExn = Caught;
+    }
+
+    CGF.Builder.CreateCall(ObjCTypes.getExceptionThrowFn(), PropagatingExn)
       ->setDoesNotThrow();
     CGF.Builder.CreateUnreachable();
   }
@@ -3582,10 +3619,10 @@ void CGObjCCommonMac::BuildAggrIvarLayout(const ObjCImplementationDecl *OI,
   uint64_t MaxSkippedUnionIvarSize = 0;
   FieldDecl *MaxField = 0;
   FieldDecl *MaxSkippedField = 0;
-  FieldDecl *LastFieldBitfield = 0;
+  FieldDecl *LastFieldBitfieldOrUnnamed = 0;
   uint64_t MaxFieldOffset = 0;
   uint64_t MaxSkippedFieldOffset = 0;
-  uint64_t LastBitfieldOffset = 0;
+  uint64_t LastBitfieldOrUnnamedOffset = 0;
 
   if (RecFields.empty())
     return;
@@ -3605,12 +3642,12 @@ void CGObjCCommonMac::BuildAggrIvarLayout(const ObjCImplementationDecl *OI,
 
     // Skip over unnamed or bitfields
     if (!Field->getIdentifier() || Field->isBitField()) {
-      LastFieldBitfield = Field;
-      LastBitfieldOffset = FieldOffset;
+      LastFieldBitfieldOrUnnamed = Field;
+      LastBitfieldOrUnnamedOffset = FieldOffset;
       continue;
     }
 
-    LastFieldBitfield = 0;
+    LastFieldBitfieldOrUnnamed = 0;
     QualType FQT = Field->getType();
     if (FQT->isRecordType() || FQT->isUnionType()) {
       if (FQT->isUnionType())
@@ -3699,16 +3736,25 @@ void CGObjCCommonMac::BuildAggrIvarLayout(const ObjCImplementationDecl *OI,
     }
   }
 
-  if (LastFieldBitfield) {
-    // Last field was a bitfield. Must update skip info.
-    Expr *BitWidth = LastFieldBitfield->getBitWidth();
-    uint64_t BitFieldSize =
-      BitWidth->EvaluateAsInt(CGM.getContext()).getZExtValue();
-    GC_IVAR skivar;
-    skivar.ivar_bytepos = BytePos + LastBitfieldOffset;
-    skivar.ivar_size = (BitFieldSize / ByteSizeInBits)
-      + ((BitFieldSize % ByteSizeInBits) != 0);
-    SkipIvars.push_back(skivar);
+  if (LastFieldBitfieldOrUnnamed) {
+    if (LastFieldBitfieldOrUnnamed->isBitField()) {
+      // Last field was a bitfield. Must update skip info.
+      Expr *BitWidth = LastFieldBitfieldOrUnnamed->getBitWidth();
+      uint64_t BitFieldSize =
+        BitWidth->EvaluateAsInt(CGM.getContext()).getZExtValue();
+      GC_IVAR skivar;
+      skivar.ivar_bytepos = BytePos + LastBitfieldOrUnnamedOffset;
+      skivar.ivar_size = (BitFieldSize / ByteSizeInBits)
+        + ((BitFieldSize % ByteSizeInBits) != 0);
+      SkipIvars.push_back(skivar);
+    } else {
+      assert(!LastFieldBitfieldOrUnnamed->getIdentifier() &&"Expected unnamed");
+      // Last field was unnamed. Must update skip info.
+      unsigned FieldSize
+          = CGM.getContext().getTypeSize(LastFieldBitfieldOrUnnamed->getType());
+      SkipIvars.push_back(GC_IVAR(BytePos + LastBitfieldOrUnnamedOffset,
+                                  FieldSize / ByteSizeInBits));
+    }
   }
 
   if (MaxField)
@@ -4804,8 +4850,8 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassRoTInitializer(
   assert(OID && "CGObjCNonFragileABIMac::BuildClassRoTInitializer");
   Values[ 6] = EmitProtocolList("\01l_OBJC_CLASS_PROTOCOLS_$_"
                                 + OID->getName(),
-                                OID->protocol_begin(),
-                                OID->protocol_end());
+                                OID->all_referenced_protocol_begin(),
+                                OID->all_referenced_protocol_end());
 
   if (flags & CLS_META)
     Values[ 7] = llvm::Constant::getNullValue(ObjCTypes.IvarListnfABIPtrTy);
@@ -4923,7 +4969,7 @@ void CGObjCNonFragileABIMac::GenerateClass(const ObjCImplementationDecl *ID) {
   llvm::GlobalVariable *SuperClassGV, *IsAGV;
 
   bool classIsHidden =
-    CGM.getDeclVisibilityMode(ID->getClassInterface()) == LangOptions::Hidden;
+    ID->getClassInterface()->getVisibility() == HiddenVisibility;
   if (classIsHidden)
     flags |= OBJC2_CLS_HIDDEN;
   if (ID->getNumIvarInitializers())
@@ -5218,7 +5264,7 @@ CGObjCNonFragileABIMac::EmitIvarOffsetVar(const ObjCInterfaceDecl *ID,
   // well (i.e., in ObjCIvarOffsetVariable).
   if (Ivar->getAccessControl() == ObjCIvarDecl::Private ||
       Ivar->getAccessControl() == ObjCIvarDecl::Package ||
-      CGM.getDeclVisibilityMode(ID) == LangOptions::Hidden)
+      ID->getVisibility() == HiddenVisibility)
     IvarOffsetGV->setVisibility(llvm::GlobalValue::HiddenVisibility);
   else
     IvarOffsetGV->setVisibility(llvm::GlobalValue::DefaultVisibility);
@@ -6092,7 +6138,7 @@ void CGObjCNonFragileABIMac::EmitTryStmt(CodeGen::CodeGenFunction &CGF,
       const llvm::Type *CatchType = CGF.ConvertType(CatchParam->getType());
       llvm::Value *CastExn = CGF.Builder.CreateBitCast(Exn, CatchType);
 
-      CGF.EmitLocalBlockVarDecl(*CatchParam);
+      CGF.EmitAutoVarDecl(*CatchParam);
       CGF.Builder.CreateStore(CastExn, CGF.GetAddrOfLocalVar(CatchParam));
     }
 
@@ -6120,32 +6166,20 @@ void CGObjCNonFragileABIMac::EmitTryStmt(CodeGen::CodeGenFunction &CGF,
 /// EmitThrowStmt - Generate code for a throw statement.
 void CGObjCNonFragileABIMac::EmitThrowStmt(CodeGen::CodeGenFunction &CGF,
                                            const ObjCAtThrowStmt &S) {
-  llvm::Value *Exception;
-  llvm::Constant *FunctionThrowOrRethrow;
   if (const Expr *ThrowExpr = S.getThrowExpr()) {
-    Exception = CGF.EmitScalarExpr(ThrowExpr);
-    FunctionThrowOrRethrow = ObjCTypes.getExceptionThrowFn();
+    llvm::Value *Exception = CGF.EmitScalarExpr(ThrowExpr);
+    Exception = CGF.Builder.CreateBitCast(Exception, ObjCTypes.ObjectPtrTy,
+                                          "tmp");
+    llvm::Value *Args[] = { Exception };
+    CGF.EmitCallOrInvoke(ObjCTypes.getExceptionThrowFn(),
+                         Args, Args+1)
+      .setDoesNotReturn();
   } else {
-    assert((!CGF.ObjCEHValueStack.empty() && CGF.ObjCEHValueStack.back()) &&
-           "Unexpected rethrow outside @catch block.");
-    Exception = CGF.ObjCEHValueStack.back();
-    FunctionThrowOrRethrow = ObjCTypes.getExceptionRethrowFn();
+    CGF.EmitCallOrInvoke(ObjCTypes.getExceptionRethrowFn(), 0, 0)
+      .setDoesNotReturn();
   }
 
-  llvm::Value *ExceptionAsObject =
-    CGF.Builder.CreateBitCast(Exception, ObjCTypes.ObjectPtrTy, "tmp");
-  llvm::BasicBlock *InvokeDest = CGF.getInvokeDest();
-  if (InvokeDest) {
-    CGF.Builder.CreateInvoke(FunctionThrowOrRethrow,
-                             CGF.getUnreachableBlock(), InvokeDest,
-                             &ExceptionAsObject, &ExceptionAsObject + 1);
-  } else {
-    CGF.Builder.CreateCall(FunctionThrowOrRethrow, ExceptionAsObject)
-      ->setDoesNotReturn();
-    CGF.Builder.CreateUnreachable();
-  }
-
-  // Clear the insertion point to indicate we are in unreachable code.
+  CGF.Builder.CreateUnreachable();
   CGF.Builder.ClearInsertionPoint();
 }
 
@@ -6204,7 +6238,7 @@ CGObjCNonFragileABIMac::GetInterfaceEHType(const ObjCInterfaceDecl *ID,
                                       ID->getIdentifier()->getName()));
   }
 
-  if (CGM.getLangOptions().getVisibilityMode() == LangOptions::Hidden)
+  if (CGM.getLangOptions().getVisibilityMode() == HiddenVisibility)
     Entry->setVisibility(llvm::GlobalValue::HiddenVisibility);
   Entry->setAlignment(CGM.getTargetData().getABITypeAlignment(
       ObjCTypes.EHTypeTy));

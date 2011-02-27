@@ -29,6 +29,8 @@
 //  d -> double
 //  z -> size_t
 //  F -> constant CFString
+//  G -> id
+//  H -> SEL
 //  a -> __builtin_va_list
 //  A -> "reference" to __builtin_va_list
 //  V -> Vector, following num elements and a base type.
@@ -38,12 +40,13 @@
 //  SJ -> sigjmp_buf
 //  . -> "...".  This may only occur at the end of the function list.
 //
-// Types maybe prefixed with the following modifiers:
+// Types may be prefixed with the following modifiers:
 //  L   -> long (e.g. Li for 'long int')
 //  LL  -> long long
 //  LLL -> __int128_t (e.g. LLLi)
 //  S   -> signed
 //  U   -> unsigned
+//  I   -> Required to constant fold to an integer constant expression.
 //
 // Types may be postfixed with the following modifiers:
 // * -> pointer (optionally followed by an address space number)
@@ -142,9 +145,21 @@ BUILTIN(__builtin_cosl, "LdLd", "Fnc")
 BUILTIN(__builtin_exp , "dd"  , "Fnc")
 BUILTIN(__builtin_expf, "ff"  , "Fnc")
 BUILTIN(__builtin_expl, "LdLd", "Fnc")
+BUILTIN(__builtin_fdim, "ddd", "Fnc")
+BUILTIN(__builtin_fdimf, "fff", "Fnc")
+BUILTIN(__builtin_fdiml, "LdLdLd", "Fnc")
 BUILTIN(__builtin_floor , "dd"  , "Fnc")
 BUILTIN(__builtin_floorf, "ff"  , "Fnc")
 BUILTIN(__builtin_floorl, "LdLd", "Fnc")
+BUILTIN(__builtin_fma, "dddd", "Fnc")
+BUILTIN(__builtin_fmaf, "ffff", "Fnc")
+BUILTIN(__builtin_fmal, "LdLdLdLd", "Fnc")
+BUILTIN(__builtin_fmax, "ddd", "Fnc")
+BUILTIN(__builtin_fmaxf, "fff", "Fnc")
+BUILTIN(__builtin_fmaxl, "LdLdLd", "Fnc")
+BUILTIN(__builtin_fmin, "ddd", "Fnc")
+BUILTIN(__builtin_fminf, "fff", "Fnc")
+BUILTIN(__builtin_fminl, "LdLdLd", "Fnc")
 BUILTIN(__builtin_hypot , "ddd"  , "Fnc")
 BUILTIN(__builtin_hypotf, "fff"  , "Fnc")
 BUILTIN(__builtin_hypotl, "LdLdLd", "Fnc")
@@ -275,7 +290,7 @@ BUILTIN(__builtin_bswap32, "UiUi", "nc")
 BUILTIN(__builtin_bswap64, "ULLiULLi", "nc")
 
 // Random GCC builtins
-BUILTIN(__builtin_constant_p, "Us.", "nc")
+BUILTIN(__builtin_constant_p, "i.", "nc")
 BUILTIN(__builtin_classify_type, "i.", "nc")
 BUILTIN(__builtin___CFStringMakeConstantString, "FC*cC*", "nc")
 BUILTIN(__builtin___NSStringMakeConstantString, "FC*cC*", "nc")
@@ -313,14 +328,14 @@ BUILTIN(__builtin_strpbrk, "c*cC*cC*", "nF")
 BUILTIN(__builtin_strrchr, "c*cC*i", "nF")
 BUILTIN(__builtin_strspn, "zcC*cC*", "nF")
 BUILTIN(__builtin_strstr, "c*cC*cC*", "nF")
-BUILTIN(__builtin_return_address, "v*Ui", "n")
+BUILTIN(__builtin_return_address, "v*IUi", "n")
 BUILTIN(__builtin_extract_return_addr, "v*v*", "n")
-BUILTIN(__builtin_frame_address, "v*Ui", "n")
+BUILTIN(__builtin_frame_address, "v*IUi", "n")
 BUILTIN(__builtin_flt_rounds, "i", "nc")
 BUILTIN(__builtin_setjmp, "iv**", "")
 BUILTIN(__builtin_longjmp, "vv**i", "r")
 BUILTIN(__builtin_unwind_init, "v", "")
-BUILTIN(__builtin_eh_return_data_regno, "ii", "nc")
+BUILTIN(__builtin_eh_return_data_regno, "iIi", "nc")
 BUILTIN(__builtin_snprintf, "ic*zcC*.", "nFp:2:")
 BUILTIN(__builtin_vsprintf, "ic*cC*a", "nFP:1:")
 BUILTIN(__builtin_vsnprintf, "ic*zcC*a", "nFP:2:")
@@ -485,7 +500,9 @@ BUILTIN(__builtin_abort, "v", "Fnr")
 BUILTIN(__builtin_index, "c*cC*i", "Fn")
 BUILTIN(__builtin_rindex, "c*cC*i", "Fn")
 
-
+// Microsoft builtins.
+BUILTIN(__assume, "vb", "n")
+BUILTIN(__noop, "v.", "n")
 
 // C99 library functions
 // C99 stdlib.h
@@ -544,11 +561,8 @@ LIBBUILTIN(_exit, "vi",           "fr",    "unistd.h")
 // POSIX setjmp.h
 LIBBUILTIN(_longjmp, "vJi",       "fr",    "setjmp.h")
 LIBBUILTIN(siglongjmp, "vSJi",    "fr",    "setjmp.h")
-
-// FIXME: This type isn't very correct, it should be
-//   id objc_msgSend(id, SEL)
-// but we need new type letters for that.
-LIBBUILTIN(objc_msgSend, "v*.",   "f",     "objc/message.h")
+//   id objc_msgSend(id, SEL, ...)
+LIBBUILTIN(objc_msgSend, "GGH.",   "f",     "objc/message.h")
 BUILTIN(__builtin_objc_memmove_collectable, "v*v*vC*z", "nF")
 
 // Builtin math library functions

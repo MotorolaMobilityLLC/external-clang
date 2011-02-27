@@ -39,7 +39,7 @@ llvm::sys::Path GetExecutablePath(const char *Argv0) {
   return llvm::sys::Path::GetMainExecutable(Argv0, MainAddr);
 }
 
-int Execute(llvm::Module *Mod, char * const *envp) {
+static int Execute(llvm::Module *Mod, char * const *envp) {
   llvm::InitializeNativeTarget();
 
   std::string Error;

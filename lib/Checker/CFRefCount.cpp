@@ -2420,8 +2420,8 @@ CFRefLeakReport::getEndPath(BugReporterContext& BRC,
           "collector";
   }
   else
-    os << " is no longer referenced after this point and has a retain count of"
-          " +" << RV->getCount() << " (object leaked)";
+    os << " is not referenced later in this execution path and has a retain "
+          "count of +" << RV->getCount() << " (object leaked)";
 
   return new PathDiagnosticEventPiece(L, os.str());
 }
@@ -2442,7 +2442,7 @@ CFRefLeakReport::CFRefLeakReport(CFRefBug& D, const CFRefCount &tf,
   const ExplodedNode* AllocNode = 0;
 
   llvm::tie(AllocNode, AllocBinding) =  // Set AllocBinding.
-    GetAllocationSite(Eng.getStateManager(), getEndNode(), getSymbol());
+    GetAllocationSite(Eng.getStateManager(), getErrorNode(), getSymbol());
 
   // Get the SourceLocation for the allocation site.
   ProgramPoint P = AllocNode->getLocation();

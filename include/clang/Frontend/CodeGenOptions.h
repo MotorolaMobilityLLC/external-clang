@@ -40,6 +40,7 @@ public:
                                   /// aliases to base ctors when possible.
   unsigned DataSections      : 1; /// Set when -fdata-sections is enabled
   unsigned DebugInfo         : 1; /// Should generate debug info (-g).
+  unsigned LimitDebugInfo    : 1; /// Limit generated debug info to reduce size.
   unsigned DisableFPElim     : 1; /// Set when -fomit-frame-pointer is enabled.
   unsigned DisableLLVMOpts   : 1; /// Don't run any optimizations, for use in
                                   /// getting .bc files that correspond to the
@@ -65,6 +66,7 @@ public:
   unsigned OptimizationLevel : 3; /// The -O[0-4] option specified.
   unsigned OptimizeSize      : 1; /// If -Os is specified.
   unsigned RelaxAll          : 1; /// Relax all machine code instructions.
+  unsigned RelaxedAliasing   : 1; /// Set when -fno-strict-aliasing is enabled.
   unsigned SimplifyLibCalls  : 1; /// Set when -fbuiltin is enabled.
   unsigned SoftFloat         : 1; /// -soft-float.
   unsigned TimePasses        : 1; /// Set when -ftime-report is enabled.
@@ -109,6 +111,7 @@ public:
     CXXCtorDtorAliases = 0;
     DataSections = 0;
     DebugInfo = 0;
+    LimitDebugInfo = 0;
     DisableFPElim = 0;
     DisableLLVMOpts = 0;
     DisableRedZone = 0;
@@ -126,6 +129,7 @@ public:
     OptimizationLevel = 0;
     OptimizeSize = 0;
     RelaxAll = 0;
+    RelaxedAliasing = 0;
     SimplifyLibCalls = 1;
     SoftFloat = 0;
     TimePasses = 0;

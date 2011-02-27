@@ -14,6 +14,7 @@
 #ifndef LLVM_CLANG_LEX_PREPROCESSOR_H
 #define LLVM_CLANG_LEX_PREPROCESSOR_H
 
+#include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Lex/PTHLexer.h"
 #include "clang/Lex/PPCallbacks.h"
@@ -34,6 +35,7 @@ namespace clang {
 class SourceManager;
 class ExternalPreprocessorSource;
 class FileManager;
+class FileSystemOptions;
 class FileEntry;
 class HeaderSearch;
 class PragmaNamespace;
@@ -56,6 +58,7 @@ class Preprocessor {
   LangOptions        Features;
   const TargetInfo  &Target;
   FileManager       &FileMgr;
+  const FileSystemOptions &FileSystemOpts;
   SourceManager     &SourceMgr;
   ScratchBuffer     *ScratchBuf;
   HeaderSearch      &HeaderInfo;
@@ -78,9 +81,11 @@ class Preprocessor {
   IdentifierInfo *Ident__BASE_FILE__;              // __BASE_FILE__
   IdentifierInfo *Ident__TIMESTAMP__;              // __TIMESTAMP__
   IdentifierInfo *Ident__COUNTER__;                // __COUNTER__
-  IdentifierInfo *Ident_Pragma, *Ident__VA_ARGS__; // _Pragma, __VA_ARGS__
+  IdentifierInfo *Ident_Pragma, *Ident__pragma;    // _Pragma, __pragma
+  IdentifierInfo *Ident__VA_ARGS__;                // __VA_ARGS__
   IdentifierInfo *Ident__has_feature;              // __has_feature
   IdentifierInfo *Ident__has_builtin;              // __has_builtin
+  IdentifierInfo *Ident__has_attribute;            // __has_attribute
   IdentifierInfo *Ident__has_include;              // __has_include
   IdentifierInfo *Ident__has_include_next;         // __has_include_next
 
@@ -193,11 +198,6 @@ class Preprocessor {
   /// to the actual definition of the macro.
   llvm::DenseMap<IdentifierInfo*, MacroInfo*> Macros;
 
-  /// MICache - A "freelist" of MacroInfo objects that can be reused for quick
-  /// allocation.
-  /// FIXME: why not use a singly linked list?
-  std::vector<MacroInfo*> MICache;
-
   /// MacroArgCache - This is a "freelist" of MacroArg objects that can be
   /// reused for quick allocation.
   MacroArgs *MacroArgCache;
@@ -250,6 +250,22 @@ private:  // Cached tokens state.
   /// invoked (at which point the last position is popped).
   std::vector<CachedTokensTy::size_type> BacktrackPositions;
 
+  struct MacroInfoChain {
+    MacroInfo MI;
+    MacroInfoChain *Next;
+    MacroInfoChain *Prev;
+  };
+
+  /// MacroInfos are managed as a chain for easy disposal.  This is the head
+  /// of that list.
+  MacroInfoChain *MIChainHead;
+
+  /// MICache - A "freelist" of MacroInfo objects that can be reused for quick
+  /// allocation.
+  MacroInfoChain *MICache;
+
+  MacroInfo *getInfoForMacro(IdentifierInfo *II) const;
+  
 public:
   Preprocessor(Diagnostic &diags, const LangOptions &opts,
                const TargetInfo &target,
@@ -265,6 +281,7 @@ public:
   const LangOptions &getLangOptions() const { return Features; }
   const TargetInfo &getTargetInfo() const { return Target; }
   FileManager &getFileManager() const { return FileMgr; }
+  const FileSystemOptions &getFileSystemOpts() const { return FileSystemOpts; }
   SourceManager &getSourceManager() const { return SourceMgr; }
   HeaderSearch &getHeaderSearchInfo() const { return HeaderInfo; }
 
@@ -323,7 +340,10 @@ public:
   /// getMacroInfo - Given an identifier, return the MacroInfo it is #defined to
   /// or null if it isn't #define'd.
   MacroInfo *getMacroInfo(IdentifierInfo *II) const {
-    return II->hasMacroDefinition() ? Macros.find(II)->second : 0;
+    if (!II->hasMacroDefinition())
+      return 0;
+    
+    return getInfoForMacro(II);
   }
 
   /// setMacroInfo - Specify a macro for this identifier.
@@ -811,7 +831,8 @@ public:
   /// This code concatenates and consumes tokens up to the '>' token.  It
   /// returns false if the > was found, otherwise it returns true if it finds
   /// and consumes the EOM marker.
-  bool ConcatenateIncludeName(llvm::SmallString<128> &FilenameBuffer);
+  bool ConcatenateIncludeName(llvm::SmallString<128> &FilenameBuffer,
+                              SourceLocation &End);
 
 private:
 
@@ -904,6 +925,13 @@ private:
   /// been read into 'Tok'.
   void Handle_Pragma(Token &Tok);
 
+  /// HandleMicrosoft__pragma - Like Handle_Pragma except the pragma text
+  /// is not enclosed within a string literal.
+  void HandleMicrosoft__pragma(Token &Tok);
+
+  void Handle_Pragma(unsigned Introducer, const std::string &StrVal, 
+                     SourceLocation PragmaLoc, SourceLocation RParenLoc);
+
   /// EnterSourceFileWithLexer - Add a lexer to the top of the include stack and
   /// start lexing tokens from it instead of the current buffer.
   void EnterSourceFileWithLexer(Lexer *TheLexer, const DirectoryLookup *Dir);
@@ -953,12 +981,13 @@ private:
   void HandleIdentSCCSDirective(Token &Tok);
 
   // File inclusion.
-  void HandleIncludeDirective(Token &Tok,
+  void HandleIncludeDirective(SourceLocation HashLoc,
+                              Token &Tok,
                               const DirectoryLookup *LookupFrom = 0,
                               bool isImport = false);
-  void HandleIncludeNextDirective(Token &Tok);
-  void HandleIncludeMacrosDirective(Token &Tok);
-  void HandleImportDirective(Token &Tok);
+  void HandleIncludeNextDirective(SourceLocation HashLoc, Token &Tok);
+  void HandleIncludeMacrosDirective(SourceLocation HashLoc, Token &Tok);
+  void HandleImportDirective(SourceLocation HashLoc, Token &Tok);
 
   // Macro handling.
   void HandleDefineDirective(Token &Tok);
@@ -973,7 +1002,7 @@ private:
   void HandleElifDirective(Token &Tok);
 
   // Pragmas.
-  void HandlePragmaDirective();
+  void HandlePragmaDirective(unsigned Introducer);
 public:
   void HandlePragmaOnce(Token &OnceTok);
   void HandlePragmaMark();

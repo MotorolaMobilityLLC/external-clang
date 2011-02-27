@@ -16,6 +16,7 @@
 
 #include "llvm/System/DataTypes.h"
 #include "llvm/ADT/DenseMap.h"
+#include "clang/AST/CharUnits.h"
 #include "clang/AST/DeclCXX.h"
 
 namespace clang {
@@ -112,13 +113,13 @@ private:
     /// SizeOfLargestEmptySubobject - The size of the largest empty subobject
     /// (either a base or a member). Will be zero if the class doesn't contain
     /// any empty subobjects.
-    uint64_t SizeOfLargestEmptySubobject;
+    CharUnits SizeOfLargestEmptySubobject;
     
     /// PrimaryBase - The primary base info for this record.
     PrimaryBaseInfo PrimaryBase;
     
     /// FIXME: This should really use a SmallPtrMap, once we have one in LLVM :)
-    typedef llvm::DenseMap<const CXXRecordDecl *, uint64_t> BaseOffsetsMapTy;
+    typedef llvm::DenseMap<const CXXRecordDecl *, CharUnits> BaseOffsetsMapTy;
     
     /// BaseOffsets - Contains a map from base classes to their offset.
     BaseOffsetsMapTy BaseOffsets;
@@ -143,7 +144,7 @@ private:
                   uint64_t size, unsigned alignment, uint64_t datasize,
                   const uint64_t *fieldoffsets, unsigned fieldcount,
                   uint64_t nonvirtualsize, unsigned nonvirtualalign,
-                  uint64_t SizeOfLargestEmptySubobject,
+                  CharUnits SizeOfLargestEmptySubobject,
                   const CXXRecordDecl *PrimaryBase,
                   bool PrimaryBaseIsVirtual,
                   const BaseOffsetsMapTy& BaseOffsets,
@@ -152,7 +153,7 @@ private:
   ~ASTRecordLayout() {}
 
   void Destroy(ASTContext &Ctx);
-
+  
   ASTRecordLayout(const ASTRecordLayout&);   // DO NOT IMPLEMENT
   void operator=(const ASTRecordLayout&); // DO NOT IMPLEMENT
 public:
@@ -212,23 +213,43 @@ public:
     return getPrimaryBaseInfo().isVirtual();
   }
 
-  /// getBaseClassOffset - Get the offset, in bits, for the given base class.
-  uint64_t getBaseClassOffset(const CXXRecordDecl *Base) const {
+  /// getBaseClassOffset - Get the offset, in chars, for the given base class.
+  CharUnits getBaseClassOffset(const CXXRecordDecl *Base) const {
     assert(CXXInfo && "Record layout does not have C++ specific info!");
     assert(CXXInfo->BaseOffsets.count(Base) && "Did not find base!");
 
     return CXXInfo->BaseOffsets[Base];
   }
 
-  /// getVBaseClassOffset - Get the offset, in bits, for the given base class.
-  uint64_t getVBaseClassOffset(const CXXRecordDecl *VBase) const {
+  /// getVBaseClassOffset - Get the offset, in chars, for the given base class.
+  CharUnits getVBaseClassOffset(const CXXRecordDecl *VBase) const {
     assert(CXXInfo && "Record layout does not have C++ specific info!");
     assert(CXXInfo->VBaseOffsets.count(VBase) && "Did not find base!");
 
     return CXXInfo->VBaseOffsets[VBase];
   }
-  
-  uint64_t getSizeOfLargestEmptySubobject() const {
+
+  /// getBaseClassOffsetInBits - Get the offset, in bits, for the given
+  /// base class.
+  uint64_t getBaseClassOffsetInBits(const CXXRecordDecl *Base) const {
+    assert(CXXInfo && "Record layout does not have C++ specific info!");
+    assert(CXXInfo->BaseOffsets.count(Base) && "Did not find base!");
+
+    return getBaseClassOffset(Base).getQuantity() *
+      Base->getASTContext().getCharWidth();
+  }
+
+  /// getVBaseClassOffsetInBits - Get the offset, in bits, for the given
+  /// base class.
+  uint64_t getVBaseClassOffsetInBits(const CXXRecordDecl *VBase) const {
+    assert(CXXInfo && "Record layout does not have C++ specific info!");
+    assert(CXXInfo->VBaseOffsets.count(VBase) && "Did not find base!");
+
+    return getVBaseClassOffset(VBase).getQuantity() *
+      VBase->getASTContext().getCharWidth();
+  }
+
+  CharUnits getSizeOfLargestEmptySubobject() const {
     assert(CXXInfo && "Record layout does not have C++ specific info!");
     return CXXInfo->SizeOfLargestEmptySubobject;
   }

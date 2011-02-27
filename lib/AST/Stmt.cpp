@@ -46,7 +46,7 @@ static StmtClassNameTable &getStmtInfoTableEntry(Stmt::StmtClass E) {
 }
 
 const char *Stmt::getStmtClassName() const {
-  return getStmtInfoTableEntry((StmtClass)sClass).Name;
+  return getStmtInfoTableEntry((StmtClass) StmtBits.sClass).Name;
 }
 
 void Stmt::PrintStats() {
@@ -87,7 +87,7 @@ bool Stmt::CollectingStats(bool Enable) {
 void CompoundStmt::setStmts(ASTContext &C, Stmt **Stmts, unsigned NumStmts) {
   if (this->Body)
     C.Deallocate(Body);
-  this->NumStmts = NumStmts;
+  this->CompoundStmtBits.NumStmts = NumStmts;
 
   Body = new (C) Stmt*[NumStmts];
   memcpy(Body, Stmts, sizeof(Stmt *) * NumStmts);
@@ -106,7 +106,7 @@ SourceRange ReturnStmt::getSourceRange() const {
 }
 
 bool Stmt::hasImplicitControlFlow() const {
-  switch (sClass) {
+  switch (StmtBits.sClass) {
     default:
       return false;
 
@@ -416,7 +416,7 @@ ObjCAtTryStmt *ObjCAtTryStmt::Create(ASTContext &Context,
                                      Stmt *atFinallyStmt) {
   unsigned Size = sizeof(ObjCAtTryStmt) + 
     (1 + NumCatchStmts + (atFinallyStmt != 0)) * sizeof(Stmt *);
-  void *Mem = Context.Allocate(Size, llvm::alignof<ObjCAtTryStmt>());
+  void *Mem = Context.Allocate(Size, llvm::alignOf<ObjCAtTryStmt>());
   return new (Mem) ObjCAtTryStmt(atTryLoc, atTryStmt, CatchStmts, NumCatchStmts,
                                  atFinallyStmt);
 }
@@ -426,7 +426,7 @@ ObjCAtTryStmt *ObjCAtTryStmt::CreateEmpty(ASTContext &Context,
                                                  bool HasFinally) {
   unsigned Size = sizeof(ObjCAtTryStmt) + 
     (1 + NumCatchStmts + HasFinally) * sizeof(Stmt *);
-  void *Mem = Context.Allocate(Size, llvm::alignof<ObjCAtTryStmt>());
+  void *Mem = Context.Allocate(Size, llvm::alignOf<ObjCAtTryStmt>());
   return new (Mem) ObjCAtTryStmt(EmptyShell(), NumCatchStmts, HasFinally);  
 }
 
@@ -448,7 +448,7 @@ CXXTryStmt *CXXTryStmt::Create(ASTContext &C, SourceLocation tryLoc,
   std::size_t Size = sizeof(CXXTryStmt);
   Size += ((numHandlers + 1) * sizeof(Stmt));
 
-  void *Mem = C.Allocate(Size, llvm::alignof<CXXTryStmt>());
+  void *Mem = C.Allocate(Size, llvm::alignOf<CXXTryStmt>());
   return new (Mem) CXXTryStmt(tryLoc, tryBlock, handlers, numHandlers);
 }
 
@@ -457,7 +457,7 @@ CXXTryStmt *CXXTryStmt::Create(ASTContext &C, EmptyShell Empty,
   std::size_t Size = sizeof(CXXTryStmt);
   Size += ((numHandlers + 1) * sizeof(Stmt));
 
-  void *Mem = C.Allocate(Size, llvm::alignof<CXXTryStmt>());
+  void *Mem = C.Allocate(Size, llvm::alignOf<CXXTryStmt>());
   return new (Mem) CXXTryStmt(Empty, numHandlers);
 }
 
@@ -530,7 +530,7 @@ void ForStmt::setConditionVariable(ASTContext &C, VarDecl *V) {
 }
 
 SwitchStmt::SwitchStmt(ASTContext &C, VarDecl *Var, Expr *cond) 
-  : Stmt(SwitchStmtClass), FirstCase(0) 
+  : Stmt(SwitchStmtClass), FirstCase(0), AllEnumCasesCovered(0) 
 {
   setConditionVariable(C, Var);
   SubExprs[COND] = reinterpret_cast<Stmt*>(cond);
@@ -604,7 +604,9 @@ Stmt::child_iterator NullStmt::child_end() { return child_iterator(); }
 
 // CompoundStmt
 Stmt::child_iterator CompoundStmt::child_begin() { return &Body[0]; }
-Stmt::child_iterator CompoundStmt::child_end() { return &Body[0]+NumStmts; }
+Stmt::child_iterator CompoundStmt::child_end() {
+  return &Body[0]+CompoundStmtBits.NumStmts;
+}
 
 // CaseStmt
 Stmt::child_iterator CaseStmt::child_begin() { return &SubExprs[0]; }
@@ -667,8 +669,12 @@ Stmt::child_iterator GotoStmt::child_begin() { return child_iterator(); }
 Stmt::child_iterator GotoStmt::child_end() { return child_iterator(); }
 
 // IndirectGotoStmt
-Expr* IndirectGotoStmt::getTarget() { return cast<Expr>(Target); }
-const Expr* IndirectGotoStmt::getTarget() const { return cast<Expr>(Target); }
+LabelStmt *IndirectGotoStmt::getConstantTarget() {
+  if (AddrLabelExpr *E =
+        dyn_cast<AddrLabelExpr>(getTarget()->IgnoreParenImpCasts()))
+    return E->getLabel();
+  return 0;
+}
 
 Stmt::child_iterator IndirectGotoStmt::child_begin() { return &Target; }
 Stmt::child_iterator IndirectGotoStmt::child_end() { return &Target+1; }

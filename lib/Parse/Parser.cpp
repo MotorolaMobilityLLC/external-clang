@@ -23,8 +23,8 @@ using namespace clang;
 
 Parser::Parser(Preprocessor &pp, Sema &actions)
   : CrashInfo(*this), PP(pp), Actions(actions), Diags(PP.getDiagnostics()),
-    GreaterThanIsOperator(true), ColonIsSacred(false),
-    TemplateParameterDepth(0) {
+    GreaterThanIsOperator(true), ColonIsSacred(false), 
+    InMessageExpression(false), TemplateParameterDepth(0) {
   Tok.setKind(tok::eof);
   Actions.CurScope = 0;
   NumCachedScopes = 0;
@@ -133,6 +133,13 @@ SourceLocation Parser::MatchRHSPunctuation(tok::TokenKind RHSTok,
   return R;
 }
 
+static bool IsCommonTypo(tok::TokenKind ExpectedTok, const Token &Tok) {
+  switch (ExpectedTok) {
+  case tok::semi: return Tok.is(tok::colon); // : for ;
+  default: return false;
+  }
+}
+
 /// ExpectAndConsume - The parser expects that 'ExpectedTok' is next in the
 /// input.  If so, it is consumed and false is returned.
 ///
@@ -143,6 +150,19 @@ bool Parser::ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned DiagID,
                               const char *Msg, tok::TokenKind SkipToTok) {
   if (Tok.is(ExpectedTok) || Tok.is(tok::code_completion)) {
     ConsumeAnyToken();
+    return false;
+  }
+
+  // Detect common single-character typos and resume.
+  if (IsCommonTypo(ExpectedTok, Tok)) {
+    SourceLocation Loc = Tok.getLocation();
+    Diag(Loc, DiagID)
+      << Msg
+      << FixItHint::CreateReplacement(SourceRange(Loc),
+                                      getTokenSimpleSpelling(ExpectedTok));
+    ConsumeAnyToken();
+
+    // Pretend there wasn't a problem.
     return false;
   }
 
@@ -160,6 +180,25 @@ bool Parser::ExpectAndConsume(tok::TokenKind ExpectedTok, unsigned DiagID,
   if (SkipToTok != tok::unknown)
     SkipUntil(SkipToTok);
   return true;
+}
+
+bool Parser::ExpectAndConsumeSemi(unsigned DiagID) {
+  if (Tok.is(tok::semi) || Tok.is(tok::code_completion)) {
+    ConsumeAnyToken();
+    return false;
+  }
+  
+  if ((Tok.is(tok::r_paren) || Tok.is(tok::r_square)) && 
+      NextToken().is(tok::semi)) {
+    Diag(Tok, diag::err_extraneous_token_before_semi)
+      << PP.getSpelling(Tok)
+      << FixItHint::CreateRemoval(Tok.getLocation());
+    ConsumeAnyToken(); // The ')' or ']'.
+    ConsumeToken(); // The ';'.
+    return false;
+  }
+  
+  return ExpectAndConsume(tok::semi, DiagID);
 }
 
 //===----------------------------------------------------------------------===//
@@ -367,6 +406,9 @@ bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result) {
   CXX0XAttributeList Attr;
   if (getLang().CPlusPlus0x && isCXX0XAttributeSpecifier())
     Attr = ParseCXX0XAttributes();
+  if (getLang().Microsoft && Tok.is(tok::l_square))
+    ParseMicrosoftAttributes();
+  
   Result = ParseExternalDeclaration(Attr);
   return false;
 }
@@ -480,14 +522,16 @@ Parser::DeclGroupPtrTy Parser::ParseExternalDeclaration(CXX0XAttributeList Attr,
     // A function definition cannot start with a these keywords.
     {
       SourceLocation DeclEnd;
-      return ParseDeclaration(Declarator::FileContext, DeclEnd, Attr);
+      StmtVector Stmts(Actions);
+      return ParseDeclaration(Stmts, Declarator::FileContext, DeclEnd, Attr);
     }
 
   case tok::kw_inline:
-    if (getLang().CPlusPlus0x && NextToken().is(tok::kw_namespace)) {
-      // Inline namespaces
+    if (getLang().CPlusPlus && NextToken().is(tok::kw_namespace)) {
+      // Inline namespaces. Allowed as an extension even in C++03.
       SourceLocation DeclEnd;
-      return ParseDeclaration(Declarator::FileContext, DeclEnd, Attr);
+      StmtVector Stmts(Actions);
+      return ParseDeclaration(Stmts, Declarator::FileContext, DeclEnd, Attr);
     }
     goto dont_know;
 
@@ -1113,6 +1157,20 @@ bool Parser::TryAnnotateCXXScopeToken(bool EnteringContext) {
   // annotation token.
   PP.AnnotateCachedTokens(Tok);
   return false;
+}
+
+bool Parser::isTokenEqualOrMistypedEqualEqual(unsigned DiagID) {
+  if (Tok.is(tok::equalequal)) {
+    // We have '==' in a context that we would expect a '='.
+    // The user probably made a typo, intending to type '='. Emit diagnostic,
+    // fixit hint to turn '==' -> '=' and continue as if the user typed '='.
+    Diag(Tok, DiagID)
+      << FixItHint::CreateReplacement(SourceRange(Tok.getLocation()),
+                                      getTokenSimpleSpelling(tok::equal));
+    return true;
+  }
+
+  return Tok.is(tok::equal);
 }
 
 void Parser::CodeCompletionRecovery() {

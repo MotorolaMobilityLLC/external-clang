@@ -1,4 +1,5 @@
 // RUN: %clang_cc1 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -fblocks -analyzer-output=plist -o - %s | FileCheck %s
+// XFAIL: *
 
 void test_null_init(void) {
   int *p = 0;
@@ -205,7 +206,7 @@ void test_null_field(void) {
 // CHECK:         </dict>
 // CHECK:         <dict>
 // CHECK:          <key>line</key><integer>10</integer>
-// CHECK:          <key>col</key><integer>3</integer>
+// CHECK:          <key>col</key><integer>7</integer>
 // CHECK:          <key>file</key><integer>0</integer>
 // CHECK:         </dict>
 // CHECK:        </array>

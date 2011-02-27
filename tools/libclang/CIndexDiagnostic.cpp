@@ -56,10 +56,6 @@ CXString clang_formatDiagnostic(CXDiagnostic Diagnostic, unsigned Options) {
 
   CXDiagnosticSeverity Severity = clang_getDiagnosticSeverity(Diagnostic);
 
-  // Ignore diagnostics that should be ignored.
-  if (Severity == CXDiagnostic_Ignored)
-    return createCXString("");
-
   llvm::SmallString<256> Str;
   llvm::raw_svector_ostream Out(Str);
   
@@ -68,8 +64,8 @@ CXString clang_formatDiagnostic(CXDiagnostic Diagnostic, unsigned Options) {
     // and source ranges.
     CXFile File;
     unsigned Line, Column;
-    clang_getInstantiationLocation(clang_getDiagnosticLocation(Diagnostic),
-                                   &File, &Line, &Column, 0);
+    clang_getSpellingLocation(clang_getDiagnosticLocation(Diagnostic),
+                              &File, &Line, &Column, 0);
     if (File) {
       CXString FName = clang_getFileName(File);
       Out << clang_getCString(FName) << ":" << Line << ":";
@@ -85,11 +81,11 @@ CXString clang_formatDiagnostic(CXDiagnostic Diagnostic, unsigned Options) {
           CXSourceRange Range = clang_getDiagnosticRange(Diagnostic, I);
           
           unsigned StartLine, StartColumn, EndLine, EndColumn;
-          clang_getInstantiationLocation(clang_getRangeStart(Range),
-                                         &StartFile, &StartLine, &StartColumn,
-                                         0);
-          clang_getInstantiationLocation(clang_getRangeEnd(Range),
-                                         &EndFile, &EndLine, &EndColumn, 0);
+          clang_getSpellingLocation(clang_getRangeStart(Range),
+                                    &StartFile, &StartLine, &StartColumn,
+                                    0);
+          clang_getSpellingLocation(clang_getRangeEnd(Range),
+                                    &EndFile, &EndLine, &EndColumn, 0);
           
           if (StartFile != EndFile || StartFile != File)
             continue;
@@ -101,9 +97,9 @@ CXString clang_formatDiagnostic(CXDiagnostic Diagnostic, unsigned Options) {
         if (PrintedRange)
           Out << ":";
       }
+      
+      Out << " ";
     }
-
-    Out << " ";
   }
 
   /* Print warning/error/etc. */
@@ -217,56 +213,3 @@ CXString clang_getDiagnosticFixIt(CXDiagnostic Diagnostic, unsigned FixIt,
 }
 
 } // end extern "C"
-
-void clang::LoadSerializedDiagnostics(const llvm::sys::Path &DiagnosticsPath,
-                                      unsigned num_unsaved_files,
-                                      struct CXUnsavedFile *unsaved_files,
-                                      FileManager &FileMgr,
-                                      SourceManager &SourceMgr,
-                                     SmallVectorImpl<StoredDiagnostic> &Diags) {
-  using llvm::MemoryBuffer;
-  using llvm::StringRef;
-  MemoryBuffer *F = MemoryBuffer::getFile(DiagnosticsPath.c_str());
-  if (!F)
-    return;
-
-  // Enter the unsaved files into the file manager.
-  for (unsigned I = 0; I != num_unsaved_files; ++I) {
-    const FileEntry *File = FileMgr.getVirtualFile(unsaved_files[I].Filename,
-                                                   unsaved_files[I].Length,
-                                                   0);
-    if (!File) {
-      // FIXME: Hard to localize when we have no diagnostics engine!
-      Diags.push_back(StoredDiagnostic(Diagnostic::Fatal,
-                            (Twine("could not remap from missing file ") +
-                                   unsaved_files[I].Filename).str()));
-      delete F;
-      return;
-    }
-
-    MemoryBuffer *Buffer
-      = MemoryBuffer::getMemBuffer(unsaved_files[I].Contents,
-                           unsaved_files[I].Contents + unsaved_files[I].Length);
-    if (!Buffer) {
-      delete F;
-      return;
-    }
-    
-    SourceMgr.overrideFileContents(File, Buffer);
-    SourceMgr.createFileID(File, SourceLocation(), SrcMgr::C_User);
-  }
-
-  // Parse the diagnostics, emitting them one by one until we've
-  // exhausted the data.
-  StringRef Buffer = F->getBuffer();
-  const char *Memory = Buffer.data(), *MemoryEnd = Memory + Buffer.size();
-  while (Memory != MemoryEnd) {
-    StoredDiagnostic Stored = StoredDiagnostic::Deserialize(FileMgr, SourceMgr,
-                                                            Memory, MemoryEnd);
-    if (!Stored)
-      break;
-
-    Diags.push_back(Stored);
-  }
-  delete F;
-}

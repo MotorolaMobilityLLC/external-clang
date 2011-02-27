@@ -65,6 +65,13 @@ namespace  {
               OS << '\n';
               DumpSubTree(*CI++);
             }
+            if (const ConditionalOperator *CO = 
+                  dyn_cast<ConditionalOperator>(S)) {
+              if (CO->getSAVE()) {
+                OS << '\n';
+                DumpSubTree(CO->getSAVE());
+              }
+            }
           }
         }
         OS << ')';
@@ -152,7 +159,6 @@ namespace  {
     void VisitObjCImplicitSetterGetterRefExpr(
                                           ObjCImplicitSetterGetterRefExpr *Node);
     void VisitObjCIvarRefExpr(ObjCIvarRefExpr *Node);
-    void VisitObjCSuperExpr(ObjCSuperExpr *Node);
   };
 }
 
@@ -599,8 +605,11 @@ void StmtDumper::VisitObjCProtocolExpr(ObjCProtocolExpr *Node) {
 
 void StmtDumper::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *Node) {
   DumpExpr(Node);
-
-  OS << " Kind=PropertyRef Property=\"" << Node->getProperty() << '"';
+  if (Node->isSuperReceiver())
+    OS << " Kind=PropertyRef Property=\"" << Node->getProperty() << '"'
+    << " super";
+  else
+    OS << " Kind=PropertyRef Property=\"" << Node->getProperty() << '"';
 }
 
 void StmtDumper::VisitObjCImplicitSetterGetterRefExpr(
@@ -617,11 +626,8 @@ void StmtDumper::VisitObjCImplicitSetterGetterRefExpr(
   else
     OS << "(null)";
   OS << "\"";
-}
-
-void StmtDumper::VisitObjCSuperExpr(ObjCSuperExpr *Node) {
-  DumpExpr(Node);
-  OS << " super";
+  if (Node->isSuperReceiver())
+    OS << " super";
 }
 
 //===----------------------------------------------------------------------===//

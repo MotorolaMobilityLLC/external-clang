@@ -51,3 +51,35 @@ namespace rdar7853795 {
     }
   };
 }
+
+namespace rdar7796492 {
+  class A { int x, y; A(); };
+
+  A::A()
+    : x(1) y(2) { // expected-error{{missing ',' between base or member initializers}}
+  }
+
+}
+
+CT<1> main(void); // expected-error{{'main' must return 'int'}}
+
+// typedef CT<1> mainT(void);
+// mainT main; // TODO
+
+// extra qualification on member
+class C {
+  int C::foo();
+};
+
+namespace rdar8488464 {
+int x == 0; // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
+
+void f() {
+    int x == 0; // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
+    (void)x;
+    if (int x == 0) { // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
+      (void)x;
+    }
+}
+}
+

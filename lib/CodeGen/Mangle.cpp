@@ -99,14 +99,14 @@ void MiscNameMangler::mangleObjCMethodName(const ObjCMethodDecl *MD) {
 
 namespace {
 
-static const DeclContext *GetLocalClassFunctionDeclContext(
-                                                      const DeclContext *DC) {
-  if (isa<CXXRecordDecl>(DC)) {
-    while (!DC->isNamespace() && !DC->isTranslationUnit() &&
-           !isa<FunctionDecl>(DC))
-      DC = DC->getParent();
-    if (isa<FunctionDecl>(DC))
-      return DC;
+static const CXXRecordDecl *GetLocalClassDecl(const NamedDecl *ND) {
+  const DeclContext *DC = dyn_cast<DeclContext>(ND);
+  if (!DC)
+    DC = ND->getDeclContext();
+  while (!DC->isNamespace() && !DC->isTranslationUnit()) {
+    if (isa<FunctionDecl>(DC->getParent()))
+      return dyn_cast<CXXRecordDecl>(DC);
+    DC = DC->getParent();
   }
   return 0;
 }
@@ -433,16 +433,15 @@ void CXXNameMangler::mangleName(const NamedDecl *ND) {
   //
   const DeclContext *DC = ND->getDeclContext();
 
-  if (GetLocalClassFunctionDeclContext(DC)) {
-    mangleLocalName(ND);
-    return;
-  }
-
   // If this is an extern variable declared locally, the relevant DeclContext
   // is that of the containing namespace, or the translation unit.
   if (isa<FunctionDecl>(DC) && ND->hasLinkage())
     while (!DC->isNamespace() && !DC->isTranslationUnit())
       DC = DC->getParent();
+  else if (GetLocalClassDecl(ND)) {
+    mangleLocalName(ND);
+    return;
+  }
 
   while (isa<LinkageSpecDecl>(DC))
     DC = DC->getParent();
@@ -853,15 +852,18 @@ void CXXNameMangler::mangleLocalName(const NamedDecl *ND) {
 
   if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(DC)) {
    mangleObjCMethodName(MD);
-  }
-  else if (const DeclContext *CDC = GetLocalClassFunctionDeclContext(DC)) {
-    mangleFunctionEncoding(cast<FunctionDecl>(CDC));
+  } else if (const CXXRecordDecl *RD = GetLocalClassDecl(ND)) {
+    mangleFunctionEncoding(cast<FunctionDecl>(RD->getDeclContext()));
     Out << 'E';
-    mangleNestedName(ND, DC, true /*NoFunction*/);
 
-    // FIXME. This still does not cover all cases.
+    // Mangle the name relative to the closest enclosing function.
+    if (ND == RD) // equality ok because RD derived from ND above
+      mangleUnqualifiedName(ND);
+    else
+      mangleNestedName(ND, DC, true /*NoFunction*/);
+
     unsigned disc;
-    if (Context.getNextDiscriminator(ND, disc)) {
+    if (Context.getNextDiscriminator(RD, disc)) {
       if (disc < 10)
         Out << '_' << disc;
       else
@@ -1217,9 +1219,8 @@ void CXXNameMangler::mangleType(const BuiltinType *T) {
   // UNSUPPORTED:    ::= Dh # IEEE 754r half-precision floating point (16 bits)
   //                 ::= Di # char32_t
   //                 ::= Ds # char16_t
+  //                 ::= Dn # std::nullptr_t (i.e., decltype(nullptr))
   //                 ::= u <source-name>    # vendor extended type
-  // From our point of view, std::nullptr_t is a builtin, but as far as mangling
-  // is concerned, it's a type called std::nullptr_t.
   switch (T->getKind()) {
   case BuiltinType::Void: Out << 'v'; break;
   case BuiltinType::Bool: Out << 'b'; break;
@@ -1242,7 +1243,7 @@ void CXXNameMangler::mangleType(const BuiltinType *T) {
   case BuiltinType::Float: Out << 'f'; break;
   case BuiltinType::Double: Out << 'd'; break;
   case BuiltinType::LongDouble: Out << 'e'; break;
-  case BuiltinType::NullPtr: Out << "St9nullptr_t"; break;
+  case BuiltinType::NullPtr: Out << "Dn"; break;
 
   case BuiltinType::Overload:
   case BuiltinType::Dependent:
@@ -1322,7 +1323,9 @@ void CXXNameMangler::mangleType(const ConstantArrayType *T) {
 }
 void CXXNameMangler::mangleType(const VariableArrayType *T) {
   Out << 'A';
-  mangleExpression(T->getSizeExpr());
+  // decayed vla types (size 0) will just be skipped.
+  if (T->getSizeExpr())
+    mangleExpression(T->getSizeExpr());
   Out << '_';
   mangleType(T->getElementType());
 }
@@ -1333,7 +1336,7 @@ void CXXNameMangler::mangleType(const DependentSizedArrayType *T) {
   mangleType(T->getElementType());
 }
 void CXXNameMangler::mangleType(const IncompleteArrayType *T) {
-  Out << 'A' << '_';
+  Out << "A_";
   mangleType(T->getElementType());
 }
 
@@ -1610,14 +1613,15 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
   case Expr::ObjCProtocolExprClass:
   case Expr::ObjCSelectorExprClass:
   case Expr::ObjCStringLiteralClass:
-  case Expr::ObjCSuperExprClass:
   case Expr::OffsetOfExprClass:
   case Expr::PredefinedExprClass:
   case Expr::ShuffleVectorExprClass:
   case Expr::StmtExprClass:
   case Expr::TypesCompatibleExprClass:
   case Expr::UnaryTypeTraitExprClass:
-  case Expr::VAArgExprClass: {
+  case Expr::VAArgExprClass:
+  case Expr::CXXUuidofExprClass:
+  case Expr::CXXNoexceptExprClass: {
     // As bad as this diagnostic is, it's better than crashing.
     Diagnostic &Diags = Context.getDiags();
     unsigned DiagID = Diags.getCustomDiagID(Diagnostic::Error,
@@ -1906,10 +1910,6 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
     break;
   }
 
-  case Expr::CXXBindReferenceExprClass:
-    mangleExpression(cast<CXXBindReferenceExpr>(E)->getSubExpr());
-    break;
-
   case Expr::CXXBindTemporaryExprClass:
     mangleExpression(cast<CXXBindTemporaryExpr>(E)->getSubExpr());
     break;
@@ -1951,7 +1951,7 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
   case Expr::ImaginaryLiteralClass: {
     const ImaginaryLiteral *IE = cast<ImaginaryLiteral>(E);
     // Mangle as if a complex literal.
-    // Proposal from David Vandervoorde, 2010.06.30.
+    // Proposal from David Vandevoorde, 2010.06.30.
     Out << 'L';
     mangleType(E->getType());
     if (const FloatingLiteral *Imag =
@@ -1961,7 +1961,7 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
       Out << '_';
       mangleFloat(Imag->getValue());
     } else {
-      Out << '0' << '_';
+      Out << "0_";
       llvm::APSInt Value(cast<IntegerLiteral>(IE->getSubExpr())->getValue());
       if (IE->getSubExpr()->getType()->isSignedIntegerType())
         Value.setIsSigned(true);
@@ -2455,8 +2455,8 @@ MangleContext::mangleCXXDtorThunk(const CXXDestructorDecl *DD, CXXDtorType Type,
 
 /// mangleGuardVariable - Returns the mangled name for a guard variable
 /// for the passed in VarDecl.
-void MangleContext::mangleGuardVariable(const VarDecl *D,
-                                        llvm::SmallVectorImpl<char> &Res) {
+void MangleContext::mangleItaniumGuardVariable(const VarDecl *D,
+                                         llvm::SmallVectorImpl<char> &Res) {
   //  <special-name> ::= GV <object name>       # Guard variable for one-time
   //                                            # initialization
   CXXNameMangler Mangler(*this, Res);
