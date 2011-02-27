@@ -17,7 +17,7 @@ struct A {
   static T my_templf(T x) { return x; }
 };
 
-void test() {
+void test(const int (&a6)[17]) {
   int x = templ_f<int, 5>(3);
   
   S<char, float>::templ();
@@ -30,6 +30,12 @@ void test() {
   
   S3<int> s3;
   s3.m();
+
+  TS5 ts(0);
+
+  S6<const int[17]>::t2 b6 = a6;
 }
 
 template struct S4<int>;
+
+S7<int[5]> s7_5;

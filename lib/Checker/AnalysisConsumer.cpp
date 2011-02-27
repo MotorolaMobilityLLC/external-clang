@@ -153,6 +153,10 @@ public:
       llvm::errs() << ' ' << "block(line:" << Loc.getLine() << ",col:"
                    << Loc.getColumn() << '\n';
     }
+    else if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D)) {
+      Selector S = MD->getSelector();
+      llvm::errs() << ' ' << S.getAsString();
+    }
   }
 
   void addCodeAction(CodeAction action) {
@@ -179,7 +183,8 @@ public:
                                   Opts.VisualizeEGDot, Opts.VisualizeEGUbi,
                                   Opts.PurgeDead, Opts.EagerlyAssume,
                                   Opts.TrimGraph, Opts.InlineCall,
-                                  Opts.UnoptimizedCFG));
+                                  Opts.UnoptimizedCFG, Opts.CFGAddImplicitDtors,
+                                  Opts.CFGAddInitializers));
   }
 
   virtual void HandleTranslationUnit(ASTContext &C);
@@ -206,26 +211,15 @@ void AnalysisConsumer::HandleTranslationUnit(ASTContext &C) {
     case Decl::CXXMethod:
     case Decl::Function: {
       FunctionDecl* FD = cast<FunctionDecl>(D);
-      
-      if (FD->isThisDeclarationADefinition()) {
+      // We skip function template definitions, as their semantics is
+      // only determined when they are instantiated.
+      if (FD->isThisDeclarationADefinition() &&
+          !FD->isDependentContext()) {
         if (!Opts.AnalyzeSpecificFunction.empty() &&
             FD->getDeclName().getAsString() != Opts.AnalyzeSpecificFunction)
           break;
         DisplayFunction(FD);
         HandleCode(FD, FunctionActions);
-      }
-      break;
-    }
-
-    case Decl::ObjCMethod: {
-      ObjCMethodDecl* MD = cast<ObjCMethodDecl>(D);
-      
-      if (MD->isThisDeclarationADefinition()) {
-        if (!Opts.AnalyzeSpecificFunction.empty() &&
-            Opts.AnalyzeSpecificFunction != MD->getSelector().getAsString())
-          break;
-        DisplayFunction(MD);
-        HandleCode(MD, ObjCMethodActions);
       }
       break;
     }
@@ -240,6 +234,7 @@ void AnalysisConsumer::HandleTranslationUnit(ASTContext &C) {
           if (!Opts.AnalyzeSpecificFunction.empty() &&
              Opts.AnalyzeSpecificFunction != (*MI)->getSelector().getAsString())
             break;
+          DisplayFunction(*MI);
           HandleCode(*MI, ObjCMethodActions);
         }
       }
@@ -349,6 +344,10 @@ static void ActionGRExprEngine(AnalysisConsumer &C, AnalysisManager& mgr,
   if (C.Opts.IdempotentOps || C.Opts.EnableExperimentalChecks
       || C.Opts.EnableExperimentalInternalChecks)
     RegisterIdempotentOperationChecker(Eng);
+
+  // Enable AnalyzerStatsChecker if it was given as an argument
+  if (C.Opts.AnalyzerStats)
+    RegisterAnalyzerStatsChecker(Eng);
 
   // Set the graph auditor.
   llvm::OwningPtr<ExplodedNode::Auditor> Auditor;

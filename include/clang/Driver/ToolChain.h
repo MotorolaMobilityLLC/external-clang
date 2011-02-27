@@ -10,6 +10,7 @@
 #ifndef CLANG_DRIVER_TOOLCHAIN_H_
 #define CLANG_DRIVER_TOOLCHAIN_H_
 
+#include "clang/Driver/Util.h"
 #include "clang/Driver/Types.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
@@ -31,6 +32,11 @@ namespace driver {
 class ToolChain {
 public:
   typedef llvm::SmallVector<std::string, 4> path_list;
+
+  enum CXXStdlibType {
+    CST_Libcxx,
+    CST_Libstdcxx
+  };
 
 private:
   const HostInfo &Host;
@@ -91,6 +97,10 @@ public:
   std::string GetProgramPath(const char *Name, bool WantFile = false) const;
 
   // Platform defaults information
+
+  /// HasNativeLTOLinker - Check whether the linker and related tools have
+  /// native LLVM support.
+  virtual bool HasNativeLLVMSupport() const;
 
   /// LookupTypeForExtension - Return the default language type to use for the
   /// given extension.
@@ -153,6 +163,25 @@ public:
   /// sets the deployment target) determines the version in the triple passed to
   /// Clang.
   virtual std::string ComputeEffectiveClangTriple(const ArgList &Args) const;
+
+  // GetCXXStdlibType - Determine the C++ standard library type to use with the
+  // given compilation arguments.
+  virtual CXXStdlibType GetCXXStdlibType(const ArgList &Args) const;
+
+  /// AddClangCXXStdlibIncludeArgs - Add the clang -cc1 level arguments to set
+  /// the include paths to use for the given C++ standard library type.
+  virtual void AddClangCXXStdlibIncludeArgs(const ArgList &Args,
+                                            ArgStringList &CmdArgs) const;
+
+  /// AddCXXStdlibLibArgs - Add the system specific linker arguments to use
+  /// for the given C++ standard library type.
+  virtual void AddCXXStdlibLibArgs(const ArgList &Args,
+                                   ArgStringList &CmdArgs) const;
+
+  /// AddCCKextLibArgs - Add the system specific linker arguments to use
+  /// for kernel extensions (Darwin-specific).
+  virtual void AddCCKextLibArgs(const ArgList &Args,
+                                ArgStringList &CmdArgs) const;
 };
 
 } // end namespace driver

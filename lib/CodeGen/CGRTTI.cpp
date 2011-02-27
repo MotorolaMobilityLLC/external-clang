@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenModule.h"
+#include "CGCXXABI.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/Type.h"
 #include "clang/Frontend/CodeGenOptions.h"
@@ -65,7 +66,7 @@ public:
   llvm::Constant *BuildName(QualType Ty, bool Hidden, 
                             llvm::GlobalVariable::LinkageTypes Linkage) {
     llvm::SmallString<256> OutName;
-    CGM.getMangleContext().mangleCXXRTTIName(Ty, OutName);
+    CGM.getCXXABI().getMangleContext().mangleCXXRTTIName(Ty, OutName);
     llvm::StringRef Name = OutName.str();
 
     llvm::GlobalVariable *OGV = CGM.getModule().getNamedGlobal(Name);
@@ -84,7 +85,7 @@ public:
       OGV->replaceAllUsesWith(NewPtr);
       OGV->eraseFromParent();
     }
-    if (Hidden)
+    if (Hidden && Linkage != llvm::GlobalValue::InternalLinkage)
       GV->setVisibility(llvm::GlobalVariable::HiddenVisibility);
     return llvm::ConstantExpr::getBitCast(GV, Int8PtrTy);
   }
@@ -112,7 +113,7 @@ public:
     }
     if (const RecordType *RT = Ty->getAs<RecordType>())
       if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(RT->getDecl()))
-        return CGM.getDeclVisibilityMode(RD) == LangOptions::Hidden;
+        return RD->getVisibility() == HiddenVisibility;
     return false;
   }
   
@@ -164,7 +165,7 @@ public:
 llvm::Constant *RTTIBuilder::GetAddrOfExternalRTTIDescriptor(QualType Ty) {
   // Mangle the RTTI name.
   llvm::SmallString<256> OutName;
-  CGM.getMangleContext().mangleCXXRTTI(Ty, OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXRTTI(Ty, OutName);
   llvm::StringRef Name = OutName.str();
 
   // Look for an existing global.
@@ -186,13 +187,14 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
   //   Basic type information (e.g. for "int", "bool", etc.) will be kept in
   //   the run-time support library. Specifically, the run-time support
   //   library should contain type_info objects for the types X, X* and 
-  //   X const*, for every X in: void, bool, wchar_t, char, unsigned char, 
-  //   signed char, short, unsigned short, int, unsigned int, long, 
-  //   unsigned long, long long, unsigned long long, float, double, long double, 
-  //   char16_t, char32_t, and the IEEE 754r decimal and half-precision 
-  //   floating point types.
+  //   X const*, for every X in: void, std::nullptr_t, bool, wchar_t, char,
+  //   unsigned char, signed char, short, unsigned short, int, unsigned int,
+  //   long, unsigned long, long long, unsigned long long, float, double,
+  //   long double, char16_t, char32_t, and the IEEE 754r decimal and 
+  //   half-precision floating point types.
   switch (Ty->getKind()) {
     case BuiltinType::Void:
+    case BuiltinType::NullPtr:
     case BuiltinType::Bool:
     case BuiltinType::WChar:
     case BuiltinType::Char_U:
@@ -221,9 +223,6 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
     case BuiltinType::UndeducedAuto:
       assert(false && "Should not see this type here!");
       
-    case BuiltinType::NullPtr:
-      assert(false && "FIXME: nullptr_t is not handled!");
-
     case BuiltinType::ObjCId:
     case BuiltinType::ObjCClass:
     case BuiltinType::ObjCSel:
@@ -269,8 +268,9 @@ static bool IsStandardLibraryRTTIDescriptor(QualType Ty) {
 /// the given type exists somewhere else, and that we should not emit the type
 /// information in this translation unit.  Assumes that it is not a
 /// standard-library type.
-static bool ShouldUseExternalRTTIDescriptor(ASTContext &Context,
-                                            QualType Ty) {
+static bool ShouldUseExternalRTTIDescriptor(CodeGenModule &CGM, QualType Ty) {
+  ASTContext &Context = CGM.getContext();
+
   // If RTTI is disabled, don't consider key functions.
   if (!Context.getLangOptions().RTTI) return false;
 
@@ -282,13 +282,7 @@ static bool ShouldUseExternalRTTIDescriptor(ASTContext &Context,
     if (!RD->isDynamicClass())
       return false;
 
-    // Get the key function.
-    const CXXMethodDecl *KeyFunction = RD->getASTContext().getKeyFunction(RD);
-    if (KeyFunction && !KeyFunction->hasBody()) {
-      // The class has a key function, but it is not defined in this translation
-      // unit, so we should use the external descriptor for it.
-      return true;
-    }
+    return !CGM.getVTables().ShouldEmitVTableInThisTU(RD);
   }
   
   return false;
@@ -518,7 +512,7 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
 
   // Check if we've already emitted an RTTI descriptor for this type.
   llvm::SmallString<256> OutName;
-  CGM.getMangleContext().mangleCXXRTTI(Ty, OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXRTTI(Ty, OutName);
   llvm::StringRef Name = OutName.str();
   
   llvm::GlobalVariable *OldGV = CGM.getModule().getNamedGlobal(Name);
@@ -527,8 +521,7 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
 
   // Check if there is already an external RTTI descriptor for this type.
   bool IsStdLib = IsStandardLibraryRTTIDescriptor(Ty);
-  if (!Force &&
-      (IsStdLib || ShouldUseExternalRTTIDescriptor(CGM.getContext(), Ty)))
+  if (!Force && (IsStdLib || ShouldUseExternalRTTIDescriptor(CGM, Ty)))
     return GetAddrOfExternalRTTIDescriptor(Ty);
 
   // Emit the standard library with external linkage.
@@ -642,7 +635,7 @@ llvm::Constant *RTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
   // compatibility.
   if (const RecordType *RT = dyn_cast<RecordType>(Ty))
     CGM.setTypeVisibility(GV, cast<CXXRecordDecl>(RT->getDecl()),
-                          /*ForRTTI*/ true);
+                          /*ForRTTI*/ true, /*ForDefinition*/ true);
   else if (CGM.getCodeGenOpts().HiddenWeakVTables &&
            Linkage == llvm::GlobalValue::WeakODRLinkage)
     GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
@@ -700,12 +693,14 @@ void RTTIBuilder::BuildSIClassTypeInfo(const CXXRecordDecl *RD) {
   Fields.push_back(BaseTypeInfo);
 }
 
-/// SeenBases - Contains virtual and non-virtual bases seen when traversing
-/// a class hierarchy.
-struct SeenBases {
-  llvm::SmallPtrSet<const CXXRecordDecl *, 16> NonVirtualBases;
-  llvm::SmallPtrSet<const CXXRecordDecl *, 16> VirtualBases;
-};
+namespace {
+  /// SeenBases - Contains virtual and non-virtual bases seen when traversing
+  /// a class hierarchy.
+  struct SeenBases {
+    llvm::SmallPtrSet<const CXXRecordDecl *, 16> NonVirtualBases;
+    llvm::SmallPtrSet<const CXXRecordDecl *, 16> VirtualBases;
+  };
+}
 
 /// ComputeVMIClassTypeInfoFlags - Compute the value of the flags member in
 /// abi::__vmi_class_type_info.
@@ -826,7 +821,7 @@ void RTTIBuilder::BuildVMIClassTypeInfo(const CXXRecordDecl *RD) {
       OffsetFlags = CGM.getVTables().getVirtualBaseOffsetOffset(RD, BaseDecl);
     else {
       const ASTRecordLayout &Layout = CGM.getContext().getASTRecordLayout(RD);
-      OffsetFlags = Layout.getBaseClassOffset(BaseDecl) / 8;
+      OffsetFlags = Layout.getBaseClassOffsetInBits(BaseDecl) / 8;
     };
     
     OffsetFlags <<= 8;
@@ -937,16 +932,16 @@ void CodeGenModule::EmitFundamentalRTTIDescriptor(QualType Type) {
 }
 
 void CodeGenModule::EmitFundamentalRTTIDescriptors() {
-  QualType FundamentalTypes[] = { Context.VoidTy, Context.Char32Ty,
-                                  Context.Char16Ty, Context.UnsignedLongLongTy,
-                                  Context.LongLongTy, Context.WCharTy,
-                                  Context.UnsignedShortTy, Context.ShortTy,
-                                  Context.UnsignedLongTy, Context.LongTy,
-                                  Context.UnsignedIntTy, Context.IntTy,
-                                  Context.UnsignedCharTy, Context.FloatTy,
-                                  Context.LongDoubleTy, Context.DoubleTy,
-                                  Context.CharTy, Context.BoolTy,
-                                  Context.SignedCharTy };
+  QualType FundamentalTypes[] = { Context.VoidTy, Context.NullPtrTy,
+                                  Context.BoolTy, Context.WCharTy,
+                                  Context.CharTy, Context.UnsignedCharTy,
+                                  Context.SignedCharTy, Context.ShortTy, 
+                                  Context.UnsignedShortTy, Context.IntTy,
+                                  Context.UnsignedIntTy, Context.LongTy, 
+                                  Context.UnsignedLongTy, Context.LongLongTy, 
+                                  Context.UnsignedLongLongTy, Context.FloatTy,
+                                  Context.DoubleTy, Context.LongDoubleTy,
+                                  Context.Char16Ty, Context.Char32Ty };
   for (unsigned i = 0; i < sizeof(FundamentalTypes)/sizeof(QualType); ++i)
     EmitFundamentalRTTIDescriptor(FundamentalTypes[i]);
 }

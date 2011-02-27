@@ -25,6 +25,8 @@ struct CGRect {
 - (void)setFrame:(CGRect)frameRect;
 - (CGRect)frame;
 - (void) initWithOwner;
+- (struct CGRect)extent;
+- (void)dealloc;
 @end
 
 @implementation I
@@ -40,6 +42,12 @@ struct CGRect {
   labelLayerFrame = self.bounds;
   _labelLayer.frame = labelLayerFrame;
 }
+// rdar://8366604
+- (void)dealloc
+  {
+      CGRect cgrect = self.extent;
+  }
+- (struct CGRect)extent {return bounds;}
 @end
 
 int main() {
@@ -49,3 +57,22 @@ int main() {
   return 0;
 }
 
+// rdar://8379892
+// CHECK: define void @_Z1fP1A
+// CHECK: @objc_msgSend to void
+struct X {
+  X();
+  X(const X&);
+  ~X();
+};
+
+@interface A {
+  X xval;
+}
+- (X)x;
+- (void)setX:(X)x;
+@end
+
+void f(A* a) {
+  a.x = X();
+}

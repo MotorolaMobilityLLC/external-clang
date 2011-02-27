@@ -32,19 +32,23 @@
   <li><a href="#c">C compatibility</a>
     <ul>
       <li><a href="#inline">C99 inline functions</a></li>
+      <li><a href="#vector_builtins">"missing" vector __builtin functions</a></li>
       <li><a href="#lvalue-cast">Lvalue casts</a></li>
+      <li><a href="#blocks-in-protected-scope">Jumps to within <tt>__block</tt> variable scope</a></li>
+      <li><a href="#block-variable-initialization">Non-initialization of <tt>__block</tt> variables</a></li>
     </ul>
   </li>
   <li><a href="#objective-c">Objective-C compatibility</a>
     <ul>
       <li><a href="#super-cast">Cast of super</a></li>
       <li><a href="#sizeof-interface">Size of interfaces</a></li>
+      <li><a href="#objc_objs-cast">Internal Objective-C types</a></li>
+      <li><a href="#c_variables-class">C variables in @class or @protocol</a></li>
     </ul>
   </li>
   <li><a href="#c++">C++ compatibility</a>
     <ul>
       <li><a href="#vla">Variable-length arrays</a></li>
-      <li><a href="#init_static_const">Initialization of non-integral static const data members within a class definition</a></li>
       <li><a href="#dep_lookup">Unqualified lookup in templates</a></li>
       <li><a href="#dep_lookup_bases">Unqualified lookup into dependent bases of class templates</a></li>
       <li><a href="#undep_incomplete">Incomplete types in templates</a></li>
@@ -113,6 +117,42 @@ Undefined symbols:
   be changed.</li>
 </ul>
 
+
+<!-- ======================================================================= -->
+<h3 id="vector_builtins">"missing" vector __builtin functions</h3>
+<!-- ======================================================================= -->
+
+<p>The Intel and AMD manuals document a number "<tt>&lt;*mmintrin.h&gt;</tt>"
+header files, which define a standardized API for accessing vector operations
+on X86 CPUs.  These functions have names like <tt>_mm_xor_ps</tt> and
+<tt>_mm256_addsub_pd</tt>.  Compilers have leeway to implement these functions
+however they want.  Since Clang supports an excellent set of <a 
+href="../docs/LanguageExtensions.html#vectors">native vector operations</a>,
+the Clang headers implement these interfaces in terms of the native vector 
+operations.
+</p>
+
+<p>In contrast, GCC implements these functions mostly as a 1-to-1 mapping to
+builtin function calls, like <tt>__builtin_ia32_paddw128</tt>.  These builtin
+functions are an internal implementation detail of GCC, and are not portable to
+the Intel compiler, the Microsoft compiler, or Clang.  If you get build errors
+mentioning these, the fix is simple: switch to the *mmintrin.h functions.</p>
+
+<p>The same issue occurs for NEON and Altivec for the ARM and PowerPC
+architectures respectively.  For these, make sure to use the &lt;arm_neon.h&gt;
+and &lt;altivec.h&gt; headers.</p>
+
+<p>For x86 architectures this <a href="builtins.py">script</a> should help with
+the manual migration process.  It will rewrite your source files in place to
+use the APIs instead of builtin function calls. Just call it like this:</p>
+
+<pre>
+  builtins.py *.c *.h
+</pre>
+
+<p>and it will rewrite all of the .c and .h files in the current directory to
+use the API calls instead of calls like <tt>__builtin_ia32_paddw128</tt>.</p>
+
 <!-- ======================================================================= -->
 <h3 id="lvalue-cast">Lvalue casts</h3>
 <!-- ======================================================================= -->
@@ -133,6 +173,78 @@ example, one could use:</p>
 <pre>
   addr = (float *)val;
 </pre>
+
+<!-- ======================================================================= -->
+<h3 id="blocks-in-protected-scope">Jumps to within <tt>__block</tt> variable scope</h3>
+<!-- ======================================================================= -->
+
+<p>Clang disallows jumps into the scope of a <tt>__block</tt> variable, similar
+to the manner in which both GCC and Clang disallow jumps into the scope of
+variables which have user defined constructors (in C++).</p>
+
+<p>Variables marked with <tt>__block</tt> require special runtime initialization
+before they can be used. A jump into the scope of a <tt>__block</tt> variable
+would bypass this initialization and therefore the variable cannot safely be
+used.</p>
+
+<p>For example, consider the following code fragment:</p>
+
+<pre>
+int f0(int c) {
+  if (c)
+    goto error;
+
+  __block int x;
+  x = 1;
+  return x;
+
+ error:
+  x = 0;
+  return x;
+}
+</pre>
+
+<p>GCC accepts this code, but it will crash at runtime along the error path,
+because the runtime setup for the storage backing the <tt>x</tt> variable will
+not have been initialized. Clang rejects this code with a hard error:</p>
+
+<pre>
+t.c:3:5: error: goto into protected scope
+    goto error;
+    ^
+t.c:5:15: note: jump bypasses setup of __block variable
+  __block int x;
+              ^
+</pre>
+
+<p>Some instances of this construct may be safe if the variable is never used
+after the jump target, however the protected scope checker does not check the
+uses of the variable, only the scopes in which it is visible. You should rewrite
+your code to put the <tt>__block</tt> variables in a scope which is only visible
+where they are used.</p>
+
+<!-- ======================================================================= -->
+<h3 id="block-variable-initialization">Non-initialization of <tt>__block</tt>
+variables</h3>
+<!-- ======================================================================= -->
+
+<p>In the following example code, the <tt>x</tt> variable is used before it is
+defined:</p>
+<pre>
+int f0() {
+  __block int x;
+  return ^(){ return x; }();
+}
+</pre>
+
+<p>By an accident of implementation, GCC and llvm-gcc unintentionally always
+zero initialized <tt>__block</tt> variables. However, any program which depends
+on this behavior is relying on unspecified compiler behavior. Programs must
+explicitly initialize all local block variables before they are used, as with
+other local variables.</p>
+
+<p>Clang does not zero initialize local block variables, and programs which rely
+on such behavior will most likely break when built with Clang.</p>
 
 <!-- ======================================================================= -->
 <h2 id="objective-c">Objective-C compatibility</h3>
@@ -185,6 +297,45 @@ this problem, use the Objective-C runtime API function
 </pre>
 
 <!-- ======================================================================= -->
+<h3 id="objc_objs-cast">Internal Objective-C types</h3>
+<!-- ======================================================================= -->
+
+<p>GCC allows using pointers to internal Objective-C objects, <tt>struct objc_object*</tt>,
+<tt>struct objc_selector*</tt>, and <tt>struct objc_class*</tt> in place of the types
+<tt>id</tt>, <tt>SEL</tt>, and <tt>Class</tt> respectively. Clang treats the
+internal Objective-C structures as implementation detail and won't do implicit conversions:
+
+<pre>
+t.mm:11:2: error: no matching function for call to 'f'
+        f((struct objc_object *)p);
+        ^
+t.mm:5:6: note: candidate function not viable: no known conversion from 'struct objc_object *' to 'id' for 1st argument
+void f(id x);
+     ^
+</pre>
+
+<p>Code should use types <tt>id</tt>, <tt>SEL</tt>, and <tt>Class</tt>
+instead of the internal types.</p>
+
+<!-- ======================================================================= -->
+<h3 id="c_variables-class">C variables in @class or @protocol</h3>
+<!-- ======================================================================= -->
+
+<p>GCC allows declaration of C variables in a @class or @protocol, but not 
+C functions. Clang does not allow variable or C function declarations. External
+declarations, however, is allowed. Variables may only be declared in an
+@implementation.
+
+<pre>
+@interface XX
+int x;  //  not allowed in clang
+int one=1;  //  not allowed in clang
+extern int OK;
+@end
+
+</pre>
+
+<!-- ======================================================================= -->
 <h2 id="c++">C++ compatibility</h3>
 <!-- ======================================================================= -->
 
@@ -221,46 +372,6 @@ template parameter.</li> </ul>
 <li>allocate the array on the heap instead using <tt>new Type[]</tt> -
     just remember to <tt>delete[]</tt> it.</li>
 </ol>
-
-<!-- ======================================================================= -->
-<h3 id="init_static_const">Initialization of non-integral static const data members within a class definition</h3>
-<!-- ======================================================================= -->
-
-The following code is ill-formed in C++'03:
-
-<pre>
-class SomeClass {
- public:
-  static const double SomeConstant = 0.5;
-};
-
-const double SomeClass::SomeConstant;
-</pre>
-
-Clang errors with something similar to:
-
-<pre>
-.../your_file.h:42:42: error: 'SomeConstant' can only be initialized if it is a static const integral data member
-  static const double SomeConstant = 0.5;
-                      ^              ~~~
-</pre>
-
-Only <i>integral</i> constant expressions are allowed as initializers
-within the class definition. See C++'03 [class.static.data] p4 for the
-details of this restriction.  The fix here is straightforward: move
-the initializer to the definition of the static data member, which
-must exist outside of the class definition:
-
-<pre>
-class SomeClass {
- public:
-  static const double SomeConstant;
-};
-
-const double SomeClass::SomeConstant<b> = 0.5</b>;
-</pre>
-
-Note that the forthcoming C++0x standard will allow this.
 
 <!-- ======================================================================= -->
 <h3 id="dep_lookup">Unqualified lookup in templates</h3>

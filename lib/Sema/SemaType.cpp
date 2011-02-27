@@ -339,6 +339,10 @@ static QualType ConvertDeclSpecToType(Sema &TheSema,
     // FIXME: Preserve type source info.
     Result = TheSema.GetTypeFromParser(DS.getRepAsType());
     assert(!Result.isNull() && "Didn't get a type for typeof?");
+    if (!Result->isDependentType())
+      if (const TagType *TT = Result->getAs<TagType>())
+        TheSema.DiagnoseUseOfDecl(TT->getDecl(), 
+                                  DS.getTypeSpecTypeLoc());
     // TypeQuals handled by caller.
     Result = Context.getTypeOfType(Result);
     break;
@@ -346,7 +350,7 @@ static QualType ConvertDeclSpecToType(Sema &TheSema,
     Expr *E = DS.getRepAsExpr();
     assert(E && "Didn't get an expression for typeof?");
     // TypeQuals handled by caller.
-    Result = TheSema.BuildTypeofExprType(E);
+    Result = TheSema.BuildTypeofExprType(E, DS.getTypeSpecTypeLoc());
     if (Result.isNull()) {
       Result = Context.IntTy;
       TheDeclarator.setInvalidType(true);
@@ -357,7 +361,7 @@ static QualType ConvertDeclSpecToType(Sema &TheSema,
     Expr *E = DS.getRepAsExpr();
     assert(E && "Didn't get an expression for decltype?");
     // TypeQuals handled by caller.
-    Result = TheSema.BuildDecltypeType(E);
+    Result = TheSema.BuildDecltypeType(E, DS.getTypeSpecTypeLoc());
     if (Result.isNull()) {
       Result = Context.IntTy;
       TheDeclarator.setInvalidType(true);
@@ -392,8 +396,9 @@ static QualType ConvertDeclSpecToType(Sema &TheSema,
     Result = Context.getVectorType(Result, 128/typeSize, AltiVecSpec);
   }
 
-  assert(DS.getTypeSpecComplex() != DeclSpec::TSC_imaginary &&
-         "FIXME: imaginary types not supported yet!");
+  // FIXME: Imaginary.
+  if (DS.getTypeSpecComplex() == DeclSpec::TSC_imaginary)
+    TheSema.Diag(DS.getTypeSpecComplexLoc(), diag::err_imaginary_not_supported);
 
   // See if there are any attributes on the declspec that apply to the type (as
   // opposed to the decl).
@@ -672,7 +677,7 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
 
   // C99 6.7.5.2p1: The size expression shall have integer type.
   if (ArraySize && !ArraySize->isTypeDependent() &&
-      !ArraySize->getType()->isIntegerType()) {
+      !ArraySize->getType()->isIntegralOrUnscopedEnumerationType()) {
     Diag(ArraySize->getLocStart(), diag::err_array_size_non_int)
       << ArraySize->getType() << ArraySize->getSourceRange();
     return QualType();
@@ -993,7 +998,30 @@ TypeSourceInfo *Sema::GetTypeForDeclarator(Declarator &D, Scope *S,
                           &ReturnTypeInfo);
     break;
   }
-  
+
+  // Check for auto functions and trailing return type and adjust the
+  // return type accordingly.
+  if (getLangOptions().CPlusPlus0x && D.isFunctionDeclarator()) {
+    const DeclaratorChunk::FunctionTypeInfo &FTI = D.getTypeObject(0).Fun;
+    if (T == Context.UndeducedAutoTy) {
+      if (FTI.TrailingReturnType) {
+          T = GetTypeFromParser(ParsedType::getFromOpaquePtr(FTI.TrailingReturnType),
+                                &ReturnTypeInfo);
+      }
+      else {
+          Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
+               diag::err_auto_missing_trailing_return);
+          T = Context.IntTy;
+          D.setInvalidType(true);
+      }
+    }
+    else if (FTI.TrailingReturnType) {
+      Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
+           diag::err_trailing_return_without_auto);
+      D.setInvalidType(true);
+    }
+  }
+
   if (T.isNull())
     return Context.getNullTypeSourceInfo();
 
@@ -1375,13 +1403,20 @@ TypeSourceInfo *Sema::GetTypeForDeclarator(Declarator &D, Scope *S,
     const FunctionProtoType *FnTy = T->getAs<FunctionProtoType>();
     assert(FnTy && "Why oh why is there not a FunctionProtoType here?");
 
-    // C++ 8.3.5p4: A cv-qualifier-seq shall only be part of the function type
-    // for a nonstatic member function, the function type to which a pointer
-    // to member refers, or the top-level function type of a function typedef
-    // declaration.
-    bool FreeFunction = (D.getContext() != Declarator::MemberContext &&
-        (!D.getCXXScopeSpec().isSet() ||
-         !computeDeclContext(D.getCXXScopeSpec(), /*FIXME:*/true)->isRecord()));
+    // C++ 8.3.5p4: 
+    //   A cv-qualifier-seq shall only be part of the function type
+    //   for a nonstatic member function, the function type to which a pointer
+    //   to member refers, or the top-level function type of a function typedef
+    //   declaration.
+    bool FreeFunction;
+    if (!D.getCXXScopeSpec().isSet()) {
+      FreeFunction = (D.getContext() != Declarator::MemberContext ||
+                      D.getDeclSpec().isFriendSpecified());
+    } else {
+      DeclContext *DC = computeDeclContext(D.getCXXScopeSpec());
+      FreeFunction = (DC && !DC->isRecord());
+    }
+
     if (FnTy->getTypeQuals() != 0 &&
         D.getDeclSpec().getStorageClassSpec() != DeclSpec::SCS_typedef &&
         (FreeFunction ||
@@ -1634,6 +1669,7 @@ namespace {
       assert(Chunk.Kind == DeclaratorChunk::Function);
       TL.setLParenLoc(Chunk.Loc);
       TL.setRParenLoc(Chunk.EndLoc);
+      TL.setTrailingReturn(!!Chunk.Fun.TrailingReturnType);
 
       const DeclaratorChunk::FunctionTypeInfo &FTI = Chunk.Fun;
       for (unsigned i = 0, e = TL.getNumArgs(), tpi = 0; i != e; ++i) {
@@ -1824,14 +1860,6 @@ static void HandleObjCGCTypeAttribute(QualType &Type,
   Type = S.Context.getObjCGCQualType(Type, GCAttr);
 }
 
-static QualType GetResultType(QualType T) {
-  if (const PointerType *PT = T->getAs<PointerType>())
-    T = PT->getPointeeType();
-  else if (const BlockPointerType *BT = T->getAs<BlockPointerType>())
-    T = BT->getPointeeType();
-  return T->getAs<FunctionType>()->getResultType();
-}
-
 /// Process an individual function attribute.  Returns true if the
 /// attribute does not make sense to apply to this type.
 bool ProcessFnAttr(Sema &S, QualType &Type, const AttributeList &Attr) {
@@ -1846,13 +1874,9 @@ bool ProcessFnAttr(Sema &S, QualType &Type, const AttributeList &Attr) {
     // Delay if this is not a function or pointer to block.
     if (!Type->isFunctionPointerType()
         && !Type->isBlockPointerType()
-        && !Type->isFunctionType())
+        && !Type->isFunctionType()
+        && !Type->isMemberFunctionPointerType())
       return true;
-    
-    if (!GetResultType(Type)->isVoidType()) {
-      S.Diag(Attr.getLoc(), diag::warn_noreturn_function_has_nonvoid_result)
-        << (Type->isBlockPointerType() ? /* blocks */ 1 : /* functions */ 0);
-    }
     
     // Otherwise we can process right away.
     Type = S.Context.getNoReturnType(Type);
@@ -1868,7 +1892,8 @@ bool ProcessFnAttr(Sema &S, QualType &Type, const AttributeList &Attr) {
     // Delay if this is not a function or pointer to block.
     if (!Type->isFunctionPointerType()
         && !Type->isBlockPointerType()
-        && !Type->isFunctionType())
+        && !Type->isFunctionType()
+        && !Type->isMemberFunctionPointerType())
       return true;
 
     // Otherwise we can process right away.
@@ -1879,6 +1904,20 @@ bool ProcessFnAttr(Sema &S, QualType &Type, const AttributeList &Attr) {
     if (NumParamsExpr->isTypeDependent() || NumParamsExpr->isValueDependent() ||
         !NumParamsExpr->isIntegerConstantExpr(NumParams, S.Context))
       return false;
+
+    if (S.Context.Target.getRegParmMax() == 0) {
+      S.Diag(Attr.getLoc(), diag::err_attribute_regparm_wrong_platform)
+        << NumParamsExpr->getSourceRange();
+      Attr.setInvalid();
+      return false;
+    }
+
+    if (NumParams.getLimitedValue(255) > S.Context.Target.getRegParmMax()) {
+      S.Diag(Attr.getLoc(), diag::err_attribute_regparm_invalid_number)
+        << S.Context.Target.getRegParmMax() << NumParamsExpr->getSourceRange();
+      Attr.setInvalid();
+      return false;
+    }
 
     Type = S.Context.getRegParmType(Type, NumParams.getZExtValue());
     return false;
@@ -1894,6 +1933,12 @@ bool ProcessFnAttr(Sema &S, QualType &Type, const AttributeList &Attr) {
   QualType T = Type;
   if (const PointerType *PT = Type->getAs<PointerType>())
     T = PT->getPointeeType();
+  else if (const BlockPointerType *BPT = Type->getAs<BlockPointerType>())
+    T = BPT->getPointeeType();
+  else if (const MemberPointerType *MPT = Type->getAs<MemberPointerType>())
+    T = MPT->getPointeeType();
+  else if (const ReferenceType *RT = Type->getAs<ReferenceType>())
+    T = RT->getPointeeType();
   const FunctionType *Fn = T->getAs<FunctionType>();
 
   // Delay if the type didn't work out to a function.
@@ -1906,6 +1951,7 @@ bool ProcessFnAttr(Sema &S, QualType &Type, const AttributeList &Attr) {
   case AttributeList::AT_fastcall: CC = CC_X86FastCall; break;
   case AttributeList::AT_stdcall: CC = CC_X86StdCall; break;
   case AttributeList::AT_thiscall: CC = CC_X86ThisCall; break;
+  case AttributeList::AT_pascal: CC = CC_X86Pascal; break;
   default: llvm_unreachable("unexpected attribute kind"); return false;
   }
 
@@ -2033,6 +2079,7 @@ void ProcessTypeAttributeList(Sema &S, QualType &Result,
     case AttributeList::AT_fastcall:
     case AttributeList::AT_stdcall:
     case AttributeList::AT_thiscall:
+    case AttributeList::AT_pascal:
     case AttributeList::AT_regparm:
       // Don't process these on the DeclSpec.
       if (IsDeclSpec ||
@@ -2170,48 +2217,23 @@ QualType Sema::getElaboratedType(ElaboratedTypeKeyword Keyword,
   return Context.getElaboratedType(Keyword, NNS, T);
 }
 
-QualType Sema::BuildTypeofExprType(Expr *E) {
-  if (E->getType() == Context.OverloadTy) {
-    // C++ [temp.arg.explicit]p3 allows us to resolve a template-id to a 
-    // function template specialization wherever deduction cannot occur.
-    if (FunctionDecl *Specialization
-        = ResolveSingleFunctionTemplateSpecialization(E)) {
-      // The access doesn't really matter in this case.
-      DeclAccessPair Found = DeclAccessPair::make(Specialization,
-                                                  Specialization->getAccess());
-      E = FixOverloadedFunctionReference(E, Found, Specialization);
-      if (!E)
-        return QualType();      
-    } else {
-      Diag(E->getLocStart(),
-           diag::err_cannot_determine_declared_type_of_overloaded_function)
-        << false << E->getSourceRange();
-      return QualType();
-    }
+QualType Sema::BuildTypeofExprType(Expr *E, SourceLocation Loc) {
+  ExprResult ER = CheckPlaceholderExpr(E, Loc);
+  if (ER.isInvalid()) return QualType();
+  E = ER.take();
+
+  if (!E->isTypeDependent()) {
+    QualType T = E->getType();
+    if (const TagType *TT = T->getAs<TagType>())
+      DiagnoseUseOfDecl(TT->getDecl(), E->getExprLoc());
   }
-  
   return Context.getTypeOfExprType(E);
 }
 
-QualType Sema::BuildDecltypeType(Expr *E) {
-  if (E->getType() == Context.OverloadTy) {
-    // C++ [temp.arg.explicit]p3 allows us to resolve a template-id to a 
-    // function template specialization wherever deduction cannot occur.
-    if (FunctionDecl *Specialization
-          = ResolveSingleFunctionTemplateSpecialization(E)) {
-      // The access doesn't really matter in this case.
-      DeclAccessPair Found = DeclAccessPair::make(Specialization,
-                                                  Specialization->getAccess());
-      E = FixOverloadedFunctionReference(E, Found, Specialization);
-      if (!E)
-        return QualType();      
-    } else {
-      Diag(E->getLocStart(),
-           diag::err_cannot_determine_declared_type_of_overloaded_function)
-        << true << E->getSourceRange();
-      return QualType();
-    }
-  }
+QualType Sema::BuildDecltypeType(Expr *E, SourceLocation Loc) {
+  ExprResult ER = CheckPlaceholderExpr(E, Loc);
+  if (ER.isInvalid()) return QualType();
+  E = ER.take();
   
   return Context.getDecltypeType(E);
 }

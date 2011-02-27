@@ -46,7 +46,7 @@ ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx,
                                  unsigned fieldcount,
                                  uint64_t nonvirtualsize,
                                  unsigned nonvirtualalign,
-                                 uint64_t SizeOfLargestEmptySubobject,
+                                 CharUnits SizeOfLargestEmptySubobject,
                                  const CXXRecordDecl *PrimaryBase,
                                  bool PrimaryBaseIsVirtual,
                                  const BaseOffsetsMapTy& BaseOffsets,
@@ -69,10 +69,10 @@ ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx,
 #ifndef NDEBUG
     if (const CXXRecordDecl *PrimaryBase = getPrimaryBase()) {
       if (getPrimaryBaseWasVirtual())
-        assert(getVBaseClassOffset(PrimaryBase) == 0 &&
+        assert(getVBaseClassOffset(PrimaryBase).isZero() &&
                "Primary virtual base must be at offset 0!");
       else
-        assert(getBaseClassOffset(PrimaryBase) == 0 &&
+        assert(getBaseClassOffsetInBits(PrimaryBase) == 0 &&
                "Primary base must be at offset 0!");
     }
 #endif        

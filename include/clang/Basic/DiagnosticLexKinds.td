@@ -51,6 +51,7 @@ def err_empty_character : Error<"empty character constant">;
 def err_unterminated_block_comment : Error<"unterminated /* comment">;
 def err_invalid_character_to_charify : Error<
   "invalid argument to convert to character">;
+def err_unterminated___pragma : Error<"missing terminating ')' character">;
 
 def err_conflict_marker : Error<"version control conflict marker in file">;
 
@@ -97,6 +98,10 @@ def warn_hex_escape_too_large : ExtWarn<"hex escape sequence out of range">;
 def ext_string_too_long : Extension<"string literal of length %0 exceeds "
   "maximum length %1 that %select{C90|ISO C99|C++}2 compilers are required to "
   "support">, InGroup<OverlengthStrings>;
+def warn_ucn_escape_too_large : ExtWarn<
+  "character unicode escape sequence too long for its type">;
+def warn_ucn_not_valid_in_c89 : ExtWarn<
+  "unicode escape sequences are only valid in C99 or C++">;
   
 //===----------------------------------------------------------------------===//
 // PTH Diagnostics
@@ -248,15 +253,11 @@ def ext_stdc_pragma_syntax_eom :
 def warn_stdc_fenv_access_not_supported :
    Warning<"pragma STDC FENV_ACCESS ON is not supported, ignoring pragma">,
    InGroup<UnknownPragmas>;
-def warn_pragma_diagnostic_gcc_invalid :
-   ExtWarn<"pragma diagnostic expected 'error', 'warning', 'ignored', or"
-            " 'fatal'">,
-   InGroup<UnknownPragmas>;
-def warn_pragma_diagnostic_clang_invalid :
-   ExtWarn<"pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal'"
+def warn_pragma_diagnostic_invalid :
+   ExtWarn<"pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal',"
             " 'push', or 'pop'">,
    InGroup<UnknownPragmas>;
-def warn_pragma_diagnostic_clang_cannot_ppp :
+def warn_pragma_diagnostic_cannot_pop :
    ExtWarn<"pragma diagnostic pop could not pop, no matching push">,
    InGroup<UnknownPragmas>;
 def warn_pragma_diagnostic_invalid_option :

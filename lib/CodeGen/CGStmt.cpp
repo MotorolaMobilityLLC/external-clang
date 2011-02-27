@@ -75,7 +75,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
     if (!isa<Expr>(S))
       ErrorUnsupported(S, "statement");
 
-    EmitAnyExpr(cast<Expr>(S), 0, false, true);
+    EmitAnyExpr(cast<Expr>(S), AggValueSlot::ignored(), true);
 
     // Expression emitters don't handle unreachable blocks yet, so look for one
     // explicitly here. This handles the common case of a call to a noreturn
@@ -146,7 +146,7 @@ bool CodeGenFunction::EmitSimpleStmt(const Stmt *S) {
 /// this captures the expression result of the last sub-statement and returns it
 /// (for use by the statement expression extension).
 RValue CodeGenFunction::EmitCompoundStmt(const CompoundStmt &S, bool GetLast,
-                                         llvm::Value *AggLoc, bool isAggVol) {
+                                         AggValueSlot AggSlot) {
   PrettyStackTraceLoc CrashInfo(getContext().getSourceManager(),S.getLBracLoc(),
                              "LLVM IR generation of compound statement ('{}')");
 
@@ -184,7 +184,7 @@ RValue CodeGenFunction::EmitCompoundStmt(const CompoundStmt &S, bool GetLast,
 
     EnsureInsertPoint();
 
-    RV = EmitAnyExpr(cast<Expr>(LastStmt), AggLoc);
+    RV = EmitAnyExpr(cast<Expr>(LastStmt), AggSlot);
   }
 
   return RV;
@@ -297,6 +297,11 @@ void CodeGenFunction::EmitGotoStmt(const GotoStmt &S) {
 
 
 void CodeGenFunction::EmitIndirectGotoStmt(const IndirectGotoStmt &S) {
+  if (const LabelStmt *Target = S.getConstantTarget()) {
+    EmitBranchThroughCleanup(getJumpDestForLabel(Target));
+    return;
+  }
+
   // Ensure that we have an i8* for our PHI node.
   llvm::Value *V = Builder.CreateBitCast(EmitScalarExpr(S.getTarget()),
                                          llvm::Type::getInt8PtrTy(VMContext),
@@ -320,7 +325,7 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
   RunCleanupsScope ConditionScope(*this);
 
   if (S.getConditionVariable())
-    EmitLocalBlockVarDecl(*S.getConditionVariable());
+    EmitAutoVarDecl(*S.getConditionVariable());
 
   // If the condition constant folds and can be elided, try to avoid emitting
   // the condition and the dead arm of the if/else.
@@ -395,7 +400,7 @@ void CodeGenFunction::EmitWhileStmt(const WhileStmt &S) {
   RunCleanupsScope ConditionScope(*this);
 
   if (S.getConditionVariable())
-    EmitLocalBlockVarDecl(*S.getConditionVariable());
+    EmitAutoVarDecl(*S.getConditionVariable());
   
   // Evaluate the conditional in the while header.  C99 6.8.5.1: The
   // evaluation of the controlling expression takes place before each
@@ -527,7 +532,7 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S) {
     // declaration.
     llvm::BasicBlock *ExitBlock = LoopExit.getBlock();
     if (S.getConditionVariable()) {
-      EmitLocalBlockVarDecl(*S.getConditionVariable());
+      EmitAutoVarDecl(*S.getConditionVariable());
     }
 
     // If there are any cleanups between here and the loop-exit scope,
@@ -643,7 +648,7 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
   } else if (RV->getType()->isAnyComplexType()) {
     EmitComplexExprIntoAddr(RV, ReturnValue, false);
   } else {
-    EmitAggExpr(RV, ReturnValue, false);
+    EmitAggExpr(RV, AggValueSlot::forAddr(ReturnValue, false, true));
   }
 
   EmitBranchThroughCleanup(ReturnBlock);
@@ -798,7 +803,7 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   RunCleanupsScope ConditionScope(*this);
 
   if (S.getConditionVariable())
-    EmitLocalBlockVarDecl(*S.getConditionVariable());
+    EmitAutoVarDecl(*S.getConditionVariable());
 
   llvm::Value *CondV = EmitScalarExpr(S.getCond());
 
@@ -861,14 +866,11 @@ static std::string
 SimplifyConstraint(const char *Constraint, const TargetInfo &Target,
                  llvm::SmallVectorImpl<TargetInfo::ConstraintInfo> *OutCons=0) {
   std::string Result;
-  std::string tmp;
 
   while (*Constraint) {
     switch (*Constraint) {
     default:
-      tmp = Target.convertConstraint(*Constraint);
-      if (Result.find(tmp) == std::string::npos) // Combine unique constraints
-        Result += tmp;
+      Result += Target.convertConstraint(*Constraint);
       break;
     // Ignore these
     case '*':
@@ -877,8 +879,8 @@ SimplifyConstraint(const char *Constraint, const TargetInfo &Target,
     case '=': // Will see this and the following in mult-alt constraints.
     case '+':
       break;
-    case ',':                 // FIXME - Until the back-end properly supports
-              return Result;  // multiple alternative constraints, we stop here.
+    case ',':
+      Result += "|";
       break;
     case 'g':
       Result += "imr";
@@ -1044,6 +1046,10 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
           ResultRegTypes.back() = ConvertType(InputTy);
         }
       }
+      if (const llvm::Type* AdjTy = 
+            Target.adjustInlineAsmType(OutputConstraint, ResultRegTypes.back(),
+                                       VMContext))
+        ResultRegTypes.back() = AdjTy;
     } else {
       ArgTypes.push_back(Dest.getAddress()->getType());
       Args.push_back(Dest.getAddress());
@@ -1107,7 +1113,10 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
           Arg = Builder.CreateFPExt(Arg, OutputTy);
       }
     }
-
+    if (const llvm::Type* AdjTy = 
+              Target.adjustInlineAsmType(InputConstraint, Arg->getType(),
+                                         VMContext))
+      Arg = Builder.CreateBitCast(Arg, AdjTy);
 
     ArgTypes.push_back(Arg->getType());
     Args.push_back(Arg);
@@ -1202,6 +1211,8 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
         Tmp = Builder.CreateTrunc(Tmp, TruncTy);
       } else if (TruncTy->isIntegerTy()) {
         Tmp = Builder.CreateTrunc(Tmp, TruncTy);
+      } else if (TruncTy->isVectorTy()) {
+        Tmp = Builder.CreateBitCast(Tmp, TruncTy);
       }
     }
 

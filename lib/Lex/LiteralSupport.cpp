@@ -164,15 +164,13 @@ static unsigned ProcessCharEscape(const char *&ThisTokBuf,
 }
 
 /// ProcessUCNEscape - Read the Universal Character Name, check constraints and
-/// convert the UTF32 to UTF8. This is a subroutine of StringLiteralParser.
-/// When we decide to implement UCN's for character constants and identifiers,
-/// we will likely rework our support for UCN's.
-static void ProcessUCNEscape(const char *&ThisTokBuf, const char *ThisTokEnd,
-                             char *&ResultBuf, bool &HadError,
+/// return the UTF32.
+static bool ProcessUCNEscape(const char *&ThisTokBuf, const char *ThisTokEnd,
+                             uint32_t &UcnVal, unsigned short &UcnLen,
                              SourceLocation Loc, Preprocessor &PP,
                              bool Complain) {
-  // FIXME: Add a warning - UCN's are only valid in C++ & C99.
-  // FIXME: Handle wide strings.
+  if (!PP.getLangOptions().CPlusPlus && !PP.getLangOptions().C99)
+    PP.Diag(Loc, diag::warn_ucn_not_valid_in_c89);
 
   // Save the beginning of the string (for error diagnostics).
   const char *ThisTokBegin = ThisTokBuf;
@@ -183,26 +181,22 @@ static void ProcessUCNEscape(const char *&ThisTokBuf, const char *ThisTokEnd,
   if (ThisTokBuf == ThisTokEnd || !isxdigit(*ThisTokBuf)) {
     if (Complain)
       PP.Diag(Loc, diag::err_ucn_escape_no_digits);
-    HadError = 1;
-    return;
+    return false;
   }
-  typedef uint32_t UTF32;
-
-  UTF32 UcnVal = 0;
-  unsigned short UcnLen = (ThisTokBuf[-1] == 'u' ? 4 : 8);
-  for (; ThisTokBuf != ThisTokEnd && UcnLen; ++ThisTokBuf, UcnLen--) {
+  UcnLen = (ThisTokBuf[-1] == 'u' ? 4 : 8);
+  unsigned short UcnLenSave = UcnLen;
+  for (; ThisTokBuf != ThisTokEnd && UcnLenSave; ++ThisTokBuf, UcnLenSave--) {
     int CharVal = HexDigitValue(ThisTokBuf[0]);
     if (CharVal == -1) break;
     UcnVal <<= 4;
     UcnVal |= CharVal;
   }
   // If we didn't consume the proper number of digits, there is a problem.
-  if (UcnLen) {
+  if (UcnLenSave) {
     if (Complain)
       PP.Diag(PP.AdvanceToTokenCharacter(Loc, ThisTokBuf-ThisTokBegin),
               diag::err_ucn_escape_incomplete);
-    HadError = 1;
-    return;
+    return false;
   }
   // Check UCN constraints (C99 6.4.3p2).
   if ((UcnVal < 0xa0 &&
@@ -211,7 +205,59 @@ static void ProcessUCNEscape(const char *&ThisTokBuf, const char *ThisTokEnd,
       || (UcnVal > 0x10FFFF)) /* the maximum legal UTF32 value */ {
     if (Complain)
       PP.Diag(Loc, diag::err_ucn_escape_invalid);
+    return false;
+  }
+  return true;
+}
+
+/// EncodeUCNEscape - Read the Universal Character Name, check constraints and
+/// convert the UTF32 to UTF8 or UTF16. This is a subroutine of
+/// StringLiteralParser. When we decide to implement UCN's for identifiers,
+/// we will likely rework our support for UCN's.
+static void EncodeUCNEscape(const char *&ThisTokBuf, const char *ThisTokEnd,
+                             char *&ResultBuf, bool &HadError,
+                             SourceLocation Loc, Preprocessor &PP,
+                             bool wide,
+                             bool Complain) {
+  typedef uint32_t UTF32;
+  UTF32 UcnVal = 0;
+  unsigned short UcnLen = 0;
+  if (!ProcessUCNEscape(ThisTokBuf, ThisTokEnd,
+                        UcnVal, UcnLen, Loc, PP, Complain)) {
     HadError = 1;
+    return;
+  }
+
+  if (wide) {
+    (void)UcnLen;
+    assert((UcnLen== 4 || UcnLen== 8) && 
+           "EncodeUCNEscape - only ucn length of 4 or 8 supported");
+
+    if (!PP.getLangOptions().ShortWChar) {
+      // Note: our internal rep of wide char tokens is always little-endian.
+      *ResultBuf++ = (UcnVal & 0x000000FF);
+      *ResultBuf++ = (UcnVal & 0x0000FF00) >> 8;
+      *ResultBuf++ = (UcnVal & 0x00FF0000) >> 16;
+      *ResultBuf++ = (UcnVal & 0xFF000000) >> 24;
+      return;
+    }
+
+    // Convert to UTF16.
+    if (UcnVal < (UTF32)0xFFFF) {
+      *ResultBuf++ = (UcnVal & 0x000000FF);
+      *ResultBuf++ = (UcnVal & 0x0000FF00) >> 8;
+      return;
+    }
+    PP.Diag(Loc, diag::warn_ucn_escape_too_large);
+
+    typedef uint16_t UTF16;
+    UcnVal -= 0x10000;
+    UTF16 surrogate1 = 0xD800 + (UcnVal >> 10);
+    UTF16 surrogate2 = 0xDC00 + (UcnVal & 0x3FF);
+    *ResultBuf++ = (surrogate1 & 0x000000FF);
+    *ResultBuf++ = (surrogate1 & 0x0000FF00) >> 8;
+    *ResultBuf++ = (surrogate2 & 0x000000FF);
+    *ResultBuf++ = (surrogate2 & 0x0000FF00) >> 8;
     return;
   }
   // Now that we've parsed/checked the UCN, we convert from UTF32->UTF8.
@@ -385,6 +431,7 @@ NumericLiteralParser(const char *begin, const char *end,
       }
       continue;  // Success.
     case 'i':
+    case 'I':
       if (PP.getLangOptions().Microsoft) {
         if (isFPConstant || isLong || isLongLong) break;
 
@@ -421,7 +468,6 @@ NumericLiteralParser(const char *begin, const char *end,
         }
       }
       // fall through.
-    case 'I':
     case 'j':
     case 'J':
       if (isImaginary) break;   // Cannot be repeated.
@@ -668,11 +714,26 @@ CharLiteralParser::CharLiteralParser(const char *begin, const char *end,
   bool Warned = false;
   while (begin[0] != '\'') {
     uint64_t ResultChar;
+
+      // Is this a Universal Character Name escape?
     if (begin[0] != '\\')     // If this is a normal character, consume it.
       ResultChar = *begin++;
-    else                      // Otherwise, this is an escape character.
-      ResultChar = ProcessCharEscape(begin, end, HadError, Loc, IsWide, PP,
-                                     /*Complain=*/true);
+    else {                    // Otherwise, this is an escape character.
+      // Check for UCN.
+      if (begin[1] == 'u' || begin[1] == 'U') {
+        uint32_t utf32 = 0;
+        unsigned short UcnLen = 0;
+        if (!ProcessUCNEscape(begin, end, utf32, UcnLen,
+                              Loc, PP, /*Complain=*/true)) {
+          HadError = 1;
+        }
+        ResultChar = utf32;
+      } else {
+        // Otherwise, this is a non-UCN escape character.  Process it.
+        ResultChar = ProcessCharEscape(begin, end, HadError, Loc, IsWide, PP,
+                                       /*Complain=*/true);
+      }
+    }
 
     // If this is a multi-character constant (e.g. 'abc'), handle it.  These are
     // implementation defined (C99 6.4.4.4p10).
@@ -711,6 +772,9 @@ CharLiteralParser::CharLiteralParser(const char *begin, const char *end,
 
   // Transfer the value from APInt to uint64_t
   Value = LitVal.getZExtValue();
+
+  if (IsWide && PP.getLangOptions().ShortWChar && Value > 0xFFFF)
+    PP.Diag(Loc, diag::warn_ucn_escape_too_large);
 
   // If this is a single narrow character, sign extend it (e.g. '\xFF' is "-1")
   // if 'char' is signed for this target (C99 6.4.4.4p10).  Note that multiple
@@ -830,12 +894,14 @@ StringLiteralParser(const Token *StringToks, unsigned NumStringToks,
     }
 
     const char *ThisTokEnd = ThisTokBuf+ThisTokLen-1;  // Skip end quote.
-
+    bool wide = false;
     // TODO: Input character set mapping support.
 
     // Skip L marker for wide strings.
-    if (ThisTokBuf[0] == 'L')
+    if (ThisTokBuf[0] == 'L') {
+      wide = true;
       ++ThisTokBuf;
+    }
 
     assert(ThisTokBuf[0] == '"' && "Expected quote, lexer broken?");
     ++ThisTokBuf;
@@ -879,8 +945,9 @@ StringLiteralParser(const Token *StringToks, unsigned NumStringToks,
       }
       // Is this a Universal Character Name escape?
       if (ThisTokBuf[1] == 'u' || ThisTokBuf[1] == 'U') {
-        ProcessUCNEscape(ThisTokBuf, ThisTokEnd, ResultPtr,
-                         hadError, StringToks[i].getLocation(), PP, Complain);
+        EncodeUCNEscape(ThisTokBuf, ThisTokEnd, ResultPtr,
+                        hadError, StringToks[i].getLocation(), PP, wide, 
+                        Complain);
         continue;
       }
       // Otherwise, this is a non-UCN escape character.  Process it.

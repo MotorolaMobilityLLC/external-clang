@@ -27,34 +27,42 @@ namespace llvm {
 
 namespace clang {
 
+class Decl;
+  
 /// \brief Default priority values for code-completion results based
 /// on their kind.
 enum {
+  /// \brief Priority for the next initialization in a constructor initializer
+  /// list.
+  CCP_NextInitializer = 7,
   /// \brief Priority for a send-to-super completion.
-  CCP_SuperCompletion = 8,
+  CCP_SuperCompletion = 20,
   /// \brief Priority for a declaration that is in the local scope.
-  CCP_LocalDeclaration = 8,
+  CCP_LocalDeclaration = 34,
   /// \brief Priority for a member declaration found from the current
   /// method or member function.
-  CCP_MemberDeclaration = 20,
+  CCP_MemberDeclaration = 35,
   /// \brief Priority for a language keyword (that isn't any of the other
   /// categories).
-  CCP_Keyword = 30,
+  CCP_Keyword = 40,
   /// \brief Priority for a code pattern.
-  CCP_CodePattern = 30,
+  CCP_CodePattern = 40,
   /// \brief Priority for a non-type declaration.
   CCP_Declaration = 50,
-  /// \brief Priority for a constant value (e.g., enumerator).
-  CCP_Constant = 60,
   /// \brief Priority for a type.
-  CCP_Type = 65,
+  CCP_Type = CCP_Declaration,
+  /// \brief Priority for a constant value (e.g., enumerator).
+  CCP_Constant = 65,
   /// \brief Priority for a preprocessor macro.
   CCP_Macro = 70,
   /// \brief Priority for a nested-name-specifier.
   CCP_NestedNameSpecifier = 75,
   /// \brief Priority for a result that isn't likely to be what the user wants,
   /// but is included for completeness.
-  CCP_Unlikely = 80
+  CCP_Unlikely = 80,
+  
+  /// \brief Priority for the Objective-C "_cmd" implicit parameter.
+  CCP_ObjC_cmd = CCP_Unlikely
 };
 
 /// \brief Priority value deltas that are added to code-completion results
@@ -62,18 +70,17 @@ enum {
 enum {
   /// \brief The result is in a base class.
   CCD_InBaseClass = 2,
-  /// \brief The result is a type match against void.
-  ///
-  /// Since everything converts to "void", we don't give as drastic an 
-  /// adjustment for matching void.
-  CCD_VoidMatch = -5,
   /// \brief The result is a C++ non-static member function whose qualifiers
   /// exactly match the object type on which the member function can be called.
   CCD_ObjectQualifierMatch = -1,
   /// \brief The selector of the given message exactly matches the selector
   /// of the current method, which might imply that some kind of delegation
   /// is occurring.
-  CCD_SelectorMatch = -3
+  CCD_SelectorMatch = -3,
+  
+  /// \brief Adjustment to the "bool" type in Objective-C, where the typedef
+  /// "BOOL" is preferred.
+  CCD_bool_in_ObjC = 1
 };
 
 /// \brief Priority value factors by which we will divide or multiply the
@@ -114,11 +121,18 @@ QualType getDeclUsageType(ASTContext &C, NamedDecl *ND);
 ///
 /// \param MacroName The name of the macro.
 ///
+/// \param LangOpts Options describing the current language dialect.
+///
 /// \param PreferredTypeIsPointer Whether the preferred type for the context
 /// of this macro is a pointer type.
 unsigned getMacroUsagePriority(llvm::StringRef MacroName, 
+                               const LangOptions &LangOpts,
                                bool PreferredTypeIsPointer = false);
 
+/// \brief Determine the libclang cursor kind associated with the given
+/// declaration.
+CXCursorKind getCursorKindForDecl(Decl *D);
+  
 class FunctionDecl;
 class FunctionType;
 class FunctionTemplateDecl;
@@ -132,7 +146,7 @@ class Sema;
 class CodeCompletionContext {
 public:
   enum Kind {
-    /// \brief An unspecified code-completion context.
+    /// \brief An unspecified code-completion context, where the 
     CCC_Other,
     /// \brief Code completion occurred within a "top-level" completion context,
     /// e.g., at namespace or global scope.
@@ -203,7 +217,13 @@ public:
     /// \brief Code completion for a selector, as in an @selector expression.
     CCC_SelectorName,
     /// \brief Code completion within a type-qualifier list.
-    CCC_TypeQualifiers
+    CCC_TypeQualifiers,
+    /// \brief Code completion in a parenthesized expression, which means that
+    /// we may also have types here in C and Objective-C (as well as in C++).
+    CCC_ParenthesizedExpression,
+    /// \brief An unknown context, in which we are recovering from a parsing 
+    /// error and don't know which completions we should give.
+    CCC_Recovery
   };
 
 private:
@@ -239,6 +259,10 @@ public:
   /// \brief Retrieve the type of the base object in a member-access 
   /// expression.
   QualType getBaseType() const { return BaseType; }
+
+  /// \brief Determines whether we want C++ constructors as results within this
+  /// context.
+  bool wantConstructorResults() const;
 };
 
 
@@ -441,14 +465,6 @@ public:
   /// \param Result If non-NULL, points to an empty code-completion
   /// result that will be given a cloned copy of
   CodeCompletionString *Clone(CodeCompletionString *Result = 0) const;
-  
-  /// \brief Serialize this code-completion string to the given stream.
-  void Serialize(llvm::raw_ostream &OS) const;
-  
-  /// \brief Deserialize a code-completion string from the given string.
-  ///
-  /// \returns true if successful, false otherwise.
-  bool Deserialize(const char *&Str, const char *StrEnd);
 };
 
 /// \brief Captures a result of code completion.
@@ -589,7 +605,7 @@ public:
     
   void Destroy();
     
-  /// brief Determine a base priority for the given declaration.
+  /// \brief Determine a base priority for the given declaration.
   static unsigned getPriorityFromDecl(NamedDecl *ND);
     
 private:
@@ -698,7 +714,8 @@ public:
     /// \brief Create a new code-completion string that describes the function
     /// signature of this overload candidate.
     CodeCompletionString *CreateSignatureString(unsigned CurrentArg, 
-                                                Sema &S) const;    
+                                                Sema &S,
+                                        CodeCompletionString *Result = 0) const;    
   };
   
   CodeCompleteConsumer() : IncludeMacros(false), IncludeCodePatterns(false),
@@ -772,32 +789,6 @@ public:
                                          unsigned NumCandidates);  
 };
   
-/// \brief A code-completion consumer that prints the results it receives
-/// in a format that is parsable by the CIndex library.
-class CIndexCodeCompleteConsumer : public CodeCompleteConsumer {
-  /// \brief The raw output stream.
-  llvm::raw_ostream &OS;
-  
-public:
-  /// \brief Create a new CIndex code-completion consumer that prints its
-  /// results to the given raw output stream in a format readable to the CIndex
-  /// library.
-  CIndexCodeCompleteConsumer(bool IncludeMacros, bool IncludeCodePatterns,
-                             bool IncludeGlobals, llvm::raw_ostream &OS)
-    : CodeCompleteConsumer(IncludeMacros, IncludeCodePatterns, IncludeGlobals,
-                           true), OS(OS) {}
-  
-  /// \brief Prints the finalized code-completion results.
-  virtual void ProcessCodeCompleteResults(Sema &S, 
-                                          CodeCompletionContext Context,
-                                          CodeCompletionResult *Results,
-                                          unsigned NumResults);
-  
-  virtual void ProcessOverloadCandidates(Sema &S, unsigned CurrentArg,
-                                         OverloadCandidate *Candidates,
-                                         unsigned NumCandidates);  
-};
-
 } // end namespace clang
 
 #endif // LLVM_CLANG_SEMA_CODECOMPLETECONSUMER_H

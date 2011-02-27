@@ -201,8 +201,15 @@ public:
                                      const LocationContext *LC,
                                      SVal V) const;
 
+  /// Create a new state by binding the value 'V' to the statement 'S' in the
+  /// state's environment.
   const GRState *BindExpr(const Stmt *S, SVal V, bool Invalidate = true) const;
 
+  /// Create a new state by binding the value 'V' and location 'locaton' to the
+  /// statement 'S' in the state's environment.
+  const GRState *bindExprAndLocation(const Stmt *S, SVal location, SVal V)
+    const;
+  
   const GRState *bindDecl(const VarRegion *VR, SVal V) const;
 
   const GRState *bindDeclWithNoInit(const VarRegion *VR) const;
@@ -257,11 +264,15 @@ public:
 
   const llvm::APSInt *getSymVal(SymbolRef sym) const;
 
-  SVal getSVal(const Stmt* Ex) const;
-
+  /// Returns the SVal bound to the statement 'S' in the state's environment.
+  SVal getSVal(const Stmt* S) const;
+  
   SVal getSValAsScalarOrLoc(const Stmt *Ex) const;
 
   SVal getSVal(Loc LV, QualType T = QualType()) const;
+
+  /// Returns the "raw" SVal bound to LV before any value simplfication.
+  SVal getRawSVal(Loc LV, QualType T= QualType()) const;
 
   SVal getSVal(const MemRegion* R) const;
 
@@ -639,7 +650,9 @@ inline SVal GRState::getLValue(const FieldDecl* D, SVal Base) const {
 }
 
 inline SVal GRState::getLValue(QualType ElementType, SVal Idx, SVal Base) const{
-  return getStateManager().StoreMgr->getLValueElement(ElementType, Idx, Base);
+  if (NonLoc *N = dyn_cast<NonLoc>(&Idx))
+    return getStateManager().StoreMgr->getLValueElement(ElementType, *N, Base);
+  return UnknownVal();
 }
 
 inline const llvm::APSInt *GRState::getSymVal(SymbolRef sym) const {
@@ -660,7 +673,7 @@ inline SVal GRState::getSValAsScalarOrLoc(const Stmt *S) const {
   return UnknownVal();
 }
 
-inline SVal GRState::getSVal(Loc LV, QualType T) const {
+inline SVal GRState::getRawSVal(Loc LV, QualType T) const {
   return getStateManager().StoreMgr->Retrieve(St, LV, T);
 }
 

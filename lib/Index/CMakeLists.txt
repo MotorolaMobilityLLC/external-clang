@@ -1,5 +1,7 @@
 set(LLVM_NO_RTTI 1)
 
+set(LLVM_USED_LIBS clangBasic clangAST)
+
 add_clang_library(clangIndex
   ASTLocation.cpp
   Analyzer.cpp
@@ -13,3 +15,6 @@ add_clang_library(clangIndex
   Program.cpp
   SelectorMap.cpp
   )
+
+add_dependencies(clangIndex ClangAttrClasses ClangAttrList
+                 ClangDeclNodes ClangStmtNodes)

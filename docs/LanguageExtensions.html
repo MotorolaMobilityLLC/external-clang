@@ -23,6 +23,8 @@ td {
 <li><a href="#has_include">Include File Checking Macros</a></li>
 <li><a href="#builtinmacros">Builtin Macros</a></li>
 <li><a href="#vectors">Vectors and Extended Vectors</a></li>
+<li><a href="#deprecated">Messages on <tt>deprecated</tt> and <tt>unavailable</tt> attributes</a></li>
+<li><a href="#attributes-on-enumerators">Attributes on enumerators</a></li>
 <li><a href="#checking_language_features">Checks for Standard Language Features</a></li>
   <ul>
   <li><a href="#cxx_exceptions">C++ exceptions</a></li>
@@ -40,6 +42,9 @@ td {
   <li><a href="#cxx_static_assert">C++0x <tt>static_assert()</tt></a></li>
   <li><a href="#cxx_auto_type">C++0x type inference</a></li>
   <li><a href="#cxx_variadic_templates">C++0x variadic templates</a></li>
+  <li><a href="#cxx_inline_namespaces">C++0x inline namespaces</a></li>
+  <li><a href="#cxx_strong_enums">C++0x strongly-typed enumerations</a></li>
+  <li><a href="#cxx_trailing_return">C++0x trailing return type</a></li>
   </ul>
 <li><a href="#blocks">Blocks</a></li>
 <li><a href="#overloading-in-c">Function Overloading in C</a></li>
@@ -130,6 +135,30 @@ can be used like this:</p>
 </blockquote>
 
 <p>The feature tag is described along with the language feature below.</p>
+
+<!-- ======================================================================= -->
+<h3 id="__has_attribute">__has_attribute</h3>
+<!-- ======================================================================= -->
+
+<p>This function-like macro takes a single identifier argument that is the name
+of an attribute.  It evaluates to 1 if the attribute is supported or 0 if not.  It
+can be used like this:</p>
+
+<blockquote>
+<pre>
+#ifndef __has_attribute         // Optional of course.
+  #define __has_attribute(x) 0  // Compatibility with non-clang compilers.
+#endif
+
+...
+#if __has_attribute(override) || \
+#define OVERRIDE __attribute__((override))
+#else
+#define OVERRIDE
+#endif
+...
+</pre>
+</blockquote>
 
 <!-- ======================================================================= -->
 <h2 id="has_include">Include File Checking Macros</h2>
@@ -258,11 +287,59 @@ float4 foo(float2 a, float2 b) {
   c.yw = b;
   return c;
 }
+</pre>
 </blockquote>
 
 <p>Query for this feature with __has_feature(attribute_ext_vector_type).</p>
 
 <p>See also <a href="#__builtin_shufflevector">__builtin_shufflevector</a>.</p>
+
+<!-- ======================================================================= -->
+<h2 id="deprecated">Messages on <tt>deprecated</tt> and <tt>unavailable</tt> Attributes</h2>
+<!-- ======================================================================= -->
+
+<p>An optional string message can be added to the <tt>deprecated</tt>
+and <tt>unavailable</tt> attributes.  For example:</p>
+
+<blockquote>
+<pre>void explode(void) __attribute__((deprecated("extremely unsafe, use 'combust' instead!!!")));</pre>
+</blockquote>
+
+<p>If the deprecated or unavailable declaration is used, the message
+will be incorporated into the appropriate diagnostic:</p>
+
+<blockquote>
+<pre>harmless.c:4:3: warning: 'explode' is deprecated: extremely unsafe, use 'combust' instead!!! [-Wdeprecated-declarations]
+  explode();
+  ^</pre>
+</blockquote>
+
+<p>Query for this feature
+with <tt>__has_feature(attribute_deprecated_with_message)</tt>
+and <tt>__has_feature(attribute_unavailable_with_message)</tt>.</p>
+
+<!-- ======================================================================= -->
+<h2 id="attributes-on-enumerators">Attributes on Enumerators</h2>
+<!-- ======================================================================= -->
+
+<p>Clang allows attributes to be written on individual enumerators.
+This allows enumerators to be deprecated, made unavailable, etc.  The
+attribute must appear after the enumerator name and before any
+initializer, like so:</p>
+
+<blockquote>
+<pre>enum OperationMode {
+  OM_Invalid,
+  OM_Normal,
+  OM_Terrified __attribute__((deprecated)),
+  OM_AbortOnError __attribute__((deprecated)) = 4
+};</pre>
+</blockquote>
+
+<p>Attributes on the <tt>enum</tt> declaration do not apply to
+individual enumerators.</p>
+
+<p>Query for this feature with <tt>__has_feature(enumerator_attributes)</tt>.</p>
 
 <!-- ======================================================================= -->
 <h2 id="checking_language_features">Checks for Standard Language Features</h2>
@@ -301,32 +378,34 @@ not yet implemented will be noted.</p>
 <h3 id="cxx_attributes">C++0x attributes</h3>
 
 <p>Use <tt>__has_feature(cxx_attributes)</tt> to determine if support for
-attribute parsing with C++0x's square bracket notation is enabled.
+attribute parsing with C++0x's square bracket notation is enabled.</p>
 
 <h3 id="cxx_deleted_functions">C++0x deleted functions</tt></h3>
 
 <p>Use <tt>__has_feature(cxx_deleted_functions)</tt> to determine if support for
-deleted function definitions (with <tt>= delete</tt>) is enabled.
+deleted function definitions (with <tt>= delete</tt>) is enabled.</p>
 
 <h3 id="cxx_concepts">C++ TR concepts</h3>
 
 <p>Use <tt>__has_feature(cxx_concepts)</tt> to determine if support for
-concepts is enabled. clang does not currently implement this feature.
+concepts is enabled. clang does not currently implement this feature.</p>
 
 <h3 id="cxx_lambdas">C++0x lambdas</h3>
 
 <p>Use <tt>__has_feature(cxx_lambdas)</tt> to determine if support for
-lambdas is enabled. clang does not currently implement this feature.
+lambdas is enabled. clang does not currently implement this feature.</p>
 
 <h3 id="cxx_nullptr">C++0x <tt>nullptr</tt></h3>
 
 <p>Use <tt>__has_feature(cxx_nullptr)</tt> to determine if support for
-<tt>nullptr</tt> is enabled. clang does not yet fully implement this feature.
+<tt>nullptr</tt> is enabled. clang does not yet fully implement this
+feature.</p>
 
 <h3 id="cxx_rvalue_references">C++0x rvalue references</tt></h3>
 
 <p>Use <tt>__has_feature(cxx_rvalue_references)</tt> to determine if support for
-rvalue references is enabled. clang does not yet fully implement this feature.
+rvalue references is enabled. clang does not yet fully implement this
+feature.</p>
 
 <h3 id="cxx_static_assert">C++0x <tt>static_assert()</tt></h3>
 
@@ -339,11 +418,26 @@ compile-time assertions using <tt>static_assert</tt> is enabled.</p>
 is supported using the <tt>auto</tt> specifier. If this is disabled,
 <tt>auto</tt> will instead be a storage class specifier, as in C or C++98.</p>
 
-<h3 id="cxx_variadic_templates">C++0x variadic templates</tt></h3>
+<h3 id="cxx_variadic_templates">C++0x variadic templates</h3>
 
 <p>Use <tt>__has_feature(cxx_variadic_templates)</tt> to determine if support
 for templates taking any number of arguments with the ellipsis notation is
 enabled. clang does not yet fully implement this feature.</p>
+
+<h3 id="cxx_inline_namespaces">C++0x inline namespaces</h3>
+
+<p>Use <tt>__has_feature(cxx_inline_namespaces)</tt> to determine if support for
+inline namespaces is enabled.</p>
+
+<h3 id="cxx_trailing_return">C++0x trailing return type</h3>
+
+<p>Use <tt>__has_feature(cxx_trailing_return)</tt> to determine if support for
+the alternate function declaration syntax with trailing return type is enabled.</p>
+
+<h3 id="cxx_strong_enums">C++0x strongly typed enumerations</h3>
+
+<p>Use <tt>__has_feature(cxx_strong_enums)</tt> to determine if support for
+strongly typed, scoped enumerations is enabled.</p>
 
 <!-- ======================================================================= -->
 <h2 id="blocks">Blocks</h2>

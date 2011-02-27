@@ -201,7 +201,7 @@ namespace test4 {
 // Implicit copy assignment operator uses.
 namespace test5 {
   class A {
-    void operator=(const A &); // expected-note 2 {{declared private here}}
+    void operator=(const A &); // expected-note 2 {{implicitly declared private here}}
   };
 
   class Test1 { A a; }; // expected-error {{private member}}
@@ -372,7 +372,7 @@ namespace test15 {
     int private_foo; // expected-note {{declared private here}}
     static int private_sfoo; // expected-note {{declared private here}}
   protected:
-    int protected_foo; // expected-note 4 {{declared protected here}}
+    int protected_foo; // expected-note 3 {{declared protected here}} // expected-note {{object type must derive from context type 'test15::B<int>'}}
     static int protected_sfoo; // expected-note 3 {{declared protected here}}
 
     int test1(A<int> &a) {
@@ -449,4 +449,42 @@ namespace test18 {
   class C : B {
     A<int> member;
   };
+}
+
+// PR8325
+namespace test19 {
+  class A { ~A(); };
+  // The destructor is not implicitly referenced here.  Contrast to test16, 
+  // testing PR7281, earlier in this file.
+  void b(A* x) { throw x; }
+}
+
+// PR7930
+namespace test20 {
+  class Foo {
+    Foo(); // expected-note {{implicitly declared private here}}
+  };
+  Foo::Foo() {}
+
+  void test() {
+    Foo a; // expected-error {{calling a private constructor}}
+  }
+}
+
+namespace test21 {
+  template <class T> class A {
+    void foo();
+    void bar();
+    class Inner; // expected-note {{implicitly declared private here}}
+  public:
+    void baz();
+  };
+  template <class T> class A<T>::Inner {};
+  class B {
+    template <class T> class A<T>::Inner;
+  };
+
+  void test() {
+    A<int>::Inner i; // expected-error {{'Inner' is a private member}}
+  }
 }

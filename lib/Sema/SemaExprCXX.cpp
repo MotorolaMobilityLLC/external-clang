@@ -262,9 +262,9 @@ ParsedType Sema::getDestructorName(SourceLocation TildeLoc,
 
 /// \brief Build a C++ typeid expression with a type operand.
 ExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
-                                            SourceLocation TypeidLoc,
-                                            TypeSourceInfo *Operand,
-                                            SourceLocation RParenLoc) {
+                                SourceLocation TypeidLoc,
+                                TypeSourceInfo *Operand,
+                                SourceLocation RParenLoc) {
   // C++ [expr.typeid]p4:
   //   The top-level cv-qualifiers of the lvalue expression or the type-id 
   //   that is the operand of typeid are always ignored.
@@ -285,9 +285,9 @@ ExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
 
 /// \brief Build a C++ typeid expression with an expression operand.
 ExprResult Sema::BuildCXXTypeId(QualType TypeInfoType,
-                                            SourceLocation TypeidLoc,
-                                            Expr *E,
-                                            SourceLocation RParenLoc) {
+                                SourceLocation TypeidLoc,
+                                Expr *E,
+                                SourceLocation RParenLoc) {
   bool isUnevaluatedOperand = true;
   if (E && !E->isTypeDependent()) {
     QualType T = E->getType();
@@ -343,14 +343,16 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
   if (!StdNamespace)
     return ExprError(Diag(OpLoc, diag::err_need_header_before_typeid));
 
-  IdentifierInfo *TypeInfoII = &PP.getIdentifierTable().get("type_info");
-  LookupResult R(*this, TypeInfoII, SourceLocation(), LookupTagName);
-  LookupQualifiedName(R, getStdNamespace());
-  RecordDecl *TypeInfoRecordDecl = R.getAsSingle<RecordDecl>();
-  if (!TypeInfoRecordDecl)
-    return ExprError(Diag(OpLoc, diag::err_need_header_before_typeid));
+  if (!CXXTypeInfoDecl) {
+    IdentifierInfo *TypeInfoII = &PP.getIdentifierTable().get("type_info");
+    LookupResult R(*this, TypeInfoII, SourceLocation(), LookupTagName);
+    LookupQualifiedName(R, getStdNamespace());
+    CXXTypeInfoDecl = R.getAsSingle<RecordDecl>();
+    if (!CXXTypeInfoDecl)
+      return ExprError(Diag(OpLoc, diag::err_need_header_before_typeid));
+  }
   
-  QualType TypeInfoType = Context.getTypeDeclType(TypeInfoRecordDecl);
+  QualType TypeInfoType = Context.getTypeDeclType(CXXTypeInfoDecl);
   
   if (isType) {
     // The operand is a type; handle it as such.
@@ -368,6 +370,62 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
 
   // The operand is an expression.  
   return BuildCXXTypeId(TypeInfoType, OpLoc, (Expr*)TyOrExpr, RParenLoc);
+}
+
+/// \brief Build a Microsoft __uuidof expression with a type operand.
+ExprResult Sema::BuildCXXUuidof(QualType TypeInfoType,
+                                SourceLocation TypeidLoc,
+                                TypeSourceInfo *Operand,
+                                SourceLocation RParenLoc) {
+  // FIXME: add __uuidof semantic analysis for type operand.
+  return Owned(new (Context) CXXUuidofExpr(TypeInfoType.withConst(),
+                                           Operand,
+                                           SourceRange(TypeidLoc, RParenLoc)));
+}
+
+/// \brief Build a Microsoft __uuidof expression with an expression operand.
+ExprResult Sema::BuildCXXUuidof(QualType TypeInfoType,
+                                SourceLocation TypeidLoc,
+                                Expr *E,
+                                SourceLocation RParenLoc) {
+  // FIXME: add __uuidof semantic analysis for expr operand.
+  return Owned(new (Context) CXXUuidofExpr(TypeInfoType.withConst(),
+                                           E,
+                                           SourceRange(TypeidLoc, RParenLoc)));  
+}
+
+/// ActOnCXXUuidof - Parse __uuidof( type-id ) or __uuidof (expression);
+ExprResult
+Sema::ActOnCXXUuidof(SourceLocation OpLoc, SourceLocation LParenLoc,
+                     bool isType, void *TyOrExpr, SourceLocation RParenLoc) {
+  // If MSVCGuidDecl has not been cached, do the lookup. 
+  if (!MSVCGuidDecl) {
+    IdentifierInfo *GuidII = &PP.getIdentifierTable().get("_GUID");
+    LookupResult R(*this, GuidII, SourceLocation(), LookupTagName);
+    LookupQualifiedName(R, Context.getTranslationUnitDecl());
+    MSVCGuidDecl = R.getAsSingle<RecordDecl>();
+    if (!MSVCGuidDecl)
+      return ExprError(Diag(OpLoc, diag::err_need_header_before_ms_uuidof));
+  }  
+  
+  QualType GuidType = Context.getTypeDeclType(MSVCGuidDecl);
+  
+  if (isType) {
+    // The operand is a type; handle it as such.
+    TypeSourceInfo *TInfo = 0;
+    QualType T = GetTypeFromParser(ParsedType::getFromOpaquePtr(TyOrExpr),
+                                   &TInfo);
+    if (T.isNull())
+      return ExprError();
+    
+    if (!TInfo)
+      TInfo = Context.getTrivialTypeSourceInfo(T, OpLoc);
+
+    return BuildCXXUuidof(GuidType, OpLoc, TInfo, RParenLoc);
+  }
+
+  // The operand is an expression.  
+  return BuildCXXUuidof(GuidType, OpLoc, (Expr*)TyOrExpr, RParenLoc);
 }
 
 /// ActOnCXXBoolLiteral - Parse {true,false} literals.
@@ -451,6 +509,10 @@ bool Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *&E) {
   // exception handling will make use of the vtable.
   MarkVTableUsed(ThrowLoc, RD);
 
+  // If a pointer is thrown, the referenced object will not be destroyed.
+  if (isPointer)
+    return false;
+
   // If the class has a non-trivial destructor, we must be able to call it.
   if (RD->hasTrivialDestructor())
     return false;
@@ -481,34 +543,42 @@ ExprResult Sema::ActOnCXXThis(SourceLocation ThisLoc) {
   return ExprError(Diag(ThisLoc, diag::err_invalid_this_use));
 }
 
+ExprResult
+Sema::ActOnCXXTypeConstructExpr(ParsedType TypeRep,
+                                SourceLocation LParenLoc,
+                                MultiExprArg exprs,
+                                SourceLocation RParenLoc) {
+  if (!TypeRep)
+    return ExprError();
+  
+  TypeSourceInfo *TInfo;
+  QualType Ty = GetTypeFromParser(TypeRep, &TInfo);
+  if (!TInfo)
+    TInfo = Context.getTrivialTypeSourceInfo(Ty, SourceLocation());
+
+  return BuildCXXTypeConstructExpr(TInfo, LParenLoc, exprs, RParenLoc);
+}
+
 /// ActOnCXXTypeConstructExpr - Parse construction of a specified type.
 /// Can be interpreted either as function-style casting ("int(x)")
 /// or class type construction ("ClassType(x,y,z)")
 /// or creation of a value-initialized type ("int()").
 ExprResult
-Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, ParsedType TypeRep,
+Sema::BuildCXXTypeConstructExpr(TypeSourceInfo *TInfo,
                                 SourceLocation LParenLoc,
                                 MultiExprArg exprs,
-                                SourceLocation *CommaLocs,
                                 SourceLocation RParenLoc) {
-  if (!TypeRep)
-    return ExprError();
-
-  TypeSourceInfo *TInfo;
-  QualType Ty = GetTypeFromParser(TypeRep, &TInfo);
-  if (!TInfo)
-    TInfo = Context.getTrivialTypeSourceInfo(Ty, SourceLocation());
+  QualType Ty = TInfo->getType();
   unsigned NumExprs = exprs.size();
   Expr **Exprs = (Expr**)exprs.get();
-  SourceLocation TyBeginLoc = TypeRange.getBegin();
+  SourceLocation TyBeginLoc = TInfo->getTypeLoc().getBeginLoc();
   SourceRange FullRange = SourceRange(TyBeginLoc, RParenLoc);
 
   if (Ty->isDependentType() ||
       CallExpr::hasAnyTypeDependentArguments(Exprs, NumExprs)) {
     exprs.release();
 
-    return Owned(CXXUnresolvedConstructExpr::Create(Context,
-                                                    TypeRange.getBegin(), Ty,
+    return Owned(CXXUnresolvedConstructExpr::Create(Context, TInfo,
                                                     LParenLoc,
                                                     Exprs, NumExprs,
                                                     RParenLoc));
@@ -536,51 +606,31 @@ Sema::ActOnCXXTypeConstructExpr(SourceRange TypeRange, ParsedType TypeRep,
   if (NumExprs == 1) {
     CastKind Kind = CK_Unknown;
     CXXCastPath BasePath;
-    if (CheckCastTypes(TypeRange, Ty, Exprs[0], Kind, BasePath,
+    if (CheckCastTypes(TInfo->getTypeLoc().getSourceRange(), Ty, Exprs[0], 
+                       Kind, BasePath,
                        /*FunctionalStyle=*/true))
       return ExprError();
 
     exprs.release();
 
     return Owned(CXXFunctionalCastExpr::Create(Context,
-                                              Ty.getNonLValueExprType(Context),
+                                               Ty.getNonLValueExprType(Context),
                                                TInfo, TyBeginLoc, Kind,
                                                Exprs[0], &BasePath,
                                                RParenLoc));
   }
 
-  if (Ty->isRecordType()) {
-    InitializedEntity Entity = InitializedEntity::InitializeTemporary(Ty);
-    InitializationKind Kind
-      = NumExprs ? InitializationKind::CreateDirect(TypeRange.getBegin(), 
-                                                    LParenLoc, RParenLoc)
-                 : InitializationKind::CreateValue(TypeRange.getBegin(), 
-                                                   LParenLoc, RParenLoc);
-    InitializationSequence InitSeq(*this, Entity, Kind, Exprs, NumExprs);
-    ExprResult Result = InitSeq.Perform(*this, Entity, Kind,
-                                              move(exprs));
+  InitializedEntity Entity = InitializedEntity::InitializeTemporary(TInfo);
+  InitializationKind Kind
+    = NumExprs ? InitializationKind::CreateDirect(TyBeginLoc,
+                                                  LParenLoc, RParenLoc)
+               : InitializationKind::CreateValue(TyBeginLoc, 
+                                                 LParenLoc, RParenLoc);
+  InitializationSequence InitSeq(*this, Entity, Kind, Exprs, NumExprs);
+  ExprResult Result = InitSeq.Perform(*this, Entity, Kind, move(exprs));
 
-    // FIXME: Improve AST representation?
-    return move(Result);
-  }
-
-  // C++ [expr.type.conv]p1:
-  // If the expression list specifies more than a single value, the type shall
-  // be a class with a suitably declared constructor.
-  //
-  if (NumExprs > 1)
-    return ExprError(Diag(CommaLocs[0],
-                          diag::err_builtin_func_cast_more_than_one_arg)
-      << FullRange);
-
-  assert(NumExprs == 0 && "Expected 0 expressions");
-  // C++ [expr.type.conv]p2:
-  // The expression T(), where T is a simple-type-specifier for a non-array
-  // complete object type or the (possibly cv-qualified) void type, creates an
-  // rvalue of the specified type, which is value-initialized.
-  //
-  exprs.release();
-  return Owned(new (Context) CXXScalarValueInitExpr(Ty, TyBeginLoc, RParenLoc));
+  // FIXME: Improve AST representation?
+  return move(Result);
 }
 
 
@@ -630,12 +680,14 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
     }
   }
 
-  //FIXME: Store TypeSourceInfo in CXXNew expression.
   TypeSourceInfo *TInfo = GetTypeForDeclarator(D, /*Scope=*/0);
   QualType AllocType = TInfo->getType();
   if (D.isInvalidType())
     return ExprError();
   
+  if (!TInfo)
+    TInfo = Context.getTrivialTypeSourceInfo(AllocType);
+    
   SourceRange R = TInfo->getTypeLoc().getSourceRange();    
   return BuildCXXNew(StartLoc, UseGlobal,
                      PlacementLParen,
@@ -643,8 +695,7 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
                      PlacementRParen,
                      TypeIdParens,
                      AllocType,
-                     D.getSourceRange().getBegin(),
-                     R,
+                     TInfo,
                      ArraySize,
                      ConstructorLParen,
                      move(ConstructorArgs),
@@ -658,14 +709,12 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   SourceLocation PlacementRParen,
                   SourceRange TypeIdParens,
                   QualType AllocType,
-                  SourceLocation TypeLoc,
-                  SourceRange TypeRange,
+                  TypeSourceInfo *AllocTypeInfo,
                   Expr *ArraySize,
                   SourceLocation ConstructorLParen,
                   MultiExprArg ConstructorArgs,
                   SourceLocation ConstructorRParen) {
-  if (CheckAllocatedType(AllocType, TypeLoc, TypeRange))
-    return ExprError();
+  SourceRange TypeRange = AllocTypeInfo->getTypeLoc().getSourceRange();
 
   // Per C++0x [expr.new]p5, the type being constructed may be a
   // typedef of an array type.
@@ -678,6 +727,9 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
       AllocType = Array->getElementType();
     }
   }
+
+  if (CheckAllocatedType(AllocType, TypeRange.getBegin(), TypeRange))
+    return ExprError();
 
   QualType ResultType = Context.getPointerType(AllocType);
 
@@ -703,7 +755,7 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
     
     ArraySize = ConvertedSize.take();
     SizeType = ArraySize->getType();
-    if (!SizeType->isIntegralOrEnumerationType())
+    if (!SizeType->isIntegralOrUnscopedEnumerationType())
       return ExprError();
     
     // Let's see if this is a constant < 0. If so, we reject it out of hand.
@@ -800,10 +852,10 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
     //     - If the new-initializer is omitted, the object is default-
     //       initialized (8.5); if no initialization is performed,
     //       the object has indeterminate value
-      = !Init? InitializationKind::CreateDefault(TypeLoc)
+      = !Init? InitializationKind::CreateDefault(TypeRange.getBegin())
     //     - Otherwise, the new-initializer is interpreted according to the 
     //       initialization rules of 8.5 for direct-initialization.
-             : InitializationKind::CreateDirect(TypeLoc,
+             : InitializationKind::CreateDirect(TypeRange.getBegin(),
                                                 ConstructorLParen, 
                                                 ConstructorRParen);
     
@@ -827,7 +879,7 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
         for (CXXConstructExpr::arg_iterator A = Construct->arg_begin(),
                                          AEnd = Construct->arg_end();
              A != AEnd; ++A)
-          ConvertedConstructorArgs.push_back(A->Retain());
+          ConvertedConstructorArgs.push_back(*A);
       } else {
         // Take the converted initializer.
         ConvertedConstructorArgs.push_back(FullInit.release());
@@ -852,14 +904,15 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
   PlacementArgs.release();
   ConstructorArgs.release();
   
-  // FIXME: The TypeSourceInfo should also be included in CXXNewExpr.
   return Owned(new (Context) CXXNewExpr(Context, UseGlobal, OperatorNew,
                                         PlaceArgs, NumPlaceArgs, TypeIdParens,
                                         ArraySize, Constructor, Init,
                                         ConsArgs, NumConsArgs, OperatorDelete,
-                                        ResultType, StartLoc,
+                                        ResultType, AllocTypeInfo,
+                                        StartLoc,
                                         Init ? ConstructorRParen :
-                                               TypeRange.getEnd()));
+                                               TypeRange.getEnd(),
+                                        ConstructorLParen, ConstructorRParen));
 }
 
 /// CheckAllocatedType - Checks that a type is suitable as the allocated type
@@ -883,7 +936,10 @@ bool Sema::CheckAllocatedType(QualType AllocType, SourceLocation Loc,
   else if (RequireNonAbstractType(Loc, AllocType,
                                   diag::err_allocation_of_abstract_type))
     return true;
-
+  else if (AllocType->isVariablyModifiedType())
+    return Diag(Loc, diag::err_variably_modified_new_type)
+             << AllocType;
+  
   return false;
 }
 
@@ -999,7 +1055,14 @@ bool Sema::FindAllocationFunctions(SourceLocation StartLoc, SourceRange Range,
 
   llvm::SmallVector<std::pair<DeclAccessPair,FunctionDecl*>, 2> Matches;
 
-  if (NumPlaceArgs > 0) {
+  // Whether we're looking for a placement operator delete is dictated
+  // by whether we selected a placement operator new, not by whether
+  // we had explicit placement arguments.  This matters for things like
+  //   struct A { void *operator new(size_t, int = 0); ... };
+  //   A *a = new A()
+  bool isPlacementNew = (NumPlaceArgs > 0 || OperatorNew->param_size() != 1);
+
+  if (isPlacementNew) {
     // C++ [expr.new]p20:
     //   A declaration of a placement deallocation function matches the
     //   declaration of a placement allocation function if it has the
@@ -1140,9 +1203,10 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
     for (unsigned i = 0; (i < NumArgs && i < NumArgsInFnDecl); ++i) {
       ExprResult Result
         = PerformCopyInitialization(InitializedEntity::InitializeParameter(
+                                                       Context,
                                                        FnDecl->getParamDecl(i)),
                                     SourceLocation(),
-                                    Owned(Args[i]->Retain()));
+                                    Owned(Args[i]));
       if (Result.isInvalid())
         return true;
       
@@ -1391,6 +1455,7 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
   // DR599 amends "pointer type" to "pointer to object type" in both cases.
 
   FunctionDecl *OperatorDelete = 0;
+  bool ArrayFormAsWritten = ArrayForm;
 
   if (!Ex->isTypeDependent()) {
     QualType Type = Ex->getType();
@@ -1467,7 +1532,14 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
     //   of the delete-expression. ]
     ImpCastExprToType(Ex, Context.getPointerType(Context.VoidTy), 
                       CK_NoOp);
-    
+
+    if (Pointee->isArrayType() && !ArrayForm) {
+      Diag(StartLoc, diag::warn_delete_array_type)
+          << Type << Ex->getSourceRange()
+          << FixItHint::CreateInsertion(PP.getLocForEndOfToken(StartLoc), "[]");
+      ArrayForm = true;
+    }
+
     DeclarationName DeleteName = Context.DeclarationNames.getCXXOperatorName(
                                       ArrayForm ? OO_Array_Delete : OO_Delete);
 
@@ -1480,9 +1552,11 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
         return ExprError();
       
       if (!RD->hasTrivialDestructor())
-        if (const CXXDestructorDecl *Dtor = LookupDestructor(RD))
+        if (CXXDestructorDecl *Dtor = LookupDestructor(RD)) {
           MarkDeclarationReferenced(StartLoc,
                                     const_cast<CXXDestructorDecl*>(Dtor));
+          DiagnoseUseOfDecl(Dtor, StartLoc);
+        }
     }
     
     if (!OperatorDelete) {
@@ -1501,7 +1575,8 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
   }
 
   return Owned(new (Context) CXXDeleteExpr(Context.VoidTy, UseGlobal, ArrayForm,
-                                           OperatorDelete, Ex, StartLoc));
+                                           ArrayFormAsWritten, OperatorDelete,
+                                           Ex, StartLoc));
 }
 
 /// \brief Check the use of the given variable as a C++ condition in an if,
@@ -1594,7 +1669,8 @@ static ExprResult BuildCXXCastArgument(Sema &S,
     ExprResult Result = 
     S.BuildCXXConstructExpr(CastLoc, Ty, cast<CXXConstructorDecl>(Method), 
                             move_arg(ConstructorArgs),
-                            /*ZeroInit*/ false, CXXConstructExpr::CK_Complete);
+                            /*ZeroInit*/ false, CXXConstructExpr::CK_Complete,
+                            SourceRange());
     if (Result.isInvalid())
       return ExprError();
     
@@ -1727,7 +1803,8 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
                               ToType, SCS.CopyConstructor,
                               move_arg(ConstructorArgs),
                               /*ZeroInit*/ false,
-                              CXXConstructExpr::CK_Complete);
+                              CXXConstructExpr::CK_Complete,
+                              SourceRange());
       if (FromResult.isInvalid())
         return true;
       From = FromResult.takeAs<Expr>();
@@ -1738,7 +1815,8 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
                             ToType, SCS.CopyConstructor,
                             MultiExprArg(*this, &From, 1),
                             /*ZeroInit*/ false,
-                            CXXConstructExpr::CK_Complete);
+                            CXXConstructExpr::CK_Complete,
+                            SourceRange());
 
     if (FromResult.isInvalid())
       return true;
@@ -1757,7 +1835,7 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
 
     if (DiagnoseUseOfDecl(Fn, From->getSourceRange().getBegin()))
       return true;
-
+    
     From = FixOverloadedFunctionReference(From, Found, Fn);
     FromType = From->getType();
   }
@@ -1933,26 +2011,258 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
   return false;
 }
 
-ExprResult Sema::ActOnUnaryTypeTrait(UnaryTypeTrait OTT,
-                                                 SourceLocation KWLoc,
-                                                 SourceLocation LParen,
-                                                 ParsedType Ty,
-                                                 SourceLocation RParen) {
-  QualType T = GetTypeFromParser(Ty);
+ExprResult Sema::ActOnUnaryTypeTrait(UnaryTypeTrait UTT,
+                                     SourceLocation KWLoc,
+                                     ParsedType Ty,
+                                     SourceLocation RParen) {
+  TypeSourceInfo *TSInfo;
+  QualType T = GetTypeFromParser(Ty, &TSInfo);
 
+  if (!TSInfo)
+    TSInfo = Context.getTrivialTypeSourceInfo(T);
+  return BuildUnaryTypeTrait(UTT, KWLoc, TSInfo, RParen);
+}
+
+static bool EvaluateUnaryTypeTrait(Sema &Self, UnaryTypeTrait UTT, QualType T,
+                                   SourceLocation KeyLoc) {
+  assert(!T->isDependentType() &&
+         "Cannot evaluate traits for dependent types.");
+  ASTContext &C = Self.Context;
+  switch(UTT) {
+  default: assert(false && "Unknown type trait or not implemented");
+  case UTT_IsPOD: return T->isPODType();
+  case UTT_IsLiteral: return T->isLiteralType();
+  case UTT_IsClass: // Fallthrough
+  case UTT_IsUnion:
+    if (const RecordType *Record = T->getAs<RecordType>()) {
+      bool Union = Record->getDecl()->isUnion();
+      return UTT == UTT_IsUnion ? Union : !Union;
+    }
+    return false;
+  case UTT_IsEnum: return T->isEnumeralType();
+  case UTT_IsPolymorphic:
+    if (const RecordType *Record = T->getAs<RecordType>()) {
+      // Type traits are only parsed in C++, so we've got CXXRecords.
+      return cast<CXXRecordDecl>(Record->getDecl())->isPolymorphic();
+    }
+    return false;
+  case UTT_IsAbstract:
+    if (const RecordType *RT = T->getAs<RecordType>())
+      return cast<CXXRecordDecl>(RT->getDecl())->isAbstract();
+    return false;
+  case UTT_IsEmpty:
+    if (const RecordType *Record = T->getAs<RecordType>()) {
+      return !Record->getDecl()->isUnion()
+          && cast<CXXRecordDecl>(Record->getDecl())->isEmpty();
+    }
+    return false;
+  case UTT_HasTrivialConstructor:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If __is_pod (type) is true then the trait is true, else if type is
+    //   a cv class or union type (or array thereof) with a trivial default
+    //   constructor ([class.ctor]) then the trait is true, else it is false.
+    if (T->isPODType())
+      return true;
+    if (const RecordType *RT =
+          C.getBaseElementType(T)->getAs<RecordType>())
+      return cast<CXXRecordDecl>(RT->getDecl())->hasTrivialConstructor();
+    return false;
+  case UTT_HasTrivialCopy:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If __is_pod (type) is true or type is a reference type then
+    //   the trait is true, else if type is a cv class or union type
+    //   with a trivial copy constructor ([class.copy]) then the trait
+    //   is true, else it is false.
+    if (T->isPODType() || T->isReferenceType())
+      return true;
+    if (const RecordType *RT = T->getAs<RecordType>())
+      return cast<CXXRecordDecl>(RT->getDecl())->hasTrivialCopyConstructor();
+    return false;
+  case UTT_HasTrivialAssign:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If type is const qualified or is a reference type then the
+    //   trait is false. Otherwise if __is_pod (type) is true then the
+    //   trait is true, else if type is a cv class or union type with
+    //   a trivial copy assignment ([class.copy]) then the trait is
+    //   true, else it is false.
+    // Note: the const and reference restrictions are interesting,
+    // given that const and reference members don't prevent a class
+    // from having a trivial copy assignment operator (but do cause
+    // errors if the copy assignment operator is actually used, q.v.
+    // [class.copy]p12).
+
+    if (C.getBaseElementType(T).isConstQualified())
+      return false;
+    if (T->isPODType())
+      return true;
+    if (const RecordType *RT = T->getAs<RecordType>())
+      return cast<CXXRecordDecl>(RT->getDecl())->hasTrivialCopyAssignment();
+    return false;
+  case UTT_HasTrivialDestructor:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If __is_pod (type) is true or type is a reference type
+    //   then the trait is true, else if type is a cv class or union
+    //   type (or array thereof) with a trivial destructor
+    //   ([class.dtor]) then the trait is true, else it is
+    //   false.
+    if (T->isPODType() || T->isReferenceType())
+      return true;
+    if (const RecordType *RT =
+          C.getBaseElementType(T)->getAs<RecordType>())
+      return cast<CXXRecordDecl>(RT->getDecl())->hasTrivialDestructor();
+    return false;
+  // TODO: Propagate nothrowness for implicitly declared special members.
+  case UTT_HasNothrowAssign:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If type is const qualified or is a reference type then the
+    //   trait is false. Otherwise if __has_trivial_assign (type)
+    //   is true then the trait is true, else if type is a cv class
+    //   or union type with copy assignment operators that are known
+    //   not to throw an exception then the trait is true, else it is
+    //   false.
+    if (C.getBaseElementType(T).isConstQualified())
+      return false;
+    if (T->isReferenceType())
+      return false;
+    if (T->isPODType())
+      return true;
+    if (const RecordType *RT = T->getAs<RecordType>()) {
+      CXXRecordDecl* RD = cast<CXXRecordDecl>(RT->getDecl());
+      if (RD->hasTrivialCopyAssignment())
+        return true;
+
+      bool FoundAssign = false;
+      bool AllNoThrow = true;
+      DeclarationName Name = C.DeclarationNames.getCXXOperatorName(OO_Equal);
+      LookupResult Res(Self, DeclarationNameInfo(Name, KeyLoc),
+                       Sema::LookupOrdinaryName);
+      if (Self.LookupQualifiedName(Res, RD)) {
+        for (LookupResult::iterator Op = Res.begin(), OpEnd = Res.end();
+             Op != OpEnd; ++Op) {
+          CXXMethodDecl *Operator = cast<CXXMethodDecl>(*Op);
+          if (Operator->isCopyAssignmentOperator()) {
+            FoundAssign = true;
+            const FunctionProtoType *CPT
+                = Operator->getType()->getAs<FunctionProtoType>();
+            if (!CPT->hasEmptyExceptionSpec()) {
+              AllNoThrow = false;
+              break;
+            }
+          }
+        }
+      }
+
+      return FoundAssign && AllNoThrow;
+    }
+    return false;
+  case UTT_HasNothrowCopy:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If __has_trivial_copy (type) is true then the trait is true, else
+    //   if type is a cv class or union type with copy constructors that are
+    //   known not to throw an exception then the trait is true, else it is
+    //   false.
+    if (T->isPODType() || T->isReferenceType())
+      return true;
+    if (const RecordType *RT = T->getAs<RecordType>()) {
+      CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+      if (RD->hasTrivialCopyConstructor())
+        return true;
+
+      bool FoundConstructor = false;
+      bool AllNoThrow = true;
+      unsigned FoundTQs;
+      DeclContext::lookup_const_iterator Con, ConEnd;
+      for (llvm::tie(Con, ConEnd) = Self.LookupConstructors(RD);
+           Con != ConEnd; ++Con) {
+        // A template constructor is never a copy constructor.
+        // FIXME: However, it may actually be selected at the actual overload
+        // resolution point.
+        if (isa<FunctionTemplateDecl>(*Con))
+          continue;
+        CXXConstructorDecl *Constructor = cast<CXXConstructorDecl>(*Con);
+        if (Constructor->isCopyConstructor(FoundTQs)) {
+          FoundConstructor = true;
+          const FunctionProtoType *CPT
+              = Constructor->getType()->getAs<FunctionProtoType>();
+          // TODO: check whether evaluating default arguments can throw.
+          // For now, we'll be conservative and assume that they can throw.
+          if (!CPT->hasEmptyExceptionSpec() || CPT->getNumArgs() > 1) {
+            AllNoThrow = false;
+            break;
+          }
+        }
+      }
+
+      return FoundConstructor && AllNoThrow;
+    }
+    return false;
+  case UTT_HasNothrowConstructor:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If __has_trivial_constructor (type) is true then the trait is
+    //   true, else if type is a cv class or union type (or array
+    //   thereof) with a default constructor that is known not to
+    //   throw an exception then the trait is true, else it is false.
+    if (T->isPODType())
+      return true;
+    if (const RecordType *RT = C.getBaseElementType(T)->getAs<RecordType>()) {
+      CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
+      if (RD->hasTrivialConstructor())
+        return true;
+
+      DeclContext::lookup_const_iterator Con, ConEnd;
+      for (llvm::tie(Con, ConEnd) = Self.LookupConstructors(RD);
+           Con != ConEnd; ++Con) {
+        // FIXME: In C++0x, a constructor template can be a default constructor.
+        if (isa<FunctionTemplateDecl>(*Con))
+          continue;
+        CXXConstructorDecl *Constructor = cast<CXXConstructorDecl>(*Con);
+        if (Constructor->isDefaultConstructor()) {
+          const FunctionProtoType *CPT
+              = Constructor->getType()->getAs<FunctionProtoType>();
+          // TODO: check whether evaluating default arguments can throw.
+          // For now, we'll be conservative and assume that they can throw.
+          return CPT->hasEmptyExceptionSpec() && CPT->getNumArgs() == 0;
+        }
+      }
+    }
+    return false;
+  case UTT_HasVirtualDestructor:
+    // http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html:
+    //   If type is a class type with a virtual destructor ([class.dtor])
+    //   then the trait is true, else it is false.
+    if (const RecordType *Record = T->getAs<RecordType>()) {
+      CXXRecordDecl *RD = cast<CXXRecordDecl>(Record->getDecl());
+      if (CXXDestructorDecl *Destructor = Self.LookupDestructor(RD))
+        return Destructor->isVirtual();
+    }
+    return false;
+  }
+}
+
+ExprResult Sema::BuildUnaryTypeTrait(UnaryTypeTrait UTT,
+                                     SourceLocation KWLoc,
+                                     TypeSourceInfo *TSInfo,
+                                     SourceLocation RParen) {
+  QualType T = TSInfo->getType();
+  
   // According to http://gcc.gnu.org/onlinedocs/gcc/Type-Traits.html
   // all traits except __is_class, __is_enum and __is_union require a the type
-  // to be complete.
-  if (OTT != UTT_IsClass && OTT != UTT_IsEnum && OTT != UTT_IsUnion) {
-    if (RequireCompleteType(KWLoc, T,
+  // to be complete, an array of unknown bound, or void.
+  if (UTT != UTT_IsClass && UTT != UTT_IsEnum && UTT != UTT_IsUnion) {
+    QualType E = T;
+    if (T->isIncompleteArrayType())
+      E = Context.getAsArrayType(T)->getElementType();
+    if (!T->isVoidType() &&
+        RequireCompleteType(KWLoc, E,
                             diag::err_incomplete_type_used_in_type_trait_expr))
       return ExprError();
   }
 
-  // There is no point in eagerly computing the value. The traits are designed
-  // to be used from type trait templates, so Ty will be a template parameter
-  // 99% of the time.
-  return Owned(new (Context) UnaryTypeTraitExpr(KWLoc, OTT, T,
+  bool Value = false;
+  if (!T->isDependentType())
+    Value = EvaluateUnaryTypeTrait(*this, UTT, T, KWLoc);
+
+  return Owned(new (Context) UnaryTypeTraitExpr(KWLoc, UTT, TSInfo, Value,
                                                 RParen, Context.BoolTy));
 }
 
@@ -1973,8 +2283,11 @@ QualType Sema::CheckPointerToMemberOperands(
 
   QualType Class(MemPtr->getClass(), 0);
 
-  if (RequireCompleteType(Loc, Class, diag::err_memptr_rhs_to_incomplete))
-    return QualType();
+  // Note: C++ [expr.mptr.oper]p2-3 says that the class type into which the
+  // member pointer points must be completely-defined. However, there is no
+  // reason for this semantic distinction, and the rule is not enforced by
+  // other compilers. Therefore, we do not check this property, as it is
+  // likely to be considered a defect.
 
   // C++ 5.5p2
   //   [...] to its first operand, which shall be of class T or of a class of
@@ -2195,6 +2508,7 @@ static bool ConvertForConditional(Sema &Self, Expr *&E, QualType T) {
 /// See C++ [expr.cond]. Note that LHS is never null, even for the GNU x ?: y
 /// extension. In this case, LHS == Cond. (But they're not aliases.)
 QualType Sema::CXXCheckConditionalOperands(Expr *&Cond, Expr *&LHS, Expr *&RHS,
+                                           Expr *&SAVE,
                                            SourceLocation QuestionLoc) {
   // FIXME: Handle C99's complex types, vector types, block pointers and Obj-C++
   // interface pointers.
@@ -2202,6 +2516,12 @@ QualType Sema::CXXCheckConditionalOperands(Expr *&Cond, Expr *&LHS, Expr *&RHS,
   // C++0x 5.16p1
   //   The first expression is contextually converted to bool.
   if (!Cond->isTypeDependent()) {
+    if (SAVE && Cond->getType()->isArrayType()) {
+      QualType CondTy = Cond->getType();
+      CondTy = Context.getArrayDecayedType(CondTy);
+      ImpCastExprToType(Cond, CondTy, CK_ArrayToPointerDecay);
+      SAVE = LHS = Cond;
+    }
     if (CheckCXXBooleanCondition(Cond))
       return QualType();
   }
@@ -2289,8 +2609,16 @@ QualType Sema::CXXCheckConditionalOperands(Expr *&Cond, Expr *&LHS, Expr *&RHS,
   //   the result is of that type [...]
   bool Same = Context.hasSameType(LTy, RTy);
   if (Same && LHS->isLvalue(Context) == Expr::LV_Valid &&
-      RHS->isLvalue(Context) == Expr::LV_Valid)
-    return LTy;
+      RHS->isLvalue(Context) == Expr::LV_Valid) {
+    // In this context, property reference is really a message call and
+    // is not considered an l-value.
+    bool lhsProperty = (isa<ObjCPropertyRefExpr>(LHS) || 
+                        isa<ObjCImplicitSetterGetterRefExpr>(LHS));
+    bool rhsProperty = (isa<ObjCPropertyRefExpr>(RHS) || 
+                        isa<ObjCImplicitSetterGetterRefExpr>(RHS));
+    if (!lhsProperty && !rhsProperty)
+      return LTy;
+  }
 
   // C++0x 5.16p5
   //   Otherwise, the result is an rvalue. If the second and third operands
@@ -2605,6 +2933,9 @@ QualType Sema::FindCompositePointerType(SourceLocation Loc,
 }
 
 ExprResult Sema::MaybeBindToTemporary(Expr *E) {
+  if (!E)
+    return ExprError();
+  
   if (!Context.getLangOptions().CPlusPlus)
     return Owned(E);
 
@@ -2647,9 +2978,6 @@ ExprResult Sema::MaybeBindToTemporary(Expr *E) {
 Expr *Sema::MaybeCreateCXXExprWithTemporaries(Expr *SubExpr) {
   assert(SubExpr && "sub expression can't be null!");
 
-  // Check any implicit conversions within the expression.
-  CheckImplicitConversions(SubExpr);
-
   unsigned FirstTemporary = ExprEvalContexts.back().NumTemporaries;
   assert(ExprTemporaries.size() >= FirstTemporary);
   if (ExprTemporaries.size() == FirstTemporary)
@@ -2686,6 +3014,26 @@ FullExpr Sema::CreateFullExpr(Expr *SubExpr) {
                         ExprTemporaries.end());
 
   return E;
+}
+
+Stmt *Sema::MaybeCreateCXXStmtWithTemporaries(Stmt *SubStmt) {
+  assert(SubStmt && "sub statement can't be null!");
+
+  unsigned FirstTemporary = ExprEvalContexts.back().NumTemporaries;
+  assert(ExprTemporaries.size() >= FirstTemporary);
+  if (ExprTemporaries.size() == FirstTemporary)
+    return SubStmt;
+
+  // FIXME: In order to attach the temporaries, wrap the statement into
+  // a StmtExpr; currently this is only used for asm statements.
+  // This is hacky, either create a new CXXStmtWithTemporaries statement or
+  // a new AsmStmtWithTemporaries.
+  CompoundStmt *CompStmt = new (Context) CompoundStmt(Context, &SubStmt, 1,
+                                                      SourceLocation(),
+                                                      SourceLocation());
+  Expr *E = new (Context) StmtExpr(CompStmt, Context.VoidTy, SourceLocation(),
+                                   SourceLocation());
+  return MaybeCreateCXXExprWithTemporaries(E);
 }
 
 ExprResult
@@ -2784,7 +3132,6 @@ ExprResult Sema::DiagnoseDtorReference(SourceLocation NameLoc,
                        MemExpr,
                        /*LPLoc*/ ExpectedLParenLoc,
                        MultiExprArg(),
-                       /*CommaLocs*/ 0,
                        /*RPLoc*/ ExpectedLParenLoc);
 }
 
@@ -3053,7 +3400,27 @@ CXXMemberCallExpr *Sema::BuildCXXMemberCallExpr(Expr *Exp,
   return CE;
 }
 
+ExprResult Sema::BuildCXXNoexceptExpr(SourceLocation KeyLoc, Expr *Operand,
+                                      SourceLocation RParen) {
+  return Owned(new (Context) CXXNoexceptExpr(Context.BoolTy, Operand,
+                                             Operand->CanThrow(Context),
+                                             KeyLoc, RParen));
+}
+
+ExprResult Sema::ActOnNoexceptExpr(SourceLocation KeyLoc, SourceLocation,
+                                   Expr *Operand, SourceLocation RParen) {
+  return BuildCXXNoexceptExpr(KeyLoc, Operand, RParen);
+}
+
 ExprResult Sema::ActOnFinishFullExpr(Expr *FullExpr) {
   if (!FullExpr) return ExprError();
+
+  CheckImplicitConversions(FullExpr);
   return MaybeCreateCXXExprWithTemporaries(FullExpr);
+}
+
+StmtResult Sema::ActOnFinishFullStmt(Stmt *FullStmt) {
+  if (!FullStmt) return StmtError();
+
+  return MaybeCreateCXXStmtWithTemporaries(FullStmt);
 }

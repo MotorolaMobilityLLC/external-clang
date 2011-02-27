@@ -78,10 +78,10 @@ static int funk(char *s) {
 }
 void next();
 void foo4() {
-  int (^xx)(const char *s) = ^(char *s) { return 1; }; // expected-error {{incompatible block pointer types initializing 'int (^)(char const *)' with an expression of type 'int (^)(char *)'}}
-  int (*yy)(const char *s) = funk; // expected-warning {{incompatible pointer types initializing 'int (*)(char const *)' with an expression of type 'int (char *)'}}
+  int (^xx)(const char *s) = ^(char *s) { return 1; }; // expected-error {{incompatible block pointer types initializing 'int (^)(const char *)' with an expression of type 'int (^)(char *)'}}
+  int (*yy)(const char *s) = funk; // expected-warning {{incompatible pointer types initializing 'int (*)(const char *)' with an expression of type 'int (char *)'}}
   
-  int (^nested)(char *s) = ^(char *str) { void (^nest)(void) = ^(void) { printf("%s\n", str); }; next(); return 1; }; // expected-warning{{implicitly declaring C library function 'printf' with type 'int (char const *, ...)'}} \
+  int (^nested)(char *s) = ^(char *str) { void (^nest)(void) = ^(void) { printf("%s\n", str); }; next(); return 1; }; // expected-warning{{implicitly declaring C library function 'printf' with type 'int (const char *, ...)'}} \
   // expected-note{{please include the header <stdio.h> or explicitly provide a declaration for 'printf'}}
 }
 
@@ -100,16 +100,16 @@ int (*funcptr3[5])(long);
 int sz8 = sizeof(^int (*[5])(long) {return funcptr3;}); // expected-error {{block declared as returning an array}}
 
 void foo6() {
-  int (^b)(int) __attribute__((noreturn)); // expected-warning{{blocks declared 'noreturn' should have a 'void' result type}}
+  int (^b)(int) __attribute__((noreturn));
   b = ^ (int i) __attribute__((noreturn)) { return 1; };  // expected-error {{block declared 'noreturn' should not return}}
   b(1);
-  int (^c)(void) __attribute__((noreturn)) = ^ __attribute__((noreturn)) { return 100; }; // expected-error {{block declared 'noreturn' should not return}} expected-warning{{blocks declared 'noreturn' should have a 'void' result type}}
+  int (^c)(void) __attribute__((noreturn)) = ^ __attribute__((noreturn)) { return 100; }; // expected-error {{block declared 'noreturn' should not return}}
 }
 
 
 void foo7()
 {
- const int (^BB) (void) = ^{ const int i = 1; return i; }; // expected-error{{incompatible block pointer types initializing 'int const (^)(void)' with an expression of type 'int (^)(void)'}}
+ const int (^BB) (void) = ^{ const int i = 1; return i; }; // expected-error{{incompatible block pointer types initializing 'const int (^)(void)' with an expression of type 'int (^)(void)'}}
 
  const int (^CC) (void)  = ^const int{ const int i = 1; return i; };
 

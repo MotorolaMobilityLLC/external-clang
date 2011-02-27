@@ -28,7 +28,7 @@ Store StoreManager::EnterStackFrame(const GRState *state,
 
 const MemRegion *StoreManager::MakeElementRegion(const MemRegion *Base,
                                               QualType EleTy, uint64_t index) {
-  SVal idx = ValMgr.makeArrayIndex(index);
+  NonLoc idx = ValMgr.makeArrayIndex(index);
   return MRMgr.getElementRegion(EleTy, idx, Base, ValMgr.getContext());
 }
 
@@ -45,7 +45,7 @@ static bool IsCompleteType(ASTContext &Ctx, QualType Ty) {
 
 const ElementRegion *StoreManager::GetElementZeroRegion(const MemRegion *R, 
                                                         QualType T) {
-  SVal idx = ValMgr.makeZeroArrayIndex();
+  NonLoc idx = ValMgr.makeZeroArrayIndex();
   assert(!T.isNull());
   return MRMgr.getElementRegion(T, idx, R, Ctx);
 }
@@ -101,17 +101,10 @@ const MemRegion *StoreManager::CastRegion(const MemRegion *R, QualType CastToTy)
       assert(0 && "Invalid region cast");
       break;
     }
-    
+
     case MemRegion::FunctionTextRegionKind:
     case MemRegion::BlockTextRegionKind:
-    case MemRegion::BlockDataRegionKind: {
-      // CodeTextRegion should be cast to only a function or block pointer type,
-      // although they can in practice be casted to anything, e.g, void*, char*,
-      // etc.  
-      // Just return the region.
-      return R;
-    }
-
+    case MemRegion::BlockDataRegionKind:
     case MemRegion::StringRegionKind:
       // FIXME: Need to handle arbitrary downcasts.
     case MemRegion::SymbolicRegionKind:
@@ -274,7 +267,7 @@ SVal StoreManager::getLValueFieldOrIvar(const Decl* D, SVal Base) {
   return loc::MemRegionVal(MRMgr.getFieldRegion(cast<FieldDecl>(D), BaseR));
 }
 
-SVal StoreManager::getLValueElement(QualType elementType, SVal Offset, 
+SVal StoreManager::getLValueElement(QualType elementType, NonLoc Offset, 
                                     SVal Base) {
 
   // If the base is an unknown or undefined value, just return it back.
@@ -290,7 +283,7 @@ SVal StoreManager::getLValueElement(QualType elementType, SVal Offset,
   const ElementRegion *ElemR = dyn_cast<ElementRegion>(BaseRegion);
 
   // Convert the offset to the appropriate size and signedness.
-  Offset = ValMgr.convertToArrayIndex(Offset);
+  Offset = cast<NonLoc>(ValMgr.convertToArrayIndex(Offset));
 
   if (!ElemR) {
     //
@@ -329,8 +322,8 @@ SVal StoreManager::getLValueElement(QualType elementType, SVal Offset,
   assert(BaseIdxI.isSigned());
 
   // Compute the new index.
-  SVal NewIdx = nonloc::ConcreteInt(
-                      ValMgr.getBasicValueFactory().getValue(BaseIdxI + OffI));
+  nonloc::ConcreteInt NewIdx(ValMgr.getBasicValueFactory().getValue(BaseIdxI +
+                                                                    OffI));
 
   // Construct the new ElementRegion.
   const MemRegion *ArrayR = ElemR->getSuperRegion();

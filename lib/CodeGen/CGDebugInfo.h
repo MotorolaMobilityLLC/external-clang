@@ -74,7 +74,7 @@ class CGDebugInfo {
   llvm::DenseMap<const NamespaceDecl *, llvm::WeakVH> NameSpaceCache;
 
   /// Helper functions for getOrCreateType.
-  llvm::DIType CreateType(const BuiltinType *Ty, llvm::DIFile F);
+  llvm::DIType CreateType(const BuiltinType *Ty);
   llvm::DIType CreateType(const ComplexType *Ty, llvm::DIFile F);
   llvm::DIType CreateQualifiedType(QualType Ty, llvm::DIFile F);
   llvm::DIType CreateType(const TypedefType *Ty, llvm::DIFile F);
@@ -98,7 +98,7 @@ class CGDebugInfo {
   llvm::DIType getOrCreateVTablePtrType(llvm::DIFile F);
   llvm::DINameSpace getOrCreateNameSpace(const NamespaceDecl *N, 
                                          llvm::DIDescriptor Unit);
-
+  llvm::DIType CreatePointeeType(QualType PointeeTy, llvm::DIFile F);
   llvm::DIType CreatePointerLikeType(unsigned Tag,
                                      const Type *Ty, QualType PointeeTy,
                                      llvm::DIFile F);
@@ -186,9 +186,10 @@ public:
   void EmitGlobalVariable(llvm::GlobalVariable *GV, ObjCInterfaceDecl *Decl);
 
   /// EmitGlobalVariable - Emit global variable's debug info.
-  void EmitGlobalVariable(const ValueDecl *VD, llvm::ConstantInt *Init, 
-                          CGBuilderTy &Builder);
+  void EmitGlobalVariable(const ValueDecl *VD, llvm::Constant *Init);
 
+  /// getOrCreateRecordType - Emit record type's standalone debug info. 
+  llvm::DIType getOrCreateRecordType(QualType Ty, SourceLocation L);
 private:
   /// EmitDeclare - Emit call to llvm.dbg.declare for a variable declaration.
   void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,
@@ -217,6 +218,9 @@ private:
   /// location.
   llvm::DIFile getOrCreateFile(SourceLocation Loc);
 
+  /// getOrCreateMainFile - Get the file info for main compile unit.
+  llvm::DIFile getOrCreateMainFile();
+
   /// getOrCreateType - Get the type from the cache or create a new type if
   /// necessary.
   llvm::DIType getOrCreateType(QualType Ty, llvm::DIFile F);
@@ -232,6 +236,10 @@ private:
   /// name is constructred on demand (e.g. C++ destructor) then the name
   /// is stored on the side.
   llvm::StringRef getFunctionName(const FunctionDecl *FD);
+
+  /// getObjCMethodName - Returns the unmangled name of an Objective-C method.
+  /// This is the display name for the debugging info.  
+  llvm::StringRef getObjCMethodName(const ObjCMethodDecl *FD);
 
   /// getClassName - Get class name including template argument list.
   llvm::StringRef getClassName(RecordDecl *RD);

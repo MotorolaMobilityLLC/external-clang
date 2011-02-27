@@ -16,6 +16,7 @@
 
 #include "clang-c/Index.h"
 #include "clang/Basic/SourceLocation.h"
+#include "llvm/ADT/PointerUnion.h"
 #include <utility>
 
 namespace clang {
@@ -26,18 +27,26 @@ class Attr;
 class CXXBaseSpecifier;
 class Decl;
 class Expr;
+class FieldDecl;
+class InclusionDirective;
+class LabelStmt;
 class MacroDefinition;
 class MacroInstantiation;
 class NamedDecl;
 class ObjCInterfaceDecl;
 class ObjCProtocolDecl;
+class OverloadedTemplateStorage;
+class OverloadExpr;
 class Stmt;
+class TemplateDecl;
+class TemplateName;
 class TypeDecl;
-
+  
 namespace cxcursor {
   
 CXCursor MakeCXCursor(const clang::Attr *A, clang::Decl *Parent, ASTUnit *TU);
-CXCursor MakeCXCursor(clang::Decl *D, ASTUnit *TU);
+CXCursor MakeCXCursor(clang::Decl *D, ASTUnit *TU,
+                      bool FirstInDeclGroup = true);
 CXCursor MakeCXCursor(clang::Stmt *S, clang::Decl *Parent, ASTUnit *TU);
 CXCursor MakeCXCursorInvalid(CXCursorKind K);
 
@@ -71,10 +80,34 @@ std::pair<ObjCInterfaceDecl *, SourceLocation>
 
 /// \brief Create a type reference at the given location.
 CXCursor MakeCursorTypeRef(TypeDecl *Type, SourceLocation Loc, ASTUnit *TU);
-
+                               
 /// \brief Unpack a TypeRef cursor into the class it references
 /// and optionally the location where the reference occurred.
 std::pair<TypeDecl *, SourceLocation> getCursorTypeRef(CXCursor C);
+
+/// \brief Create a reference to a template at the given location.
+CXCursor MakeCursorTemplateRef(TemplateDecl *Template, SourceLocation Loc,
+                               ASTUnit *TU);
+
+/// \brief Unpack a TemplateRef cursor into the template it references and
+/// the location where the reference occurred.
+std::pair<TemplateDecl *, SourceLocation> getCursorTemplateRef(CXCursor C);
+
+/// \brief Create a reference to a namespace or namespace alias at the given 
+/// location.
+CXCursor MakeCursorNamespaceRef(NamedDecl *NS, SourceLocation Loc, ASTUnit *TU);
+
+/// \brief Unpack a NamespaceRef cursor into the namespace or namespace alias
+/// it references and the location where the reference occurred.
+std::pair<NamedDecl *, SourceLocation> getCursorNamespaceRef(CXCursor C);
+
+/// \brief Create a reference to a field at the given location.
+CXCursor MakeCursorMemberRef(FieldDecl *Field, SourceLocation Loc, 
+                             ASTUnit *TU);
+  
+/// \brief Unpack a MemberRef cursor into the field it references and the 
+/// location where the reference occurred.
+std::pair<FieldDecl *, SourceLocation> getCursorMemberRef(CXCursor C);
 
 /// \brief Create a CXX base specifier cursor.
 CXCursor MakeCursorCXXBaseSpecifier(CXXBaseSpecifier *B, ASTUnit *TU);
@@ -102,6 +135,41 @@ CXCursor MakeMacroInstantiationCursor(MacroInstantiation *, ASTUnit *TU);
 /// source range.
 MacroInstantiation *getCursorMacroInstantiation(CXCursor C);
 
+/// \brief Create an inclusion directive cursor.
+CXCursor MakeInclusionDirectiveCursor(InclusionDirective *, ASTUnit *TU);
+
+/// \brief Unpack a given inclusion directive cursor to retrieve its
+/// source range.
+InclusionDirective *getCursorInclusionDirective(CXCursor C);
+
+/// \brief Create a label reference at the given location.
+CXCursor MakeCursorLabelRef(LabelStmt *Label, SourceLocation Loc, ASTUnit *TU);
+
+/// \brief Unpack a label reference into the label statement it refers to and
+/// the location of the reference.
+std::pair<LabelStmt *, SourceLocation> getCursorLabelRef(CXCursor C);
+
+/// \brief Create a overloaded declaration reference cursor for an expression.
+CXCursor MakeCursorOverloadedDeclRef(OverloadExpr *E, ASTUnit *TU);
+
+/// \brief Create a overloaded declaration reference cursor for a declaration.
+CXCursor MakeCursorOverloadedDeclRef(Decl *D, SourceLocation Location,
+                                     ASTUnit *TU);
+
+/// \brief Create a overloaded declaration reference cursor for a template name.
+CXCursor MakeCursorOverloadedDeclRef(TemplateName Template, 
+                                     SourceLocation Location, ASTUnit *TU);
+
+/// \brief Internal storage for an overloaded declaration reference cursor;
+typedef llvm::PointerUnion3<OverloadExpr *, Decl *, 
+                            OverloadedTemplateStorage *>
+  OverloadedDeclRefStorage;
+  
+/// \brief Unpack an overloaded declaration reference into an expression,
+/// declaration, or template name along with the source location.
+std::pair<OverloadedDeclRefStorage, SourceLocation>
+  getCursorOverloadedDeclRef(CXCursor C);
+  
 Decl *getCursorDecl(CXCursor Cursor);
 Expr *getCursorExpr(CXCursor Cursor);
 Stmt *getCursorStmt(CXCursor Cursor);
@@ -115,6 +183,10 @@ bool operator==(CXCursor X, CXCursor Y);
 inline bool operator!=(CXCursor X, CXCursor Y) {
   return !(X == Y);
 }
+
+/// \brief Return true if the cursor represents a declaration that is the
+/// first in a declaration group.
+bool isFirstInDeclGroup(CXCursor C);
 
 }} // end namespace: clang::cxcursor
 

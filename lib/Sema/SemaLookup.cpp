@@ -31,7 +31,9 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <limits>
 #include <list>
 #include <set>
 #include <vector>
@@ -183,11 +185,8 @@ namespace {
       std::sort(list.begin(), list.end(), UnqualUsingEntry::Comparator());
     }
 
-    typedef ListTy::iterator iterator;
     typedef ListTy::const_iterator const_iterator;
     
-    iterator begin() { return list.begin(); }
-    iterator end() { return list.end(); }
     const_iterator begin() const { return list.begin(); }
     const_iterator end() const { return list.end(); }
 
@@ -302,7 +301,8 @@ void LookupResult::sanity() const {
           isa<FunctionTemplateDecl>((*begin())->getUnderlyingDecl())));
   assert(ResultKind != FoundUnresolvedValue || sanityCheckUnresolved());
   assert(ResultKind != Ambiguous || Decls.size() > 1 ||
-         (Decls.size() == 1 && Ambiguity == AmbiguousBaseSubobjects));
+         (Decls.size() == 1 && (Ambiguity == AmbiguousBaseSubobjects ||
+                                Ambiguity == AmbiguousBaseSubobjectTypes)));
   assert((Paths != NULL) == (ResultKind == Ambiguous &&
                              (Ambiguity == AmbiguousBaseSubobjectTypes ||
                               Ambiguity == AmbiguousBaseSubobjects)));
@@ -407,8 +407,13 @@ void LookupResult::resolveKind() {
   // But it's still an error if there are distinct tag types found,
   // even if they're not visible. (ref?)
   if (HideTags && HasTag && !Ambiguous &&
-      (HasFunction || HasNonFunction || HasUnresolved))
-    Decls[UniqueTagIndex] = Decls[--N];
+      (HasFunction || HasNonFunction || HasUnresolved)) {
+    if (Decls[UniqueTagIndex]->getDeclContext()->getRedeclContext()->Equals(
+         Decls[UniqueTagIndex? 0 : N-1]->getDeclContext()->getRedeclContext()))
+      Decls[UniqueTagIndex] = Decls[--N];
+    else
+      Ambiguous = true;
+  }
 
   Decls.set_size(N);
 
@@ -478,6 +483,11 @@ static bool LookupBuiltin(Sema &S, LookupResult &R) {
         // 'malloc'. Instead, we'll just error.
         if (S.getLangOptions().CPlusPlus &&
             S.Context.BuiltinInfo.isPredefinedLibFunction(BuiltinID))
+          return false;
+        // When not in Objective-C mode, there is no builtin 'id' type.
+        // We won't have pre-defined library functions which use this type.
+        if (!S.getLangOptions().ObjC1 &&
+            S.Context.BuiltinInfo.GetTypeString(BuiltinID)[0] == 'G')
           return false;
 
         NamedDecl *D = S.LazilyCreateBuiltin((IdentifierInfo *)II, BuiltinID,
@@ -913,6 +923,10 @@ bool Sema::CppLookupName(LookupResult &R, Scope *S) {
   // FIXME:  This really, really shouldn't be happening.
   if (!S) return false;
 
+  // If we are looking for members, no need to look into global/namespace scope.
+  if (R.getLookupKind() == LookupMemberName)
+    return false;
+
   // Collect UsingDirectiveDecls in all scopes, and recursively all
   // nominated namespaces by those using-directives.
   //
@@ -1238,6 +1252,38 @@ static bool LookupAnyMember(const CXXBaseSpecifier *Specifier,
   return Path.Decls.first != Path.Decls.second;
 }
 
+/// \brief Determine whether the given set of member declarations contains only 
+/// static members, nested types, and enumerators.
+template<typename InputIterator>
+static bool HasOnlyStaticMembers(InputIterator First, InputIterator Last) {
+  Decl *D = (*First)->getUnderlyingDecl();
+  if (isa<VarDecl>(D) || isa<TypeDecl>(D) || isa<EnumConstantDecl>(D))
+    return true;
+  
+  if (isa<CXXMethodDecl>(D)) {
+    // Determine whether all of the methods are static.
+    bool AllMethodsAreStatic = true;
+    for(; First != Last; ++First) {
+      D = (*First)->getUnderlyingDecl();
+      
+      if (!isa<CXXMethodDecl>(D)) {
+        assert(isa<TagDecl>(D) && "Non-function must be a tag decl");
+        break;
+      }
+      
+      if (!cast<CXXMethodDecl>(D)->isStatic()) {
+        AllMethodsAreStatic = false;
+        break;
+      }
+    }
+    
+    if (AllMethodsAreStatic)
+      return true;
+  }
+
+  return false;
+}
+
 /// \brief Perform qualified name lookup into a given context.
 ///
 /// Qualified name lookup (C++ [basic.lookup.qual]) is used to find
@@ -1363,10 +1409,10 @@ bool Sema::LookupQualifiedName(LookupResult &R, DeclContext *LookupCtx,
   //   and includes members from distinct sub-objects, there is an
   //   ambiguity and the program is ill-formed. Otherwise that set is
   //   the result of the lookup.
-  // FIXME: support using declarations!
   QualType SubobjectType;
   int SubobjectNumber = 0;
   AccessSpecifier SubobjectAccess = AS_none;
+  
   for (CXXBasePaths::paths_iterator Path = Paths.begin(), PathEnd = Paths.end();
        Path != PathEnd; ++Path) {
     const CXXBasePathElement &PathElement = Path->back();
@@ -1380,45 +1426,48 @@ bool Sema::LookupQualifiedName(LookupResult &R, DeclContext *LookupCtx,
       // This is the first subobject we've looked at. Record its type.
       SubobjectType = Context.getCanonicalType(PathElement.Base->getType());
       SubobjectNumber = PathElement.SubobjectNumber;
-    } else if (SubobjectType
+      continue;
+    } 
+    
+    if (SubobjectType
                  != Context.getCanonicalType(PathElement.Base->getType())) {
       // We found members of the given name in two subobjects of
-      // different types. This lookup is ambiguous.
+      // different types. If the declaration sets aren't the same, this
+      // this lookup is ambiguous.
+      if (HasOnlyStaticMembers(Path->Decls.first, Path->Decls.second)) {
+        CXXBasePaths::paths_iterator FirstPath = Paths.begin();
+        DeclContext::lookup_iterator FirstD = FirstPath->Decls.first;
+        DeclContext::lookup_iterator CurrentD = Path->Decls.first;
+        
+        while (FirstD != FirstPath->Decls.second &&
+               CurrentD != Path->Decls.second) {
+         if ((*FirstD)->getUnderlyingDecl()->getCanonicalDecl() !=
+             (*CurrentD)->getUnderlyingDecl()->getCanonicalDecl())
+           break;
+          
+          ++FirstD;
+          ++CurrentD;
+        }
+        
+        if (FirstD == FirstPath->Decls.second &&
+            CurrentD == Path->Decls.second)
+          continue;
+      }
+      
       R.setAmbiguousBaseSubobjectTypes(Paths);
       return true;
-    } else if (SubobjectNumber != PathElement.SubobjectNumber) {
+    } 
+    
+    if (SubobjectNumber != PathElement.SubobjectNumber) {
       // We have a different subobject of the same type.
 
       // C++ [class.member.lookup]p5:
       //   A static member, a nested type or an enumerator defined in
       //   a base class T can unambiguously be found even if an object
       //   has more than one base class subobject of type T.
-      Decl *FirstDecl = *Path->Decls.first;
-      if (isa<VarDecl>(FirstDecl) ||
-          isa<TypeDecl>(FirstDecl) ||
-          isa<EnumConstantDecl>(FirstDecl))
+      if (HasOnlyStaticMembers(Path->Decls.first, Path->Decls.second))
         continue;
-
-      if (isa<CXXMethodDecl>(FirstDecl)) {
-        // Determine whether all of the methods are static.
-        bool AllMethodsAreStatic = true;
-        for (DeclContext::lookup_iterator Func = Path->Decls.first;
-             Func != Path->Decls.second; ++Func) {
-          if (!isa<CXXMethodDecl>(*Func)) {
-            assert(isa<TagDecl>(*Func) && "Non-function must be a tag decl");
-            break;
-          }
-
-          if (!cast<CXXMethodDecl>(*Func)->isStatic()) {
-            AllMethodsAreStatic = false;
-            break;
-          }
-        }
-
-        if (AllMethodsAreStatic)
-          continue;
-      }
-
+      
       // We have found a nonstatic member name in multiple, distinct
       // subobjects. Name lookup is ambiguous.
       R.setAmbiguousBaseSubobjects(Paths);
@@ -1619,7 +1668,11 @@ static void CollectEnclosingNamespace(Sema::AssociatedNamespaceSet &Namespaces,
   // We don't use DeclContext::getEnclosingNamespaceContext() as this may
   // be a locally scoped record.
 
-  while (Ctx->isRecord() || Ctx->isTransparentContext())
+  // We skip out of inline namespaces. The innermost non-inline namespace
+  // contains all names of all its nested inline namespaces anyway, so we can
+  // replace the entire inline namespace tree with its root.
+  while (Ctx->isRecord() || Ctx->isTransparentContext() ||
+         Ctx->isInlineNamespace())
     Ctx = Ctx->getParent();
 
   if (Ctx->isFileContext())
@@ -2423,9 +2476,9 @@ static void LookupVisibleDecls(DeclContext *Ctx, LookupResult &Result,
           Visited.add(ND);
         }
 
-      // Visit transparent contexts inside this context.
+      // Visit transparent contexts and inline namespaces inside this context.
       if (DeclContext *InnerCtx = dyn_cast<DeclContext>(*D)) {
-        if (InnerCtx->isTransparentContext())
+        if (InnerCtx->isTransparentContext() || InnerCtx->isInlineNamespace())
           LookupVisibleDecls(InnerCtx, Result, QualifiedNameLookup, InBaseClass,
                              Consumer, Visited);
       }
@@ -2498,8 +2551,9 @@ static void LookupVisibleDecls(DeclContext *Ctx, LookupResult &Result,
     }
 
     // Traverse protocols.
-    for (ObjCInterfaceDecl::protocol_iterator I = IFace->protocol_begin(),
-         E = IFace->protocol_end(); I != E; ++I) {
+    for (ObjCInterfaceDecl::all_protocol_iterator
+         I = IFace->all_referenced_protocol_begin(),
+         E = IFace->all_referenced_protocol_end(); I != E; ++I) {
       ShadowContextRAII Shadow(Visited);
       LookupVisibleDecls(*I, Result, QualifiedNameLookup, false, Consumer, 
                          Visited);
@@ -2581,9 +2635,27 @@ static void LookupVisibleDecls(Scope *S, LookupResult &Result,
           // For instance methods, look for ivars in the method's interface.
           LookupResult IvarResult(Result.getSema(), Result.getLookupName(),
                                   Result.getNameLoc(), Sema::LookupMemberName);
-          if (ObjCInterfaceDecl *IFace = Method->getClassInterface())
+          if (ObjCInterfaceDecl *IFace = Method->getClassInterface()) {
             LookupVisibleDecls(IFace, IvarResult, /*QualifiedNameLookup=*/false, 
                                /*InBaseClass=*/false, Consumer, Visited);
+            
+            // Look for properties from which we can synthesize ivars, if
+            // permitted.
+            if (Result.getSema().getLangOptions().ObjCNonFragileABI2 &&
+                IFace->getImplementation() &&
+                Result.getLookupKind() == Sema::LookupOrdinaryName) {
+              for (ObjCInterfaceDecl::prop_iterator 
+                        P = IFace->prop_begin(),
+                     PEnd = IFace->prop_end();
+                   P != PEnd; ++P) {
+                if (Result.getSema().canSynthesizeProvisionalIvar(*P) &&
+                    !IFace->lookupInstanceVariable((*P)->getIdentifier())) {
+                  Consumer.FoundDecl(*P, Visited.checkHidden(*P), false);
+                  Visited.add(*P);
+                }
+              }                  
+            }                
+          }
         }
 
         // We've already performed all of the name lookup that we need
@@ -2677,35 +2749,33 @@ class TypoCorrectionConsumer : public VisibleDeclConsumer {
 
   /// \brief The results found that have the smallest edit distance
   /// found (so far) with the typo name.
-  llvm::SmallVector<NamedDecl *, 4> BestResults;
+  ///
+  /// The boolean value indicates whether there is a keyword with this name.
+  llvm::StringMap<bool, llvm::BumpPtrAllocator> BestResults;
 
-  /// \brief The keywords that have the smallest edit distance.
-  llvm::SmallVector<IdentifierInfo *, 4> BestKeywords;
-  
   /// \brief The best edit distance found so far.
   unsigned BestEditDistance;
   
 public:
   explicit TypoCorrectionConsumer(IdentifierInfo *Typo)
-    : Typo(Typo->getName()) { }
+    : Typo(Typo->getName()), 
+      BestEditDistance((std::numeric_limits<unsigned>::max)()) { }
 
   virtual void FoundDecl(NamedDecl *ND, NamedDecl *Hiding, bool InBaseClass);
+  void FoundName(llvm::StringRef Name);
   void addKeywordResult(ASTContext &Context, llvm::StringRef Keyword);
 
-  typedef llvm::SmallVector<NamedDecl *, 4>::const_iterator iterator;
-  iterator begin() const { return BestResults.begin(); }
-  iterator end() const { return BestResults.end(); }
-  void clear_decls() { BestResults.clear(); }
-  
-  bool empty() const { return BestResults.empty() && BestKeywords.empty(); }
+  typedef llvm::StringMap<bool, llvm::BumpPtrAllocator>::iterator iterator;
+  iterator begin() { return BestResults.begin(); }
+  iterator end()  { return BestResults.end(); }
+  void erase(iterator I) { BestResults.erase(I); }
+  unsigned size() const { return BestResults.size(); }
+  bool empty() const { return BestResults.empty(); }
 
-  typedef llvm::SmallVector<IdentifierInfo *, 4>::const_iterator
-    keyword_iterator;
-  keyword_iterator keyword_begin() const { return BestKeywords.begin(); }
-  keyword_iterator keyword_end() const { return BestKeywords.end(); }
-  bool keyword_empty() const { return BestKeywords.empty(); }
-  unsigned keyword_size() const { return BestKeywords.size(); }
-  
+  bool &operator[](llvm::StringRef Name) {
+    return BestResults[Name];
+  }
+
   unsigned getBestEditDistance() const { return BestEditDistance; }  
 };
 
@@ -2724,26 +2794,45 @@ void TypoCorrectionConsumer::FoundDecl(NamedDecl *ND, NamedDecl *Hiding,
   if (!Name)
     return;
 
+  FoundName(Name->getName());
+}
+
+void TypoCorrectionConsumer::FoundName(llvm::StringRef Name) {
+  using namespace std;
+  
+  // Use a simple length-based heuristic to determine the minimum possible
+  // edit distance. If the minimum isn't good enough, bail out early.
+  unsigned MinED = abs((int)Name.size() - (int)Typo.size());
+  if (MinED > BestEditDistance || (MinED && Typo.size() / MinED < 3))
+    return;
+  
+  // Compute an upper bound on the allowable edit distance, so that the
+  // edit-distance algorithm can short-circuit.
+  unsigned UpperBound = min(unsigned((Typo.size() + 2) / 3), BestEditDistance);
+  
   // Compute the edit distance between the typo and the name of this
   // entity. If this edit distance is not worse than the best edit
   // distance we've seen so far, add it to the list of results.
-  unsigned ED = Typo.edit_distance(Name->getName());
-  if (!BestResults.empty() || !BestKeywords.empty()) {
-    if (ED < BestEditDistance) {
-      // This result is better than any we've seen before; clear out
-      // the previous results.
-      BestResults.clear();
-      BestKeywords.clear();
-      BestEditDistance = ED;
-    } else if (ED > BestEditDistance) {
-      // This result is worse than the best results we've seen so far;
-      // ignore it.
-      return;
-    }
-  } else
+  unsigned ED = Typo.edit_distance(Name, true, UpperBound);
+  if (ED == 0)
+    return;
+  
+  if (ED < BestEditDistance) {
+    // This result is better than any we've seen before; clear out
+    // the previous results.
+    BestResults.clear();
     BestEditDistance = ED;
-
-  BestResults.push_back(ND);
+  } else if (ED > BestEditDistance) {
+    // This result is worse than the best results we've seen so far;
+    // ignore it.
+    return;
+  }
+  
+  // Add this name to the list of results. By not assigning a value, we
+  // keep the current value if we've seen this name before (either as a
+  // keyword or as a declaration), or get the default value (not a keyword)
+  // if we haven't seen it before.
+  (void)BestResults[Name];  
 }
 
 void TypoCorrectionConsumer::addKeywordResult(ASTContext &Context, 
@@ -2752,20 +2841,67 @@ void TypoCorrectionConsumer::addKeywordResult(ASTContext &Context,
   // If this edit distance is not worse than the best edit
   // distance we've seen so far, add it to the list of results.
   unsigned ED = Typo.edit_distance(Keyword);
-  if (!BestResults.empty() || !BestKeywords.empty()) {
-    if (ED < BestEditDistance) {
-      BestResults.clear();
-      BestKeywords.clear();
-      BestEditDistance = ED;
-    } else if (ED > BestEditDistance) {
-      // This result is worse than the best results we've seen so far;
-      // ignore it.
-      return;
-    }
-  } else
+  if (ED < BestEditDistance) {
+    BestResults.clear();
     BestEditDistance = ED;
+  } else if (ED > BestEditDistance) {
+    // This result is worse than the best results we've seen so far;
+    // ignore it.
+    return;
+  }
   
-  BestKeywords.push_back(&Context.Idents.get(Keyword));
+  BestResults[Keyword] = true;
+}
+
+/// \brief Perform name lookup for a possible result for typo correction.
+static void LookupPotentialTypoResult(Sema &SemaRef,
+                                      LookupResult &Res,
+                                      IdentifierInfo *Name,
+                                      Scope *S, CXXScopeSpec *SS,
+                                      DeclContext *MemberContext,
+                                      bool EnteringContext,
+                                      Sema::CorrectTypoContext CTC) {
+  Res.suppressDiagnostics();
+  Res.clear();
+  Res.setLookupName(Name);
+  if (MemberContext) {    
+    if (ObjCInterfaceDecl *Class = dyn_cast<ObjCInterfaceDecl>(MemberContext)) {
+      if (CTC == Sema::CTC_ObjCIvarLookup) {
+        if (ObjCIvarDecl *Ivar = Class->lookupInstanceVariable(Name)) {
+          Res.addDecl(Ivar);
+          Res.resolveKind();
+          return;
+        }
+      }
+      
+      if (ObjCPropertyDecl *Prop = Class->FindPropertyDeclaration(Name)) {
+        Res.addDecl(Prop);
+        Res.resolveKind();
+        return;
+      }
+    }
+        
+    SemaRef.LookupQualifiedName(Res, MemberContext);
+    return;
+  }
+  
+  SemaRef.LookupParsedName(Res, S, SS, /*AllowBuiltinCreation=*/false, 
+                           EnteringContext);
+  
+  // Fake ivar lookup; this should really be part of
+  // LookupParsedName.
+  if (ObjCMethodDecl *Method = SemaRef.getCurMethodDecl()) {
+    if (Method->isInstanceMethod() && Method->getClassInterface() &&
+        (Res.empty() || 
+         (Res.isSingleResult() &&
+          Res.getFoundDecl()->isDefinedOutsideFunctionOrMethod()))) {
+       if (ObjCIvarDecl *IV 
+             = Method->getClassInterface()->lookupInstanceVariable(Name)) {
+         Res.addDecl(IV);
+         Res.resolveKind();
+       }
+     }
+  }
 }
 
 /// \brief Try to "correct" a typo in the source code by finding
@@ -2805,14 +2941,6 @@ DeclarationName Sema::CorrectTypo(LookupResult &Res, Scope *S, CXXScopeSpec *SS,
                                   const ObjCObjectPointerType *OPT) {
   if (Diags.hasFatalErrorOccurred() || !getLangOptions().SpellChecking)
     return DeclarationName();
-
-  // Provide a stop gap for files that are just seriously broken.  Trying
-  // to correct all typos can turn into a HUGE performance penalty, causing
-  // some files to take minutes to get rejected by the parser.
-  // FIXME: Is this the right solution?
-  if (TyposCorrected == 20)
-    return DeclarationName();
-  ++TyposCorrected;
   
   // We only attempt to correct typos for identifiers.
   IdentifierInfo *Typo = Res.getLookupName().getAsIdentifierInfo();
@@ -2832,6 +2960,7 @@ DeclarationName Sema::CorrectTypo(LookupResult &Res, Scope *S, CXXScopeSpec *SS,
   TypoCorrectionConsumer Consumer(Typo);
   
   // Perform name lookup to find visible, similarly-named entities.
+  bool IsUnqualifiedLookup = false;
   if (MemberContext) {
     LookupVisibleDecls(MemberContext, Res.getLookupKind(), Consumer);
 
@@ -2847,9 +2976,53 @@ DeclarationName Sema::CorrectTypo(LookupResult &Res, Scope *S, CXXScopeSpec *SS,
     if (!DC)
       return DeclarationName();
     
+    // Provide a stop gap for files that are just seriously broken.  Trying
+    // to correct all typos can turn into a HUGE performance penalty, causing
+    // some files to take minutes to get rejected by the parser.
+    if (TyposCorrected + UnqualifiedTyposCorrected.size() >= 20)
+      return DeclarationName();
+    ++TyposCorrected;
+
     LookupVisibleDecls(DC, Res.getLookupKind(), Consumer);
   } else {
-    LookupVisibleDecls(S, Res.getLookupKind(), Consumer);
+    IsUnqualifiedLookup = true;
+    UnqualifiedTyposCorrectedMap::iterator Cached
+      = UnqualifiedTyposCorrected.find(Typo);
+    if (Cached == UnqualifiedTyposCorrected.end()) {
+      // Provide a stop gap for files that are just seriously broken.  Trying
+      // to correct all typos can turn into a HUGE performance penalty, causing
+      // some files to take minutes to get rejected by the parser.
+      if (TyposCorrected + UnqualifiedTyposCorrected.size() >= 20)
+        return DeclarationName();
+      
+      // For unqualified lookup, look through all of the names that we have
+      // seen in this translation unit.
+      for (IdentifierTable::iterator I = Context.Idents.begin(), 
+                                  IEnd = Context.Idents.end();
+           I != IEnd; ++I)
+        Consumer.FoundName(I->getKey());
+      
+      // Walk through identifiers in external identifier sources.
+      if (IdentifierInfoLookup *External
+                              = Context.Idents.getExternalIdentifierLookup()) {
+        llvm::OwningPtr<IdentifierIterator> Iter(External->getIdentifiers());
+        do {
+          llvm::StringRef Name = Iter->Next();
+          if (Name.empty())
+            break;
+
+          Consumer.FoundName(Name);
+        } while (true);
+      }
+    } else {
+      // Use the cached value, unless it's a keyword. In the keyword case, we'll
+      // end up adding the keyword below.
+      if (Cached->second.first.empty())
+        return DeclarationName();
+      
+      if (!Cached->second.second)
+        Consumer.FoundName(Cached->second.first);
+    }
   }
 
   // Add context-dependent keywords.
@@ -2892,9 +3065,16 @@ DeclarationName Sema::CorrectTypo(LookupResult &Res, Scope *S, CXXScopeSpec *SS,
       WantCXXNamedCasts = true;
       break;
       
+    case CTC_ObjCPropertyLookup:
+      // FIXME: Add "isa"?
+      break;
+      
     case CTC_MemberLookup:
       if (getLangOptions().CPlusPlus)
         Consumer.addKeywordResult(Context, "template");
+      break;
+      
+    case CTC_ObjCIvarLookup:
       break;
   }
 
@@ -3018,120 +3198,132 @@ DeclarationName Sema::CorrectTypo(LookupResult &Res, Scope *S, CXXScopeSpec *SS,
   }
   
   // If we haven't found anything, we're done.
-  if (Consumer.empty())
+  if (Consumer.empty()) {
+    // If this was an unqualified lookup, note that no correction was found.
+    if (IsUnqualifiedLookup)
+      (void)UnqualifiedTyposCorrected[Typo];
+    
     return DeclarationName();
+  }
 
-  // Only allow a single, closest name in the result set (it's okay to
-  // have overloads of that name, though).
-  DeclarationName BestName;
-  NamedDecl *BestIvarOrPropertyDecl = 0;
-  bool FoundIvarOrPropertyDecl = false;
-  
-  // Check all of the declaration results to find the best name so far.
+  // Make sure that the user typed at least 3 characters for each correction 
+  // made. Otherwise, we don't even both looking at the results.
+
+  // We also suppress exact matches; those should be handled by a
+  // different mechanism (e.g., one that introduces qualification in
+  // C++).
+  unsigned ED = Consumer.getBestEditDistance();
+  if (ED > 0 && Typo->getName().size() / ED < 3) {
+    // If this was an unqualified lookup, note that no correction was found.
+    if (IsUnqualifiedLookup)
+      (void)UnqualifiedTyposCorrected[Typo];
+
+    return DeclarationName();
+  }
+
+  // Weed out any names that could not be found by name lookup.
+  bool LastLookupWasAccepted = false;
   for (TypoCorrectionConsumer::iterator I = Consumer.begin(), 
                                      IEnd = Consumer.end();
-       I != IEnd; ++I) {
-    if (!BestName)
-      BestName = (*I)->getDeclName();
-    else if (BestName != (*I)->getDeclName())
-      return DeclarationName();
-
-    // \brief Keep track of either an Objective-C ivar or a property, but not
-    // both.
-    if (isa<ObjCIvarDecl>(*I) || isa<ObjCPropertyDecl>(*I)) {
-      if (FoundIvarOrPropertyDecl)
-        BestIvarOrPropertyDecl = 0;
-      else {
-        BestIvarOrPropertyDecl = *I;
-        FoundIvarOrPropertyDecl = true;
-      }
+       I != IEnd; /* Increment in loop. */) {
+    // Keywords are always found.
+    if (I->second) {
+      ++I;
+      continue;
     }
+    
+    // Perform name lookup on this name.
+    IdentifierInfo *Name = &Context.Idents.get(I->getKey());
+    LookupPotentialTypoResult(*this, Res, Name, S, SS, MemberContext, 
+                              EnteringContext, CTC);
+    
+    switch (Res.getResultKind()) {
+    case LookupResult::NotFound:
+    case LookupResult::NotFoundInCurrentInstantiation:
+    case LookupResult::Ambiguous:
+      // We didn't find this name in our scope, or didn't like what we found; 
+      // ignore it.
+      Res.suppressDiagnostics();
+      {
+        TypoCorrectionConsumer::iterator Next = I;
+        ++Next;
+        Consumer.erase(I);
+        I = Next;
+      }
+      LastLookupWasAccepted = false;
+      break;      
+        
+    case LookupResult::Found:
+    case LookupResult::FoundOverloaded:
+    case LookupResult::FoundUnresolvedValue:
+      ++I;
+      LastLookupWasAccepted = true;
+      break;
+    }
+    
+    if (Res.isAmbiguous()) {
+      // We don't deal with ambiguities.
+      Res.suppressDiagnostics();
+      Res.clear();
+      return DeclarationName(); 
+    }        
   }
 
-  // Now check all of the keyword results to find the best name. 
-  switch (Consumer.keyword_size()) {
-    case 0:
-      // No keywords matched.
-      break;
+  // If only a single name remains, return that result.
+  if (Consumer.size() == 1) {
+    IdentifierInfo *Name = &Context.Idents.get(Consumer.begin()->getKey());
+    if (Consumer.begin()->second) {
+      Res.suppressDiagnostics();
+      Res.clear();
       
-    case 1:
-      // If we already have a name
-      if (!BestName) {
-        // We did not have anything previously, 
-        BestName = *Consumer.keyword_begin();
-      } else if (BestName.getAsIdentifierInfo() == *Consumer.keyword_begin()) {
-        // We have a declaration with the same name as a context-sensitive
-        // keyword. The keyword takes precedence.
-        BestIvarOrPropertyDecl = 0;
-        FoundIvarOrPropertyDecl = false;
-        Consumer.clear_decls();
-      } else if (CTC == CTC_ObjCMessageReceiver &&
-                 (*Consumer.keyword_begin())->isStr("super")) {
-        // In an Objective-C message send, give the "super" keyword a slight
-        // edge over entities not in function or method scope.
-        for (TypoCorrectionConsumer::iterator I = Consumer.begin(), 
-                                           IEnd = Consumer.end();
-             I != IEnd; ++I) {
-          if ((*I)->getDeclName() == BestName) {
-            if ((*I)->getDeclContext()->isFunctionOrMethod())
-              return DeclarationName();
-          }
-        }
-        
-        // Everything found was outside a function or method; the 'super'
-        // keyword takes precedence.
-        BestIvarOrPropertyDecl = 0;
-        FoundIvarOrPropertyDecl = false;
-        Consumer.clear_decls();        
-        BestName = *Consumer.keyword_begin();
-      } else {
-        // Name collision; we will not correct typos.
+      // Don't correct to a keyword that's the same as the typo; the keyword
+      // wasn't actually in scope.
+      if (ED == 0) {
+        Res.setLookupName(Typo);
         return DeclarationName();
       }
-      break;
       
-    default:
-      // Name collision; we will not correct typos.
-      return DeclarationName();
+    } else if (!LastLookupWasAccepted) {
+      // Perform name lookup on this name.
+      LookupPotentialTypoResult(*this, Res, Name, S, SS, MemberContext, 
+                                EnteringContext, CTC);
+    }
+
+    // Record the correction for unqualified lookup.
+    if (IsUnqualifiedLookup)
+      UnqualifiedTyposCorrected[Typo] 
+        = std::make_pair(Name->getName(), Consumer.begin()->second);
+      
+    return &Context.Idents.get(Consumer.begin()->getKey());  
   }
-  
-  // BestName is the closest viable name to what the user
-  // typed. However, to make sure that we don't pick something that's
-  // way off, make sure that the user typed at least 3 characters for
-  // each correction.
-  unsigned ED = Consumer.getBestEditDistance();
-  if (ED == 0 || !BestName.getAsIdentifierInfo() ||
-      (BestName.getAsIdentifierInfo()->getName().size() / ED) < 3)
-    return DeclarationName();
-
-  // Perform name lookup again with the name we chose, and declare
-  // success if we found something that was not ambiguous.
-  Res.clear();
-  Res.setLookupName(BestName);
-
-  // If we found an ivar or property, add that result; no further
-  // lookup is required.
-  if (BestIvarOrPropertyDecl)
-    Res.addDecl(BestIvarOrPropertyDecl);  
-  // If we're looking into the context of a member, perform qualified
-  // name lookup on the best name.
-  else if (!Consumer.keyword_empty()) {
-    // The best match was a keyword. Return it.
-    return BestName;
-  } else if (MemberContext)
-    LookupQualifiedName(Res, MemberContext);
-  // Perform lookup as if we had just parsed the best name.
-  else
-    LookupParsedName(Res, S, SS, /*AllowBuiltinCreation=*/false, 
-                     EnteringContext);
-
-  if (Res.isAmbiguous()) {
+  else if (Consumer.size() > 1 && CTC == CTC_ObjCMessageReceiver 
+           && Consumer["super"]) {
+    // Prefix 'super' when we're completing in a message-receiver
+    // context.
     Res.suppressDiagnostics();
-    return DeclarationName();
+    Res.clear();
+    
+    // Don't correct to a keyword that's the same as the typo; the keyword
+    // wasn't actually in scope.
+    if (ED == 0) {
+      Res.setLookupName(Typo);
+      return DeclarationName();
+    }
+    
+    // Record the correction for unqualified lookup.
+    if (IsUnqualifiedLookup)
+      UnqualifiedTyposCorrected[Typo]
+        = std::make_pair("super", Consumer.begin()->second);
+    
+    return &Context.Idents.get("super");
   }
+           
+  Res.suppressDiagnostics();
+  Res.setLookupName(Typo);
+  Res.clear();
+  // Record the correction for unqualified lookup.
+  if (IsUnqualifiedLookup)
+    (void)UnqualifiedTyposCorrected[Typo];
 
-  if (Res.getResultKind() != LookupResult::NotFound)
-    return BestName;
-  
   return DeclarationName();
 }

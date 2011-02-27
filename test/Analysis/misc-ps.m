@@ -323,7 +323,7 @@ int test_invalidate_by_ref() {
 // was the block containing the merge for '?', which would trigger an
 // assertion failure.
 int rdar_7027684_aux();
-int rdar_7027684_aux_2() __attribute__((noreturn)); // expected-warning{{functions declared 'noreturn' should have a 'void' result type}}
+int rdar_7027684_aux_2() __attribute__((noreturn));
 void rdar_7027684(int x, int y) {
   {}; // this empty compound statement is critical.
   (rdar_7027684_aux() ? rdar_7027684_aux_2() : (void) 0);
@@ -458,7 +458,7 @@ void rdar_7062158_2() {
 // ElementRegion is created.
 unsigned char test_array_index_bitwidth(const unsigned char *p) {
   unsigned short i = 0;
-  for (i = 0; i < 2; i++) p = &p[i]; // expected-warning{{Assigned value is always the same as the existing value}}
+  for (i = 0; i < 2; i++) p = &p[i];
   return p[i+1];
 }
 
@@ -794,7 +794,7 @@ int test_uninit_branch_c(void) {
 void test_bad_call_aux(int x);
 void test_bad_call(void) {
   int y;
-  test_bad_call_aux(y); // expected-warning{{Pass-by-value argument in function call is undefined}}
+  test_bad_call_aux(y); // expected-warning{{Function call argument is an uninitialized value}}
 }
 
 @interface TestBadArg {}
@@ -803,7 +803,7 @@ void test_bad_call(void) {
 
 void test_bad_msg(TestBadArg *p) {
   int y;
-  [p testBadArg:y]; // expected-warning{{Pass-by-value argument in message expression is undefined}}
+  [p testBadArg:y]; // expected-warning{{Argument in message expression is an uninitialized value}}
 }
 
 //===----------------------------------------------------------------------===//
@@ -1054,5 +1054,128 @@ void r8360854(int n) {
   }
   int *p = 0;
   *p = 0xDEADBEEF; // expected-warning{{null pointer}}
+}
+
+// PR 8050 - crash in CastSizeChecker when pointee is an incomplete type
+typedef long unsigned int __darwin_size_t;
+typedef __darwin_size_t size_t;
+void *malloc(size_t);
+
+struct PR8050;
+
+void pr8050(struct PR8050 **arg)
+{
+    *arg = malloc(1);
+}
+
+// <rdar://problem/5880430> Switch on enum should not consider default case live
+//  if all enum values are covered
+enum Cases { C1, C2, C3, C4 };
+void test_enum_cases(enum Cases C) {
+  switch (C) {
+  case C1:
+  case C2:
+  case C4:
+  case C3:
+    return;
+  }
+  int *p = 0;
+  *p = 0xDEADBEEF; // no-warning
+}
+
+void test_enum_cases_positive(enum Cases C) {
+  switch (C) { // expected-warning{{enumeration value 'C4' not handled in switch}}
+  case C1:
+  case C2:
+  case C3:
+    return;
+  }
+  int *p = 0;
+  *p = 0xDEADBEEF; // expected-warning{{Dereference of null pointer}}
+}
+
+// <rdar://problem/6351970> rule request: warn if synchronization mutex can be nil
+void rdar6351970() {
+  id x = 0;
+  @synchronized(x) {} // expected-warning{{Nil value used as mutex for @synchronized() (no synchronization will occur)}}
+}
+
+void rdar6351970_b(id x) {
+  if (!x)
+    @synchronized(x) {} // expected-warning{{Nil value used as mutex for @synchronized() (no synchronization will occur)}}
+}
+
+void rdar6351970_c() {
+  id x;
+  @synchronized(x) {} // expected-warning{{Uninitialized value used as mutex for @synchronized}}
+}
+
+@interface Rdar8578650
+- (id) foo8578650;
+@end
+
+void rdar8578650(id x) {
+  @synchronized (x) {
+    [x foo8578650];
+  }
+  // At this point we should assume that 'x' is not nil, not
+  // the inverse.
+  @synchronized (x) { // no-warning
+  }
+}
+
+// <rdar://problem/6352035> rule request: direct structure member access null pointer dereference
+@interface RDar6352035 {
+  int c;
+}
+- (void)foo;
+- (void)bar;
+@end
+
+@implementation RDar6352035
+- (void)foo {
+  RDar6352035 *friend = 0;
+  friend->c = 7; // expected-warning{{Instance variable access (via 'friend') results in a null pointer dereference}}
+}
+- (void)bar {
+  self = 0;
+  c = 7; // expected-warning{{Instance variable access (via 'self') results in a null pointer dereference}}
+}
+@end
+
+// PR 8149 - GNU statement expression in condition of ForStmt.
+// This previously triggered an assertion failure in CFGBuilder.
+void pr8149(void) {
+  for (; ({ do { } while (0); 0; });) { }
+}
+
+// PR 8458 - Make sure @synchronized doesn't crash with properties.
+@interface PR8458 {}
+@property(readonly) id lock;
+@end
+
+static
+void __PR8458(PR8458 *x) {
+  @synchronized(x.lock) {} // no-warning
+}
+
+// PR 8440 - False null dereference during store to array-in-field-in-global.
+// This test case previously resulted in a bogus null deref warning from
+// incorrect lazy symbolication logic in RegionStore.
+static struct {
+  int num;
+  char **data;
+} saved_pr8440;
+
+char *foo_pr8440();
+char **bar_pr8440();
+void baz_pr8440(int n)
+{
+   saved_pr8440.num = n;
+   if (saved_pr8440.data) 
+     return;
+   saved_pr8440.data = bar_pr8440();
+   for (int i = 0 ; i < n ; i ++)
+     saved_pr8440.data[i] = foo_pr8440(); // no-warning
 }
 

@@ -13,7 +13,7 @@ void f1() {
 void f2(void *b) {
  char *c = (char*)b; // no-warning
  char *d = b+1; // expected-warning {{never read}} expected-warning{{unused variable 'd'}}
- printf("%s", c); // expected-warning{{implicitly declaring C library function 'printf' with type 'int (char const *, ...)'}} \
+ printf("%s", c); // expected-warning{{implicitly declaring C library function 'printf' with type 'int (const char *, ...)'}} \
  // expected-note{{please include the header <stdio.h> or explicitly provide a declaration for 'printf'}}
 }
 
@@ -150,7 +150,7 @@ void f15(unsigned x, unsigned y) {
 
 int f16(int x) {
   x = x * 2;
-  x = sizeof(int [x = (x || x + 1) * 2]) // expected-warning{{Although the value stored to 'x' is used}} expected-warning{{The left operand to '*' is always 1}}
+  x = sizeof(int [x = (x || x + 1) * 2]) // expected-warning{{Although the value stored to 'x' is used}} expected-warning{{The left operand to '*' is always 1}} expected-warning{{The left operand to '+' is always 0}}
       ? 5 : 8;
   return x;
 }

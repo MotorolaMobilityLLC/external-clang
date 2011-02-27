@@ -14,6 +14,7 @@
 #include "CGDebugInfo.h"
 #include "CodeGenFunction.h"
 #include "clang/AST/CXXInheritance.h"
+#include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtCXX.h"
 
@@ -40,7 +41,7 @@ ComputeNonVirtualBaseClassOffset(ASTContext &Context,
       cast<CXXRecordDecl>(Base->getType()->getAs<RecordType>()->getDecl());
     
     // Add the offset.
-    Offset += Layout.getBaseClassOffset(BaseDecl);
+    Offset += Layout.getBaseClassOffsetInBits(BaseDecl);
     
     RD = BaseDecl;
   }
@@ -86,9 +87,9 @@ CodeGenFunction::GetAddressOfDirectBaseInCompleteClass(llvm::Value *This,
   uint64_t Offset;
   const ASTRecordLayout &Layout = getContext().getASTRecordLayout(Derived);
   if (BaseIsVirtual)
-    Offset = Layout.getVBaseClassOffset(Base);
+    Offset = Layout.getVBaseClassOffsetInBits(Base);
   else
-    Offset = Layout.getBaseClassOffset(Base);
+    Offset = Layout.getBaseClassOffsetInBits(Base);
 
   // Shift and cast down to the base type.
   // TODO: for complete types, this should be possible with a GEP.
@@ -294,7 +295,8 @@ static llvm::Value *GetVTTParameter(CodeGenFunction &CGF, GlobalDecl GD,
     const ASTRecordLayout &Layout = 
       CGF.getContext().getASTRecordLayout(RD);
     uint64_t BaseOffset = ForVirtualBase ? 
-      Layout.getVBaseClassOffset(Base) : Layout.getBaseClassOffset(Base);
+      Layout.getVBaseClassOffsetInBits(Base) : 
+      Layout.getBaseClassOffsetInBits(Base);
 
     SubVTTIndex = 
       CGF.CGM.getVTables().getSubVTTIndex(RD, BaseSubobject(Base, BaseOffset));
@@ -334,6 +336,29 @@ namespace {
       CGF.EmitCXXDestructorCall(D, Dtor_Base, BaseIsVirtual, Addr);
     }
   };
+
+  /// A visitor which checks whether an initializer uses 'this' in a
+  /// way which requires the vtable to be properly set.
+  struct DynamicThisUseChecker : EvaluatedExprVisitor<DynamicThisUseChecker> {
+    typedef EvaluatedExprVisitor<DynamicThisUseChecker> super;
+
+    bool UsesThis;
+
+    DynamicThisUseChecker(ASTContext &C) : super(C), UsesThis(false) {}
+
+    // Black-list all explicit and implicit references to 'this'.
+    //
+    // Do we need to worry about external references to 'this' derived
+    // from arbitrary code?  If so, then anything which runs arbitrary
+    // external code might potentially access the vtable.
+    void VisitCXXThisExpr(CXXThisExpr *E) { UsesThis = true; }
+  };
+}
+
+static bool BaseInitializerUsesThis(ASTContext &C, const Expr *Init) {
+  DynamicThisUseChecker Checker(C);
+  Checker.Visit(const_cast<Expr*>(Init));
+  return Checker.UsesThis;
 }
 
 static void EmitBaseInitializer(CodeGenFunction &CGF, 
@@ -355,6 +380,12 @@ static void EmitBaseInitializer(CodeGenFunction &CGF,
   if (CtorType == Ctor_Base && isBaseVirtual)
     return;
 
+  // If the initializer for the base (other than the constructor
+  // itself) accesses 'this' in any way, we need to initialize the
+  // vtables.
+  if (BaseInitializerUsesThis(CGF.getContext(), BaseInit->getInit()))
+    CGF.InitializeVTablePointers(ClassDecl);
+
   // We can pretend to be a complete class because it only matters for
   // virtual bases, and we only do virtual bases for complete ctors.
   llvm::Value *V = 
@@ -362,7 +393,9 @@ static void EmitBaseInitializer(CodeGenFunction &CGF,
                                               BaseClassDecl,
                                               isBaseVirtual);
 
-  CGF.EmitAggExpr(BaseInit->getInit(), V, false, false, true);
+  AggValueSlot AggSlot = AggValueSlot::forAddr(V, false, /*Lifetime*/ true);
+
+  CGF.EmitAggExpr(BaseInit->getInit(), AggSlot);
   
   if (CGF.Exceptions && !BaseClassDecl->hasTrivialDestructor())
     CGF.EHStack.pushCleanup<CallBaseDtor>(EHCleanup, BaseClassDecl,
@@ -388,11 +421,11 @@ static void EmitAggMemberInitializer(CodeGenFunction &CGF,
       Next = CGF.Builder.CreateAdd(ArrayIndex, Next, "inc");
       CGF.Builder.CreateStore(Next, ArrayIndexVar);      
     }
+
+    AggValueSlot Slot = AggValueSlot::forAddr(Dest, LHS.isVolatileQualified(),
+                                              /*Lifetime*/ true);
     
-    CGF.EmitAggExpr(MemberInit->getInit(), Dest, 
-                    LHS.isVolatileQualified(),
-                    /*IgnoreResult*/ false,
-                    /*IsInitializer*/ true);
+    CGF.EmitAggExpr(MemberInit->getInit(), Slot);
     
     return;
   }
@@ -557,7 +590,7 @@ static void EmitMemberInitializer(CodeGenFunction &CGF,
       
       // Emit the block variables for the array indices, if any.
       for (unsigned I = 0, N = MemberInit->getNumArrayIndices(); I != N; ++I)
-        CGF.EmitLocalBlockVarDecl(*MemberInit->getArrayIndex(I));
+        CGF.EmitAutoVarDecl(*MemberInit->getArrayIndex(I));
     }
     
     EmitAggMemberInitializer(CGF, LHS, ArrayIndexVar, MemberInit, FieldType, 0);
@@ -1205,10 +1238,7 @@ CodeGenFunction::GetVirtualBaseClassOffset(llvm::Value *This,
   const llvm::Type *Int8PtrTy = 
     llvm::Type::getInt8Ty(VMContext)->getPointerTo();
 
-  llvm::Value *VTablePtr = Builder.CreateBitCast(This, 
-                                                 Int8PtrTy->getPointerTo());
-  VTablePtr = Builder.CreateLoad(VTablePtr, "vtable");
-
+  llvm::Value *VTablePtr = GetVTablePtr(This, Int8PtrTy);
   int64_t VBaseOffsetOffset = 
     CGM.getVTables().getVirtualBaseOffsetOffset(ClassDecl, BaseClassDecl);
   
@@ -1326,15 +1356,16 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
       const ASTRecordLayout &Layout = 
         getContext().getASTRecordLayout(VTableClass);
 
-      BaseOffset = Layout.getVBaseClassOffset(BaseDecl);
+      BaseOffset = Layout.getVBaseClassOffsetInBits(BaseDecl);
       BaseOffsetFromNearestVBase = 0;
       BaseDeclIsNonVirtualPrimaryBase = false;
     } else {
       const ASTRecordLayout &Layout = getContext().getASTRecordLayout(RD);
 
-      BaseOffset = Base.getBaseOffset() + Layout.getBaseClassOffset(BaseDecl);
+      BaseOffset = 
+        Base.getBaseOffset() + Layout.getBaseClassOffsetInBits(BaseDecl);
       BaseOffsetFromNearestVBase = 
-        OffsetFromNearestVBase + Layout.getBaseClassOffset(BaseDecl);
+        OffsetFromNearestVBase + Layout.getBaseClassOffsetInBits(BaseDecl);
       BaseDeclIsNonVirtualPrimaryBase = Layout.getPrimaryBase() == BaseDecl;
     }
     
@@ -1360,4 +1391,10 @@ void CodeGenFunction::InitializeVTablePointers(const CXXRecordDecl *RD) {
                            /*OffsetFromNearestVBase=*/0,
                            /*BaseIsNonVirtualPrimaryBase=*/false, 
                            VTable, RD, VBases);
+}
+
+llvm::Value *CodeGenFunction::GetVTablePtr(llvm::Value *This,
+                                           const llvm::Type *Ty) {
+  llvm::Value *VTablePtrSrc = Builder.CreateBitCast(This, Ty->getPointerTo());
+  return Builder.CreateLoad(VTablePtrSrc, "vtable");
 }

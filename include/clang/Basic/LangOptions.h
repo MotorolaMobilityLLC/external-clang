@@ -15,6 +15,7 @@
 #define LLVM_CLANG_LANGOPTIONS_H
 
 #include <string>
+#include "clang/Basic/Visibility.h"
 
 namespace clang {
 
@@ -34,6 +35,7 @@ public:
   unsigned HexFloats         : 1;  // C99 Hexadecimal float constants.
   unsigned C99               : 1;  // C99 Support
   unsigned Microsoft         : 1;  // Microsoft extensions.
+  unsigned Borland           : 1;  // Borland extensions.
   unsigned CPlusPlus         : 1;  // C++ Support
   unsigned CPlusPlus0x       : 1;  // C++0x Support
   unsigned CXXOperatorNames  : 1;  // Treat C++ operator names as keywords.
@@ -88,8 +90,11 @@ public:
   unsigned CharIsSigned      : 1; // Whether char is a signed or unsigned type
   unsigned ShortWChar        : 1; // Force wchar_t to be unsigned short int.
 
+  unsigned ShortEnums        : 1; // The enum type will be equivalent to the
+                                  // smallest integer type with enough room.
+
   unsigned OpenCL            : 1; // OpenCL C99 language extensions.
-  
+
   unsigned AssumeSaneOperatorNew : 1; // Whether to add __attribute__((malloc))
                                       // to the declaration of C++'s new
                                       // operators
@@ -100,7 +105,7 @@ public:
   unsigned DumpVTableLayouts : 1; /// Dump the layouts of emitted vtables.
   unsigned NoConstantCFStrings : 1;  // Do not do CF strings
   unsigned InlineVisibilityHidden : 1; // Whether inline C++ methods have
-                                       // hidden visibility by default.  
+                                       // hidden visibility by default.
 
   unsigned SpellChecking : 1; // Whether to perform spell-checking for error
                               // recovery.
@@ -118,21 +123,24 @@ private:
 public:
   unsigned InstantiationDepth;    // Maximum template instantiation depth.
 
+  // Version of Microsoft Visual C/C++ we are pretending to be. This is
+  // temporary until we support all MS extensions used in Windows SDK and stdlib
+  // headers. Sets _MSC_VER.
+  unsigned MSCVersion;
+
   std::string ObjCConstantStringClass;
 
   enum GCMode { NonGC, GCOnly, HybridGC };
   enum StackProtectorMode { SSPOff, SSPOn, SSPReq };
-  enum VisibilityMode {
-    Default,
-    Protected,
-    Hidden
-  };
-  
+
   enum SignedOverflowBehaviorTy {
     SOB_Undefined,  // Default C standard behavior.
     SOB_Defined,    // -fwrapv
     SOB_Trapping    // -ftrapv
   };
+  /// The name of the handler function to be called when -ftrapv is specified.
+  /// If none is specified, abort (GCC-compatible behaviour).
+  std::string OverflowHandler;
 
   LangOptions() {
     Trigraphs = BCPLComment = Bool = DollarIdents = AsmPreprocessor = 0;
@@ -140,7 +148,7 @@ public:
     HexFloats = 0;
     GC = ObjC1 = ObjC2 = ObjCNonFragileABI = ObjCNonFragileABI2 = 0;
     NoConstantCFStrings = 0; InlineVisibilityHidden = 0;
-    C99 = Microsoft = CPlusPlus = CPlusPlus0x = 0;
+    C99 = Microsoft = Borland = CPlusPlus = CPlusPlus0x = 0;
     CXXOperatorNames = PascalStrings = WritableStrings = ConstStrings = 0;
     Exceptions = SjLjExceptions = Freestanding = NoBuiltin = 0;
     NeXTRuntime = 1;
@@ -149,15 +157,15 @@ public:
     HeinousExtensions = 0;
     AltiVec = OpenCL = StackProtector = 0;
 
-    SymbolVisibility = (unsigned) Default;
-      
+    SymbolVisibility = (unsigned) DefaultVisibility;
+
     ThreadsafeStatics = 1;
     POSIXThreads = 0;
     Blocks = 0;
     EmitAllDecls = 0;
     MathErrno = 1;
     SignedOverflowBehavior = SOB_Undefined;
-    
+
     AssumeSaneOperatorNew = 1;
     AccessControl = 1;
     ElideConstructors = 1;
@@ -178,6 +186,7 @@ public:
 
     CharIsSigned = 1;
     ShortWChar = 0;
+    ShortEnums = 0;
     CatchUndefined = 0;
     DumpRecordLayouts = 0;
     DumpVTableLayouts = 0;
@@ -195,11 +204,11 @@ public:
     StackProtector = static_cast<unsigned>(m);
   }
 
-  VisibilityMode getVisibilityMode() const {
-    return (VisibilityMode) SymbolVisibility;
+  Visibility getVisibilityMode() const {
+    return (Visibility) SymbolVisibility;
   }
-  void setVisibilityMode(VisibilityMode v) { SymbolVisibility = (unsigned) v; }
-  
+  void setVisibilityMode(Visibility v) { SymbolVisibility = (unsigned) v; }
+
   SignedOverflowBehaviorTy getSignedOverflowBehavior() const {
     return (SignedOverflowBehaviorTy)SignedOverflowBehavior;
   }

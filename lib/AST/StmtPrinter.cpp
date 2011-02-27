@@ -18,6 +18,7 @@
 #include "clang/AST/PrettyPrinter.h"
 #include "llvm/Support/Format.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 using namespace clang;
 
 //===----------------------------------------------------------------------===//
@@ -83,10 +84,10 @@ namespace  {
       else StmtVisitor<StmtPrinter>::Visit(S);
     }
     
-    void VisitStmt(Stmt *Node) ATTRIBUTE_UNUSED {
+    void VisitStmt(Stmt *Node) LLVM_ATTRIBUTE_UNUSED {
       Indent() << "<<unknown stmt type>>\n";
     }
-    void VisitExpr(Expr *Node) ATTRIBUTE_UNUSED {
+    void VisitExpr(Expr *Node) LLVM_ATTRIBUTE_UNUSED {
       OS << "<<unknown expr type>>";
     }
     void VisitCXXNamedCastExpr(CXXNamedCastExpr *Node);
@@ -508,16 +509,21 @@ void StmtPrinter::VisitObjCIvarRefExpr(ObjCIvarRefExpr *Node) {
 }
 
 void StmtPrinter::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *Node) {
-  if (Node->getBase()) {
+  if (Node->isSuperReceiver())
+    OS << "super.";
+  else if (Node->getBase()) {
     PrintExpr(Node->getBase());
     OS << ".";
   }
+
   OS << Node->getProperty()->getName();
 }
 
 void StmtPrinter::VisitObjCImplicitSetterGetterRefExpr(
                                         ObjCImplicitSetterGetterRefExpr *Node) {
-  if (Node->getBase()) {
+  if (Node->isSuperReceiver())
+    OS << "super.";
+  else if (Node->getBase()) {
     PrintExpr(Node->getBase());
     OS << ".";
   }
@@ -1001,6 +1007,16 @@ void StmtPrinter::VisitCXXTypeidExpr(CXXTypeidExpr *Node) {
   OS << ")";
 }
 
+void StmtPrinter::VisitCXXUuidofExpr(CXXUuidofExpr *Node) {
+  OS << "__uuidof(";
+  if (Node->isTypeOperand()) {
+    OS << Node->getTypeOperand().getAsString(Policy);
+  } else {
+    PrintExpr(Node->getExprOperand());
+  }
+  OS << ")";
+}
+
 void StmtPrinter::VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *Node) {
   OS << (Node->getValue() ? "true" : "false");
 }
@@ -1037,10 +1053,6 @@ void StmtPrinter::VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *Node) {
   PrintExpr(Node->getSubExpr());
 }
 
-void StmtPrinter::VisitCXXBindReferenceExpr(CXXBindReferenceExpr *Node) {
-  PrintExpr(Node->getSubExpr());
-}
-
 void StmtPrinter::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *Node) {
   OS << Node->getType().getAsString(Policy);
   OS << "(";
@@ -1055,7 +1067,10 @@ void StmtPrinter::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *Node) {
 }
 
 void StmtPrinter::VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *Node) {
-  OS << Node->getType().getAsString(Policy) << "()";
+  if (TypeSourceInfo *TSInfo = Node->getTypeSourceInfo())
+    OS << TSInfo->getType().getAsString(Policy) << "()";
+  else
+    OS << Node->getType().getAsString(Policy) << "()";
 }
 
 void StmtPrinter::VisitCXXNewExpr(CXXNewExpr *E) {
@@ -1225,6 +1240,12 @@ void StmtPrinter::VisitUnaryTypeTraitExpr(UnaryTypeTraitExpr *E) {
      << E->getQueriedType().getAsString(Policy) << ")";
 }
 
+void StmtPrinter::VisitCXXNoexceptExpr(CXXNoexceptExpr *E) {
+  OS << "noexcept(";
+  PrintExpr(E->getOperand());
+  OS << ")";
+}
+
 // Obj-C
 
 void StmtPrinter::VisitObjCStringLiteral(ObjCStringLiteral *Node) {
@@ -1282,9 +1303,6 @@ void StmtPrinter::VisitObjCMessageExpr(ObjCMessageExpr *Mess) {
   OS << "]";
 }
 
-void StmtPrinter::VisitObjCSuperExpr(ObjCSuperExpr *) {
-  OS << "super";
-}
 
 void StmtPrinter::VisitBlockExpr(BlockExpr *Node) {
   BlockDecl *BD = Node->getBlockDecl();

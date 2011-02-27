@@ -71,7 +71,7 @@ class IdentifierInfo {
   void operator=(const IdentifierInfo&);  // NONASSIGNABLE.
 
   friend class IdentifierTable;
-
+  
 public:
   IdentifierInfo();
 
@@ -254,6 +254,35 @@ private:
   }
 };
 
+/// \brief An iterator that walks over all of the known identifiers
+/// in the lookup table.
+///
+/// Since this iterator uses an abstract interface via virtual
+/// functions, it uses an object-oriented interface rather than the
+/// more standard C++ STL iterator interface. In this OO-style
+/// iteration, the single function \c Next() provides dereference,
+/// advance, and end-of-sequence checking in a single
+/// operation. Subclasses of this iterator type will provide the
+/// actual functionality.
+class IdentifierIterator {
+private:
+  IdentifierIterator(const IdentifierIterator&); // Do not implement
+  IdentifierIterator &operator=(const IdentifierIterator&); // Do not implement
+
+protected:
+  IdentifierIterator() { }
+  
+public:
+  virtual ~IdentifierIterator();
+
+  /// \brief Retrieve the next string in the identifier table and
+  /// advances the iterator for the following string.
+  ///
+  /// \returns The next string in the identifier table. If there is
+  /// no such string, returns an empty \c llvm::StringRef.
+  virtual llvm::StringRef Next() = 0;
+};
+
 /// IdentifierInfoLookup - An abstract class used by IdentifierTable that
 ///  provides an interface for performing lookups from strings
 /// (const char *) to IdentiferInfo objects.
@@ -266,6 +295,18 @@ public:
   ///  of a reference.  If the pointer is NULL then the IdentifierInfo cannot
   ///  be found.
   virtual IdentifierInfo* get(llvm::StringRef Name) = 0;
+
+  /// \brief Retrieve an iterator into the set of all identifiers
+  /// known to this identifier lookup source.
+  ///
+  /// This routine provides access to all of the identifiers known to
+  /// the identifier lookup, allowing access to the contents of the
+  /// identifiers without introducing the overhead of constructing
+  /// IdentifierInfo objects for each.
+  ///
+  /// \returns A new iterator into the set of known identifiers. The
+  /// caller is responsible for deleting this iterator.
+  virtual IdentifierIterator *getIdentifiers() const;
 };
 
 /// \brief An abstract class used to resolve numerical identifier
@@ -304,6 +345,11 @@ public:
     ExternalLookup = IILookup;
   }
 
+  /// \brief Retrieve the external identifier lookup object, if any.
+  IdentifierInfoLookup *getExternalIdentifierLookup() const {
+    return ExternalLookup;
+  }
+  
   llvm::BumpPtrAllocator& getAllocator() {
     return HashTable.getAllocator();
   }
@@ -570,6 +616,17 @@ struct DenseMapInfo<clang::Selector> {
 template <>
 struct isPodLike<clang::Selector> { static const bool value = true; };
 
+template<>
+class PointerLikeTypeTraits<clang::Selector> {
+public:
+  static inline const void *getAsVoidPointer(clang::Selector P) {
+    return P.getAsOpaquePtr();
+  }
+  static inline clang::Selector getFromVoidPointer(const void *P) {
+    return clang::Selector(reinterpret_cast<uintptr_t>(P));
+  }
+  enum { NumLowBitsAvailable = 0 };  
+};
 
 // Provide PointerLikeTypeTraits for IdentifierInfo pointers, which
 // are not guaranteed to be 8-byte aligned.

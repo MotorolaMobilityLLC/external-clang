@@ -98,7 +98,7 @@ const char *TargetInfo::getTypeConstantSuffix(IntType T) {
   }
 }
 
-/// getTypeWidth - Return the width (in bits) of the specified integer type 
+/// getTypeWidth - Return the width (in bits) of the specified integer type
 /// enum. For example, SignedInt -> getIntWidth().
 unsigned TargetInfo::getTypeWidth(IntType T) const {
   switch (T) {
@@ -114,7 +114,7 @@ unsigned TargetInfo::getTypeWidth(IntType T) const {
   };
 }
 
-/// getTypeAlign - Return the alignment (in bits) of the specified integer type 
+/// getTypeAlign - Return the alignment (in bits) of the specified integer type
 /// enum. For example, SignedInt -> getIntAlign().
 unsigned TargetInfo::getTypeAlign(IntType T) const {
   switch (T) {
@@ -138,12 +138,12 @@ bool TargetInfo::isTypeSigned(IntType T) const {
   case SignedShort:
   case SignedInt:
   case SignedLong:
-  case SignedLongLong:   
+  case SignedLongLong:
     return true;
   case UnsignedShort:
   case UnsignedInt:
   case UnsignedLong:
-  case UnsignedLongLong: 
+  case UnsignedLongLong:
     return false;
   };
 }
@@ -164,7 +164,7 @@ void TargetInfo::setForcedLangOptions(LangOptions &Opts) {
 static llvm::StringRef removeGCCRegisterPrefix(llvm::StringRef Name) {
   if (Name[0] == '%' || Name[0] == '#')
     Name = Name.substr(1);
-  
+
   return Name;
 }
 
@@ -174,7 +174,7 @@ static llvm::StringRef removeGCCRegisterPrefix(llvm::StringRef Name) {
 bool TargetInfo::isValidGCCRegisterName(llvm::StringRef Name) const {
   if (Name.empty())
     return false;
-  
+
   const char * const *Names;
   unsigned NumNames;
 
@@ -216,7 +216,7 @@ bool TargetInfo::isValidGCCRegisterName(llvm::StringRef Name) const {
   return false;
 }
 
-llvm::StringRef 
+llvm::StringRef
 TargetInfo::getNormalizedGCCRegisterName(llvm::StringRef Name) const {
   assert(isValidGCCRegisterName(Name) && "Invalid register passed in");
 
@@ -283,6 +283,10 @@ bool TargetInfo::validateOutputConstraint(ConstraintInfo &Info) const {
       Info.setAllowsRegister();
       break;
     case 'm': // memory operand.
+    case 'o': // offsetable memory operand.
+    case 'V': // non-offsetable memory operand.
+    case '<': // autodecrement memory operand.
+    case '>': // autoincrement memory operand.
       Info.setAllowsMemory();
       break;
     case 'g': // general register, memory operand or immediate integer.
@@ -291,13 +295,12 @@ bool TargetInfo::validateOutputConstraint(ConstraintInfo &Info) const {
       Info.setAllowsMemory();
       break;
     case ',': // multiple alternative constraint.  Pass it.
-      Name++;
       // Handle additional optional '=' or '+' modifiers.
-      if (*Name == '=' || *Name == '+')
+      if (Name[1] == '=' || Name[1] == '+')
         Name++;
       break;
     case '?': // Disparage slightly code.
-    case '!': // Disparage severly.
+    case '!': // Disparage severely.
       break;  // Pass them.
     }
 
@@ -347,6 +350,15 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
         if (i >= NumOutputs)
           return false;
 
+        // A number must refer to an output only operand.
+        if (OutputConstraints[i].isReadWrite())
+          return false;
+
+        // If the constraint is already tied, it must be tied to the 
+        // same operand referenced to by the number.
+        if (Info.hasTiedOperand() && Info.getTiedOperand() != i)
+          return false;
+
         // The constraint should have the same info as the respective
         // output constraint.
         Info.setTiedOperand(i, OutputConstraints[i]);
@@ -360,6 +372,11 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
     case '[': {
       unsigned Index = 0;
       if (!resolveSymbolicName(Name, OutputConstraints, NumOutputs, Index))
+        return false;
+
+      // If the constraint is already tied, it must be tied to the 
+      // same operand referenced to by the number.
+      if (Info.hasTiedOperand() && Info.getTiedOperand() != Index)
         return false;
 
       Info.setTiedOperand(Index, OutputConstraints[Index]);
@@ -384,14 +401,20 @@ bool TargetInfo::validateInputConstraint(ConstraintInfo *OutputConstraints,
       Info.setAllowsRegister();
       break;
     case 'm': // memory operand.
-    case 'o': // offsettable memory operand
-    case 'V': // non-offsettable memory operand
+    case 'o': // offsettable memory operand.
+    case 'V': // non-offsettable memory operand.
+    case '<': // autodecrement memory operand.
+    case '>': // autoincrement memory operand.
       Info.setAllowsMemory();
       break;
     case 'g': // general register, memory operand or immediate integer.
     case 'X': // any operand.
       Info.setAllowsRegister();
       Info.setAllowsMemory();
+      break;
+    case 'E': // immediate floating point.
+    case 'F': // immediate floating point.
+    case 'p': // address operand.
       break;
     case ',': // multiple alternative constraint.  Ignore comma.
       break;

@@ -624,3 +624,14 @@ namespace test20 {
   template <class T> void test1(decltype(f<>(T()))) {}
   template void test1<int>(decltype(f<>(int())));
 }
+
+// rdar:// 8620510
+namespace test21 {
+  // CHECK: define void @_ZN6test2112vla_arg_funcEiPA_i(
+  void vla_arg_func(int X, int a[X][X]) {}
+}
+
+namespace test22 {
+  // CHECK: define void @_ZN6test221fEDn(
+  void f(decltype(nullptr)) { }
+}

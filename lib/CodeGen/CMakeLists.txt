@@ -1,5 +1,7 @@
 set(LLVM_NO_RTTI 1)
 
+set(LLVM_USED_LIBS clangBasic clangAST clangFrontend)
+
 add_clang_library(clangCodeGen
   BackendUtil.cpp
   CGBlocks.cpp
@@ -29,6 +31,7 @@ add_clang_library(clangCodeGen
   CodeGenAction.cpp
   CodeGenFunction.cpp
   CodeGenModule.cpp
+  CodeGenTBAA.cpp
   CodeGenTypes.cpp
   ItaniumCXXABI.cpp
   Mangle.cpp

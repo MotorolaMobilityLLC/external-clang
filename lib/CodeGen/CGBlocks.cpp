@@ -122,12 +122,19 @@ static void CollectBlockDeclRefInfo(const Stmt *S, CGBlockInfo &Info) {
         E->getReceiverKind() == ObjCMessageExpr::SuperInstance)
       Info.NeedsObjCSelf = true;
   }
-
-  // Getter/setter uses may also cause implicit super references,
-  // which we can check for with:
-  else if (isa<ObjCSuperExpr>(S))
-    Info.NeedsObjCSelf = true;
-
+  else if (const ObjCPropertyRefExpr *PE = dyn_cast<ObjCPropertyRefExpr>(S)) {
+    // Getter/setter uses may also cause implicit super references,
+    // which we can check for with:
+    if (PE->isSuperReceiver())
+      Info.NeedsObjCSelf = true;
+  }
+  else if (const ObjCImplicitSetterGetterRefExpr *IE = 
+           dyn_cast<ObjCImplicitSetterGetterRefExpr>(S)) {
+    // Getter/setter uses may also cause implicit super references,
+    // which we can check for with:
+    if (IE->isSuperReceiver())
+      Info.NeedsObjCSelf = true;
+  }
   else if (isa<CXXThisExpr>(S))
     Info.CXXThisRef = cast<CXXThisExpr>(S);
 }
@@ -352,7 +359,7 @@ llvm::Value *CodeGenFunction::BuildBlockLiteralTmp(const BlockExpr *BE) {
                         SourceLocation());
       }
 
-      RValue r = EmitAnyExpr(E, Addr, false);
+      RValue r = EmitAnyExpr(E, AggValueSlot::forAddr(Addr, false, true));
       if (r.isScalar()) {
         llvm::Value *Loc = r.getScalarVal();
         const llvm::Type *Ty = Types[i+BlockFields];
@@ -604,7 +611,7 @@ llvm::Value *CodeGenFunction::GetAddrOfBlockDecl(const ValueDecl *VD,
     if (VD->getType()->isReferenceType())
       V = Builder.CreateLoad(V);
   } else {
-    const llvm::Type *Ty = CGM.getTypes().ConvertType(VD->getType());
+    const llvm::Type *Ty = CGM.getTypes().ConvertTypeForMem(VD->getType());
     Ty = llvm::PointerType::get(Ty, 0);
     V = Builder.CreateBitCast(V, Ty);
     if (VD->getType()->isReferenceType())
@@ -757,7 +764,7 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD, const BlockExpr *BExpr,
 
   // Capture block layout info. here.
   if (CGM.getContext().getLangOptions().ObjC1)
-    BlockVarLayout = CGM.getObjCRuntime().GCBlockLayout(*this, Info.DeclRefs);
+    BlockVarLayout = CGM.getObjCRuntime().GCBlockLayout(*this, BlockLayout);
   else
     BlockVarLayout = llvm::Constant::getNullValue(PtrToInt8Ty);
   

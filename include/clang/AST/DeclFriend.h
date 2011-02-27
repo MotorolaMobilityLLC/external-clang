@@ -43,10 +43,15 @@ private:
   FriendUnion Friend;
 
   // A pointer to the next friend in the sequence.
-  FriendDecl *NextFriend;
+  LazyDeclPtr NextFriend;
 
   // Location of the 'friend' specifier.
   SourceLocation FriendLoc;
+
+  /// True if this 'friend' declaration is unsupported.  Eventually we
+  /// will support every possible friend declaration, but for now we
+  /// silently ignore some and set this flag to authorize all access.
+  bool UnsupportedFriend;
 
   friend class CXXRecordDecl::friend_iterator;
   friend class CXXRecordDecl;
@@ -55,29 +60,35 @@ private:
              SourceLocation FriendL)
     : Decl(Decl::Friend, DC, L),
       Friend(Friend),
-      NextFriend(0),
-      FriendLoc(FriendL) {
+      NextFriend(),
+      FriendLoc(FriendL),
+      UnsupportedFriend(false) {
   }
 
   explicit FriendDecl(EmptyShell Empty)
-    : Decl(Decl::Friend, Empty), NextFriend(0) { }
+    : Decl(Decl::Friend, Empty), NextFriend() { }
 
+  FriendDecl *getNextFriend() {
+    return cast_or_null<FriendDecl>(
+                          NextFriend.get(getASTContext().getExternalSource()));
+  }
+  
 public:
   static FriendDecl *Create(ASTContext &C, DeclContext *DC,
                             SourceLocation L, FriendUnion Friend_,
                             SourceLocation FriendL);
   static FriendDecl *Create(ASTContext &C, EmptyShell Empty);
 
-  /// If this friend declaration names an (untemplated but
-  /// possibly dependent) type, return the type;  otherwise
-  /// return null.  This is used only for C++0x's unelaborated
-  /// friend type declarations.
+  /// If this friend declaration names an (untemplated but possibly
+  /// dependent) type, return the type; otherwise return null.  This
+  /// is used for elaborated-type-specifiers and, in C++0x, for
+  /// arbitrary friend type declarations.
   TypeSourceInfo *getFriendType() const {
     return Friend.dyn_cast<TypeSourceInfo*>();
   }
 
-  /// If this friend declaration doesn't name an unelaborated
-  /// type, return the inner declaration.
+  /// If this friend declaration doesn't name a type, return the inner
+  /// declaration.
   NamedDecl *getFriendDecl() const {
     return Friend.dyn_cast<NamedDecl*>();
   }
@@ -85,6 +96,14 @@ public:
   /// Retrieves the location of the 'friend' keyword.
   SourceLocation getFriendLoc() const {
     return FriendLoc;
+  }
+
+  /// Determines if this friend kind is unsupported.
+  bool isUnsupportedFriend() const {
+    return UnsupportedFriend;
+  }
+  void setUnsupportedFriend(bool Unsupported) {
+    UnsupportedFriend = Unsupported;
   }
 
   // Implement isa/cast/dyncast/etc.
@@ -115,7 +134,7 @@ public:
 
   friend_iterator &operator++() {
     assert(Ptr && "attempt to increment past end of friend list");
-    Ptr = Ptr->NextFriend;
+    Ptr = Ptr->getNextFriend();
     return *this;
   }
 

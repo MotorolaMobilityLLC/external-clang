@@ -274,7 +274,6 @@ public:
       writtenBS() {
   }
   ~DeclSpec() {
-    delete AttrList;
     delete [] ProtocolQualifiers;
     delete [] ProtocolLocs;
   }
@@ -813,7 +812,6 @@ struct DeclaratorChunk {
     unsigned TypeQuals : 3;
     AttributeList *AttrList;
     void destroy() {
-      delete AttrList;
     }
   };
 
@@ -824,7 +822,6 @@ struct DeclaratorChunk {
     bool LValueRef : 1;
     AttributeList *AttrList;
     void destroy() {
-      delete AttrList;
     }
   };
 
@@ -925,6 +922,11 @@ struct DeclaratorChunk {
     /// specification and their locations.
     TypeAndRange *Exceptions;
 
+    /// TrailingReturnType - If this isn't null, it's the trailing return type
+    /// specified. This is actually a ParsedType, but stored as void* to
+    /// allow union storage.
+    void *TrailingReturnType;
+
     /// freeArgs - reset the argument list to having zero arguments.  This is
     /// used in various places for error recovery.
     void freeArgs() {
@@ -962,7 +964,6 @@ struct DeclaratorChunk {
     unsigned TypeQuals : 3;
     AttributeList *AttrList;
     void destroy() {
-      delete AttrList;
     }
   };
 
@@ -983,7 +984,6 @@ struct DeclaratorChunk {
       return *reinterpret_cast<const CXXScopeSpec*>(ScopeMem.Mem);
     }
     void destroy() {
-      delete AttrList;
       Scope().~CXXScopeSpec();
     }
   };
@@ -1077,7 +1077,8 @@ struct DeclaratorChunk {
                                      SourceRange *ExceptionRanges,
                                      unsigned NumExceptions,
                                      SourceLocation LPLoc, SourceLocation RPLoc,
-                                     Declarator &TheDeclarator);
+                                     Declarator &TheDeclarator,
+                                     ParsedType TrailingReturnType = ParsedType());
 
   /// getBlockPointer - Return a DeclaratorChunk for a block.
   ///
@@ -1238,7 +1239,6 @@ public:
     for (unsigned i = 0, e = DeclTypeInfo.size(); i != e; ++i)
       DeclTypeInfo[i].destroy();
     DeclTypeInfo.clear();
-    delete AttrList;
     AttrList = 0;
     AsmLabel = 0;
     InlineParamsUsed = false;

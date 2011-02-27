@@ -22,6 +22,7 @@
 #include "clang/AST/ExprObjC.h"
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Preprocessor.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -146,12 +147,44 @@ namespace {
     /// \brief The selector that we prefer.
     Selector PreferredSelector;
     
-    void AdjustResultPriorityForPreferredType(Result &R);
+    /// \brief The completion context in which we are gathering results.
+    CodeCompletionContext CompletionContext;
+    
+    /// \brief If we are in an instance method definition, the @implementation
+    /// object.
+    ObjCImplementationDecl *ObjCImplementation;
+    
+    void AdjustResultPriorityForDecl(Result &R);
 
+    void MaybeAddConstructorResults(Result R);
+    
   public:
-    explicit ResultBuilder(Sema &SemaRef, LookupFilter Filter = 0)
+    explicit ResultBuilder(Sema &SemaRef, 
+                           const CodeCompletionContext &CompletionContext,
+                           LookupFilter Filter = 0)
       : SemaRef(SemaRef), Filter(Filter), AllowNestedNameSpecifiers(false),
-        HasObjectTypeQualifiers(false) { }
+        HasObjectTypeQualifiers(false), 
+        CompletionContext(CompletionContext),
+        ObjCImplementation(0) 
+    { 
+      // If this is an Objective-C instance method definition, dig out the 
+      // corresponding implementation.
+      switch (CompletionContext.getKind()) {
+      case CodeCompletionContext::CCC_Expression:
+      case CodeCompletionContext::CCC_ObjCMessageReceiver:
+      case CodeCompletionContext::CCC_ParenthesizedExpression:
+      case CodeCompletionContext::CCC_Statement:
+      case CodeCompletionContext::CCC_Recovery:
+        if (ObjCMethodDecl *Method = SemaRef.getCurMethodDecl())
+          if (Method->isInstanceMethod())
+            if (ObjCInterfaceDecl *Interface = Method->getClassInterface())
+              ObjCImplementation = Interface->getImplementation();
+        break;
+          
+      default:
+        break;
+      }
+    }
     
     /// \brief Whether we should include code patterns in the completion
     /// results.
@@ -164,10 +197,6 @@ namespace {
     void setFilter(LookupFilter Filter) {
       this->Filter = Filter;
     }
-    
-    typedef std::vector<Result>::iterator iterator;
-    iterator begin() { return Results.begin(); }
-    iterator end() { return Results.end(); }
     
     Result *data() { return Results.empty()? 0 : &Results.front(); }
     unsigned size() const { return Results.size(); }
@@ -198,12 +227,22 @@ namespace {
     void setPreferredSelector(Selector Sel) {
       PreferredSelector = Sel;
     }
+        
+    /// \brief Retrieve the code-completion context for which results are
+    /// being collected.
+    const CodeCompletionContext &getCompletionContext() const { 
+      return CompletionContext; 
+    }
     
     /// \brief Specify whether nested-name-specifiers are allowed.
     void allowNestedNameSpecifiers(bool Allow = true) {
       AllowNestedNameSpecifiers = Allow;
     }
 
+    /// \brief Return the semantic analysis object for which we are collecting
+    /// code completion results.
+    Sema &getSema() const { return SemaRef; }
+    
     /// \brief Determine whether the given declaration is at all interesting
     /// as a code-completion result.
     ///
@@ -278,6 +317,7 @@ namespace {
     bool IsObjCIvar(NamedDecl *ND) const;
     bool IsObjCMessageReceiver(NamedDecl *ND) const;
     bool IsObjCCollection(NamedDecl *ND) const;
+    bool IsImpossibleToSatisfy(NamedDecl *ND) const;
     //@}    
   };  
 }
@@ -324,11 +364,11 @@ public:
     return *this;
   }
 
-  iterator operator++(int) {
+  /*iterator operator++(int) {
     iterator tmp(*this);
     ++(*this);
     return tmp;
-  }
+  }*/
 
   reference operator*() const {
     if (NamedDecl *ND = DeclOrIterator.dyn_cast<NamedDecl *>())
@@ -464,15 +504,20 @@ bool ResultBuilder::isInterestingDecl(NamedDecl *ND,
         return false;
     }
   }
- 
-  // C++ constructors are never found by name lookup.
-  if (isa<CXXConstructorDecl>(ND))
+   
+  // Skip out-of-line declarations and definitions.
+  // NOTE: Unless it's an Objective-C property, method, or ivar, where
+  // the contexts can be messy.
+  if (!ND->getDeclContext()->Equals(ND->getLexicalDeclContext()) &&
+      !(isa<ObjCPropertyDecl>(ND) || isa<ObjCIvarDecl>(ND) ||
+        isa<ObjCMethodDecl>(ND)))
     return false;
-  
+
   if (Filter == &ResultBuilder::IsNestedNameSpecifier ||
       ((isa<NamespaceDecl>(ND) || isa<NamespaceAliasDecl>(ND)) &&
        Filter != &ResultBuilder::IsNamespace &&
-       Filter != &ResultBuilder::IsNamespaceOrAlias))
+       Filter != &ResultBuilder::IsNamespaceOrAlias &&
+       Filter != 0))
     AsNestedNameSpecifier = true;
 
   // Filter out any unwanted results.
@@ -501,13 +546,13 @@ bool ResultBuilder::CheckHiddenResult(Result &R, DeclContext *CurContext,
   if (!SemaRef.getLangOptions().CPlusPlus)
     return true;
   
-  DeclContext *HiddenCtx = R.Declaration->getDeclContext()->getLookupContext();
+  DeclContext *HiddenCtx = R.Declaration->getDeclContext()->getRedeclContext();
   
   // There is no way to qualify a name declared in a function or method.
   if (HiddenCtx->isFunctionOrMethod())
     return true;
   
-  if (HiddenCtx == Hiding->getDeclContext()->getLookupContext())
+  if (HiddenCtx == Hiding->getDeclContext()->getRedeclContext())
     return true;
   
   // We can refer to the result with the appropriate qualification. Do it.
@@ -621,23 +666,66 @@ QualType clang::getDeclUsageType(ASTContext &C, NamedDecl *ND) {
   return T.getNonReferenceType();
 }
 
-void ResultBuilder::AdjustResultPriorityForPreferredType(Result &R) {
-  QualType T = getDeclUsageType(SemaRef.Context, R.Declaration);
-  if (T.isNull())
+void ResultBuilder::AdjustResultPriorityForDecl(Result &R) {
+  // If this is an Objective-C method declaration whose selector matches our
+  // preferred selector, give it a priority boost.
+  if (!PreferredSelector.isNull())
+    if (ObjCMethodDecl *Method = dyn_cast<ObjCMethodDecl>(R.Declaration))
+      if (PreferredSelector == Method->getSelector())
+        R.Priority += CCD_SelectorMatch;
+  
+  // If we have a preferred type, adjust the priority for results with exactly-
+  // matching or nearly-matching types.
+  if (!PreferredType.isNull()) {
+    QualType T = getDeclUsageType(SemaRef.Context, R.Declaration);
+    if (!T.isNull()) {
+      CanQualType TC = SemaRef.Context.getCanonicalType(T);
+      // Check for exactly-matching types (modulo qualifiers).
+      if (SemaRef.Context.hasSameUnqualifiedType(PreferredType, TC))
+        R.Priority /= CCF_ExactTypeMatch;
+      // Check for nearly-matching types, based on classification of each.
+      else if ((getSimplifiedTypeClass(PreferredType)
+                                               == getSimplifiedTypeClass(TC)) &&
+               !(PreferredType->isEnumeralType() && TC->isEnumeralType()))
+        R.Priority /= CCF_SimilarTypeMatch;  
+    }
+  }  
+}
+
+void ResultBuilder::MaybeAddConstructorResults(Result R) {
+  if (!SemaRef.getLangOptions().CPlusPlus || !R.Declaration ||
+      !CompletionContext.wantConstructorResults())
     return;
   
-  CanQualType TC = SemaRef.Context.getCanonicalType(T);
-  // Check for exactly-matching types (modulo qualifiers).
-  if (SemaRef.Context.hasSameUnqualifiedType(PreferredType, TC)) {
-    if (PreferredType->isVoidType())
-      R.Priority += CCD_VoidMatch;
-    else
-      R.Priority /= CCF_ExactTypeMatch;
-  } // Check for nearly-matching types, based on classification of each.
-  else if ((getSimplifiedTypeClass(PreferredType)
-                                               == getSimplifiedTypeClass(TC)) &&
-           !(PreferredType->isEnumeralType() && TC->isEnumeralType()))
-    R.Priority /= CCF_SimilarTypeMatch;  
+  ASTContext &Context = SemaRef.Context;
+  NamedDecl *D = R.Declaration;
+  CXXRecordDecl *Record = 0;
+  if (ClassTemplateDecl *ClassTemplate = dyn_cast<ClassTemplateDecl>(D))
+    Record = ClassTemplate->getTemplatedDecl();
+  else if ((Record = dyn_cast<CXXRecordDecl>(D))) {
+    // Skip specializations and partial specializations.
+    if (isa<ClassTemplateSpecializationDecl>(Record))
+      return;
+  } else {
+    // There are no constructors here.
+    return;
+  }
+  
+  Record = Record->getDefinition();
+  if (!Record)
+    return;
+
+  
+  QualType RecordTy = Context.getTypeDeclType(Record);
+  DeclarationName ConstructorName
+    = Context.DeclarationNames.getCXXConstructorName(
+                                           Context.getCanonicalType(RecordTy));
+  for (DeclContext::lookup_result Ctors = Record->lookup(ConstructorName);
+       Ctors.first != Ctors.second; ++Ctors.first) {
+    R.Declaration = *Ctors.first;
+    R.CursorKind = getCursorKindForDecl(R.Declaration);
+    Results.push_back(R);
+  }
 }
 
 void ResultBuilder::MaybeAddResult(Result R, DeclContext *CurContext) {
@@ -662,6 +750,10 @@ void ResultBuilder::MaybeAddResult(Result R, DeclContext *CurContext) {
   if (!isInterestingDecl(R.Declaration, AsNestedNameSpecifier))
     return;
       
+  // C++ constructors are never found by name lookup.
+  if (isa<CXXConstructorDecl>(R.Declaration))
+    return;
+
   ShadowMap &SMap = ShadowMaps.back();
   ShadowMapEntry::iterator I, IEnd;
   ShadowMap::iterator NamePos = SMap.find(R.Declaration->getDeclName());
@@ -719,20 +811,13 @@ void ResultBuilder::MaybeAddResult(Result R, DeclContext *CurContext) {
   if (!AllDeclsFound.insert(CanonDecl))
     return;
 
-  // If this is an Objective-C method declaration whose selector matches our
-  // preferred selector, give it a priority boost.
-  if (!PreferredSelector.isNull())
-    if (ObjCMethodDecl *Method = dyn_cast<ObjCMethodDecl>(R.Declaration))
-      if (PreferredSelector == Method->getSelector())
-        R.Priority += CCD_SelectorMatch;
-
   // If the filter is for nested-name-specifiers, then this result starts a
   // nested-name-specifier.
   if (AsNestedNameSpecifier) {
     R.StartsNestedNameSpecifier = true;
     R.Priority = CCP_NestedNameSpecifier;
-  } else if (!PreferredType.isNull())
-      AdjustResultPriorityForPreferredType(R);
+  } else 
+      AdjustResultPriorityForDecl(R);
       
   // If this result is supposed to have an informative qualifier, add one.
   if (R.QualifierIsInformative && !R.Qualifier &&
@@ -751,6 +836,9 @@ void ResultBuilder::MaybeAddResult(Result R, DeclContext *CurContext) {
   // map.
   SMap[R.Declaration->getDeclName()].Add(R.Declaration, Results.size());
   Results.push_back(R);
+  
+  if (!AsNestedNameSpecifier)
+    MaybeAddConstructorResults(R);
 }
 
 void ResultBuilder::AddResult(Result R, DeclContext *CurContext, 
@@ -771,6 +859,10 @@ void ResultBuilder::AddResult(Result R, DeclContext *CurContext,
   if (!isInterestingDecl(R.Declaration, AsNestedNameSpecifier))
     return;
   
+  // C++ constructors are never found by name lookup.
+  if (isa<CXXConstructorDecl>(R.Declaration))
+    return;
+
   if (Hiding && CheckHiddenResult(R, CurContext, Hiding))
     return;
       
@@ -786,7 +878,7 @@ void ResultBuilder::AddResult(Result R, DeclContext *CurContext,
   }
   else if (Filter == &ResultBuilder::IsMember && !R.Qualifier && InBaseClass &&
            isa<CXXRecordDecl>(R.Declaration->getDeclContext()
-                                                  ->getLookupContext()))
+                                                  ->getRedeclContext()))
     R.QualifierIsInformative = true;
 
   // If this result is supposed to have an informative qualifier, add one.
@@ -806,15 +898,7 @@ void ResultBuilder::AddResult(Result R, DeclContext *CurContext,
   if (InBaseClass)
     R.Priority += CCD_InBaseClass;
   
-  // If this is an Objective-C method declaration whose selector matches our
-  // preferred selector, give it a priority boost.
-  if (!PreferredSelector.isNull())
-    if (ObjCMethodDecl *Method = dyn_cast<ObjCMethodDecl>(R.Declaration))
-      if (PreferredSelector == Method->getSelector())
-        R.Priority += CCD_SelectorMatch;
-
-  if (!PreferredType.isNull())
-    AdjustResultPriorityForPreferredType(R);
+  AdjustResultPriorityForDecl(R);
   
   if (HasObjectTypeQualifiers)
     if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(R.Declaration))
@@ -832,6 +916,9 @@ void ResultBuilder::AddResult(Result R, DeclContext *CurContext,
   
   // Insert this result into the set of results.
   Results.push_back(R);
+  
+  if (!AsNestedNameSpecifier)
+    MaybeAddConstructorResults(R);
 }
 
 void ResultBuilder::AddResult(Result R) {
@@ -864,9 +951,14 @@ bool ResultBuilder::IsOrdinaryName(NamedDecl *ND) const {
   unsigned IDNS = Decl::IDNS_Ordinary;
   if (SemaRef.getLangOptions().CPlusPlus)
     IDNS |= Decl::IDNS_Tag | Decl::IDNS_Namespace | Decl::IDNS_Member;
-  else if (SemaRef.getLangOptions().ObjC1 && isa<ObjCIvarDecl>(ND))
-    return true;
-
+  else if (SemaRef.getLangOptions().ObjC1) {
+    if (isa<ObjCIvarDecl>(ND))
+      return true;
+    if (isa<ObjCPropertyDecl>(ND) &&
+        SemaRef.canSynthesizeProvisionalIvar(cast<ObjCPropertyDecl>(ND)))
+      return true;
+  }
+  
   return ND->getIdentifierNamespace() & IDNS;
 }
 
@@ -880,9 +972,14 @@ bool ResultBuilder::IsOrdinaryNonTypeName(NamedDecl *ND) const {
   unsigned IDNS = Decl::IDNS_Ordinary;
   if (SemaRef.getLangOptions().CPlusPlus)
     IDNS |= Decl::IDNS_Tag | Decl::IDNS_Namespace | Decl::IDNS_Member;
-  else if (SemaRef.getLangOptions().ObjC1 && isa<ObjCIvarDecl>(ND))
-    return true;
-  
+  else if (SemaRef.getLangOptions().ObjC1) {
+    if (isa<ObjCIvarDecl>(ND))
+      return true;
+    if (isa<ObjCPropertyDecl>(ND) &&
+        SemaRef.canSynthesizeProvisionalIvar(cast<ObjCPropertyDecl>(ND)))
+      return true;
+  }
+ 
   return ND->getIdentifierNamespace() & IDNS;
 }
 
@@ -1038,6 +1135,10 @@ bool ResultBuilder::IsObjCCollection(NamedDecl *ND) const {
          (SemaRef.getLangOptions().CPlusPlus && T->isRecordType());
 }
 
+bool ResultBuilder::IsImpossibleToSatisfy(NamedDecl *ND) const {
+  return false;
+}
+
 /// \rief Determines whether the given declaration is an Objective-C
 /// instance variable.
 bool ResultBuilder::IsObjCIvar(NamedDecl *ND) const {
@@ -1090,7 +1191,8 @@ static void AddTypeSpecifierResults(const LangOptions &LangOpts,
   
   if (LangOpts.CPlusPlus) {
     // C++-specific
-    Results.AddResult(Result("bool", CCP_Type));
+    Results.AddResult(Result("bool", CCP_Type + 
+                             (LangOpts.ObjC1? CCD_bool_in_ObjC : 0)));
     Results.AddResult(Result("class", CCP_Type));
     Results.AddResult(Result("wchar_t", CCP_Type));
     
@@ -1180,6 +1282,7 @@ static void AddFunctionSpecifiers(Sema::ParserCompletionContext CCC,
   case Sema::PCC_Condition:
   case Sema::PCC_RecoveryInFunction:
   case Sema::PCC_Type:
+  case Sema::PCC_ParenthesizedExpression:
     break;
   }
 }
@@ -1209,9 +1312,6 @@ static void AddTypedefResult(ResultBuilder &Results) {
 
 static bool WantTypesInContext(Sema::ParserCompletionContext CCC,
                                const LangOptions &LangOpts) {
-  if (LangOpts.CPlusPlus)
-    return true;
-  
   switch (CCC) {
   case Sema::PCC_Namespace:
   case Sema::PCC_Class:
@@ -1221,16 +1321,19 @@ static bool WantTypesInContext(Sema::ParserCompletionContext CCC,
   case Sema::PCC_Statement:
   case Sema::PCC_RecoveryInFunction:
   case Sema::PCC_Type:
+  case Sema::PCC_ParenthesizedExpression:
     return true;
     
-  case Sema::PCC_ObjCInterface:
-  case Sema::PCC_ObjCImplementation:
   case Sema::PCC_Expression:
   case Sema::PCC_Condition:
+    return LangOpts.CPlusPlus;
+      
+  case Sema::PCC_ObjCInterface:
+  case Sema::PCC_ObjCImplementation:
     return false;
     
   case Sema::PCC_ForInit:
-    return LangOpts.ObjC1 || LangOpts.C99;
+    return LangOpts.CPlusPlus || LangOpts.ObjC1 || LangOpts.C99;
   }
   
   return false;
@@ -1498,6 +1601,7 @@ static void AddOrdinaryNameResults(Sema::ParserCompletionContext CCC,
       Pattern->AddPlaceholderChunk("inc-expression");
       Pattern->AddChunk(CodeCompletionString::CK_RightParen);
       Pattern->AddChunk(CodeCompletionString::CK_LeftBrace);
+      Pattern->AddChunk(CodeCompletionString::CK_VerticalSpace);
       Pattern->AddPlaceholderChunk("statements");
       Pattern->AddChunk(CodeCompletionString::CK_VerticalSpace);
       Pattern->AddChunk(CodeCompletionString::CK_RightBrace);
@@ -1560,6 +1664,7 @@ static void AddOrdinaryNameResults(Sema::ParserCompletionContext CCC,
     AddStorageSpecifiers(CCC, SemaRef.getLangOptions(), Results);
     // Fall through: conditions and statements can have expressions.
 
+  case Sema::PCC_ParenthesizedExpression:
   case Sema::PCC_Expression: {
     CodeCompletionString *Pattern = 0;
     if (SemaRef.getLangOptions().CPlusPlus) {
@@ -1714,9 +1819,14 @@ static void AddResultTypeChunk(ASTContext &Context,
                                CodeCompletionString *Result) {
   if (!ND)
     return;
-  
+
+  // Skip constructors and conversion functions, which have their return types
+  // built into their names.
+  if (isa<CXXConstructorDecl>(ND) || isa<CXXConversionDecl>(ND))
+    return;
+
   // Determine the type of the declaration (if it has a type).
-  QualType T;
+  QualType T;  
   if (FunctionDecl *Function = dyn_cast<FunctionDecl>(ND))
     T = Function->getResultType();
   else if (ObjCMethodDecl *Method = dyn_cast<ObjCMethodDecl>(ND))
@@ -1758,7 +1868,8 @@ static void MaybeAddSentinel(ASTContext &Context, NamedDecl *FunctionOrMethod,
 }
 
 static std::string FormatFunctionParameter(ASTContext &Context,
-                                           ParmVarDecl *Param) {
+                                           ParmVarDecl *Param,
+                                           bool SuppressName = false) {
   bool ObjCMethodParam = isa<ObjCMethodDecl>(Param->getDeclContext());
   if (Param->getType()->isDependentType() ||
       !Param->getType()->isBlockPointerType()) {
@@ -1766,7 +1877,7 @@ static std::string FormatFunctionParameter(ASTContext &Context,
     // containing that parameter's type.
     std::string Result;
     
-    if (Param->getIdentifier() && !ObjCMethodParam)
+    if (Param->getIdentifier() && !ObjCMethodParam && !SuppressName)
       Result = Param->getIdentifier()->getName();
     
     Param->getType().getAsStringInternal(Result, 
@@ -1775,7 +1886,7 @@ static std::string FormatFunctionParameter(ASTContext &Context,
     if (ObjCMethodParam) {
       Result = "(" + Result;
       Result += ")";
-      if (Param->getIdentifier())
+      if (Param->getIdentifier() && !SuppressName)
         Result += Param->getIdentifier()->getName();
     }
     return Result;
@@ -1833,23 +1944,33 @@ static std::string FormatFunctionParameter(ASTContext &Context,
   
   // We have the function prototype behind the block pointer type, as it was
   // written in the source.
-  std::string Result = "(^)(";
-  for (unsigned I = 0, N = Block->getNumArgs(); I != N; ++I) {
-    if (I)
-      Result += ", ";
-    Result += FormatFunctionParameter(Context, Block->getArg(I));
-  }
-  if (Block->getTypePtr()->isVariadic()) {
-    if (Block->getNumArgs() > 0)
-      Result += ", ...";
+  std::string Result;
+  QualType ResultType = Block->getTypePtr()->getResultType();
+  if (!ResultType->isVoidType())
+    ResultType.getAsStringInternal(Result, Context.PrintingPolicy);
+  
+  Result = '^' + Result;
+  if (Block->getNumArgs() == 0) {
+    if (Block->getTypePtr()->isVariadic())
+      Result += "(...)";
     else
-      Result += "...";
-  } else if (Block->getNumArgs() == 0 && !Context.getLangOptions().CPlusPlus)
-    Result += "void";
-             
-  Result += ")";
-  Block->getTypePtr()->getResultType().getAsStringInternal(Result, 
-                                                        Context.PrintingPolicy);
+      Result += "(void)";
+  } else {
+    Result += "(";
+    for (unsigned I = 0, N = Block->getNumArgs(); I != N; ++I) {
+      if (I)
+        Result += ", ";
+      Result += FormatFunctionParameter(Context, Block->getArg(I));
+      
+      if (I == N - 1 && Block->getTypePtr()->isVariadic())
+        Result += ", ...";
+    }
+    Result += ")";
+  }
+  
+  if (Param->getIdentifier())
+    Result += Param->getIdentifier()->getName();
+
   return Result;
 }
 
@@ -1878,6 +1999,9 @@ static void AddFunctionParameterChunks(ASTContext &Context,
     // Format the placeholder string.
     std::string PlaceholderStr = FormatFunctionParameter(Context, Param);
         
+    if (Function->isVariadic() && P == N - 1)
+      PlaceholderStr += ", ...";
+
     // Add the placeholder string.
     CCStr->AddPlaceholderChunk(PlaceholderStr);
   }
@@ -1885,7 +2009,8 @@ static void AddFunctionParameterChunks(ASTContext &Context,
   if (const FunctionProtoType *Proto 
         = Function->getType()->getAs<FunctionProtoType>())
     if (Proto->isVariadic()) {
-      CCStr->AddPlaceholderChunk(", ...");
+      if (Proto->getNumArgs() == 0)
+        CCStr->AddPlaceholderChunk("...");
 
       MaybeAddSentinel(Context, Function, CCStr);
     }
@@ -1998,6 +2123,54 @@ static void AddFunctionTypeQualsToCompletionString(CodeCompletionString *Result,
   Result->AddInformativeChunk(QualsStr);
 }
 
+/// \brief Add the name of the given declaration 
+static void AddTypedNameChunk(ASTContext &Context, NamedDecl *ND,
+                              CodeCompletionString *Result) {
+  typedef CodeCompletionString::Chunk Chunk;
+  
+  DeclarationName Name = ND->getDeclName();
+  if (!Name)
+    return;
+  
+  switch (Name.getNameKind()) {
+  case DeclarationName::Identifier:
+  case DeclarationName::CXXConversionFunctionName:
+  case DeclarationName::CXXOperatorName:
+  case DeclarationName::CXXDestructorName:
+  case DeclarationName::CXXLiteralOperatorName:
+    Result->AddTypedTextChunk(ND->getNameAsString());
+    break;
+      
+  case DeclarationName::CXXUsingDirective:
+  case DeclarationName::ObjCZeroArgSelector:
+  case DeclarationName::ObjCOneArgSelector:
+  case DeclarationName::ObjCMultiArgSelector:
+    break;
+      
+  case DeclarationName::CXXConstructorName: {
+    CXXRecordDecl *Record = 0;
+    QualType Ty = Name.getCXXNameType();
+    if (const RecordType *RecordTy = Ty->getAs<RecordType>())
+      Record = cast<CXXRecordDecl>(RecordTy->getDecl());
+    else if (const InjectedClassNameType *InjectedTy
+                                        = Ty->getAs<InjectedClassNameType>())
+      Record = InjectedTy->getDecl();
+    else {
+      Result->AddTypedTextChunk(ND->getNameAsString());
+      break;
+    }
+    
+    Result->AddTypedTextChunk(Record->getNameAsString());
+    if (ClassTemplateDecl *Template = Record->getDescribedClassTemplate()) {
+      Result->AddChunk(Chunk(CodeCompletionString::CK_LeftAngle));
+      AddTemplateParameterChunks(Context, Template, Result);
+      Result->AddChunk(Chunk(CodeCompletionString::CK_RightAngle));
+    }
+    break;
+  }
+  }
+}
+
 /// \brief If possible, create a new code completion string for the given
 /// result.
 ///
@@ -2006,7 +2179,7 @@ static void AddFunctionTypeQualsToCompletionString(CodeCompletionString *Result,
 /// result is all that is needed.
 CodeCompletionString *
 CodeCompletionResult::CreateCodeCompletionString(Sema &S,
-                                               CodeCompletionString *Result) {
+                                                 CodeCompletionString *Result) {
   typedef CodeCompletionString::Chunk Chunk;
   
   if (Kind == RK_Pattern)
@@ -2071,7 +2244,7 @@ CodeCompletionResult::CreateCodeCompletionString(Sema &S,
   if (FunctionDecl *Function = dyn_cast<FunctionDecl>(ND)) {
     AddQualifierToCompletionString(Result, Qualifier, QualifierIsInformative, 
                                    S.Context);
-    Result->AddTypedTextChunk(Function->getNameAsString());
+    AddTypedNameChunk(S.Context, ND, Result);
     Result->AddChunk(Chunk(CodeCompletionString::CK_LeftParen));
     AddFunctionParameterChunks(S.Context, Function, Result);
     Result->AddChunk(Chunk(CodeCompletionString::CK_RightParen));
@@ -2083,8 +2256,8 @@ CodeCompletionResult::CreateCodeCompletionString(Sema &S,
     AddQualifierToCompletionString(Result, Qualifier, QualifierIsInformative, 
                                    S.Context);
     FunctionDecl *Function = FunTmpl->getTemplatedDecl();
-    Result->AddTypedTextChunk(Function->getNameAsString());
-    
+    AddTypedNameChunk(S.Context, Function, Result);
+
     // Figure out which template parameters are deduced (or have default
     // arguments).
     llvm::SmallVector<bool, 16> Deduced;
@@ -2175,10 +2348,8 @@ CodeCompletionResult::CreateCodeCompletionString(Sema &S,
         Keyword += ":";
         if (Idx < StartParameter || AllParametersAreInformative)
           Result->AddInformativeChunk(Keyword);
-        else if (Idx == StartParameter)
+        else 
           Result->AddTypedTextChunk(Keyword);
-        else
-          Result->AddTextChunk(Keyword);
       }
       
       // If we're before the starting parameter, skip the placeholder.
@@ -2188,13 +2359,17 @@ CodeCompletionResult::CreateCodeCompletionString(Sema &S,
       std::string Arg;
       
       if ((*P)->getType()->isBlockPointerType() && !DeclaringEntity)
-        Arg = FormatFunctionParameter(S.Context, *P);
+        Arg = FormatFunctionParameter(S.Context, *P, true);
       else {
         (*P)->getType().getAsStringInternal(Arg, S.Context.PrintingPolicy);
         Arg = "(" + Arg + ")";
         if (IdentifierInfo *II = (*P)->getIdentifier())
-          Arg += II->getName().str();
+          if (DeclaringEntity || AllParametersAreInformative)
+            Arg += II->getName().str();
       }
+      
+      if (Method->isVariadic() && (P + 1) == PEnd)
+        Arg += ", ...";
       
       if (DeclaringEntity)
         Result->AddTextChunk(Arg);
@@ -2205,12 +2380,14 @@ CodeCompletionResult::CreateCodeCompletionString(Sema &S,
     }
 
     if (Method->isVariadic()) {
-      if (DeclaringEntity)
-        Result->AddTextChunk(", ...");
-      else if (AllParametersAreInformative)
-        Result->AddInformativeChunk(", ...");
-      else
-        Result->AddPlaceholderChunk(", ...");
+      if (Method->param_size() == 0) {
+        if (DeclaringEntity)
+          Result->AddTextChunk(", ...");
+        else if (AllParametersAreInformative)
+          Result->AddInformativeChunk(", ...");
+        else
+          Result->AddPlaceholderChunk(", ...");
+      }
       
       MaybeAddSentinel(S.Context, Method, Result);
     }
@@ -2229,10 +2406,12 @@ CodeCompletionResult::CreateCodeCompletionString(Sema &S,
 CodeCompletionString *
 CodeCompleteConsumer::OverloadCandidate::CreateSignatureString(
                                                           unsigned CurrentArg,
-                                                               Sema &S) const {
+                                                               Sema &S,
+                                           CodeCompletionString *Result) const {
   typedef CodeCompletionString::Chunk Chunk;
   
-  CodeCompletionString *Result = new CodeCompletionString;
+  if (!Result)
+    Result = new CodeCompletionString;
   FunctionDecl *FDecl = getFunction();
   AddResultTypeChunk(S.Context, FDecl, Result);
   const FunctionProtoType *Proto 
@@ -2293,17 +2472,90 @@ CodeCompleteConsumer::OverloadCandidate::CreateSignatureString(
 }
 
 unsigned clang::getMacroUsagePriority(llvm::StringRef MacroName, 
+                                      const LangOptions &LangOpts,
                                       bool PreferredTypeIsPointer) {
   unsigned Priority = CCP_Macro;
   
-  // Treat the "nil" and "NULL" macros as null pointer constants.
-  if (MacroName.equals("nil") || MacroName.equals("NULL")) {
+  // Treat the "nil", "Nil" and "NULL" macros as null pointer constants.
+  if (MacroName.equals("nil") || MacroName.equals("NULL") || 
+      MacroName.equals("Nil")) {
     Priority = CCP_Constant;
     if (PreferredTypeIsPointer)
       Priority = Priority / CCF_SimilarTypeMatch;
-  }
+  } 
+  // Treat "YES", "NO", "true", and "false" as constants.
+  else if (MacroName.equals("YES") || MacroName.equals("NO") ||
+           MacroName.equals("true") || MacroName.equals("false"))
+    Priority = CCP_Constant;
+  // Treat "bool" as a type.
+  else if (MacroName.equals("bool"))
+    Priority = CCP_Type + (LangOpts.ObjC1? CCD_bool_in_ObjC : 0);
+    
   
   return Priority;
+}
+
+CXCursorKind clang::getCursorKindForDecl(Decl *D) {
+  if (!D)
+    return CXCursor_UnexposedDecl;
+  
+  switch (D->getKind()) {
+    case Decl::Enum:               return CXCursor_EnumDecl;
+    case Decl::EnumConstant:       return CXCursor_EnumConstantDecl;
+    case Decl::Field:              return CXCursor_FieldDecl;
+    case Decl::Function:  
+      return CXCursor_FunctionDecl;
+    case Decl::ObjCCategory:       return CXCursor_ObjCCategoryDecl;
+    case Decl::ObjCCategoryImpl:   return CXCursor_ObjCCategoryImplDecl;
+    case Decl::ObjCClass:
+      // FIXME
+      return CXCursor_UnexposedDecl;
+    case Decl::ObjCForwardProtocol:
+      // FIXME
+      return CXCursor_UnexposedDecl;      
+    case Decl::ObjCImplementation: return CXCursor_ObjCImplementationDecl;
+    case Decl::ObjCInterface:      return CXCursor_ObjCInterfaceDecl;
+    case Decl::ObjCIvar:           return CXCursor_ObjCIvarDecl; 
+    case Decl::ObjCMethod:
+      return cast<ObjCMethodDecl>(D)->isInstanceMethod()
+      ? CXCursor_ObjCInstanceMethodDecl : CXCursor_ObjCClassMethodDecl;
+    case Decl::CXXMethod:          return CXCursor_CXXMethod;
+    case Decl::CXXConstructor:     return CXCursor_Constructor;
+    case Decl::CXXDestructor:      return CXCursor_Destructor;
+    case Decl::CXXConversion:      return CXCursor_ConversionFunction;
+    case Decl::ObjCProperty:       return CXCursor_ObjCPropertyDecl;
+    case Decl::ObjCProtocol:       return CXCursor_ObjCProtocolDecl;
+    case Decl::ParmVar:            return CXCursor_ParmDecl;
+    case Decl::Typedef:            return CXCursor_TypedefDecl;
+    case Decl::Var:                return CXCursor_VarDecl;
+    case Decl::Namespace:          return CXCursor_Namespace;
+    case Decl::NamespaceAlias:     return CXCursor_NamespaceAlias;
+    case Decl::TemplateTypeParm:   return CXCursor_TemplateTypeParameter;
+    case Decl::NonTypeTemplateParm:return CXCursor_NonTypeTemplateParameter;
+    case Decl::TemplateTemplateParm:return CXCursor_TemplateTemplateParameter;
+    case Decl::FunctionTemplate:   return CXCursor_FunctionTemplate;
+    case Decl::ClassTemplate:      return CXCursor_ClassTemplate;
+    case Decl::ClassTemplatePartialSpecialization:
+      return CXCursor_ClassTemplatePartialSpecialization;
+    case Decl::UsingDirective:     return CXCursor_UsingDirective;
+      
+    case Decl::Using:
+    case Decl::UnresolvedUsingValue:
+    case Decl::UnresolvedUsingTypename: 
+      return CXCursor_UsingDeclaration;
+      
+    default:
+      if (TagDecl *TD = dyn_cast<TagDecl>(D)) {
+        switch (TD->getTagKind()) {
+          case TTK_Struct: return CXCursor_StructDecl;
+          case TTK_Class:  return CXCursor_ClassDecl;
+          case TTK_Union:  return CXCursor_UnionDecl;
+          case TTK_Enum:   return CXCursor_EnumDecl;
+        }
+      }
+  }
+  
+  return CXCursor_UnexposedDecl;
 }
 
 static void AddMacroResults(Preprocessor &PP, ResultBuilder &Results,
@@ -2311,14 +2563,18 @@ static void AddMacroResults(Preprocessor &PP, ResultBuilder &Results,
   typedef CodeCompletionResult Result;
   
   Results.EnterNewScope();
+  
   for (Preprocessor::macro_iterator M = PP.macro_begin(), 
                                  MEnd = PP.macro_end();
        M != MEnd; ++M) {
     Results.AddResult(Result(M->first, 
                              getMacroUsagePriority(M->first->getName(),
+                                                   PP.getLangOptions(),
                                                    TargetTypeIsPointer)));
   }
+  
   Results.ExitScope();
+  
 }
 
 static void AddPrettyFunctionResults(const LangOptions &LangOpts, 
@@ -2326,6 +2582,7 @@ static void AddPrettyFunctionResults(const LangOptions &LangOpts,
   typedef CodeCompletionResult Result;
   
   Results.EnterNewScope();
+  
   Results.AddResult(Result("__PRETTY_FUNCTION__", CCP_Constant));
   Results.AddResult(Result("__FUNCTION__", CCP_Constant));
   if (LangOpts.C99 || LangOpts.CPlusPlus0x)
@@ -2365,11 +2622,24 @@ static enum CodeCompletionContext::Kind mapCodeCompletionContext(Sema &S,
       
   case Sema::PCC_Template:
   case Sema::PCC_MemberTemplate:
-  case Sema::PCC_RecoveryInFunction:
-    return CodeCompletionContext::CCC_Other;
+    if (S.CurContext->isFileContext())
+      return CodeCompletionContext::CCC_TopLevel;
+    else if (S.CurContext->isRecord())
+      return CodeCompletionContext::CCC_ClassStructUnion;
+    else 
+      return CodeCompletionContext::CCC_Other;
       
-  case Sema::PCC_Expression:
+  case Sema::PCC_RecoveryInFunction:
+    return CodeCompletionContext::CCC_Recovery;
+
   case Sema::PCC_ForInit:
+    if (S.getLangOptions().CPlusPlus || S.getLangOptions().C99 ||
+        S.getLangOptions().ObjC1)
+      return CodeCompletionContext::CCC_ParenthesizedExpression;
+    else
+      return CodeCompletionContext::CCC_Expression;
+
+  case Sema::PCC_Expression:
   case Sema::PCC_Condition:
     return CodeCompletionContext::CCC_Expression;
       
@@ -2378,6 +2648,9 @@ static enum CodeCompletionContext::Kind mapCodeCompletionContext(Sema &S,
 
   case Sema::PCC_Type:
     return CodeCompletionContext::CCC_Type;
+
+  case Sema::PCC_ParenthesizedExpression:
+    return CodeCompletionContext::CCC_ParenthesizedExpression;
   }
   
   return CodeCompletionContext::CCC_Other;
@@ -2459,9 +2732,10 @@ static void MaybeAddOverrideCalls(Sema &S, DeclContext *InContext,
 void Sema::CodeCompleteOrdinaryName(Scope *S, 
                                     ParserCompletionContext CompletionContext) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);  
+  ResultBuilder Results(*this, 
+                        mapCodeCompletionContext(*this, CompletionContext));
   Results.EnterNewScope();
-
+  
   // Determine how to filter results, e.g., so that the names of
   // values (functions, enumerators, function templates, etc.) are
   // only allowed where we can have an expression.
@@ -2478,12 +2752,7 @@ void Sema::CodeCompleteOrdinaryName(Scope *S,
     break;
 
   case PCC_Statement:
-    // For statements that are expressions, we prefer to call 'void' functions 
-    // rather than functions that return a result, since then the result would
-    // be ignored.
-    Results.setPreferredType(Context.VoidTy);
-    // Fall through
-      
+  case PCC_ParenthesizedExpression:
   case PCC_Expression:
   case PCC_ForInit:
   case PCC_Condition:
@@ -2516,6 +2785,7 @@ void Sema::CodeCompleteOrdinaryName(Scope *S,
   Results.ExitScope();
 
   switch (CompletionContext) {
+  case PCC_ParenthesizedExpression:
   case PCC_Expression:
   case PCC_Statement:
   case PCC_RecoveryInFunction:
@@ -2539,16 +2809,26 @@ void Sema::CodeCompleteOrdinaryName(Scope *S,
   if (CodeCompleter->includeMacros())
     AddMacroResults(PP, Results);
   
-  HandleCodeCompleteResults(this, CodeCompleter,
-                            mapCodeCompletionContext(*this, CompletionContext),
+  HandleCodeCompleteResults(this, CodeCompleter, Results.getCompletionContext(),
                             Results.data(),Results.size());
 }
 
-void Sema::CodeCompleteDeclarator(Scope *S,
-                                  bool AllowNonIdentifiers,
-                                  bool AllowNestedNameSpecifiers) {
+static void AddClassMessageCompletions(Sema &SemaRef, Scope *S, 
+                                       ParsedType Receiver,
+                                       IdentifierInfo **SelIdents,
+                                       unsigned NumSelIdents,
+                                       bool AtArgumentExpression,
+                                       bool IsSuper,
+                                       ResultBuilder &Results);
+
+void Sema::CodeCompleteDeclSpec(Scope *S, DeclSpec &DS,
+                                bool AllowNonIdentifiers,
+                                bool AllowNestedNameSpecifiers) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);    
+  ResultBuilder Results(*this,
+                        AllowNestedNameSpecifiers
+                          ? CodeCompletionContext::CCC_PotentiallyQualifiedName
+                          : CodeCompletionContext::CCC_Name);
   Results.EnterNewScope();
   
   // Type qualifiers can come after names.
@@ -2565,20 +2845,41 @@ void Sema::CodeCompleteDeclarator(Scope *S,
     // Add nested-name-specifiers.
     if (AllowNestedNameSpecifiers) {
       Results.allowNestedNameSpecifiers();
+      Results.setFilter(&ResultBuilder::IsImpossibleToSatisfy);
       CodeCompletionDeclConsumer Consumer(Results, CurContext);
       LookupVisibleDecls(S, LookupNestedNameSpecifierName, Consumer,
                          CodeCompleter->includeGlobals());
+      Results.setFilter(0);
     }
   }
   Results.ExitScope();
 
+  // If we're in a context where we might have an expression (rather than a
+  // declaration), and what we've seen so far is an Objective-C type that could
+  // be a receiver of a class message, this may be a class message send with
+  // the initial opening bracket '[' missing. Add appropriate completions.
+  if (AllowNonIdentifiers && !AllowNestedNameSpecifiers &&
+      DS.getTypeSpecType() == DeclSpec::TST_typename &&
+      DS.getStorageClassSpecAsWritten() == DeclSpec::SCS_unspecified &&
+      !DS.isThreadSpecified() && !DS.isExternInLinkageSpec() &&
+      DS.getTypeSpecComplex() == DeclSpec::TSC_unspecified &&
+      DS.getTypeSpecSign() == DeclSpec::TSS_unspecified &&
+      DS.getTypeQualifiers() == 0 &&
+      S && 
+      (S->getFlags() & Scope::DeclScope) != 0 &&
+      (S->getFlags() & (Scope::ClassScope | Scope::TemplateParamScope |
+                        Scope::FunctionPrototypeScope | 
+                        Scope::AtCatchScope)) == 0) {
+    ParsedType T = DS.getRepAsType();
+    if (!T.get().isNull() && T.get()->isObjCObjectOrInterfaceType())
+      AddClassMessageCompletions(*this, S, T, 0, 0, false, false, Results); 
+  }
+
   // Note that we intentionally suppress macro results here, since we do not
   // encourage using macros to produce the names of entities.
 
-  HandleCodeCompleteResults(this, CodeCompleter,
-                        AllowNestedNameSpecifiers
-                          ? CodeCompletionContext::CCC_PotentiallyQualifiedName
-                          : CodeCompletionContext::CCC_Name,
+  HandleCodeCompleteResults(this, CodeCompleter, 
+                            Results.getCompletionContext(),
                             Results.data(), Results.size());
 }
 
@@ -2601,8 +2902,7 @@ struct Sema::CodeCompleteExpressionData {
 void Sema::CodeCompleteExpression(Scope *S, 
                                   const CodeCompleteExpressionData &Data) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
-  
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Expression);
   if (Data.ObjCCollection)
     Results.setFilter(&ResultBuilder::IsObjCCollection);
   else if (Data.IntegralConstantExpression)
@@ -2646,6 +2946,12 @@ void Sema::CodeCompleteExpression(Scope *S,
                             Results.data(),Results.size());
 }
 
+void Sema::CodeCompletePostfixExpression(Scope *S, ExprResult E) {
+  if (E.isInvalid())
+    CodeCompleteOrdinaryName(S, PCC_RecoveryInFunction);
+  else if (getLangOptions().ObjC1)
+    CodeCompleteObjCInstanceMessage(S, E.take(), 0, 0, false);
+}
 
 static void AddObjCProperties(ObjCContainerDecl *Container, 
                               bool AllowCategories,
@@ -2675,9 +2981,9 @@ static void AddObjCProperties(ObjCContainerDecl *Container,
     }
     
     // Look through protocols.
-    for (ObjCInterfaceDecl::protocol_iterator I = IFace->protocol_begin(),
-                                              E = IFace->protocol_end(); 
-         I != E; ++I)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+         I = IFace->all_referenced_protocol_begin(),
+         E = IFace->all_referenced_protocol_end(); I != E; ++I)
       AddObjCProperties(*I, AllowCategories, CurContext, Results);
     
     // Look in the superclass.
@@ -2687,8 +2993,8 @@ static void AddObjCProperties(ObjCContainerDecl *Container,
   } else if (const ObjCCategoryDecl *Category
                                     = dyn_cast<ObjCCategoryDecl>(Container)) {
     // Look through protocols.
-    for (ObjCInterfaceDecl::protocol_iterator P = Category->protocol_begin(),
-                                           PEnd = Category->protocol_end(); 
+    for (ObjCCategoryDecl::protocol_iterator P = Category->protocol_begin(),
+                                          PEnd = Category->protocol_end(); 
          P != PEnd; ++P)
       AddObjCProperties(*P, AllowCategories, CurContext, Results);
   }
@@ -2714,7 +3020,10 @@ void Sema::CodeCompleteMemberReferenceExpr(Scope *S, ExprTy *BaseE,
       return;
   }
   
-  ResultBuilder Results(*this, &ResultBuilder::IsMember);
+  ResultBuilder Results(*this, 
+                  CodeCompletionContext(CodeCompletionContext::CCC_MemberAccess,
+                                        BaseType),
+                        &ResultBuilder::IsMember);
   Results.EnterNewScope();
   if (const RecordType *Record = BaseType->getAs<RecordType>()) {
     // Indicate that we are performing a member access, and the cv-qualifiers
@@ -2784,8 +3093,7 @@ void Sema::CodeCompleteMemberReferenceExpr(Scope *S, ExprTy *BaseE,
 
   // Hand off the results found for code completion.
   HandleCodeCompleteResults(this, CodeCompleter, 
-            CodeCompletionContext(CodeCompletionContext::CCC_MemberAccess,
-                                              BaseType),
+                            Results.getCompletionContext(),
                             Results.data(),Results.size());
 }
 
@@ -2819,7 +3127,7 @@ void Sema::CodeCompleteTag(Scope *S, unsigned TagSpec) {
     return;
   }
   
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, ContextKind);
   CodeCompletionDeclConsumer Consumer(Results, CurContext);
 
   // First pass: look for tags.
@@ -2833,12 +3141,12 @@ void Sema::CodeCompleteTag(Scope *S, unsigned TagSpec) {
     LookupVisibleDecls(S, LookupNestedNameSpecifierName, Consumer);
   }
   
-  HandleCodeCompleteResults(this, CodeCompleter, ContextKind,
+  HandleCodeCompleteResults(this, CodeCompleter, Results.getCompletionContext(),
                             Results.data(),Results.size());
 }
 
 void Sema::CodeCompleteTypeQualifiers(DeclSpec &DS) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_TypeQualifiers);
   Results.EnterNewScope();
   if (!(DS.getTypeQualifiers() & DeclSpec::TQ_const))
     Results.AddResult("const");
@@ -2849,7 +3157,7 @@ void Sema::CodeCompleteTypeQualifiers(DeclSpec &DS) {
     Results.AddResult("restrict");
   Results.ExitScope();
   HandleCodeCompleteResults(this, CodeCompleter, 
-                            CodeCompletionContext::CCC_TypeQualifiers,
+                            Results.getCompletionContext(),
                             Results.data(), Results.size());
 }
 
@@ -2919,7 +3227,7 @@ void Sema::CodeCompleteCase(Scope *S) {
   }
   
   // Add any enumerators that have not yet been mentioned.
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Expression);
   Results.EnterNewScope();
   for (EnumDecl::enumerator_iterator E = Enum->enumerator_begin(),
                                   EEnd = Enum->enumerator_end();
@@ -3122,9 +3430,9 @@ void Sema::CodeCompleteQualifiedId(Scope *S, CXXScopeSpec &SS,
   if (!isDependentScopeSpecifier(SS) && RequireCompleteDeclContext(SS, Ctx))
     return;
 
-  ResultBuilder Results(*this);
-  
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Name);
   Results.EnterNewScope();
+  
   // The "template" keyword can follow "::" in the grammar, but only
   // put it into the grammar if the nested-name-specifier is dependent.
   NestedNameSpecifier *NNS = (NestedNameSpecifier *)SS.getScopeRep();
@@ -3152,7 +3460,9 @@ void Sema::CodeCompleteUsing(Scope *S) {
   if (!CodeCompleter)
     return;
   
-  ResultBuilder Results(*this, &ResultBuilder::IsNestedNameSpecifier);
+  ResultBuilder Results(*this, 
+                        CodeCompletionContext::CCC_PotentiallyQualifiedName,
+                        &ResultBuilder::IsNestedNameSpecifier);
   Results.EnterNewScope();
   
   // If we aren't in class scope, we could see the "namespace" keyword.
@@ -3167,7 +3477,7 @@ void Sema::CodeCompleteUsing(Scope *S) {
   Results.ExitScope();
   
   HandleCodeCompleteResults(this, CodeCompleter, 
-                            CodeCompletionContext::CCC_Other,
+                            CodeCompletionContext::CCC_PotentiallyQualifiedName,
                             Results.data(),Results.size());
 }
 
@@ -3177,7 +3487,8 @@ void Sema::CodeCompleteUsingDirective(Scope *S) {
   
   // After "using namespace", we expect to see a namespace name or namespace
   // alias.
-  ResultBuilder Results(*this, &ResultBuilder::IsNamespaceOrAlias);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Namespace,
+                        &ResultBuilder::IsNamespaceOrAlias);
   Results.EnterNewScope();
   CodeCompletionDeclConsumer Consumer(Results, CurContext);
   LookupVisibleDecls(S, LookupOrdinaryName, Consumer,
@@ -3192,12 +3503,20 @@ void Sema::CodeCompleteNamespaceDecl(Scope *S)  {
   if (!CodeCompleter)
     return;
   
-  ResultBuilder Results(*this, &ResultBuilder::IsNamespace);
   DeclContext *Ctx = (DeclContext *)S->getEntity();
   if (!S->getParent())
     Ctx = Context.getTranslationUnitDecl();
   
-  if (Ctx && Ctx->isFileContext()) {
+  bool SuppressedGlobalResults
+    = Ctx && !CodeCompleter->includeGlobals() && isa<TranslationUnitDecl>(Ctx);
+  
+  ResultBuilder Results(*this, 
+                        SuppressedGlobalResults
+                          ? CodeCompletionContext::CCC_Namespace
+                          : CodeCompletionContext::CCC_Other,
+                        &ResultBuilder::IsNamespace);
+  
+  if (Ctx && Ctx->isFileContext() && !SuppressedGlobalResults) {
     // We only want to see those namespaces that have already been defined
     // within this scope, because its likely that the user is creating an
     // extended namespace declaration. Keep track of the most recent 
@@ -3220,7 +3539,7 @@ void Sema::CodeCompleteNamespaceDecl(Scope *S)  {
   }
   
   HandleCodeCompleteResults(this, CodeCompleter, 
-                            CodeCompletionContext::CCC_Other,
+                            Results.getCompletionContext(),
                             Results.data(),Results.size());
 }
 
@@ -3229,12 +3548,13 @@ void Sema::CodeCompleteNamespaceAliasDecl(Scope *S)  {
     return;
   
   // After "namespace", we expect to see a namespace or alias.
-  ResultBuilder Results(*this, &ResultBuilder::IsNamespaceOrAlias);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Namespace,
+                        &ResultBuilder::IsNamespaceOrAlias);
   CodeCompletionDeclConsumer Consumer(Results, CurContext);
   LookupVisibleDecls(S, LookupOrdinaryName, Consumer,
                      CodeCompleter->includeGlobals());
   HandleCodeCompleteResults(this, CodeCompleter, 
-                            CodeCompletionContext::CCC_Namespace,
+                            Results.getCompletionContext(),
                             Results.data(),Results.size());
 }
 
@@ -3243,7 +3563,8 @@ void Sema::CodeCompleteOperatorName(Scope *S) {
     return;
 
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this, &ResultBuilder::IsType);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Type,
+                        &ResultBuilder::IsType);
   Results.EnterNewScope();
   
   // Add the names of overloadable operators.
@@ -3275,7 +3596,8 @@ void Sema::CodeCompleteConstructorInitializer(Decl *ConstructorD,
   if (!Constructor)
     return;
   
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, 
+                        CodeCompletionContext::CCC_PotentiallyQualifiedName);
   Results.EnterNewScope();
   
   // Fill in any already-initialized fields or base classes.
@@ -3290,13 +3612,19 @@ void Sema::CodeCompleteConstructorInitializer(Decl *ConstructorD,
   }
   
   // Add completions for base classes.
-  unsigned Priority = 1;
+  bool SawLastInitializer = (NumInitializers == 0);
   CXXRecordDecl *ClassDecl = Constructor->getParent();
   for (CXXRecordDecl::base_class_iterator Base = ClassDecl->bases_begin(),
                                        BaseEnd = ClassDecl->bases_end();
        Base != BaseEnd; ++Base) {
-    if (!InitializedBases.insert(Context.getCanonicalType(Base->getType())))
+    if (!InitializedBases.insert(Context.getCanonicalType(Base->getType()))) {
+      SawLastInitializer
+        = NumInitializers > 0 && 
+          Initializers[NumInitializers - 1]->isBaseInitializer() &&
+          Context.hasSameUnqualifiedType(Base->getType(),
+               QualType(Initializers[NumInitializers - 1]->getBaseClass(), 0));
       continue;
+    }
     
     CodeCompletionString *Pattern = new CodeCompletionString;
     Pattern->AddTypedTextChunk(
@@ -3304,15 +3632,24 @@ void Sema::CodeCompleteConstructorInitializer(Decl *ConstructorD,
     Pattern->AddChunk(CodeCompletionString::CK_LeftParen);
     Pattern->AddPlaceholderChunk("args");
     Pattern->AddChunk(CodeCompletionString::CK_RightParen);
-    Results.AddResult(CodeCompletionResult(Pattern, Priority++));
+    Results.AddResult(CodeCompletionResult(Pattern, 
+                                   SawLastInitializer? CCP_NextInitializer
+                                                     : CCP_MemberDeclaration));
+    SawLastInitializer = false;
   }
   
   // Add completions for virtual base classes.
   for (CXXRecordDecl::base_class_iterator Base = ClassDecl->vbases_begin(),
                                        BaseEnd = ClassDecl->vbases_end();
        Base != BaseEnd; ++Base) {
-    if (!InitializedBases.insert(Context.getCanonicalType(Base->getType())))
+    if (!InitializedBases.insert(Context.getCanonicalType(Base->getType()))) {
+      SawLastInitializer
+        = NumInitializers > 0 && 
+          Initializers[NumInitializers - 1]->isBaseInitializer() &&
+          Context.hasSameUnqualifiedType(Base->getType(),
+               QualType(Initializers[NumInitializers - 1]->getBaseClass(), 0));
       continue;
+    }
     
     CodeCompletionString *Pattern = new CodeCompletionString;
     Pattern->AddTypedTextChunk(
@@ -3320,15 +3657,23 @@ void Sema::CodeCompleteConstructorInitializer(Decl *ConstructorD,
     Pattern->AddChunk(CodeCompletionString::CK_LeftParen);
     Pattern->AddPlaceholderChunk("args");
     Pattern->AddChunk(CodeCompletionString::CK_RightParen);
-    Results.AddResult(CodeCompletionResult(Pattern, Priority++));
+    Results.AddResult(CodeCompletionResult(Pattern, 
+                                   SawLastInitializer? CCP_NextInitializer
+                                                     : CCP_MemberDeclaration));
+    SawLastInitializer = false;
   }
   
   // Add completions for members.
   for (CXXRecordDecl::field_iterator Field = ClassDecl->field_begin(),
                                   FieldEnd = ClassDecl->field_end();
        Field != FieldEnd; ++Field) {
-    if (!InitializedFields.insert(cast<FieldDecl>(Field->getCanonicalDecl())))
+    if (!InitializedFields.insert(cast<FieldDecl>(Field->getCanonicalDecl()))) {
+      SawLastInitializer
+        = NumInitializers > 0 && 
+          Initializers[NumInitializers - 1]->isMemberInitializer() &&
+          Initializers[NumInitializers - 1]->getMember() == *Field;
       continue;
+    }
     
     if (!Field->getDeclName())
       continue;
@@ -3338,12 +3683,15 @@ void Sema::CodeCompleteConstructorInitializer(Decl *ConstructorD,
     Pattern->AddChunk(CodeCompletionString::CK_LeftParen);
     Pattern->AddPlaceholderChunk("args");
     Pattern->AddChunk(CodeCompletionString::CK_RightParen);
-    Results.AddResult(CodeCompletionResult(Pattern, Priority++));
+    Results.AddResult(CodeCompletionResult(Pattern, 
+                                   SawLastInitializer? CCP_NextInitializer
+                                                     : CCP_MemberDeclaration,
+                                           CXCursor_MemberRef));
+    SawLastInitializer = false;
   }
   Results.ExitScope();
   
-  HandleCodeCompleteResults(this, CodeCompleter, 
-                            CodeCompletionContext::CCC_Name,
+  HandleCodeCompleteResults(this, CodeCompleter, Results.getCompletionContext(),
                             Results.data(), Results.size());
 }
 
@@ -3444,7 +3792,7 @@ static void AddObjCTopLevelResults(ResultBuilder &Results, bool NeedAt) {
 void Sema::CodeCompleteObjCAtDirective(Scope *S, Decl *ObjCImpDecl,
                                        bool InInterface) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   if (ObjCImpDecl)
     AddObjCImplementationResults(getLangOptions(), Results, false);
@@ -3547,7 +3895,7 @@ static void AddObjCVisibilityResults(const LangOptions &LangOpts,
 }
 
 void Sema::CodeCompleteObjCAtVisibility(Scope *S) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   AddObjCVisibilityResults(getLangOptions(), Results, false);
   Results.ExitScope();
@@ -3557,7 +3905,7 @@ void Sema::CodeCompleteObjCAtVisibility(Scope *S) {
 }
 
 void Sema::CodeCompleteObjCAtStatement(Scope *S) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   AddObjCStatementResults(Results, false);
   AddObjCExpressionResults(Results, false);
@@ -3568,7 +3916,7 @@ void Sema::CodeCompleteObjCAtStatement(Scope *S) {
 }
 
 void Sema::CodeCompleteObjCAtExpression(Scope *S) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   AddObjCExpressionResults(Results, false);
   Results.ExitScope();
@@ -3614,7 +3962,7 @@ void Sema::CodeCompleteObjCPropertyFlags(Scope *S, ObjCDeclSpec &ODS) {
   unsigned Attributes = ODS.getPropertyAttributes();
   
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   if (!ObjCPropertyFlagConflicts(Attributes, ObjCDeclSpec::DQ_PR_readonly))
     Results.AddResult(CodeCompletionResult("readonly"));
@@ -3683,7 +4031,13 @@ static bool isAcceptableObjCMethod(ObjCMethodDecl *Method,
   return isAcceptableObjCSelector(Method->getSelector(), WantKind, SelIdents,
                                   NumSelIdents);
 }
-                                   
+
+namespace {
+  /// \brief A set of selectors, which is used to avoid introducing multiple 
+  /// completions with the same selector into the result set.
+  typedef llvm::SmallPtrSet<Selector, 16> VisitedSelectorSet;
+}
+
 /// \brief Add all of the Objective-C methods in the given Objective-C 
 /// container to the set of results.
 ///
@@ -3707,6 +4061,7 @@ static void AddObjCMethods(ObjCContainerDecl *Container,
                            IdentifierInfo **SelIdents,
                            unsigned NumSelIdents,
                            DeclContext *CurContext,
+                           VisitedSelectorSet &Selectors,
                            ResultBuilder &Results,
                            bool InOriginalClass = true) {
   typedef CodeCompletionResult Result;
@@ -3719,6 +4074,9 @@ static void AddObjCMethods(ObjCContainerDecl *Container,
       if (!isAcceptableObjCMethod(*M, WantKind, SelIdents, NumSelIdents))
         continue;
 
+      if (!Selectors.insert((*M)->getSelector()))
+        continue;
+      
       Result R = Result(*M, 0);
       R.StartParameter = NumSelIdents;
       R.AllParametersAreInformative = (WantKind != MK_Any);
@@ -3726,6 +4084,17 @@ static void AddObjCMethods(ObjCContainerDecl *Container,
         R.Priority += CCD_InBaseClass;
       Results.MaybeAddResult(R, CurContext);
     }
+  }
+  
+  // Visit the protocols of protocols.
+  if (ObjCProtocolDecl *Protocol = dyn_cast<ObjCProtocolDecl>(Container)) {
+    const ObjCList<ObjCProtocolDecl> &Protocols
+      = Protocol->getReferencedProtocols();
+    for (ObjCList<ObjCProtocolDecl>::iterator I = Protocols.begin(),
+                                              E = Protocols.end(); 
+         I != E; ++I)
+      AddObjCMethods(*I, WantInstanceMethods, WantKind, SelIdents, NumSelIdents, 
+                     CurContext, Selectors, Results, false);    
   }
   
   ObjCInterfaceDecl *IFace = dyn_cast<ObjCInterfaceDecl>(Container);
@@ -3738,13 +4107,14 @@ static void AddObjCMethods(ObjCContainerDecl *Container,
                                             E = Protocols.end(); 
        I != E; ++I)
     AddObjCMethods(*I, WantInstanceMethods, WantKind, SelIdents, NumSelIdents, 
-                   CurContext, Results, false);
+                   CurContext, Selectors, Results, false);
   
   // Add methods in categories.
   for (ObjCCategoryDecl *CatDecl = IFace->getCategoryList(); CatDecl;
        CatDecl = CatDecl->getNextClassCategory()) {
     AddObjCMethods(CatDecl, WantInstanceMethods, WantKind, SelIdents, 
-                   NumSelIdents, CurContext, Results, InOriginalClass);
+                   NumSelIdents, CurContext, Selectors, Results, 
+                   InOriginalClass);
     
     // Add a categories protocol methods.
     const ObjCList<ObjCProtocolDecl> &Protocols 
@@ -3753,23 +4123,26 @@ static void AddObjCMethods(ObjCContainerDecl *Container,
                                               E = Protocols.end();
          I != E; ++I)
       AddObjCMethods(*I, WantInstanceMethods, WantKind, SelIdents, 
-                     NumSelIdents, CurContext, Results, false);
+                     NumSelIdents, CurContext, Selectors, Results, false);
     
     // Add methods in category implementations.
     if (ObjCCategoryImplDecl *Impl = CatDecl->getImplementation())
       AddObjCMethods(Impl, WantInstanceMethods, WantKind, SelIdents, 
-                     NumSelIdents, CurContext, Results, InOriginalClass);
+                     NumSelIdents, CurContext, Selectors, Results, 
+                     InOriginalClass);
   }
   
   // Add methods in superclass.
   if (IFace->getSuperClass())
     AddObjCMethods(IFace->getSuperClass(), WantInstanceMethods, WantKind, 
-                   SelIdents, NumSelIdents, CurContext, Results, false);
+                   SelIdents, NumSelIdents, CurContext, Selectors, Results, 
+                   false);
 
   // Add methods in our implementation, if any.
   if (ObjCImplementationDecl *Impl = IFace->getImplementation())
     AddObjCMethods(Impl, WantInstanceMethods, WantKind, SelIdents,
-                   NumSelIdents, CurContext, Results, InOriginalClass);
+                   NumSelIdents, CurContext, Selectors, Results, 
+                   InOriginalClass);
 }
 
 
@@ -3790,7 +4163,7 @@ void Sema::CodeCompleteObjCPropertyGetter(Scope *S, Decl *ClassDecl,
   }
 
   // Find all of the potential getters.
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
 
   // FIXME: We need to do this because Objective-C methods don't get
@@ -3806,7 +4179,9 @@ void Sema::CodeCompleteObjCPropertyGetter(Scope *S, Decl *ClassDecl,
       }
   }
 
-  AddObjCMethods(Class, true, MK_ZeroArgSelector, 0, 0, CurContext, Results);
+  VisitedSelectorSet Selectors;
+  AddObjCMethods(Class, true, MK_ZeroArgSelector, 0, 0, CurContext, Selectors,
+                 Results);
   Results.ExitScope();
   HandleCodeCompleteResults(this, CodeCompleter,
                             CodeCompletionContext::CCC_Other,
@@ -3831,7 +4206,7 @@ void Sema::CodeCompleteObjCPropertySetter(Scope *S, Decl *ObjCImplDecl,
   }
 
   // Find all of the potential getters.
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
 
   // FIXME: We need to do this because Objective-C methods don't get
@@ -3847,7 +4222,9 @@ void Sema::CodeCompleteObjCPropertySetter(Scope *S, Decl *ObjCImplDecl,
       }
   }
 
-  AddObjCMethods(Class, true, MK_OneArgSelector, 0, 0, CurContext, Results);
+  VisitedSelectorSet Selectors;
+  AddObjCMethods(Class, true, MK_OneArgSelector, 0, 0, CurContext, 
+                 Selectors, Results);
 
   Results.ExitScope();
   HandleCodeCompleteResults(this, CodeCompleter,
@@ -3857,7 +4234,7 @@ void Sema::CodeCompleteObjCPropertySetter(Scope *S, Decl *ObjCImplDecl,
 
 void Sema::CodeCompleteObjCPassingType(Scope *S, ObjCDeclSpec &DS) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Type);
   Results.EnterNewScope();
   
   // Add context-sensitive, Objective-C parameter-passing keywords.
@@ -3905,7 +4282,7 @@ void Sema::CodeCompleteObjCPassingType(Scope *S, ObjCDeclSpec &DS) {
 /// common uses of Objective-C. This routine returns that class type,
 /// or NULL if no better result could be determined.
 static ObjCInterfaceDecl *GetAssumedMessageSendExprType(Expr *E) {
-  ObjCMessageExpr *Msg = dyn_cast<ObjCMessageExpr>(E);
+  ObjCMessageExpr *Msg = dyn_cast_or_null<ObjCMessageExpr>(E);
   if (!Msg)
     return 0;
 
@@ -4076,10 +4453,9 @@ static ObjCMethodDecl *AddSuperSendCompletion(Sema &S, bool NeedSuperKeyword,
                                    
 void Sema::CodeCompleteObjCMessageReceiver(Scope *S) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_ObjCMessageReceiver,
+                        &ResultBuilder::IsObjCMessageReceiver);
   
-  // Find anything that looks like it could be a message receiver.
-  Results.setFilter(&ResultBuilder::IsObjCMessageReceiver);
   CodeCompletionDeclConsumer Consumer(Results, CurContext);
   Results.EnterNewScope();
   LookupVisibleDecls(S, LookupOrdinaryName, Consumer,
@@ -4099,15 +4475,15 @@ void Sema::CodeCompleteObjCMessageReceiver(Scope *S) {
   
   if (CodeCompleter->includeMacros())
     AddMacroResults(PP, Results);
-  HandleCodeCompleteResults(this, CodeCompleter, 
-                            CodeCompletionContext::CCC_ObjCMessageReceiver,
+  HandleCodeCompleteResults(this, CodeCompleter, Results.getCompletionContext(),
                             Results.data(), Results.size());
   
 }
 
 void Sema::CodeCompleteObjCSuperMessage(Scope *S, SourceLocation SuperLoc,
                                         IdentifierInfo **SelIdents,
-                                        unsigned NumSelIdents) {
+                                        unsigned NumSelIdents,
+                                        bool AtArgumentExpression) {
   ObjCInterfaceDecl *CDecl = 0;
   if (ObjCMethodDecl *CurMethod = getCurMethodDecl()) {
     // Figure out which interface we're in.
@@ -4123,15 +4499,11 @@ void Sema::CodeCompleteObjCSuperMessage(Scope *S, SourceLocation SuperLoc,
     if (CurMethod->isInstanceMethod()) {
       // We are inside an instance method, which means that the message
       // send [super ...] is actually calling an instance method on the
-      // current object. Build the super expression and handle this like
-      // an instance method.
-      QualType SuperTy = Context.getObjCInterfaceType(CDecl);
-      SuperTy = Context.getObjCObjectPointerType(SuperTy);
-      ExprResult Super
-        = Owned(new (Context) ObjCSuperExpr(SuperLoc, SuperTy));
-      return CodeCompleteObjCInstanceMessage(S, (Expr *)Super.get(),
+      // current object.
+      return CodeCompleteObjCInstanceMessage(S, 0,
                                              SelIdents, NumSelIdents,
-                                             /*IsSuper=*/true);
+                                             AtArgumentExpression,
+                                             CDecl);
     }
 
     // Fall through to send to the superclass in CDecl.
@@ -4156,7 +4528,8 @@ void Sema::CodeCompleteObjCSuperMessage(Scope *S, SourceLocation SuperLoc,
       id.setIdentifier(Super, SuperLoc);
       ExprResult SuperExpr = ActOnIdExpression(S, SS, id, false, false);
       return CodeCompleteObjCInstanceMessage(S, (Expr *)SuperExpr.get(),
-                                             SelIdents, NumSelIdents);
+                                             SelIdents, NumSelIdents,
+                                             AtArgumentExpression);
     }
 
     // Fall through
@@ -4166,71 +4539,104 @@ void Sema::CodeCompleteObjCSuperMessage(Scope *S, SourceLocation SuperLoc,
   if (CDecl)
     Receiver = ParsedType::make(Context.getObjCInterfaceType(CDecl));
   return CodeCompleteObjCClassMessage(S, Receiver, SelIdents, 
-                                      NumSelIdents, /*IsSuper=*/true);
+                                      NumSelIdents, AtArgumentExpression,
+                                      /*IsSuper=*/true);
 }
 
-void Sema::CodeCompleteObjCClassMessage(Scope *S, ParsedType Receiver,
-                                        IdentifierInfo **SelIdents,
-                                        unsigned NumSelIdents) {
-  CodeCompleteObjCClassMessage(S, Receiver, SelIdents, NumSelIdents, false);
+/// \brief Given a set of code-completion results for the argument of a message
+/// send, determine the preferred type (if any) for that argument expression.
+static QualType getPreferredArgumentTypeForMessageSend(ResultBuilder &Results,
+                                                       unsigned NumSelIdents) {
+  typedef CodeCompletionResult Result;  
+  ASTContext &Context = Results.getSema().Context;
+  
+  QualType PreferredType;
+  unsigned BestPriority = CCP_Unlikely * 2;
+  Result *ResultsData = Results.data();
+  for (unsigned I = 0, N = Results.size(); I != N; ++I) {
+    Result &R = ResultsData[I];
+    if (R.Kind == Result::RK_Declaration && 
+        isa<ObjCMethodDecl>(R.Declaration)) {
+      if (R.Priority <= BestPriority) {
+        ObjCMethodDecl *Method = cast<ObjCMethodDecl>(R.Declaration);
+        if (NumSelIdents <= Method->param_size()) {
+          QualType MyPreferredType = Method->param_begin()[NumSelIdents - 1]
+                                       ->getType();
+          if (R.Priority < BestPriority || PreferredType.isNull()) {
+            BestPriority = R.Priority;
+            PreferredType = MyPreferredType;
+          } else if (!Context.hasSameUnqualifiedType(PreferredType,
+                                                     MyPreferredType)) {
+            PreferredType = QualType();
+          }
+        }
+      }
+    }
+  }
+
+  return PreferredType;
 }
 
-void Sema::CodeCompleteObjCClassMessage(Scope *S, ParsedType Receiver,
-                                        IdentifierInfo **SelIdents,
-                                        unsigned NumSelIdents,
-                                        bool IsSuper) {
+static void AddClassMessageCompletions(Sema &SemaRef, Scope *S, 
+                                       ParsedType Receiver,
+                                       IdentifierInfo **SelIdents,
+                                       unsigned NumSelIdents,
+                                       bool AtArgumentExpression,
+                                       bool IsSuper,
+                                       ResultBuilder &Results) {
   typedef CodeCompletionResult Result;
   ObjCInterfaceDecl *CDecl = 0;
-
+  
   // If the given name refers to an interface type, retrieve the
   // corresponding declaration.
   if (Receiver) {
-    QualType T = GetTypeFromParser(Receiver, 0);
+    QualType T = SemaRef.GetTypeFromParser(Receiver, 0);
     if (!T.isNull()) 
       if (const ObjCObjectType *Interface = T->getAs<ObjCObjectType>())
         CDecl = Interface->getInterface();
   }
-
+  
   // Add all of the factory methods in this Objective-C class, its protocols,
   // superclasses, categories, implementation, etc.
-  ResultBuilder Results(*this);
   Results.EnterNewScope();
-
+  
   // If this is a send-to-super, try to add the special "super" send 
   // completion.
   if (IsSuper) {
     if (ObjCMethodDecl *SuperMethod
-          = AddSuperSendCompletion(*this, false, SelIdents, NumSelIdents, 
-                                   Results))
+        = AddSuperSendCompletion(SemaRef, false, SelIdents, NumSelIdents, 
+                                 Results))
       Results.Ignore(SuperMethod);
   }
-
+  
   // If we're inside an Objective-C method definition, prefer its selector to
   // others.
-  if (ObjCMethodDecl *CurMethod = getCurMethodDecl())
+  if (ObjCMethodDecl *CurMethod = SemaRef.getCurMethodDecl())
     Results.setPreferredSelector(CurMethod->getSelector());
-
+  
+  VisitedSelectorSet Selectors;
   if (CDecl) 
-    AddObjCMethods(CDecl, false, MK_Any, SelIdents, NumSelIdents, CurContext, 
-                   Results);  
+    AddObjCMethods(CDecl, false, MK_Any, SelIdents, NumSelIdents, 
+                   SemaRef.CurContext, Selectors, Results);  
   else {
     // We're messaging "id" as a type; provide all class/factory methods.
-
+    
     // If we have an external source, load the entire class method
     // pool from the AST file.
-    if (ExternalSource) {
-      for (uint32_t I = 0, N = ExternalSource->GetNumExternalSelectors();
+    if (SemaRef.ExternalSource) {
+      for (uint32_t I = 0, 
+                    N = SemaRef.ExternalSource->GetNumExternalSelectors();
            I != N; ++I) {
-        Selector Sel = ExternalSource->GetExternalSelector(I);
-        if (Sel.isNull() || MethodPool.count(Sel))
+        Selector Sel = SemaRef.ExternalSource->GetExternalSelector(I);
+        if (Sel.isNull() || SemaRef.MethodPool.count(Sel))
           continue;
-
-        ReadMethodPool(Sel);
+        
+        SemaRef.ReadMethodPool(Sel);
       }
     }
-
-    for (GlobalMethodPool::iterator M = MethodPool.begin(),
-                                    MEnd = MethodPool.end();
+    
+    for (Sema::GlobalMethodPool::iterator M = SemaRef.MethodPool.begin(),
+                                       MEnd = SemaRef.MethodPool.end();
          M != MEnd; ++M) {
       for (ObjCMethodList *MethList = &M->second.second;
            MethList && MethList->Method; 
@@ -4238,16 +4644,42 @@ void Sema::CodeCompleteObjCClassMessage(Scope *S, ParsedType Receiver,
         if (!isAcceptableObjCMethod(MethList->Method, MK_Any, SelIdents, 
                                     NumSelIdents))
           continue;
-
+        
         Result R(MethList->Method, 0);
         R.StartParameter = NumSelIdents;
         R.AllParametersAreInformative = false;
-        Results.MaybeAddResult(R, CurContext);
+        Results.MaybeAddResult(R, SemaRef.CurContext);
       }
     }
   }
+  
+  Results.ExitScope();  
+}
 
-  Results.ExitScope();
+void Sema::CodeCompleteObjCClassMessage(Scope *S, ParsedType Receiver,
+                                        IdentifierInfo **SelIdents,
+                                        unsigned NumSelIdents,
+                                        bool AtArgumentExpression,
+                                        bool IsSuper) {
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
+  AddClassMessageCompletions(*this, S, Receiver, SelIdents, NumSelIdents, 
+                             AtArgumentExpression, IsSuper, Results);
+  
+  // If we're actually at the argument expression (rather than prior to the 
+  // selector), we're actually performing code completion for an expression.
+  // Determine whether we have a single, best method. If so, we can 
+  // code-complete the expression using the corresponding parameter type as
+  // our preferred type, improving completion results.
+  if (AtArgumentExpression) {
+    QualType PreferredType = getPreferredArgumentTypeForMessageSend(Results, 
+                                                                    NumSelIdents);
+    if (PreferredType.isNull())
+      CodeCompleteOrdinaryName(S, PCC_Expression);
+    else
+      CodeCompleteExpression(S, PreferredType);
+    return;
+  }
+
   HandleCodeCompleteResults(this, CodeCompleter, 
                             CodeCompletionContext::CCC_Other,
                             Results.data(), Results.size());
@@ -4255,30 +4687,44 @@ void Sema::CodeCompleteObjCClassMessage(Scope *S, ParsedType Receiver,
 
 void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
                                            IdentifierInfo **SelIdents,
-                                           unsigned NumSelIdents) {
-  CodeCompleteObjCInstanceMessage(S, Receiver, SelIdents, NumSelIdents, false);
-}
-
-void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
-                                           IdentifierInfo **SelIdents,
                                            unsigned NumSelIdents,
-                                           bool IsSuper) {
+                                           bool AtArgumentExpression,
+                                           ObjCInterfaceDecl *Super) {
   typedef CodeCompletionResult Result;
   
   Expr *RecExpr = static_cast<Expr *>(Receiver);
   
   // If necessary, apply function/array conversion to the receiver.
   // C99 6.7.5.3p[7,8].
-  DefaultFunctionArrayLvalueConversion(RecExpr);
-  QualType ReceiverType = RecExpr->getType();
+  if (RecExpr)
+    DefaultFunctionArrayLvalueConversion(RecExpr);
+  QualType ReceiverType = RecExpr? RecExpr->getType() 
+                          : Super? Context.getObjCObjectPointerType(
+                                            Context.getObjCInterfaceType(Super))
+                                 : Context.getObjCIdType();
   
+  // If we're messaging an expression with type "id" or "Class", check
+  // whether we know something special about the receiver that allows
+  // us to assume a more-specific receiver type.
+  if (ReceiverType->isObjCIdType() || ReceiverType->isObjCClassType())
+    if (ObjCInterfaceDecl *IFace = GetAssumedMessageSendExprType(RecExpr)) {
+      if (ReceiverType->isObjCClassType())
+        return CodeCompleteObjCClassMessage(S, 
+                       ParsedType::make(Context.getObjCInterfaceType(IFace)),
+                                            SelIdents, NumSelIdents,
+                                            AtArgumentExpression, Super);
+
+      ReceiverType = Context.getObjCObjectPointerType(
+                                          Context.getObjCInterfaceType(IFace));
+    }
+
   // Build the set of methods we can see.
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
 
   // If this is a send-to-super, try to add the special "super" send 
   // completion.
-  if (IsSuper) {
+  if (Super) {
     if (ObjCMethodDecl *SuperMethod
           = AddSuperSendCompletion(*this, false, SelIdents, NumSelIdents, 
                                    Results))
@@ -4289,14 +4735,9 @@ void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
   // others.
   if (ObjCMethodDecl *CurMethod = getCurMethodDecl())
     Results.setPreferredSelector(CurMethod->getSelector());
-
-  // If we're messaging an expression with type "id" or "Class", check
-  // whether we know something special about the receiver that allows
-  // us to assume a more-specific receiver type.
-  if (ReceiverType->isObjCIdType() || ReceiverType->isObjCClassType())
-    if (ObjCInterfaceDecl *IFace = GetAssumedMessageSendExprType(RecExpr))
-      ReceiverType = Context.getObjCObjectPointerType(
-                                          Context.getObjCInterfaceType(IFace));
+  
+  // Keep track of the selectors we've already added.
+  VisitedSelectorSet Selectors;
   
   // Handle messages to Class. This really isn't a message to an instance
   // method, so we treat it the same way we would treat a message send to a
@@ -4306,7 +4747,7 @@ void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
     if (ObjCMethodDecl *CurMethod = getCurMethodDecl()) {
       if (ObjCInterfaceDecl *ClassDecl = CurMethod->getClassInterface())
         AddObjCMethods(ClassDecl, false, MK_Any, SelIdents, NumSelIdents, 
-                       CurContext, Results);
+                       CurContext, Selectors, Results);
     }
   } 
   // Handle messages to a qualified ID ("id<foo>").
@@ -4317,21 +4758,21 @@ void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
                                               E = QualID->qual_end(); 
          I != E; ++I)
       AddObjCMethods(*I, true, MK_Any, SelIdents, NumSelIdents, CurContext, 
-                     Results);
+                     Selectors, Results);
   }
   // Handle messages to a pointer to interface type.
   else if (const ObjCObjectPointerType *IFacePtr
                               = ReceiverType->getAsObjCInterfacePointerType()) {
     // Search the class, its superclasses, etc., for instance methods.
     AddObjCMethods(IFacePtr->getInterfaceDecl(), true, MK_Any, SelIdents,
-                   NumSelIdents, CurContext, Results);
+                   NumSelIdents, CurContext, Selectors, Results);
     
     // Search protocols for instance methods.
     for (ObjCObjectPointerType::qual_iterator I = IFacePtr->qual_begin(),
          E = IFacePtr->qual_end(); 
          I != E; ++I)
       AddObjCMethods(*I, true, MK_Any, SelIdents, NumSelIdents, CurContext, 
-                     Results);
+                     Selectors, Results);
   }
   // Handle messages to "id".
   else if (ReceiverType->isObjCIdType()) {
@@ -4360,7 +4801,10 @@ void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
         if (!isAcceptableObjCMethod(MethList->Method, MK_Any, SelIdents, 
                                     NumSelIdents))
           continue;
-
+        
+        if (!Selectors.insert(MethList->Method->getSelector()))
+          continue;
+        
         Result R(MethList->Method, 0);
         R.StartParameter = NumSelIdents;
         R.AllParametersAreInformative = false;
@@ -4368,8 +4812,24 @@ void Sema::CodeCompleteObjCInstanceMessage(Scope *S, ExprTy *Receiver,
       }
     }
   }
-
   Results.ExitScope();
+  
+  
+  // If we're actually at the argument expression (rather than prior to the 
+  // selector), we're actually performing code completion for an expression.
+  // Determine whether we have a single, best method. If so, we can 
+  // code-complete the expression using the corresponding parameter type as
+  // our preferred type, improving completion results.
+  if (AtArgumentExpression) {
+    QualType PreferredType = getPreferredArgumentTypeForMessageSend(Results, 
+                                                                  NumSelIdents);
+    if (PreferredType.isNull())
+      CodeCompleteOrdinaryName(S, PCC_Expression);
+    else
+      CodeCompleteExpression(S, PreferredType);
+    return;
+  }
+  
   HandleCodeCompleteResults(this, CodeCompleter, 
                             CodeCompletionContext::CCC_Other,
                             Results.data(),Results.size());
@@ -4406,7 +4866,7 @@ void Sema::CodeCompleteObjCSelector(Scope *S, IdentifierInfo **SelIdents,
     }
   }
   
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_SelectorName);
   Results.EnterNewScope();
   for (GlobalMethodPool::iterator M = MethodPool.begin(),
                                MEnd = MethodPool.end();
@@ -4475,7 +4935,7 @@ static void AddProtocolResults(DeclContext *Ctx, DeclContext *CurContext,
 
 void Sema::CodeCompleteObjCProtocolReferences(IdentifierLocPair *Protocols,
                                               unsigned NumProtocols) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_ObjCProtocolName);
   Results.EnterNewScope();
   
   // Tell the result set to ignore all of the protocols we have
@@ -4496,7 +4956,7 @@ void Sema::CodeCompleteObjCProtocolReferences(IdentifierLocPair *Protocols,
 }
 
 void Sema::CodeCompleteObjCProtocolDecl(Scope *) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_ObjCProtocolName);
   Results.EnterNewScope();
   
   // Add all protocols.
@@ -4539,7 +4999,7 @@ static void AddInterfaceResults(DeclContext *Ctx, DeclContext *CurContext,
 }
 
 void Sema::CodeCompleteObjCInterfaceDecl(Scope *S) { 
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   
   // Add all classes.
@@ -4547,6 +5007,8 @@ void Sema::CodeCompleteObjCInterfaceDecl(Scope *S) {
                       false, Results);
 
   Results.ExitScope();
+  // FIXME: Add a special context for this, use cached global completion 
+  // results.
   HandleCodeCompleteResults(this, CodeCompleter,
                             CodeCompletionContext::CCC_Other,
                             Results.data(),Results.size());
@@ -4554,7 +5016,7 @@ void Sema::CodeCompleteObjCInterfaceDecl(Scope *S) {
 
 void Sema::CodeCompleteObjCSuperclass(Scope *S, IdentifierInfo *ClassName,
                                       SourceLocation ClassNameLoc) { 
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   
   // Make sure that we ignore the class we're currently defining.
@@ -4568,13 +5030,15 @@ void Sema::CodeCompleteObjCSuperclass(Scope *S, IdentifierInfo *ClassName,
                       false, Results);
 
   Results.ExitScope();
+  // FIXME: Add a special context for this, use cached global completion 
+  // results.
   HandleCodeCompleteResults(this, CodeCompleter, 
                             CodeCompletionContext::CCC_Other,
                             Results.data(),Results.size());
 }
 
 void Sema::CodeCompleteObjCImplementationDecl(Scope *S) { 
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
 
   // Add all unimplemented classes.
@@ -4582,6 +5046,8 @@ void Sema::CodeCompleteObjCImplementationDecl(Scope *S) {
                       true, Results);
 
   Results.ExitScope();
+  // FIXME: Add a special context for this, use cached global completion 
+  // results.
   HandleCodeCompleteResults(this, CodeCompleter, 
                             CodeCompletionContext::CCC_Other,
                             Results.data(),Results.size());
@@ -4592,7 +5058,7 @@ void Sema::CodeCompleteObjCInterfaceCategory(Scope *S,
                                              SourceLocation ClassNameLoc) {
   typedef CodeCompletionResult Result;
   
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   
   // Ignore any categories we find that have already been implemented by this
   // interface.
@@ -4634,7 +5100,7 @@ void Sema::CodeCompleteObjCImplementationCategory(Scope *S,
   if (!Class)
     return CodeCompleteObjCInterfaceCategory(S, ClassName, ClassNameLoc);
     
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   
   // Add all of the categories that have have corresponding interface 
   // declarations in this class and any of its superclasses, except for
@@ -4661,7 +5127,7 @@ void Sema::CodeCompleteObjCImplementationCategory(Scope *S,
 
 void Sema::CodeCompleteObjCPropertyDefinition(Scope *S, Decl *ObjCImpDecl) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
 
   // Figure out where this @synthesize lives.
   ObjCContainerDecl *Container
@@ -4698,7 +5164,7 @@ void Sema::CodeCompleteObjCPropertySynthesizeIvar(Scope *S,
                                                   IdentifierInfo *PropertyName,
                                                   Decl *ObjCImpDecl) {
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
 
   // Figure out where this @synthesize lives.
   ObjCContainerDecl *Container
@@ -4747,7 +5213,6 @@ static void FindImplementableMethods(ASTContext &Context,
                                      ObjCContainerDecl *Container,
                                      bool WantInstanceMethods,
                                      QualType ReturnType,
-                                     bool IsInImplementation,
                                      KnownMethodsMap &KnownMethods,
                                      bool InOriginalClass = true) {
   if (ObjCInterfaceDecl *IFace = dyn_cast<ObjCInterfaceDecl>(Container)) {
@@ -4755,28 +5220,23 @@ static void FindImplementableMethods(ASTContext &Context,
     const ObjCList<ObjCProtocolDecl> &Protocols
       = IFace->getReferencedProtocols();
     for (ObjCList<ObjCProtocolDecl>::iterator I = Protocols.begin(),
-           E = Protocols.end(); 
+                                              E = Protocols.end(); 
          I != E; ++I)
       FindImplementableMethods(Context, *I, WantInstanceMethods, ReturnType,
-                               IsInImplementation, KnownMethods,
-                               InOriginalClass);
+                               KnownMethods, InOriginalClass);
 
-    // If we're not in the implementation of a class, also visit the
-    // superclass.
-    if (!IsInImplementation && IFace->getSuperClass())
-      FindImplementableMethods(Context, IFace->getSuperClass(), 
-                               WantInstanceMethods, ReturnType,
-                               IsInImplementation, KnownMethods,
-                               false);
-
-    // Add methods from any class extensions (but not from categories;
-    // those should go into category implementations).
-    for (const ObjCCategoryDecl *Cat = IFace->getFirstClassExtension(); Cat;
-         Cat = Cat->getNextClassExtension())
+    // Add methods from any class extensions and categories.
+    for (const ObjCCategoryDecl *Cat = IFace->getCategoryList(); Cat;
+         Cat = Cat->getNextClassCategory())
       FindImplementableMethods(Context, const_cast<ObjCCategoryDecl*>(Cat), 
                                WantInstanceMethods, ReturnType,
-                               IsInImplementation, KnownMethods,
-                               InOriginalClass);      
+                               KnownMethods, false);      
+    
+    // Visit the superclass.
+    if (IFace->getSuperClass())
+      FindImplementableMethods(Context, IFace->getSuperClass(), 
+                               WantInstanceMethods, ReturnType,
+                               KnownMethods, false);
   }
 
   if (ObjCCategoryDecl *Category = dyn_cast<ObjCCategoryDecl>(Container)) {
@@ -4784,11 +5244,16 @@ static void FindImplementableMethods(ASTContext &Context,
     const ObjCList<ObjCProtocolDecl> &Protocols
       = Category->getReferencedProtocols();
     for (ObjCList<ObjCProtocolDecl>::iterator I = Protocols.begin(),
-           E = Protocols.end(); 
+                                              E = Protocols.end(); 
          I != E; ++I)
       FindImplementableMethods(Context, *I, WantInstanceMethods, ReturnType,
-                               IsInImplementation, KnownMethods,
-                               InOriginalClass);
+                               KnownMethods, InOriginalClass);
+    
+    // If this category is the original class, jump to the interface.
+    if (InOriginalClass && Category->getClassInterface())
+      FindImplementableMethods(Context, Category->getClassInterface(), 
+                               WantInstanceMethods, ReturnType, KnownMethods,
+                               false);
   }
 
   if (ObjCProtocolDecl *Protocol = dyn_cast<ObjCProtocolDecl>(Container)) {
@@ -4799,7 +5264,7 @@ static void FindImplementableMethods(ASTContext &Context,
            E = Protocols.end(); 
          I != E; ++I)
       FindImplementableMethods(Context, *I, WantInstanceMethods, ReturnType,
-                               IsInImplementation, KnownMethods, false);
+                               KnownMethods, false);
   }
 
   // Add methods in this container. This operation occurs last because
@@ -4826,33 +5291,27 @@ void Sema::CodeCompleteObjCMethodDecl(Scope *S,
   // provided.
   QualType ReturnType = GetTypeFromParser(ReturnTy);
 
-  // Determine where we should start searching for methods, and where we 
-  ObjCContainerDecl *SearchDecl = 0, *CurrentDecl = 0;
+  // Determine where we should start searching for methods.
+  ObjCContainerDecl *SearchDecl = 0;
   bool IsInImplementation = false;
   if (Decl *D = IDecl) {
     if (ObjCImplementationDecl *Impl = dyn_cast<ObjCImplementationDecl>(D)) {
       SearchDecl = Impl->getClassInterface();
-      CurrentDecl = Impl;
       IsInImplementation = true;
     } else if (ObjCCategoryImplDecl *CatImpl 
-                                       = dyn_cast<ObjCCategoryImplDecl>(D)) {
+                                         = dyn_cast<ObjCCategoryImplDecl>(D)) {
       SearchDecl = CatImpl->getCategoryDecl();
-      CurrentDecl = CatImpl;
       IsInImplementation = true;
-    } else {
+    } else
       SearchDecl = dyn_cast<ObjCContainerDecl>(D);
-      CurrentDecl = SearchDecl;
-    }
   }
 
   if (!SearchDecl && S) {
-    if (DeclContext *DC = static_cast<DeclContext *>(S->getEntity())) {
+    if (DeclContext *DC = static_cast<DeclContext *>(S->getEntity()))
       SearchDecl = dyn_cast<ObjCContainerDecl>(DC);
-      CurrentDecl = SearchDecl;
-    }
   }
 
-  if (!SearchDecl || !CurrentDecl) {
+  if (!SearchDecl) {
     HandleCodeCompleteResults(this, CodeCompleter, 
                               CodeCompletionContext::CCC_Other,
                               0, 0);
@@ -4862,24 +5321,11 @@ void Sema::CodeCompleteObjCMethodDecl(Scope *S,
   // Find all of the methods that we could declare/implement here.
   KnownMethodsMap KnownMethods;
   FindImplementableMethods(Context, SearchDecl, IsInstanceMethod, 
-                           ReturnType, IsInImplementation, KnownMethods);
+                           ReturnType, KnownMethods);
   
-  // Erase any methods that have already been declared or
-  // implemented here.
-  for (ObjCContainerDecl::method_iterator M = CurrentDecl->meth_begin(),
-                                       MEnd = CurrentDecl->meth_end();
-       M != MEnd; ++M) {
-    if ((*M)->isInstanceMethod() != IsInstanceMethod)
-      continue;
-    
-    KnownMethodsMap::iterator Pos = KnownMethods.find((*M)->getSelector());
-    if (Pos != KnownMethods.end())
-      KnownMethods.erase(Pos);
-  }
-
   // Add declarations or definitions for each of the known methods.
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   Results.EnterNewScope();
   PrintingPolicy Policy(Context.PrintingPolicy);
   Policy.AnonymousTagLocations = false;
@@ -4911,11 +5357,11 @@ void Sema::CodeCompleteObjCMethodDecl(Scope *S,
          P != PEnd; (void)++P, ++I) {
       // Add the part of the selector name.
       if (I == 0)
-        Pattern->AddChunk(CodeCompletionString::CK_Colon);
+        Pattern->AddTypedTextChunk(":");
       else if (I < Sel.getNumArgs()) {
         Pattern->AddChunk(CodeCompletionString::CK_HorizontalSpace);
-        Pattern->AddTextChunk(Sel.getIdentifierInfoForSlot(I)->getName());
-        Pattern->AddChunk(CodeCompletionString::CK_Colon);
+        Pattern->AddTypedTextChunk((Sel.getIdentifierInfoForSlot(I)->getName()
+                                    + ":").str());
       } else
         break;
 
@@ -4927,14 +5373,14 @@ void Sema::CodeCompleteObjCMethodDecl(Scope *S,
       Pattern->AddChunk(CodeCompletionString::CK_RightParen);
       
       if (IdentifierInfo *Id = (*P)->getIdentifier())
-        Pattern->AddTextChunk(Id->getName());
+        Pattern->AddTextChunk(Id->getName());      
     }
 
     if (Method->isVariadic()) {
       if (Method->param_size() > 0)
         Pattern->AddChunk(CodeCompletionString::CK_Comma);
       Pattern->AddTextChunk("...");
-    }
+    }        
 
     if (IsInImplementation && Results.includeCodePatterns()) {
       // We will be defining the method here, so add a compound statement.
@@ -4992,7 +5438,7 @@ void Sema::CodeCompleteObjCMethodDeclSelector(Scope *S,
 
   // Build the set of methods we can see.
   typedef CodeCompletionResult Result;
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, CodeCompletionContext::CCC_Other);
   
   if (ReturnTy)
     Results.setPreferredType(GetTypeFromParser(ReturnTy).getNonReferenceType());
@@ -5038,7 +5484,8 @@ void Sema::CodeCompleteObjCMethodDeclSelector(Scope *S,
 }
 
 void Sema::CodeCompletePreprocessorDirective(bool InConditional) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, 
+                        CodeCompletionContext::CCC_PreprocessorDirective);
   Results.EnterNewScope();
   
   // #if <condition>
@@ -5219,7 +5666,9 @@ void Sema::CodeCompleteInPreprocessorConditionalExclusion(Scope *S) {
 }
 
 void Sema::CodeCompletePreprocessorMacroName(bool IsDefinition) {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this,
+                        IsDefinition? CodeCompletionContext::CCC_MacroName
+                                    : CodeCompletionContext::CCC_MacroNameUse);
   if (!IsDefinition && (!CodeCompleter || CodeCompleter->includeMacros())) {
     // Add just the names of macros, not their arguments.    
     Results.EnterNewScope();
@@ -5235,14 +5684,13 @@ void Sema::CodeCompletePreprocessorMacroName(bool IsDefinition) {
     // FIXME: Can we detect when the user just wrote an include guard above?
   }
   
-  HandleCodeCompleteResults(this, CodeCompleter, 
-                      IsDefinition? CodeCompletionContext::CCC_MacroName
-                                  : CodeCompletionContext::CCC_MacroNameUse,
+  HandleCodeCompleteResults(this, CodeCompleter, Results.getCompletionContext(),
                             Results.data(), Results.size()); 
 }
 
 void Sema::CodeCompletePreprocessorExpression() {
-  ResultBuilder Results(*this);
+  ResultBuilder Results(*this, 
+                        CodeCompletionContext::CCC_PreprocessorExpression);
   
   if (!CodeCompleter || CodeCompleter->includeMacros())
     AddMacroResults(PP, Results);
@@ -5283,8 +5731,7 @@ void Sema::CodeCompleteNaturalLanguage() {
 
 void Sema::GatherGlobalCodeCompletions(
                  llvm::SmallVectorImpl<CodeCompletionResult> &Results) {
-  ResultBuilder Builder(*this);
-
+  ResultBuilder Builder(*this, CodeCompletionContext::CCC_Recovery);
   if (!CodeCompleter || CodeCompleter->includeGlobals()) {
     CodeCompletionDeclConsumer Consumer(Builder, 
                                         Context.getTranslationUnitDecl());

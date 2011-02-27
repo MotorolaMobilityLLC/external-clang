@@ -19,6 +19,7 @@
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/type_traits.h"
+#include "llvm/System/DataTypes.h"
 #include <string>
 #include <vector>
 #include <cassert>
@@ -215,9 +216,7 @@ private:
     unsigned char Values[diag::DIAG_UPPER_LIMIT/2];
 
   public:
-    DiagMappings() {
-      memset(Values, 0, diag::DIAG_UPPER_LIMIT/2);
-    }
+    DiagMappings() : Values() /*zero-initialization of array*/ { }
 
     void setMapping(diag::kind Diag, unsigned Map) {
       size_t Shift = (Diag & 1)*4;
@@ -585,7 +584,8 @@ private:
   // diagnostic is in flight at a time.
   friend class DiagnosticBuilder;
   friend class DiagnosticInfo;
-
+  friend class PartialDiagnostic;
+  
   /// CurDiagLoc - This is the location of the current diagnostic that is in
   /// flight.
   FullSourceLoc CurDiagLoc;
@@ -641,6 +641,9 @@ private:
   /// \returns true if the diagnostic was emitted, false if it was
   /// suppressed.
   bool ProcessDiag();
+
+  friend class ASTReader;
+  friend class ASTWriter;
 };
 
 //===----------------------------------------------------------------------===//
@@ -667,6 +670,11 @@ class DiagnosticBuilder {
   explicit DiagnosticBuilder(Diagnostic *diagObj)
     : DiagObj(diagObj), NumArgs(0), NumRanges(0), NumFixItHints(0) {}
 
+  friend class PartialDiagnostic;
+
+protected:
+  void FlushCounts();
+  
 public:
   /// Copy constructor.  When copied, this "takes" the diagnostic info from the
   /// input and neuters it.
@@ -703,6 +711,17 @@ public:
   /// isActive - Determine whether this diagnostic is still active.
   bool isActive() const { return DiagObj != 0; }
 
+  /// \brief Retrieve the active diagnostic ID.
+  ///
+  /// \pre \c isActive()
+  unsigned getDiagID() const {
+    assert(isActive() && "Diagnostic is inactive");
+    return DiagObj->CurDiagID;
+  }
+  
+  /// \brief Clear out the current diagnostic.
+  void Clear() { DiagObj = 0; }
+  
   /// Operator bool: conversion of DiagnosticBuilder to bool always returns
   /// true.  This allows is to be used in boolean error contexts like:
   /// return Diag(...);
@@ -930,8 +949,8 @@ public:
 };
 
 /**
- * \brief Represents a diagnostic in a form that can be serialized and
- * deserialized.
+ * \brief Represents a diagnostic in a form that can be retained until its 
+ * corresponding source manager is destroyed. 
  */
 class StoredDiagnostic {
   Diagnostic::Level Level;
@@ -964,19 +983,6 @@ public:
   fixit_iterator fixit_begin() const { return FixIts.begin(); }
   fixit_iterator fixit_end() const { return FixIts.end(); }
   unsigned fixit_size() const { return FixIts.size(); }
-
-  /// Serialize - Serialize the given diagnostic (with its diagnostic
-  /// level) to the given stream. Serialization is a lossy operation,
-  /// since the specific diagnostic ID and any macro-instantiation
-  /// information is lost.
-  void Serialize(llvm::raw_ostream &OS) const;
-
-  /// Deserialize - Deserialize the first diagnostic within the memory
-  /// [Memory, MemoryEnd), producing a new diagnostic builder describing the
-  /// deserialized diagnostic. If the memory does not contain a
-  /// diagnostic, returns a diagnostic builder with no diagnostic ID.
-  static StoredDiagnostic Deserialize(FileManager &FM, SourceManager &SM, 
-                                   const char *&Memory, const char *MemoryEnd);
 };
 
 /// DiagnosticClient - This is an abstract interface implemented by clients of

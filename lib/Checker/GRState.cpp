@@ -169,13 +169,62 @@ SVal GRState::getSValAsScalarOrLoc(const MemRegion *R) const {
   return UnknownVal();
 }
 
+SVal GRState::getSVal(Loc location, QualType T) const {
+  SVal V = getRawSVal(cast<Loc>(location), T);
 
-const GRState *GRState::BindExpr(const Stmt* Ex, SVal V, bool Invalidate) const{
-  Environment NewEnv = getStateManager().EnvMgr.BindExpr(Env, Ex, V,
+  // If 'V' is a symbolic value that is *perfectly* constrained to
+  // be a constant value, use that value instead to lessen the burden
+  // on later analysis stages (so we have less symbolic values to reason
+  // about).
+  if (!T.isNull()) {
+    if (SymbolRef sym = V.getAsSymbol()) {
+      if (const llvm::APSInt *Int = getSymVal(sym)) {
+        // FIXME: Because we don't correctly model (yet) sign-extension
+        // and truncation of symbolic values, we need to convert
+        // the integer value to the correct signedness and bitwidth.
+        //
+        // This shows up in the following:
+        //
+        //   char foo();
+        //   unsigned x = foo();
+        //   if (x == 54)
+        //     ...
+        //
+        //  The symbolic value stored to 'x' is actually the conjured
+        //  symbol for the call to foo(); the type of that symbol is 'char',
+        //  not unsigned.
+        const llvm::APSInt &NewV = getBasicVals().Convert(T, *Int);
+        
+        if (isa<Loc>(V))
+          return loc::ConcreteInt(NewV);
+        else
+          return nonloc::ConcreteInt(NewV);
+      }
+    }
+  }
+  
+  return V;
+}
+
+const GRState *GRState::BindExpr(const Stmt* S, SVal V, bool Invalidate) const{
+  Environment NewEnv = getStateManager().EnvMgr.bindExpr(Env, S, V,
                                                          Invalidate);
   if (NewEnv == Env)
     return this;
 
+  GRState NewSt = *this;
+  NewSt.Env = NewEnv;
+  return getStateManager().getPersistentState(NewSt);
+}
+
+const GRState *GRState::bindExprAndLocation(const Stmt *S, SVal location,
+                                            SVal V) const {
+  Environment NewEnv =
+    getStateManager().EnvMgr.bindExprAndLocation(Env, S, location, V);
+
+  if (NewEnv == Env)
+    return this;
+  
   GRState NewSt = *this;
   NewSt.Env = NewEnv;
   return getStateManager().getPersistentState(NewSt);
@@ -259,6 +308,11 @@ const GRState* GRState::makeWithStore(Store store) const {
 //  State pretty-printing.
 //===----------------------------------------------------------------------===//
 
+static bool IsEnvLoc(const Stmt *S) {
+  // FIXME: This is a layering violation.  Should be in environment.
+  return (bool) (((uintptr_t) S) & 0x1);
+}
+
 void GRState::print(llvm::raw_ostream& Out, CFG &C, const char* nl,
                     const char* sep) const {
   // Print the store.
@@ -268,8 +322,9 @@ void GRState::print(llvm::raw_ostream& Out, CFG &C, const char* nl,
   // Print Subexpression bindings.
   bool isFirst = true;
 
+  // FIXME: All environment printing should be moved inside Environment.
   for (Environment::iterator I = Env.begin(), E = Env.end(); I != E; ++I) {
-    if (C.isBlkExpr(I.getKey()))
+    if (C.isBlkExpr(I.getKey()) || IsEnvLoc(I.getKey()))
       continue;
 
     if (isFirst) {
@@ -300,6 +355,27 @@ void GRState::print(llvm::raw_ostream& Out, CFG &C, const char* nl,
     Out << " (" << (void*) I.getKey() << ") ";
     LangOptions LO; // FIXME.
     I.getKey()->printPretty(Out, 0, PrintingPolicy(LO));
+    Out << " : " << I.getData();
+  }
+  
+  // Print locations.
+  isFirst = true;
+  
+  for (Environment::iterator I = Env.begin(), E = Env.end(); I != E; ++I) {
+    if (!IsEnvLoc(I.getKey()))
+      continue;
+    
+    if (isFirst) {
+      Out << nl << nl << "Load/store locations:" << nl;
+      isFirst = false;
+    }
+    else { Out << nl; }
+
+    const Stmt *S = (Stmt*) (((uintptr_t) I.getKey()) & ((uintptr_t) ~0x1));
+    
+    Out << " (" << (void*) S << ") ";
+    LangOptions LO; // FIXME.
+    S->printPretty(Out, 0, PrintingPolicy(LO));
     Out << " : " << I.getData();
   }
 

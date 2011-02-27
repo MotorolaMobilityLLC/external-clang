@@ -14,6 +14,7 @@
 #ifndef LLVM_CLANG_AST_EXTERNAL_AST_SOURCE_H
 #define LLVM_CLANG_AST_EXTERNAL_AST_SOURCE_H
 
+#include "clang/AST/DeclBase.h"
 #include <cassert>
 #include <vector>
 
@@ -24,6 +25,7 @@ template <class T> class SmallVectorImpl;
 namespace clang {
 
 class ASTConsumer;
+class CXXBaseSpecifier;
 class Decl;
 class DeclContext;
 class DeclContextLookupResult;
@@ -91,6 +93,10 @@ public:
   /// FunctionDecl::setLazyBody when building decls.
   virtual Stmt *GetExternalDeclStmt(uint64_t Offset) = 0;
 
+  /// \brief Resolve the offset of a set of C++ base specifiers in the decl
+  /// stream into an array of specifiers.
+  virtual CXXBaseSpecifier *GetExternalCXXBaseSpecifiers(uint64_t Offset) = 0;
+  
   /// \brief Finds all declarations with the given name in the
   /// given context.
   ///
@@ -110,11 +116,31 @@ public:
   virtual void MaterializeVisibleDecls(const DeclContext *DC) = 0;
 
   /// \brief Finds all declarations lexically contained within the given
-  /// DeclContext.
+  /// DeclContext, after applying an optional filter predicate.
+  ///
+  /// \param isKindWeWant a predicate function that returns true if the passed
+  /// declaration kind is one we are looking for. If NULL, all declarations
+  /// are returned.
   ///
   /// \return true if an error occurred
   virtual bool FindExternalLexicalDecls(const DeclContext *DC,
-                                llvm::SmallVectorImpl<Decl*> &Result) = 0;
+                                        bool (*isKindWeWant)(Decl::Kind),
+                                      llvm::SmallVectorImpl<Decl*> &Result) = 0;
+
+  /// \brief Finds all declarations lexically contained within the given
+  /// DeclContext.
+  ///
+  /// \return true if an error occurred
+  bool FindExternalLexicalDecls(const DeclContext *DC,
+                                llvm::SmallVectorImpl<Decl*> &Result) {
+    return FindExternalLexicalDecls(DC, 0, Result);
+  }
+
+  template <typename DeclTy>
+  bool FindExternalLexicalDeclsBy(const DeclContext *DC,
+                                llvm::SmallVectorImpl<Decl*> &Result) {
+    return FindExternalLexicalDecls(DC, DeclTy::classofKind, Result);
+  }
 
   /// \brief Notify ExternalASTSource that we started deserialization of
   /// a decl or type so until FinishedDeserializing is called there may be
@@ -227,6 +253,11 @@ typedef LazyOffsetPtr<Stmt, uint64_t, &ExternalASTSource::GetExternalDeclStmt>
 typedef LazyOffsetPtr<Decl, uint32_t, &ExternalASTSource::GetExternalDecl>
   LazyDeclPtr;
 
+/// \brief A lazy pointer to a set of CXXBaseSpecifiers.
+typedef LazyOffsetPtr<CXXBaseSpecifier, uint64_t, 
+                      &ExternalASTSource::GetExternalCXXBaseSpecifiers>
+  LazyCXXBaseSpecifiersPtr;
+  
 } // end namespace clang
 
 #endif // LLVM_CLANG_AST_EXTERNAL_AST_SOURCE_H

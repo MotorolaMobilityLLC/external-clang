@@ -45,6 +45,7 @@ namespace clang {
   class Diagnostic;
   class Expr;
   class ExternalASTSource;
+  class ASTMutationListener;
   class IdentifierTable;
   class SelectorTable;
   class SourceManager;
@@ -198,7 +199,7 @@ class ASTContext {
   ///
   /// Since so few decls have attrs, we keep them in a hash map instead of
   /// wasting space in the Decl class.
-  llvm::DenseMap<const Decl*, AttrVec> DeclAttrs;
+  llvm::DenseMap<const Decl*, AttrVec*> DeclAttrs;
 
   /// \brief Keeps track of the static data member templates from which
   /// static data members of class template specializations were instantiated.
@@ -287,7 +288,9 @@ class ASTContext {
   /// \brief The current C++ ABI.
   llvm::OwningPtr<CXXABI> ABI;
   CXXABI *createCXXABI(const TargetInfo &T);
-  
+
+  friend class ASTDeclReader;
+
 public:
   const TargetInfo &Target;
   IdentifierTable &Idents;
@@ -295,6 +298,7 @@ public:
   Builtin::Context &BuiltinInfo;
   DeclarationNameTable DeclarationNames;
   llvm::OwningPtr<ExternalASTSource> ExternalSource;
+  ASTMutationListener *Listener;
   clang::PrintingPolicy PrintingPolicy;
 
   // Typedefs which may be provided defining the structure of Objective-C
@@ -316,15 +320,17 @@ public:
 
   const LangOptions& getLangOptions() const { return LangOpts; }
 
+  Diagnostic &getDiagnostics() const;
+
   FullSourceLoc getFullLoc(SourceLocation Loc) const {
     return FullSourceLoc(Loc,SourceMgr);
   }
 
   /// \brief Retrieve the attributes for the given declaration.
-  AttrVec& getDeclAttrs(const Decl *D) { return DeclAttrs[D]; }
+  AttrVec& getDeclAttrs(const Decl *D);
 
   /// \brief Erase the attributes corresponding to the given declaration.
-  void eraseDeclAttrs(const Decl *D) { DeclAttrs.erase(D); }
+  void eraseDeclAttrs(const Decl *D);
 
   /// \brief If this variable is an instantiated static data member of a
   /// class template specialization, returns the templated static data member
@@ -386,9 +392,8 @@ public:
   CanQualType FloatTy, DoubleTy, LongDoubleTy;
   CanQualType FloatComplexTy, DoubleComplexTy, LongDoubleComplexTy;
   CanQualType VoidPtrTy, NullPtrTy;
-  CanQualType OverloadTy;
+  CanQualType OverloadTy, UndeducedAutoTy;
   CanQualType DependentTy;
-  CanQualType UndeducedAutoTy;
   CanQualType ObjCBuiltinIdTy, ObjCBuiltinClassTy, ObjCBuiltinSelTy;
 
   ASTContext(const LangOptions& LOpts, SourceManager &SM, const TargetInfo &t,
@@ -408,6 +413,19 @@ public:
   /// \brief Retrieve a pointer to the external AST source associated
   /// with this AST context, if any.
   ExternalASTSource *getExternalSource() const { return ExternalSource.get(); }
+
+  /// \brief Attach an AST mutation listener to the AST context.
+  ///
+  /// The AST mutation listener provides the ability to track modifications to
+  /// the abstract syntax tree entities committed after they were initially
+  /// created.
+  void setASTMutationListener(ASTMutationListener *Listener) {
+    this->Listener = Listener;
+  }
+
+  /// \brief Retrieve a pointer to the AST mutation listener associated
+  /// with this AST context, if any.
+  ASTMutationListener *getASTMutationListener() const { return Listener; }
 
   void PrintStats() const;
   const std::vector<Type*>& getTypes() const { return Types; }
@@ -566,6 +584,14 @@ public:
   QualType getConstantArrayType(QualType EltTy, const llvm::APInt &ArySize,
                                 ArrayType::ArraySizeModifier ASM,
                                 unsigned EltTypeQuals);
+  
+  /// getUnknownSizeVariableArrayType - Return a variable array type with
+  /// all variable indices replaced with unknow [*] size.
+  QualType getUnknownSizeVariableArrayType(QualType Ty);
+  
+  /// getVariableArrayDecayedType - Returns a vla type where known sizes
+  /// are replaced with [*]
+  QualType getVariableArrayDecayedType(QualType Ty);
 
   /// getVectorType - Return the unique reference to a vector type of
   /// the specified element type and size. VectorType must be a built-in type.
@@ -895,8 +921,12 @@ public:
     GE_Missing_setjmp     //< Missing a type from <setjmp.h>
   };
 
-  /// GetBuiltinType - Return the type for the specified builtin.
-  QualType GetBuiltinType(unsigned ID, GetBuiltinTypeError &Error);
+  /// GetBuiltinType - Return the type for the specified builtin.  If 
+  /// IntegerConstantArgs is non-null, it is filled in with a bitmask of
+  /// arguments to the builtin that are required to be integer constant
+  /// expressions.
+  QualType GetBuiltinType(unsigned ID, GetBuiltinTypeError &Error,
+                          unsigned *IntegerConstantArgs = 0);
 
 private:
   CanQualType getFromTargetType(unsigned Type) const;
@@ -1099,6 +1129,10 @@ public:
   NestedNameSpecifier *
   getCanonicalNestedNameSpecifier(NestedNameSpecifier *NNS);
 
+  /// \brief Retrieves the default calling convention to use for
+  /// C++ instance methods.
+  CallingConv getDefaultMethodCallConv();
+
   /// \brief Retrieves the canonical representation of the given
   /// calling convention.
   CallingConv getCanonicalCallConv(CallingConv CC) {
@@ -1260,6 +1294,12 @@ public:
                       bool Unqualified = false);
   QualType mergeFunctionTypes(QualType, QualType, bool OfBlockPointer=false,
                               bool Unqualified = false);
+  QualType mergeFunctionArgumentTypes(QualType, QualType,
+                                      bool OfBlockPointer=false,
+                                      bool Unqualified = false);
+  QualType mergeTransparentUnionType(QualType, QualType,
+                                     bool OfBlockPointer=false,
+                                     bool Unqualified = false);
   
   QualType mergeObjCGCQualifiers(QualType, QualType);
 

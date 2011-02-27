@@ -193,7 +193,7 @@ const GRState *CStringChecker::CheckLocation(CheckerContext &C,
   DefinedOrUnknownSVal Size = cast<DefinedOrUnknownSVal>(Extent);
 
   // Get the index of the accessed element.
-  DefinedOrUnknownSVal &Idx = cast<DefinedOrUnknownSVal>(ER->getIndex());
+  DefinedOrUnknownSVal Idx = cast<DefinedOrUnknownSVal>(ER->getIndex());
 
   const GRState *StInBound = state->AssumeInBound(Idx, Size, true);
   const GRState *StOutBound = state->AssumeInBound(Idx, Size, false);
@@ -905,7 +905,10 @@ bool CStringChecker::EvalCallExpr(CheckerContext &C, const CallExpr *CE) {
     return false;
 
   // Get the name of the callee. If it's a builtin, strip off the prefix.
-  llvm::StringRef Name = FD->getName();
+  IdentifierInfo *II = FD->getIdentifier();
+  if (!II)   // if no identifier, not a simple C function
+    return false;
+  llvm::StringRef Name = II->getName();
   if (Name.startswith("__builtin_"))
     Name = Name.substr(10);
 

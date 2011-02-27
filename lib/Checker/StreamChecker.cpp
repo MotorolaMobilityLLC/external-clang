@@ -31,8 +31,8 @@ struct StreamState {
 
   bool isOpened() const { return K == Opened; }
   bool isClosed() const { return K == Closed; }
-  bool isOpenFailed() const { return K == OpenFailed; }
-  bool isEscaped() const { return K == Escaped; }
+  //bool isOpenFailed() const { return K == OpenFailed; }
+  //bool isEscaped() const { return K == Escaped; }
 
   bool operator==(const StreamState &X) const {
     return K == X.K && S == X.S;
@@ -235,15 +235,16 @@ void StreamChecker::OpenFileAux(CheckerContext &C, const CallExpr *CE) {
   const GRState *stateNotNull, *stateNull;
   llvm::tie(stateNotNull, stateNull) = CM.AssumeDual(state, RetVal);
   
-  SymbolRef Sym = RetVal.getAsSymbol();
-  assert(Sym);
+  if (SymbolRef Sym = RetVal.getAsSymbol()) {
+    // if RetVal is not NULL, set the symbol's state to Opened.
+    stateNotNull =
+      stateNotNull->set<StreamState>(Sym,StreamState::getOpened(CE));
+    stateNull =
+      stateNull->set<StreamState>(Sym, StreamState::getOpenFailed(CE));
 
-  // if RetVal is not NULL, set the symbol's state to Opened.
-  stateNotNull = stateNotNull->set<StreamState>(Sym,StreamState::getOpened(CE));
-  stateNull = stateNull->set<StreamState>(Sym, StreamState::getOpenFailed(CE));
-
-  C.addTransition(stateNotNull);
-  C.addTransition(stateNull);
+    C.addTransition(stateNotNull);
+    C.addTransition(stateNull);
+  }
 }
 
 void StreamChecker::Fclose(CheckerContext &C, const CallExpr *CE) {
@@ -270,29 +271,24 @@ void StreamChecker::Fseek(CheckerContext &C, const CallExpr *CE) {
     return;
   // Check the legality of the 'whence' argument of 'fseek'.
   SVal Whence = state->getSVal(CE->getArg(2));
-  bool WhenceIsLegal = true;
   const nonloc::ConcreteInt *CI = dyn_cast<nonloc::ConcreteInt>(&Whence);
+
   if (!CI)
-    WhenceIsLegal = false;
+    return;
 
   int64_t x = CI->getValue().getSExtValue();
-  if (!(x == 0 || x == 1 || x == 2))
-    WhenceIsLegal = false;
-
-  if (!WhenceIsLegal) {
-    if (ExplodedNode *N = C.GenerateSink(state)) {
-      if (!BT_illegalwhence)
-        BT_illegalwhence = new BuiltinBug("Illegal whence argument",
-                                     "The whence argument to fseek() should be "
-                                          "SEEK_SET, SEEK_END, or SEEK_CUR.");
-      BugReport *R = new BugReport(*BT_illegalwhence, 
-                                   BT_illegalwhence->getDescription(), N);
-      C.EmitReport(R);
-    }
+  if (x >= 0 && x <= 2)
     return;
-  }
 
-  C.addTransition(state);
+  if (ExplodedNode *N = C.GenerateNode(state)) {
+    if (!BT_illegalwhence)
+      BT_illegalwhence = new BuiltinBug("Illegal whence argument",
+					"The whence argument to fseek() should be "
+					"SEEK_SET, SEEK_END, or SEEK_CUR.");
+    BugReport *R = new BugReport(*BT_illegalwhence, 
+				 BT_illegalwhence->getDescription(), N);
+    C.EmitReport(R);
+  }
 }
 
 void StreamChecker::Ftell(CheckerContext &C, const CallExpr *CE) {
@@ -370,7 +366,8 @@ const GRState *StreamChecker::CheckDoubleClose(const CallExpr *CE,
                                                const GRState *state,
                                                CheckerContext &C) {
   SymbolRef Sym = state->getSVal(CE->getArg(0)).getAsSymbol();
-  assert(Sym);
+  if (!Sym)
+    return state;
   
   const StreamState *SS = state->get<StreamState>(Sym);
 

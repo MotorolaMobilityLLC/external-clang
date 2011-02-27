@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenModule.h"
+#include "CGCXXABI.h"
 #include "clang/AST/RecordLayout.h"
 using namespace clang;
 using namespace CodeGen;
@@ -217,7 +218,7 @@ void VTTBuilder::LayoutSecondaryVTTs(BaseSubobject Base) {
 
     const ASTRecordLayout &Layout = CGM.getContext().getASTRecordLayout(RD);
     uint64_t BaseOffset = Base.getBaseOffset() + 
-      Layout.getBaseClassOffset(BaseDecl);
+      Layout.getBaseClassOffsetInBits(BaseDecl);
    
     // Layout the VTT for this base.
     LayoutVTT(BaseSubobject(BaseDecl, BaseOffset), /*BaseIsVirtual=*/false);
@@ -261,12 +262,13 @@ VTTBuilder::LayoutSecondaryVirtualPointers(BaseSubobject Base,
       if (!VBases.insert(BaseDecl))
         continue;
       
-      BaseOffset = MostDerivedClassLayout.getVBaseClassOffset(BaseDecl);
+      BaseOffset = MostDerivedClassLayout.getVBaseClassOffsetInBits(BaseDecl);
       BaseDeclIsMorallyVirtual = true;
     } else {
       const ASTRecordLayout &Layout = CGM.getContext().getASTRecordLayout(RD);
       
-      BaseOffset = Base.getBaseOffset() + Layout.getBaseClassOffset(BaseDecl);
+      BaseOffset = 
+        Base.getBaseOffset() + Layout.getBaseClassOffsetInBits(BaseDecl);
       
       if (!Layout.getPrimaryBaseWasVirtual() &&
           Layout.getPrimaryBase() == BaseDecl)
@@ -315,7 +317,7 @@ void VTTBuilder::LayoutVirtualVTTs(const CXXRecordDecl *RD,
         continue;
     
       uint64_t BaseOffset = 
-        MostDerivedClassLayout.getVBaseClassOffset(BaseDecl);
+        MostDerivedClassLayout.getVBaseClassOffsetInBits(BaseDecl);
       
       LayoutVTT(BaseSubobject(BaseDecl, BaseOffset), /*BaseIsVirtual=*/true);
     }
@@ -373,7 +375,7 @@ CodeGenVTables::GenerateVTT(llvm::GlobalVariable::LinkageTypes Linkage,
     return 0;
 
   llvm::SmallString<256> OutName;
-  CGM.getMangleContext().mangleCXXVTT(RD, OutName);
+  CGM.getCXXABI().getMangleContext().mangleCXXVTT(RD, OutName);
   llvm::StringRef Name = OutName.str();
 
   D1(printf("vtt %s\n", RD->getNameAsCString()));
@@ -396,7 +398,7 @@ CodeGenVTables::GenerateVTT(llvm::GlobalVariable::LinkageTypes Linkage,
     llvm::GlobalVariable *OldGV = GV;
     GV = new llvm::GlobalVariable(CGM.getModule(), Type, /*isConstant=*/true, 
                                   Linkage, Init, Name);
-    CGM.setGlobalVisibility(GV, RD);
+    CGM.setGlobalVisibility(GV, RD, /*ForDefinition*/ GenerateDefinition);
     
     if (OldGV) {
       GV->takeName(OldGV);

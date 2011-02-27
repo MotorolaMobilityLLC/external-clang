@@ -1,4 +1,5 @@
 // RUN: %clang_cc1 -analyze -analyzer-check-objc-mem -analyzer-inline-call -analyzer-store region -verify %s
+
 struct A {
   int x;
   A(int a) { x = a; }

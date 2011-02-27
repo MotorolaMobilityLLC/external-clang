@@ -54,12 +54,43 @@ public:
                            SrcMgr::CharacteristicKind FileType) {
   }
 
+  /// \brief This callback is invoked whenever an inclusion directive of
+  /// any kind (\c #include, \c #import, etc.) has been processed, regardless
+  /// of whether the inclusion will actually result in an inclusion.
+  ///
+  /// \param HashLoc The location of the '#' that starts the inclusion 
+  /// directive.
+  ///
+  /// \param IncludeTok The token that indicates the kind of inclusion 
+  /// directive, e.g., 'include' or 'import'.
+  ///
+  /// \param FileName The name of the file being included, as written in the 
+  /// source code.
+  ///
+  /// \param IsAngled Whether the file name was enclosed in angle brackets;
+  /// otherwise, it was enclosed in quotes.
+  ///
+  /// \param File The actual file that may be included by this inclusion 
+  /// directive.
+  ///
+  /// \param EndLoc The location of the last token within the inclusion
+  /// directive.
+  virtual void InclusionDirective(SourceLocation HashLoc,
+                                  const Token &IncludeTok,
+                                  llvm::StringRef FileName,
+                                  bool IsAngled,
+                                  const FileEntry *File,
+                                  SourceLocation EndLoc) {
+  }
+
   /// EndOfMainFile - This callback is invoked when the end of the main file is
   /// reach, no subsequent callbacks will be made.
   virtual void EndOfMainFile() {
   }
 
   /// Ident - This callback is invoked when a #ident or #sccs directive is read.
+  /// \param Loc The location of the directive.
+  /// \param str The text of the directive.
   ///
   virtual void Ident(SourceLocation Loc, const std::string &str) {
   }
@@ -73,6 +104,8 @@ public:
 
   /// PragmaMessage - This callback is invoked when a #pragma message directive
   /// is read.
+  /// \param Loc The location of the message directive.
+  /// \param str The text of the message directive.
   ///
   virtual void PragmaMessage(SourceLocation Loc, llvm::StringRef Str) {
   }
@@ -91,6 +124,38 @@ public:
   /// MI is released immediately following this callback.
   virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
                               const MacroInfo *MI) {
+  }
+
+  /// If -- This hook is called whenever an #if is seen.
+  /// \param Range The SourceRange of the expression being tested.
+  // FIXME: better to pass in a list (or tree!) of Tokens.
+  virtual void If(SourceRange Range) {
+  }
+
+  /// Elif -- This hook is called whenever an #elif is seen.
+  /// \param Range The SourceRange of the expression being tested.
+  // FIXME: better to pass in a list (or tree!) of Tokens.
+  virtual void Elif(SourceRange Range) {
+  }
+
+  /// Ifdef -- This hook is called whenever an #ifdef is seen.
+  /// \param Loc The location of the token being tested.
+  /// \param II Information on the token being tested.
+  virtual void Ifdef(SourceLocation Loc, const IdentifierInfo* II) {
+  }
+
+  /// Ifndef -- This hook is called whenever an #ifndef is seen.
+  /// \param Loc The location of the token being tested.
+  /// \param II Information on the token being tested.
+  virtual void Ifndef(SourceLocation Loc, const IdentifierInfo* II) {
+  }
+
+  /// Else -- This hook is called whenever an #else is seen.
+  virtual void Else() {
+  }
+
+  /// Endif -- This hook is called whenever an #endif is seen.
+  virtual void Endif() {
   }
 };
 
@@ -154,6 +219,42 @@ public:
                               const MacroInfo *MI) {
     First->MacroUndefined(Loc, II, MI);
     Second->MacroUndefined(Loc, II, MI);
+  }
+
+  /// If -- This hook is called whenever an #if is seen.
+  virtual void If(SourceRange Range) {
+    First->If(Range);
+    Second->If(Range);
+  }
+
+  /// Elif -- This hook is called whenever an #if is seen.
+  virtual void Elif(SourceRange Range) {
+    First->Elif(Range);
+    Second->Elif(Range);
+  }
+
+  /// Ifdef -- This hook is called whenever an #ifdef is seen.
+  virtual void Ifdef(SourceLocation Loc, const IdentifierInfo* II) {
+    First->Ifdef(Loc, II);
+    Second->Ifdef(Loc, II);
+  }
+
+  /// Ifndef -- This hook is called whenever an #ifndef is seen.
+  virtual void Ifndef(SourceLocation Loc, const IdentifierInfo* II) {
+    First->Ifndef(Loc, II);
+    Second->Ifndef(Loc, II);
+  }
+
+  /// Else -- This hook is called whenever an #else is seen.
+  virtual void Else() {
+    First->Else();
+    Second->Else();
+  }
+
+  /// Endif -- This hook is called whenever an #endif is seen.
+  virtual void Endif() {
+    First->Endif();
+    Second->Endif();
   }
 };
 

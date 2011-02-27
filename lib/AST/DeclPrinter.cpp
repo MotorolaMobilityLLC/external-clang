@@ -518,12 +518,15 @@ void DeclPrinter::VisitVarDecl(VarDecl *D) {
     T = Parm->getOriginalType();
   T.getAsStringInternal(Name, Policy);
   Out << Name;
-  if (D->getInit()) {
+  if (Expr *Init = D->getInit()) {
     if (D->hasCXXDirectInitializer())
       Out << "(";
-    else
-      Out << " = ";
-    D->getInit()->printPretty(Out, Context, 0, Policy, Indentation);
+    else {
+        CXXConstructExpr *CCE = dyn_cast<CXXConstructExpr>(Init);
+        if (!CCE || CCE->getConstructor()->isCopyConstructor())
+          Out << " = ";
+    }
+    Init->printPretty(Out, Context, 0, Policy, Indentation);
     if (D->hasCXXDirectInitializer())
       Out << ")";
   }

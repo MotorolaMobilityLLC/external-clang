@@ -139,10 +139,10 @@ namespace {
     llvm::DenseMap<BlockExpr *, std::string> RewrittenBlockExprs;
 
     // This maps a property to it's assignment statement.
-    llvm::DenseMap<ObjCPropertyRefExpr *, BinaryOperator *> PropSetters;
+    llvm::DenseMap<Expr *, BinaryOperator *> PropSetters;
     // This maps a property to it's synthesied message expression.
     // This allows us to rewrite chained getters (e.g. o.a.b.c).
-    llvm::DenseMap<ObjCPropertyRefExpr *, Stmt *> PropGetters;
+    llvm::DenseMap<Expr *, Stmt *> PropGetters;
 
     // This maps an original source AST to it's rewritten form. This allows
     // us to avoid rewriting the same node twice (which is very uncommon).
@@ -155,7 +155,7 @@ namespace {
 
     bool DisableReplaceStmt;
 
-    static const int OBJC_ABI_VERSION =7 ;
+    static const int OBJC_ABI_VERSION = 7;
   public:
     virtual void Initialize(ASTContext &context);
 
@@ -195,7 +195,7 @@ namespace {
     }
 
     void ReplaceStmtWithRange(Stmt *Old, Stmt *New, SourceRange SrcRange) {
-      // Measaure the old text.
+      // Measure the old text.
       int Size = Rewrite.getRangeSize(SrcRange);
       if (Size == -1) {
         Diags.Report(Context->getFullLoc(Old->getLocStart()), RewriteFailedDiag)
@@ -247,7 +247,8 @@ namespace {
                                  ObjCCategoryImplDecl *CID);
     void RewriteInterfaceDecl(ObjCInterfaceDecl *Dcl);
     void RewriteImplementationDecl(Decl *Dcl);
-    void RewriteObjCMethodDecl(ObjCMethodDecl *MDecl, std::string &ResultStr);
+    void RewriteObjCMethodDecl(const ObjCInterfaceDecl *IDecl,
+                               ObjCMethodDecl *MDecl, std::string &ResultStr);
     void RewriteTypeIntoString(QualType T, std::string &ResultStr,
                                const FunctionType *&FPRetType);
     void RewriteByRefString(std::string &ResultStr, const std::string &Name,
@@ -281,8 +282,8 @@ namespace {
     Stmt *RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV, SourceLocation OrigStart,
                                  bool &replaced);
     Stmt *RewriteObjCNestedIvarRefExpr(Stmt *S, bool &replaced);
-    Stmt *RewritePropertyGetter(ObjCPropertyRefExpr *PropRefExpr);
-    Stmt *RewritePropertySetter(BinaryOperator *BinOp, Expr *newStmt,
+    Stmt *RewritePropertyOrImplicitGetter(Expr *PropOrGetterRefExpr);
+    Stmt *RewritePropertyOrImplicitSetter(BinaryOperator *BinOp, Expr *newStmt,
                                 SourceRange SrcRange);
     Stmt *RewriteAtSelector(ObjCSelectorExpr *Exp);
     Stmt *RewriteMessageExpr(ObjCMessageExpr *Exp);
@@ -344,8 +345,7 @@ namespace {
                                          std::string &Result);
     void SynthesizeObjCInternalStruct(ObjCInterfaceDecl *CDecl,
                                       std::string &Result);
-    void SynthesizeIvarOffsetComputation(ObjCContainerDecl *IDecl,
-                                         ObjCIvarDecl *ivar,
+    void SynthesizeIvarOffsetComputation(ObjCIvarDecl *ivar,
                                          std::string &Result);
     void RewriteImplementations();
     void SynthesizeMetaDataIntoBuffer(std::string &Result);
@@ -404,6 +404,16 @@ namespace {
       return false;
     }
     
+    void convertToUnqualifiedObjCType(QualType &T) {
+      if (T->isObjCQualifiedIdType())
+        T = Context->getObjCIdType();
+      else if (T->isObjCQualifiedClassType())
+        T = Context->getObjCClassType();
+      else if (T->isObjCObjectPointerType() &&
+               T->getPointeeType()->isObjCQualifiedInterfaceType())
+        T = Context->getObjCIdType();
+    }
+    
     // FIXME: This predicate seems like it would be useful to add to ASTContext.
     bool isObjCType(QualType T) {
       if (!LangOpts.ObjC1 && !LangOpts.ObjC2)
@@ -423,6 +433,7 @@ namespace {
       return false;
     }
     bool PointerTypeTakesAnyBlockArguments(QualType QT);
+    bool PointerTypeTakesAnyObjCQualifiedType(QualType QT);
     void GetExtentOfArgList(const char *Name, const char *&LParen,
                             const char *&RParen);
     void RewriteCastExpr(CStyleCastExpr *CE);
@@ -733,8 +744,8 @@ void RewriteObjC::RewriteInclude() {
   }
 }
 
-static std::string getIvarAccessString(ObjCInterfaceDecl *ClassDecl,
-                                       ObjCIvarDecl *OID) {
+static std::string getIvarAccessString(ObjCIvarDecl *OID) {
+  const ObjCInterfaceDecl *ClassDecl = OID->getContainingInterface();
   std::string S;
   S = "((struct ";
   S += ClassDecl->getIdentifier()->getName();
@@ -762,64 +773,67 @@ void RewriteObjC::RewritePropertyImplDecl(ObjCPropertyImplDecl *PID,
 
   // Generate the 'getter' function.
   ObjCPropertyDecl *PD = PID->getPropertyDecl();
-  ObjCInterfaceDecl *ClassDecl = PD->getGetterMethodDecl()->getClassInterface();
   ObjCIvarDecl *OID = PID->getPropertyIvarDecl();
 
   if (!OID)
     return;
   unsigned Attributes = PD->getPropertyAttributes();
-  bool GenGetProperty = !(Attributes & ObjCPropertyDecl::OBJC_PR_nonatomic) &&
-                         (Attributes & (ObjCPropertyDecl::OBJC_PR_retain | 
-                                        ObjCPropertyDecl::OBJC_PR_copy));
-  std::string Getr;
-  if (GenGetProperty && !objcGetPropertyDefined) {
-    objcGetPropertyDefined = true;
-    // FIXME. Is this attribute correct in all cases?
-    Getr = "\nextern \"C\" __declspec(dllimport) "
-           "id objc_getProperty(id, SEL, long, bool);\n";
-  }
-  RewriteObjCMethodDecl(PD->getGetterMethodDecl(), Getr);
-  Getr += "{ ";
-  // Synthesize an explicit cast to gain access to the ivar.
-  // See objc-act.c:objc_synthesize_new_getter() for details.
-  if (GenGetProperty) {
-    // return objc_getProperty(self, _cmd, offsetof(ClassDecl, OID), 1)
-    Getr += "typedef ";
-    const FunctionType *FPRetType = 0;
-    RewriteTypeIntoString(PD->getGetterMethodDecl()->getResultType(), Getr, 
-                          FPRetType);
-    Getr += " _TYPE";
-    if (FPRetType) {
-      Getr += ")"; // close the precedence "scope" for "*".
-      
-      // Now, emit the argument types (if any).
-      if (const FunctionProtoType *FT = dyn_cast<FunctionProtoType>(FPRetType)){
-        Getr += "(";
-        for (unsigned i = 0, e = FT->getNumArgs(); i != e; ++i) {
-          if (i) Getr += ", ";
-          std::string ParamStr = FT->getArgType(i).getAsString(
-            Context->PrintingPolicy);
-          Getr += ParamStr;
-        }
-        if (FT->isVariadic()) {
-          if (FT->getNumArgs()) Getr += ", ";
-          Getr += "...";
-        }
-        Getr += ")";
-      } else
-        Getr += "()";
+  if (!PD->getGetterMethodDecl()->isDefined()) {
+    bool GenGetProperty = !(Attributes & ObjCPropertyDecl::OBJC_PR_nonatomic) &&
+                          (Attributes & (ObjCPropertyDecl::OBJC_PR_retain | 
+                                         ObjCPropertyDecl::OBJC_PR_copy));
+    std::string Getr;
+    if (GenGetProperty && !objcGetPropertyDefined) {
+      objcGetPropertyDefined = true;
+      // FIXME. Is this attribute correct in all cases?
+      Getr = "\nextern \"C\" __declspec(dllimport) "
+            "id objc_getProperty(id, SEL, long, bool);\n";
     }
-    Getr += ";\n";
-    Getr += "return (_TYPE)";
-    Getr += "objc_getProperty(self, _cmd, ";
-    SynthesizeIvarOffsetComputation(ClassDecl, OID, Getr);
-    Getr += ", 1)";
+    RewriteObjCMethodDecl(OID->getContainingInterface(),  
+                          PD->getGetterMethodDecl(), Getr);
+    Getr += "{ ";
+    // Synthesize an explicit cast to gain access to the ivar.
+    // See objc-act.c:objc_synthesize_new_getter() for details.
+    if (GenGetProperty) {
+      // return objc_getProperty(self, _cmd, offsetof(ClassDecl, OID), 1)
+      Getr += "typedef ";
+      const FunctionType *FPRetType = 0;
+      RewriteTypeIntoString(PD->getGetterMethodDecl()->getResultType(), Getr, 
+                            FPRetType);
+      Getr += " _TYPE";
+      if (FPRetType) {
+        Getr += ")"; // close the precedence "scope" for "*".
+      
+        // Now, emit the argument types (if any).
+        if (const FunctionProtoType *FT = dyn_cast<FunctionProtoType>(FPRetType)){
+          Getr += "(";
+          for (unsigned i = 0, e = FT->getNumArgs(); i != e; ++i) {
+            if (i) Getr += ", ";
+            std::string ParamStr = FT->getArgType(i).getAsString(
+                                                          Context->PrintingPolicy);
+            Getr += ParamStr;
+          }
+          if (FT->isVariadic()) {
+            if (FT->getNumArgs()) Getr += ", ";
+            Getr += "...";
+          }
+          Getr += ")";
+        } else
+          Getr += "()";
+      }
+      Getr += ";\n";
+      Getr += "return (_TYPE)";
+      Getr += "objc_getProperty(self, _cmd, ";
+      SynthesizeIvarOffsetComputation(OID, Getr);
+      Getr += ", 1)";
+    }
+    else
+      Getr += "return " + getIvarAccessString(OID);
+    Getr += "; }";
+    InsertText(onePastSemiLoc, Getr);
   }
-  else
-    Getr += "return " + getIvarAccessString(ClassDecl, OID);
-  Getr += "; }";
-  InsertText(onePastSemiLoc, Getr);
-  if (PD->isReadOnly())
+  
+  if (PD->isReadOnly() || PD->getSetterMethodDecl()->isDefined())
     return;
 
   // Generate the 'setter' function.
@@ -833,13 +847,14 @@ void RewriteObjC::RewritePropertyImplDecl(ObjCPropertyImplDecl *PID,
     "void objc_setProperty (id, SEL, long, id, bool, bool);\n";
   }
   
-  RewriteObjCMethodDecl(PD->getSetterMethodDecl(), Setr);
+  RewriteObjCMethodDecl(OID->getContainingInterface(), 
+                        PD->getSetterMethodDecl(), Setr);
   Setr += "{ ";
   // Synthesize an explicit cast to initialize the ivar.
   // See objc-act.c:objc_synthesize_new_setter() for details.
   if (GenSetProperty) {
     Setr += "objc_setProperty (self, _cmd, ";
-    SynthesizeIvarOffsetComputation(ClassDecl, OID, Setr);
+    SynthesizeIvarOffsetComputation(OID, Setr);
     Setr += ", (id)";
     Setr += PD->getName();
     Setr += ", ";
@@ -853,7 +868,7 @@ void RewriteObjC::RewritePropertyImplDecl(ObjCPropertyImplDecl *PID,
       Setr += "0)";
   }
   else {
-    Setr += getIvarAccessString(ClassDecl, OID) + " = ";
+    Setr += getIvarAccessString(OID) + " = ";
     Setr += PD->getName();
   }
   Setr += "; }";
@@ -962,6 +977,10 @@ void RewriteObjC::RewriteProtocolDecl(ObjCProtocolDecl *PDecl) {
        I != E; ++I)
     RewriteMethodDeclaration(*I);
 
+  for (ObjCInterfaceDecl::prop_iterator I = PDecl->prop_begin(),
+       E = PDecl->prop_end(); I != E; ++I)
+    RewriteProperty(*I);
+  
   // Lastly, comment out the @end.
   SourceLocation LocEnd = PDecl->getAtEndRange().getBegin();
   ReplaceText(LocEnd, strlen("@end"), "/* @end */");
@@ -1014,7 +1033,8 @@ void RewriteObjC::RewriteTypeIntoString(QualType T, std::string &ResultStr,
     ResultStr += T.getAsString(Context->PrintingPolicy);
 }
 
-void RewriteObjC::RewriteObjCMethodDecl(ObjCMethodDecl *OMD,
+void RewriteObjC::RewriteObjCMethodDecl(const ObjCInterfaceDecl *IDecl,
+                                        ObjCMethodDecl *OMD,
                                         std::string &ResultStr) {
   //fprintf(stderr,"In RewriteObjCMethodDecl\n");
   const FunctionType *FPRetType = 0;
@@ -1030,7 +1050,7 @@ void RewriteObjC::RewriteObjCMethodDecl(ObjCMethodDecl *OMD,
   else
     NameStr += "_C_";
 
-  NameStr += OMD->getClassInterface()->getNameAsString();
+  NameStr += IDecl->getNameAsString();
   NameStr += "_";
 
   if (ObjCCategoryImplDecl *CID =
@@ -1056,14 +1076,14 @@ void RewriteObjC::RewriteObjCMethodDecl(ObjCMethodDecl *OMD,
 
   // invisible arguments
   if (OMD->isInstanceMethod()) {
-    QualType selfTy = Context->getObjCInterfaceType(OMD->getClassInterface());
+    QualType selfTy = Context->getObjCInterfaceType(IDecl);
     selfTy = Context->getPointerType(selfTy);
     if (!LangOpts.Microsoft) {
-      if (ObjCSynthesizedStructs.count(OMD->getClassInterface()))
+      if (ObjCSynthesizedStructs.count(const_cast<ObjCInterfaceDecl*>(IDecl)))
         ResultStr += "struct ";
     }
     // When rewriting for Microsoft, explicitly omit the structure name.
-    ResultStr += OMD->getClassInterface()->getNameAsString();
+    ResultStr += IDecl->getNameAsString();
     ResultStr += " *";
   }
   else
@@ -1131,7 +1151,7 @@ void RewriteObjC::RewriteImplementationDecl(Decl *OID) {
        I != E; ++I) {
     std::string ResultStr;
     ObjCMethodDecl *OMD = *I;
-    RewriteObjCMethodDecl(OMD, ResultStr);
+    RewriteObjCMethodDecl(OMD->getClassInterface(), OMD, ResultStr);
     SourceLocation LocStart = OMD->getLocStart();
     SourceLocation LocEnd = OMD->getCompoundBody()->getLocStart();
 
@@ -1146,7 +1166,7 @@ void RewriteObjC::RewriteImplementationDecl(Decl *OID) {
        I != E; ++I) {
     std::string ResultStr;
     ObjCMethodDecl *OMD = *I;
-    RewriteObjCMethodDecl(OMD, ResultStr);
+    RewriteObjCMethodDecl(OMD->getClassInterface(), OMD, ResultStr);
     SourceLocation LocStart = OMD->getLocStart();
     SourceLocation LocEnd = OMD->getCompoundBody()->getLocStart();
 
@@ -1199,42 +1219,76 @@ void RewriteObjC::RewriteInterfaceDecl(ObjCInterfaceDecl *ClassDecl) {
               "/* @end */");
 }
 
-Stmt *RewriteObjC::RewritePropertySetter(BinaryOperator *BinOp, Expr *newStmt,
+Stmt *RewriteObjC::RewritePropertyOrImplicitSetter(BinaryOperator *BinOp, Expr *newStmt,
                                          SourceRange SrcRange) {
-  // Synthesize a ObjCMessageExpr from a ObjCPropertyRefExpr.
+  ObjCMethodDecl *OMD = 0;
+  QualType Ty;
+  Selector Sel;
+  Stmt *Receiver = 0;
+  bool Super = false;
+  QualType SuperTy;
+  SourceLocation SuperLocation;
+  // Synthesize a ObjCMessageExpr from a ObjCPropertyRefExpr or ObjCImplicitSetterGetterRefExpr.
   // This allows us to reuse all the fun and games in SynthMessageExpr().
-  ObjCPropertyRefExpr *PropRefExpr = dyn_cast<ObjCPropertyRefExpr>(BinOp->getLHS());
-  ObjCMessageExpr *MsgExpr;
-  ObjCPropertyDecl *PDecl = PropRefExpr->getProperty();
+  if (ObjCPropertyRefExpr *PropRefExpr = dyn_cast<ObjCPropertyRefExpr>(BinOp->getLHS())) {
+    ObjCPropertyDecl *PDecl = PropRefExpr->getProperty();
+    OMD = PDecl->getSetterMethodDecl();
+    Ty = PDecl->getType();
+    Sel = PDecl->getSetterName();
+    Super = PropRefExpr->isSuperReceiver();
+    if (!Super)
+      Receiver = PropRefExpr->getBase();
+    else {
+      SuperTy = PropRefExpr->getSuperType();
+      SuperLocation = PropRefExpr->getSuperLocation();
+    }
+  }
+  else if (ObjCImplicitSetterGetterRefExpr *ImplicitRefExpr = 
+           dyn_cast<ObjCImplicitSetterGetterRefExpr>(BinOp->getLHS())) {
+    OMD = ImplicitRefExpr->getSetterMethod();
+    Sel = OMD->getSelector();
+    Ty = ImplicitRefExpr->getType();
+    Super = ImplicitRefExpr->isSuperReceiver();
+    if (!Super)
+      Receiver = ImplicitRefExpr->getBase();
+    else {
+      SuperTy = ImplicitRefExpr->getSuperType();
+      SuperLocation = ImplicitRefExpr->getSuperLocation();
+    }
+  }
+  
+  assert(OMD && "RewritePropertyOrImplicitSetter - null OMD");
   llvm::SmallVector<Expr *, 1> ExprVec;
   ExprVec.push_back(newStmt);
 
-  Stmt *Receiver = PropRefExpr->getBase();
-  ObjCPropertyRefExpr *PRE = dyn_cast<ObjCPropertyRefExpr>(Receiver);
-  if (PRE && PropGetters[PRE]) {
-    // This allows us to handle chain/nested property getters.
-    Receiver = PropGetters[PRE];
-  }
-  if (isa<ObjCSuperExpr>(Receiver))
+  ObjCMessageExpr *MsgExpr;
+  if (Super)
     MsgExpr = ObjCMessageExpr::Create(*Context, 
-                                      PDecl->getType().getNonReferenceType(),
+                                      Ty.getNonReferenceType(),
                                       /*FIXME?*/SourceLocation(),
-                                      Receiver->getLocStart(),
+                                      SuperLocation,
                                       /*IsInstanceSuper=*/true,
-                                      cast<Expr>(Receiver)->getType(),
-                                      PDecl->getSetterName(),
-                                      PDecl->getSetterMethodDecl(),
+                                      SuperTy,
+                                      Sel, OMD,
                                       &ExprVec[0], 1,
                                       /*FIXME:*/SourceLocation());
-  else
+  else {
+    // FIXME. Refactor this into common code with that in 
+    // RewritePropertyOrImplicitGetter
+    assert(Receiver && "RewritePropertyOrImplicitSetter - null Receiver");
+    if (Expr *Exp = dyn_cast<Expr>(Receiver))
+      if (PropGetters[Exp])
+        // This allows us to handle chain/nested property/implicit getters.
+        Receiver = PropGetters[Exp];
+  
     MsgExpr = ObjCMessageExpr::Create(*Context, 
-                                      PDecl->getType().getNonReferenceType(),
+                                      Ty.getNonReferenceType(),
                                       /*FIXME: */SourceLocation(),
                                       cast<Expr>(Receiver),
-                                      PDecl->getSetterName(),
-                                      PDecl->getSetterMethodDecl(),
+                                      Sel, OMD,
                                       &ExprVec[0], 1,
                                       /*FIXME:*/SourceLocation());
+  }
   Stmt *ReplacingStmt = SynthMessageExpr(MsgExpr);
 
   // Now do the actual rewrite.
@@ -1246,57 +1300,89 @@ Stmt *RewriteObjC::RewritePropertySetter(BinaryOperator *BinOp, Expr *newStmt,
   return ReplacingStmt;
 }
 
-Stmt *RewriteObjC::RewritePropertyGetter(ObjCPropertyRefExpr *PropRefExpr) {
-  // Synthesize a ObjCMessageExpr from a ObjCPropertyRefExpr.
+Stmt *RewriteObjC::RewritePropertyOrImplicitGetter(Expr *PropOrGetterRefExpr) {
+  // Synthesize a ObjCMessageExpr from a ObjCPropertyRefExpr or ImplicitGetter.
   // This allows us to reuse all the fun and games in SynthMessageExpr().
-  ObjCMessageExpr *MsgExpr;
-  ObjCPropertyDecl *PDecl = PropRefExpr->getProperty();
-
-  Stmt *Receiver = PropRefExpr->getBase();
-
-  ObjCPropertyRefExpr *PRE = dyn_cast<ObjCPropertyRefExpr>(Receiver);
-  if (PRE && PropGetters[PRE]) {
-    // This allows us to handle chain/nested property getters.
-    Receiver = PropGetters[PRE];
+  Stmt *Receiver = 0;
+  ObjCMethodDecl *OMD = 0;
+  QualType Ty;
+  Selector Sel;
+  bool Super = false;
+  QualType SuperTy;
+  SourceLocation SuperLocation;
+  if (ObjCPropertyRefExpr *PropRefExpr = 
+        dyn_cast<ObjCPropertyRefExpr>(PropOrGetterRefExpr)) {
+    ObjCPropertyDecl *PDecl = PropRefExpr->getProperty();
+    OMD = PDecl->getGetterMethodDecl();
+    Ty = PDecl->getType();
+    Sel = PDecl->getGetterName();
+    Super = PropRefExpr->isSuperReceiver();
+    if (!Super)
+      Receiver = PropRefExpr->getBase();
+    else {
+      SuperTy = PropRefExpr->getSuperType();
+      SuperLocation = PropRefExpr->getSuperLocation();
+    }
   }
-
-  if (isa<ObjCSuperExpr>(Receiver))
+  else if (ObjCImplicitSetterGetterRefExpr *ImplicitRefExpr = 
+            dyn_cast<ObjCImplicitSetterGetterRefExpr>(PropOrGetterRefExpr)) {
+    OMD = ImplicitRefExpr->getGetterMethod();
+    Sel = OMD->getSelector();
+    Ty = ImplicitRefExpr->getType();
+    Super = ImplicitRefExpr->isSuperReceiver();
+    if (!Super)
+      Receiver = ImplicitRefExpr->getBase();
+    else {
+      SuperTy = ImplicitRefExpr->getSuperType();
+      SuperLocation = ImplicitRefExpr->getSuperLocation();
+    }
+  }
+  
+  assert (OMD && "RewritePropertyOrImplicitGetter - OMD is null");
+  
+  ObjCMessageExpr *MsgExpr;
+  if (Super)
     MsgExpr = ObjCMessageExpr::Create(*Context, 
-                                      PDecl->getType().getNonReferenceType(),
-                                      /*FIXME:*/SourceLocation(),
-                                      Receiver->getLocStart(),
+                                      Ty.getNonReferenceType(),
+                                      /*FIXME?*/SourceLocation(),
+                                      SuperLocation,
                                       /*IsInstanceSuper=*/true,
-                                      cast<Expr>(Receiver)->getType(),
-                                      PDecl->getGetterName(), 
-                                      PDecl->getGetterMethodDecl(),
+                                      SuperTy,
+                                      Sel, OMD,
                                       0, 0, 
                                       /*FIXME:*/SourceLocation());
-  else
+  else {
+    assert (Receiver && "RewritePropertyOrImplicitGetter - Receiver is null");
+    if (Expr *Exp = dyn_cast<Expr>(Receiver))
+      if (PropGetters[Exp])
+        // This allows us to handle chain/nested property/implicit getters.
+        Receiver = PropGetters[Exp];
     MsgExpr = ObjCMessageExpr::Create(*Context, 
-                                      PDecl->getType().getNonReferenceType(),
+                                      Ty.getNonReferenceType(),
                                       /*FIXME:*/SourceLocation(),
                                       cast<Expr>(Receiver),
-                                      PDecl->getGetterName(), 
-                                      PDecl->getGetterMethodDecl(),
+                                      Sel, OMD,
                                       0, 0, 
                                       /*FIXME:*/SourceLocation());
+  }
 
   Stmt *ReplacingStmt = SynthMessageExpr(MsgExpr);
 
   if (!PropParentMap)
     PropParentMap = new ParentMap(CurrentBody);
 
-  Stmt *Parent = PropParentMap->getParent(PropRefExpr);
-  if (Parent && isa<ObjCPropertyRefExpr>(Parent)) {
+  Stmt *Parent = PropParentMap->getParent(PropOrGetterRefExpr);
+  if (Parent && (isa<ObjCPropertyRefExpr>(Parent) ||
+                 isa<ObjCImplicitSetterGetterRefExpr>(Parent))) {
     // We stash away the ReplacingStmt since actually doing the
     // replacement/rewrite won't work for nested getters (e.g. obj.p.i)
-    PropGetters[PropRefExpr] = ReplacingStmt;
+    PropGetters[PropOrGetterRefExpr] = ReplacingStmt;
     // NOTE: We don't want to call MsgExpr->Destroy(), as it holds references
     // to things that stay around.
     Context->Deallocate(MsgExpr);
-    return PropRefExpr; // return the original...
+    return PropOrGetterRefExpr; // return the original...
   } else {
-    ReplaceStmt(PropRefExpr, ReplacingStmt);
+    ReplaceStmt(PropOrGetterRefExpr, ReplacingStmt);
     // delete PropRefExpr; elsewhere...
     // NOTE: We don't want to call MsgExpr->Destroy(), as it holds references
     // to things that stay around.
@@ -1342,7 +1428,7 @@ Stmt *RewriteObjC::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV,
         MemberExpr *ME = new (Context) MemberExpr(PE, true, D,
                                                    IV->getLocation(),
                                                    D->getType());
-        // delete IV; leak for now, see RewritePropertySetter() usage for more info.
+        // delete IV; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
         return ME;
       }
       // Get the new text
@@ -2020,7 +2106,7 @@ Stmt *RewriteObjC::RewriteAtEncode(ObjCEncodeExpr *Exp) {
   ReplaceStmt(Exp, Replacement);
 
   // Replace this subexpr in the parent.
-  // delete Exp; leak for now, see RewritePropertySetter() usage for more info.
+  // delete Exp; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
   return Replacement;
 }
 
@@ -2038,7 +2124,7 @@ Stmt *RewriteObjC::RewriteAtSelector(ObjCSelectorExpr *Exp) {
   CallExpr *SelExp = SynthesizeCallToFunctionDecl(SelGetUidFunctionDecl,
                                                  &SelExprs[0], SelExprs.size());
   ReplaceStmt(Exp, SelExp);
-  // delete Exp; leak for now, see RewritePropertySetter() usage for more info.
+  // delete Exp; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
   return SelExp;
 }
 
@@ -2104,6 +2190,10 @@ bool RewriteObjC::needToScanForQualifiers(QualType T) {
   if (T->isObjCObjectPointerType()) {
     T = T->getPointeeType();
     return T->isObjCQualifiedInterfaceType();
+  }
+  if (T->isArrayType()) {
+    QualType ElemTy = Context->getBaseElementType(T);
+    return needToScanForQualifiers(ElemTy);
   }
   return false;
 }
@@ -2580,7 +2670,7 @@ Stmt *RewriteObjC::RewriteObjCStringLiteral(ObjCStringLiteral *Exp) {
   CastExpr *cast = NoTypeInfoCStyleCastExpr(Context, Exp->getType(),
                                             CK_Unknown, Unop);
   ReplaceStmt(Exp, cast);
-  // delete Exp; leak for now, see RewritePropertySetter() usage for more info.
+  // delete Exp; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
   return cast;
 }
 
@@ -2922,7 +3012,7 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
     MsgExprs.push_back(userExpr);
     // We've transferred the ownership to MsgExprs. For now, we *don't* null
     // out the argument in the original expression (since we aren't deleting
-    // the ObjCMessageExpr). See RewritePropertySetter() usage for more info.
+    // the ObjCMessageExpr). See RewritePropertyOrImplicitSetter() usage for more info.
     //Exp->setArg(i, 0);
   }
   // Generate the funky cast.
@@ -3041,10 +3131,12 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
     ConditionalOperator *CondExpr =
       new (Context) ConditionalOperator(lessThanExpr,
                                         SourceLocation(), CE,
-                                        SourceLocation(), STCE, returnType);
-    ReplacingStmt = new (Context) ParenExpr(SourceLocation(), SourceLocation(), CondExpr);
+                                        SourceLocation(), STCE, (Expr*)0,
+                                        returnType);
+    ReplacingStmt = new (Context) ParenExpr(SourceLocation(), SourceLocation(), 
+                                            CondExpr);
   }
-  // delete Exp; leak for now, see RewritePropertySetter() usage for more info.
+  // delete Exp; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
   return ReplacingStmt;
 }
 
@@ -3055,7 +3147,7 @@ Stmt *RewriteObjC::RewriteMessageExpr(ObjCMessageExpr *Exp) {
   // Now do the actual rewrite.
   ReplaceStmt(Exp, ReplacingStmt);
 
-  // delete Exp; leak for now, see RewritePropertySetter() usage for more info.
+  // delete Exp; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
   return ReplacingStmt;
 }
 
@@ -3091,7 +3183,7 @@ Stmt *RewriteObjC::RewriteObjCProtocolExpr(ObjCProtocolExpr *Exp) {
                                                 DerefExpr);
   ReplaceStmt(Exp, castExpr);
   ProtocolExprDecls.insert(Exp->getProtocol());
-  // delete Exp; leak for now, see RewritePropertySetter() usage for more info.
+  // delete Exp; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
   return castExpr;
 
 }
@@ -3635,8 +3727,7 @@ void RewriteObjC::RewriteObjCCategoryImplDecl(ObjCCategoryImplDecl *IDecl,
 
 /// SynthesizeIvarOffsetComputation - This rutine synthesizes computation of
 /// ivar offset.
-void RewriteObjC::SynthesizeIvarOffsetComputation(ObjCContainerDecl *IDecl,
-                                                  ObjCIvarDecl *ivar,
+void RewriteObjC::SynthesizeIvarOffsetComputation(ObjCIvarDecl *ivar,
                                                   std::string &Result) {
   if (ivar->isBitField()) {
     // FIXME: The hack below doesn't work for bitfields. For now, we simply
@@ -3644,7 +3735,7 @@ void RewriteObjC::SynthesizeIvarOffsetComputation(ObjCContainerDecl *IDecl,
     Result += "0";
   } else {
     Result += "__OFFSETOFIVAR__(struct ";
-    Result += IDecl->getNameAsString();
+    Result += ivar->getContainingInterface()->getNameAsString();
     if (LangOpts.Microsoft)
       Result += "_IMPL";
     Result += ", ";
@@ -3727,7 +3818,7 @@ void RewriteObjC::RewriteObjCClassMetaData(ObjCImplementationDecl *IDecl,
     QuoteDoublequotes(TmpString, StrEncoding);
     Result += StrEncoding;
     Result += "\", ";
-    SynthesizeIvarOffsetComputation(IDecl, *IVI, Result);
+    SynthesizeIvarOffsetComputation(*IVI, Result);
     Result += "}\n";
     for (++IVI; IVI != IVE; ++IVI) {
       Result += "\t  ,{\"";
@@ -3738,7 +3829,7 @@ void RewriteObjC::RewriteObjCClassMetaData(ObjCImplementationDecl *IDecl,
       QuoteDoublequotes(TmpString, StrEncoding);
       Result += StrEncoding;
       Result += "\", ";
-      SynthesizeIvarOffsetComputation(IDecl, (*IVI), Result);
+      SynthesizeIvarOffsetComputation((*IVI), Result);
       Result += "}\n";
     }
 
@@ -3762,11 +3853,13 @@ void RewriteObjC::RewriteObjCClassMetaData(ObjCImplementationDecl *IDecl,
     if (!PD)
       continue;
     if (ObjCMethodDecl *Getter = PD->getGetterMethodDecl())
-      InstanceMethods.push_back(Getter);
+      if (!Getter->isDefined())
+        InstanceMethods.push_back(Getter);
     if (PD->isReadOnly())
       continue;
     if (ObjCMethodDecl *Setter = PD->getSetterMethodDecl())
-      InstanceMethods.push_back(Setter);
+      if (!Setter->isDefined())
+        InstanceMethods.push_back(Setter);
   }
   RewriteObjCMethodsMetaData(InstanceMethods.begin(), InstanceMethods.end(),
                              true, "", IDecl->getName(), Result);
@@ -4371,6 +4464,12 @@ void RewriteObjC::SynthesizeBlockLiterals(SourceLocation FunLocStart,
         BlockByRefDeclsPtrSet.insert(VD);
         BlockByRefDecls.push_back(VD);
       }
+      // imported objects in the inner blocks not used in the outer
+      // blocks must be copied/disposed in the outer block as well.
+      if (Exp->isByRef() ||
+          VD->getType()->isObjCObjectPointerType() || 
+          VD->getType()->isBlockPointerType())
+        ImportedBlockDecls.insert(VD);
     }
 
     std::string ImplTag = "__" + FunName.str() + "_block_impl_" + utostr(i);
@@ -4566,7 +4665,8 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
     ConditionalOperator *CondExpr =
       new (Context) ConditionalOperator(CONDExp,
                                       SourceLocation(), cast<Expr>(LHSStmt),
-                                      SourceLocation(), cast<Expr>(RHSStmt), 
+                                      SourceLocation(), cast<Expr>(RHSStmt),
+                                      (Expr*)0,
                                       Exp->getType());
     return CondExpr;
   } else if (const ObjCIvarRefExpr *IRE = dyn_cast<ObjCIvarRefExpr>(BlockExp)) {
@@ -4595,7 +4695,8 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
          E = FTP->arg_type_end(); I && (I != E); ++I) {
       QualType t = *I;
       // Make sure we convert "t (^)(...)" to "t (*)(...)".
-      (void)convertBlockPointerToFunctionPointer(t);
+      if (!convertBlockPointerToFunctionPointer(t))
+        convertToUnqualifiedObjCType(t);
       ArgTypes.push_back(t);
     }
   }
@@ -4621,6 +4722,7 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
   MemberExpr *ME = new (Context) MemberExpr(PE, true, FD, SourceLocation(),
                                             FD->getType());
 
+  
   CastExpr *FunkCast = NoTypeInfoCStyleCastExpr(Context, PtrToFuncCastType,
                                                 CK_Unknown, ME);
   PE = new (Context) ParenExpr(SourceLocation(), SourceLocation(), FunkCast);
@@ -4799,6 +4901,30 @@ bool RewriteObjC::PointerTypeTakesAnyBlockArguments(QualType QT) {
   return false;
 }
 
+bool RewriteObjC::PointerTypeTakesAnyObjCQualifiedType(QualType QT) {
+  const FunctionProtoType *FTP;
+  const PointerType *PT = QT->getAs<PointerType>();
+  if (PT) {
+    FTP = PT->getPointeeType()->getAs<FunctionProtoType>();
+  } else {
+    const BlockPointerType *BPT = QT->getAs<BlockPointerType>();
+    assert(BPT && "BlockPointerTypeTakeAnyBlockArguments(): not a block pointer type");
+    FTP = BPT->getPointeeType()->getAs<FunctionProtoType>();
+  }
+  if (FTP) {
+    for (FunctionProtoType::arg_type_iterator I = FTP->arg_type_begin(),
+         E = FTP->arg_type_end(); I != E; ++I) {
+      if ((*I)->isObjCQualifiedIdType())
+        return true;
+      if ((*I)->isObjCObjectPointerType() &&
+          (*I)->getPointeeType()->isObjCQualifiedInterfaceType())
+        return true;
+    }
+        
+  }
+  return false;
+}
+
 void RewriteObjC::GetExtentOfArgList(const char *Name, const char *&LParen,
                                      const char *&RParen) {
   const char *argPtr = strchr(Name, '(');
@@ -4842,28 +4968,57 @@ void RewriteObjC::RewriteBlockPointerDecl(NamedDecl *ND) {
   // scan backward (from the decl location) for the end of the previous decl.
   while (*startBuf != '^' && *startBuf != ';' && startBuf != MainFileStart)
     startBuf--;
-
+  SourceLocation Start = DeclLoc.getFileLocWithOffset(startBuf-endBuf);
+  std::string buf;
+  unsigned OrigLength=0;
   // *startBuf != '^' if we are dealing with a pointer to function that
   // may take block argument types (which will be handled below).
   if (*startBuf == '^') {
     // Replace the '^' with '*', computing a negative offset.
-    DeclLoc = DeclLoc.getFileLocWithOffset(startBuf-endBuf);
-    ReplaceText(DeclLoc, 1, "*");
+    buf = '*';
+    startBuf++;
+    OrigLength++;
   }
-  if (PointerTypeTakesAnyBlockArguments(DeclT)) {
+  while (*startBuf != ')') {
+    buf += *startBuf;
+    startBuf++;
+    OrigLength++;
+  }
+  buf += ')';
+  OrigLength++;
+  
+  if (PointerTypeTakesAnyBlockArguments(DeclT) ||
+      PointerTypeTakesAnyObjCQualifiedType(DeclT)) {
     // Replace the '^' with '*' for arguments.
+    // Replace id<P> with id/*<>*/
     DeclLoc = ND->getLocation();
     startBuf = SM->getCharacterData(DeclLoc);
     const char *argListBegin, *argListEnd;
     GetExtentOfArgList(startBuf, argListBegin, argListEnd);
     while (argListBegin < argListEnd) {
-      if (*argListBegin == '^') {
-        SourceLocation CaretLoc = DeclLoc.getFileLocWithOffset(argListBegin-startBuf);
-        ReplaceText(CaretLoc, 1, "*");
+      if (*argListBegin == '^')
+        buf += '*';
+      else if (*argListBegin ==  '<') {
+        buf += "/*"; 
+        buf += *argListBegin++;
+        OrigLength++;;
+        while (*argListBegin != '>') {
+          buf += *argListBegin++;
+          OrigLength++;
+        }
+        buf += *argListBegin;
+        buf += "*/";
       }
+      else
+        buf += *argListBegin;
       argListBegin++;
+      OrigLength++;
     }
+    buf += ')';
+    OrigLength++;
   }
+  ReplaceText(Start, OrigLength, buf);
+  
   return;
 }
 
@@ -5308,8 +5463,9 @@ void RewriteObjC::CollectPropertySetters(Stmt *S) {
 
   if (BinaryOperator *BinOp = dyn_cast<BinaryOperator>(S)) {
     if (BinOp->isAssignmentOp()) {
-      if (ObjCPropertyRefExpr *PRE = dyn_cast<ObjCPropertyRefExpr>(BinOp->getLHS()))
-        PropSetters[PRE] = BinOp;
+        if (isa<ObjCPropertyRefExpr>(BinOp->getLHS()) || 
+            isa<ObjCImplicitSetterGetterRefExpr>(BinOp->getLHS()))
+          PropSetters[BinOp->getLHS()] = BinOp;
     }
   }
 }
@@ -5346,6 +5502,18 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
         newStmt = RewriteFunctionBodyOrGlobalInitializer(S);
       if (newStmt)
         *CI = newStmt;
+      // If dealing with an assignment with LHS being a property reference
+      // expression, the entire assignment tree is rewritten into a property
+      // setter messaging. This involvs the RHS too. Do not attempt to rewrite
+      // RHS again.
+      if (Expr *Exp = dyn_cast<Expr>(S))
+        if (isa<ObjCPropertyRefExpr>(Exp) || 
+            isa<ObjCImplicitSetterGetterRefExpr>(Exp)) {
+          if (PropSetters[Exp]) {
+            ++CI;
+            continue;
+          }
+        }
     }
 
   if (BlockExpr *BE = dyn_cast<BlockExpr>(S)) {
@@ -5356,7 +5524,12 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
     GetInnerBlockDeclRefExprs(BE->getBody(),
                               InnerBlockDeclRefs, InnerContexts);
     // Rewrite the block body in place.
+    Stmt *SaveCurrentBody = CurrentBody;
+    CurrentBody = BE->getBody();
+    PropParentMap = 0;
     RewriteFunctionBodyOrGlobalInitializer(BE->getBody());
+    CurrentBody = SaveCurrentBody;
+    PropParentMap = 0;
     ImportedLocalExternalDecls.clear();
     // Now we snarf the rewritten text and stash it away for later use.
     std::string Str = Rewrite.getRewrittenText(BE->getSourceRange());
@@ -5372,8 +5545,11 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
   if (ObjCEncodeExpr *AtEncode = dyn_cast<ObjCEncodeExpr>(S))
     return RewriteAtEncode(AtEncode);
 
-  if (ObjCPropertyRefExpr *PropRefExpr = dyn_cast<ObjCPropertyRefExpr>(S)) {
-    BinaryOperator *BinOp = PropSetters[PropRefExpr];
+  if (isa<ObjCPropertyRefExpr>(S) || isa<ObjCImplicitSetterGetterRefExpr>(S)) {
+    Expr *PropOrImplicitRefExpr = dyn_cast<Expr>(S);
+    assert(PropOrImplicitRefExpr && "Property or implicit setter/getter is null");
+    
+    BinaryOperator *BinOp = PropSetters[PropOrImplicitRefExpr];
     if (BinOp) {
       // Because the rewriter doesn't allow us to rewrite rewritten code,
       // we need to rewrite the right hand side prior to rewriting the setter.
@@ -5385,6 +5561,12 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
       //              ^(NSURL *errorURL, NSError *error) { return (BOOL)1; };
       SourceRange SrcRange = BinOp->getSourceRange();
       Stmt *newStmt = RewriteFunctionBodyOrGlobalInitializer(BinOp->getRHS());
+      // Need to rewrite the ivar access expression if need be.
+      if (isa<ObjCIvarRefExpr>(newStmt)) {
+        bool replaced = false;
+        newStmt = RewriteObjCNestedIvarRefExpr(newStmt, replaced);
+      }
+      
       DisableReplaceStmt = false;
       //
       // Unlike the main iterator, we explicily avoid changing 'BinOp'. If
@@ -5411,18 +5593,19 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
       //       (CStyleCastExpr 0x231d220 'void *'
       //         (DeclRefExpr 0x231d200 'id (id, SEL, ...)' FunctionDecl='objc_msgSend' 0x231cdc0))))
       //
-      // Note that 'newStmt' is passed to RewritePropertySetter so that it
+      // Note that 'newStmt' is passed to RewritePropertyOrImplicitSetter so that it
       // can be used as the setter argument. ReplaceStmt() will still 'see'
       // the original RHS (since we haven't altered BinOp).
       //
       // This implies the Rewrite* routines can no longer delete the original
       // node. As a result, we now leak the original AST nodes.
       //
-      return RewritePropertySetter(BinOp, dyn_cast<Expr>(newStmt), SrcRange);
+      return RewritePropertyOrImplicitSetter(BinOp, dyn_cast<Expr>(newStmt), SrcRange);
     } else {
-      return RewritePropertyGetter(PropRefExpr);
+      return RewritePropertyOrImplicitGetter(PropOrImplicitRefExpr);
     }
   }
+  
   if (ObjCSelectorExpr *AtSelector = dyn_cast<ObjCSelectorExpr>(S))
     return RewriteAtSelector(AtSelector);
 

@@ -24,6 +24,7 @@
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
@@ -142,7 +143,7 @@ void AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
   // Construct the invocation.
 
   // Target Options
-  Opts.Triple = Args->getLastArgValue(OPT_triple);
+  Opts.Triple = Triple::normalize(Args->getLastArgValue(OPT_triple));
   if (Opts.Triple.empty()) // Use the host triple if unspecified.
     Opts.Triple = sys::getHostTriple();
 
@@ -273,6 +274,7 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts, Diagnostic &Diags) {
     TargetAsmBackend *TAB = TheTarget->createAsmBackend(Opts.Triple);
     Str.reset(TheTarget->createObjectStreamer(Opts.Triple, Ctx, *TAB, *Out,
                                               CE, Opts.RelaxAll));
+    Str.get()->InitSections();
   }
 
   OwningPtr<MCAsmParser> Parser(createMCAsmParser(*TheTarget, SrcMgr, Ctx,

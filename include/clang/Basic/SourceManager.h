@@ -33,6 +33,7 @@ namespace clang {
 class Diagnostic;
 class SourceManager;
 class FileManager;
+class FileSystemOptions;
 class FileEntry;
 class LineTableInfo;
   
@@ -369,7 +370,10 @@ public:
 class SourceManager {
   /// \brief Diagnostic object.
   Diagnostic &Diag;
-  
+
+  FileManager &FileMgr;
+  const FileSystemOptions &FileSystemOpts;
+
   mutable llvm::BumpPtrAllocator ContentCacheAlloc;
 
   /// FileInfos - Memoized information about all of the files tracked by this
@@ -427,14 +431,21 @@ class SourceManager {
   explicit SourceManager(const SourceManager&);
   void operator=(const SourceManager&);
 public:
-  SourceManager(Diagnostic &Diag)
-    : Diag(Diag), ExternalSLocEntries(0), LineTable(0), NumLinearScans(0),
+  SourceManager(Diagnostic &Diag, FileManager &FileMgr,
+                const FileSystemOptions &FSOpts)
+    : Diag(Diag), FileMgr(FileMgr), FileSystemOpts(FSOpts),
+      ExternalSLocEntries(0), LineTable(0), NumLinearScans(0),
       NumBinaryProbes(0) {
     clearIDTables();
   }
   ~SourceManager();
 
   void clearIDTables();
+
+  Diagnostic &getDiagnostics() const { return Diag; }
+
+  FileManager &getFileManager() const { return FileMgr; }
+  const FileSystemOptions &getFileSystemOpts() const { return FileSystemOpts; }
 
   //===--------------------------------------------------------------------===//
   // MainFileID creation and querying methods.
@@ -464,7 +475,7 @@ public:
                       unsigned PreallocatedID = 0,
                       unsigned Offset = 0) {
     const SrcMgr::ContentCache *IR = getOrCreateContentCache(SourceFile);
-    if (IR == 0) return FileID();    // Error opening file?
+    assert(IR && "getOrCreateContentCache() cannot return NULL");
     return createFileID(IR, IncludePos, FileCharacter, PreallocatedID, Offset);
   }
 
@@ -514,9 +525,7 @@ public:
   ///
   /// \param DoNotFree If true, then the buffer will not be freed when the
   /// source manager is destroyed.
-  ///
-  /// \returns true if an error occurred, false otherwise.
-  bool overrideFileContents(const FileEntry *SourceFile,
+  void overrideFileContents(const FileEntry *SourceFile,
                             const llvm::MemoryBuffer *Buffer,
                             bool DoNotFree = false);
 

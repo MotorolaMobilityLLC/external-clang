@@ -14,7 +14,9 @@
 #include "CodeGenModule.h"
 #include "CGDebugInfo.h"
 #include "CodeGenFunction.h"
+#include "CodeGenTBAA.h"
 #include "CGCall.h"
+#include "CGCXXABI.h"
 #include "CGObjCRuntime.h"
 #include "Mangle.h"
 #include "TargetInfo.h"
@@ -61,8 +63,9 @@ CodeGenModule::CodeGenModule(ASTContext &C, const CodeGenOptions &CGO,
     TheTargetData(TD), TheTargetCodeGenInfo(0), Diags(diags),
     ABI(createCXXABI(*this)), 
     Types(C, M, TD, getTargetCodeGenInfo().getABIInfo(), ABI),
+    TBAA(0),
     VTables(*this), Runtime(0),
-    CFConstantStringClassRef(0), NSConstantStringClassRef(0),
+    CFConstantStringClassRef(0), ConstantStringClassRef(0),
     VMContext(M.getContext()),
     NSConcreteGlobalBlockDecl(0), NSConcreteStackBlockDecl(0),
     NSConcreteGlobalBlock(0), NSConcreteStackBlock(0),
@@ -78,6 +81,11 @@ CodeGenModule::CodeGenModule(ASTContext &C, const CodeGenOptions &CGO,
   else
     Runtime = CreateMacObjCRuntime(*this);
 
+  // Enable TBAA unless it's suppressed.
+  if (!CodeGenOpts.RelaxedAliasing && CodeGenOpts.OptimizationLevel > 0)
+    TBAA = new CodeGenTBAA(Context, VMContext, getLangOptions(),
+                           ABI.getMangleContext());
+
   // If debug info generation is enabled, create the CGDebugInfo object.
   DebugInfo = CodeGenOpts.DebugInfo ? new CGDebugInfo(*this) : 0;
 }
@@ -85,6 +93,7 @@ CodeGenModule::CodeGenModule(ASTContext &C, const CodeGenOptions &CGO,
 CodeGenModule::~CodeGenModule() {
   delete Runtime;
   delete &ABI;
+  delete TBAA;
   delete DebugInfo;
 }
 
@@ -109,8 +118,21 @@ void CodeGenModule::Release() {
   EmitAnnotations();
   EmitLLVMUsed();
 
+  SimplifyPersonality();
+
   if (getCodeGenOpts().EmitDeclMetadata)
     EmitDeclMetadata();
+}
+
+llvm::MDNode *CodeGenModule::getTBAAInfo(QualType QTy) {
+  if (!TBAA)
+    return 0;
+  return TBAA->getTBAAInfo(QTy);
+}
+
+void CodeGenModule::DecorateInstruction(llvm::Instruction *Inst,
+                                        llvm::MDNode *TBAAInfo) {
+  Inst->setMetadata(llvm::LLVMContext::MD_tbaa, TBAAInfo);
 }
 
 bool CodeGenModule::isTargetDarwin() const {
@@ -142,89 +164,40 @@ void CodeGenModule::ErrorUnsupported(const Decl *D, const char *Type,
   getDiags().Report(Context.getFullLoc(D->getLocation()), DiagID) << Msg;
 }
 
-LangOptions::VisibilityMode
-CodeGenModule::getDeclVisibilityMode(const Decl *D) const {
-  if (const VarDecl *VD = dyn_cast<VarDecl>(D))
-    if (VD->getStorageClass() == SC_PrivateExtern)
-      return LangOptions::Hidden;
-
-  if (const VisibilityAttr *attr = D->getAttr<VisibilityAttr>()) {
-    switch (attr->getVisibility()) {
-    default: assert(0 && "Unknown visibility!");
-    case VisibilityAttr::Default:
-      return LangOptions::Default;
-    case VisibilityAttr::Hidden:
-      return LangOptions::Hidden;
-    case VisibilityAttr::Protected:
-      return LangOptions::Protected;
-    }
+static llvm::GlobalValue::VisibilityTypes GetLLVMVisibility(Visibility V) {
+  switch (V) {
+  case DefaultVisibility:   return llvm::GlobalValue::DefaultVisibility;
+  case HiddenVisibility:    return llvm::GlobalValue::HiddenVisibility;
+  case ProtectedVisibility: return llvm::GlobalValue::ProtectedVisibility;
   }
-  
-  if (getLangOptions().CPlusPlus) {
-    // Entities subject to an explicit instantiation declaration get default
-    // visibility.
-    if (const FunctionDecl *Function = dyn_cast<FunctionDecl>(D)) {
-      if (Function->getTemplateSpecializationKind()
-                                        == TSK_ExplicitInstantiationDeclaration)
-        return LangOptions::Default;
-    } else if (const ClassTemplateSpecializationDecl *ClassSpec
-                              = dyn_cast<ClassTemplateSpecializationDecl>(D)) {
-      if (ClassSpec->getSpecializationKind()
-                                        == TSK_ExplicitInstantiationDeclaration)
-        return LangOptions::Default;
-    } else if (const CXXRecordDecl *Record = dyn_cast<CXXRecordDecl>(D)) {
-      if (Record->getTemplateSpecializationKind()
-                                        == TSK_ExplicitInstantiationDeclaration)
-        return LangOptions::Default;
-    } else if (const VarDecl *Var = dyn_cast<VarDecl>(D)) {
-      if (Var->isStaticDataMember() &&
-          (Var->getTemplateSpecializationKind()
-                                      == TSK_ExplicitInstantiationDeclaration))
-        return LangOptions::Default;
-    }
-
-    // If -fvisibility-inlines-hidden was provided, then inline C++ member
-    // functions get "hidden" visibility by default.
-    if (getLangOptions().InlineVisibilityHidden)
-      if (const CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(D))
-        if (Method->isInlined())
-          return LangOptions::Hidden;
-  }
-           
-  // If this decl is contained in a class, it should have the same visibility
-  // as the parent class.
-  if (const DeclContext *DC = D->getDeclContext()) 
-    if (DC->isRecord())
-      return getDeclVisibilityMode(cast<Decl>(DC));
-
-  return getLangOptions().getVisibilityMode();
+  llvm_unreachable("unknown visibility!");
+  return llvm::GlobalValue::DefaultVisibility;
 }
 
+
 void CodeGenModule::setGlobalVisibility(llvm::GlobalValue *GV,
-                                        const Decl *D) const {
+                                        const NamedDecl *D,
+                                        bool IsForDefinition) const {
   // Internal definitions always have default visibility.
   if (GV->hasLocalLinkage()) {
     GV->setVisibility(llvm::GlobalValue::DefaultVisibility);
     return;
   }
 
-  switch (getDeclVisibilityMode(D)) {
-  default: assert(0 && "Unknown visibility!");
-  case LangOptions::Default:
-    return GV->setVisibility(llvm::GlobalValue::DefaultVisibility);
-  case LangOptions::Hidden:
-    return GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
-  case LangOptions::Protected:
-    return GV->setVisibility(llvm::GlobalValue::ProtectedVisibility);
-  }
+  // Set visibility for definitions.
+  NamedDecl::LinkageInfo LV = D->getLinkageAndVisibility();
+  if (LV.visibilityExplicit() ||
+      (IsForDefinition && !GV->hasAvailableExternallyLinkage()))
+    GV->setVisibility(GetLLVMVisibility(LV.visibility()));
 }
 
 /// Set the symbol visibility of type information (vtable and RTTI)
 /// associated with the given type.
 void CodeGenModule::setTypeVisibility(llvm::GlobalValue *GV,
                                       const CXXRecordDecl *RD,
-                                      bool IsForRTTI) const {
-  setGlobalVisibility(GV, RD);
+                                      bool IsForRTTI,
+                                      bool IsForDefinition) const {
+  setGlobalVisibility(GV, RD, IsForDefinition);
 
   if (!CodeGenOpts.HiddenWeakVTables)
     return;
@@ -287,7 +260,7 @@ llvm::StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
   if (!Str.empty())
     return Str;
 
-  if (!getMangleContext().shouldMangleDeclName(ND)) {
+  if (!getCXXABI().getMangleContext().shouldMangleDeclName(ND)) {
     IdentifierInfo *II = ND->getIdentifier();
     assert(II && "Attempt to mangle unnamed decl.");
 
@@ -297,13 +270,13 @@ llvm::StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
   
   llvm::SmallString<256> Buffer;
   if (const CXXConstructorDecl *D = dyn_cast<CXXConstructorDecl>(ND))
-    getMangleContext().mangleCXXCtor(D, GD.getCtorType(), Buffer);
+    getCXXABI().getMangleContext().mangleCXXCtor(D, GD.getCtorType(), Buffer);
   else if (const CXXDestructorDecl *D = dyn_cast<CXXDestructorDecl>(ND))
-    getMangleContext().mangleCXXDtor(D, GD.getDtorType(), Buffer);
+    getCXXABI().getMangleContext().mangleCXXDtor(D, GD.getDtorType(), Buffer);
   else if (const BlockDecl *BD = dyn_cast<BlockDecl>(ND))
-    getMangleContext().mangleBlock(GD, BD, Buffer);
+    getCXXABI().getMangleContext().mangleBlock(GD, BD, Buffer);
   else
-    getMangleContext().mangleName(ND, Buffer);
+    getCXXABI().getMangleContext().mangleName(ND, Buffer);
 
   // Allocate space for the mangled name.
   size_t Length = Buffer.size();
@@ -317,7 +290,7 @@ llvm::StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
 
 void CodeGenModule::getMangledName(GlobalDecl GD, MangleBuffer &Buffer,
                                    const BlockDecl *BD) {
-  getMangleContext().mangleBlock(GD, BD, Buffer.getBuffer());
+  getCXXABI().getMangleContext().mangleBlock(GD, BD, Buffer.getBuffer());
 }
 
 llvm::GlobalValue *CodeGenModule::GetGlobalValue(llvm::StringRef Name) {
@@ -454,6 +427,9 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
   if (D->hasAttr<AlwaysInlineAttr>())
     F->addFnAttr(llvm::Attribute::AlwaysInline);
 
+  if (D->hasAttr<NakedAttr>())
+    F->addFnAttr(llvm::Attribute::Naked);
+
   if (D->hasAttr<NoInlineAttr>())
     F->addFnAttr(llvm::Attribute::NoInline);
 
@@ -473,7 +449,10 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
 
 void CodeGenModule::SetCommonAttributes(const Decl *D,
                                         llvm::GlobalValue *GV) {
-  setGlobalVisibility(GV, D);
+  if (isa<NamedDecl>(D))
+    setGlobalVisibility(GV, cast<NamedDecl>(D), /*ForDef*/ true);
+  else
+    GV->setVisibility(llvm::GlobalValue::DefaultVisibility);
 
   if (D->hasAttr<UsedAttr>())
     AddUsedGlobal(GV);
@@ -515,6 +494,11 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD,
     F->setLinkage(llvm::Function::ExternalWeakLinkage);
   } else {
     F->setLinkage(llvm::Function::ExternalLinkage);
+
+    NamedDecl::LinkageInfo LV = FD->getLinkageAndVisibility();
+    if (LV.linkage() == ExternalLinkage && LV.visibilityExplicit()) {
+      F->setVisibility(GetLLVMVisibility(LV.visibility()));
+    }
   }
 
   if (const SectionAttr *SA = FD->getAttr<SectionAttr>())
@@ -849,11 +833,11 @@ CodeGenModule::GetOrCreateLLVMFunction(llvm::StringRef MangledName,
     // If this the first reference to a C++ inline function in a class, queue up
     // the deferred function body for emission.  These are not seen as
     // top-level declarations.
-    if (FD->isThisDeclarationADefinition() && MayDeferGeneration(FD))
+    if (FD->isThisDeclarationADefinition() && MayDeferGeneration(FD)) {
       DeferredDeclsToEmit.push_back(D);
     // A called constructor which has no definition or declaration need be
     // synthesized.
-    else if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(FD)) {
+    } else if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(FD)) {
       if (CD->isImplicit()) {
         assert(CD->isUsed() && "Sema doesn't consider constructor as used.");
         DeferredDeclsToEmit.push_back(D);
@@ -864,7 +848,7 @@ CodeGenModule::GetOrCreateLLVMFunction(llvm::StringRef MangledName,
         DeferredDeclsToEmit.push_back(D);
       }
     } else if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD)) {
-      if (MD->isCopyAssignment() && MD->isImplicit()) {
+      if (MD->isImplicit() && MD->isCopyAssignmentOperator()) {
         assert(MD->isUsed() && "Sema doesn't consider CopyAssignment as used.");
         DeferredDeclsToEmit.push_back(D);
       }
@@ -964,13 +948,20 @@ CodeGenModule::GetOrCreateLLVMGlobal(llvm::StringRef MangledName,
     // handling.
     GV->setConstant(DeclIsConstantGlobal(Context, D));
 
-    // FIXME: Merge with other attribute handling code.
-    if (D->getStorageClass() == SC_PrivateExtern)
-      GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    // Set linkage and visibility in case we never see a definition.
+    NamedDecl::LinkageInfo LV = D->getLinkageAndVisibility();
+    if (LV.linkage() != ExternalLinkage) {
+      GV->setLinkage(llvm::GlobalValue::InternalLinkage);
+    } else {
+      if (D->hasAttr<DLLImportAttr>())
+        GV->setLinkage(llvm::GlobalValue::DLLImportLinkage);
+      else if (D->hasAttr<WeakAttr>() || D->hasAttr<WeakImportAttr>())
+        GV->setLinkage(llvm::GlobalValue::ExternalWeakLinkage);
 
-    if (D->hasAttr<WeakAttr>() ||
-        D->hasAttr<WeakImportAttr>())
-      GV->setLinkage(llvm::GlobalValue::ExternalWeakLinkage);
+      // Set visibility on a declaration only if it's explicit.
+      if (LV.visibilityExplicit())
+        GV->setVisibility(GetLLVMVisibility(LV.visibility()));
+    }
 
     GV->setThreadLocal(D->isThreadSpecified());
   }
@@ -1111,7 +1102,6 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
         T = D->getType();
       
       if (getLangOptions().CPlusPlus) {
-        EmitCXXGlobalVarDeclInitFunc(D);
         Init = EmitNullConstant(T);
         NonConstInit = true;
       } else {
@@ -1182,42 +1172,55 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
     GV->setConstant(true);
 
   GV->setAlignment(getContext().getDeclAlign(D).getQuantity());
-
+  
   // Set the llvm linkage type as appropriate.
-  GVALinkage Linkage = getContext().GetGVALinkageForVariable(D);
-  if (Linkage == GVA_Internal)
-    GV->setLinkage(llvm::Function::InternalLinkage);
-  else if (D->hasAttr<DLLImportAttr>())
-    GV->setLinkage(llvm::Function::DLLImportLinkage);
-  else if (D->hasAttr<DLLExportAttr>())
-    GV->setLinkage(llvm::Function::DLLExportLinkage);
-  else if (D->hasAttr<WeakAttr>()) {
-    if (GV->isConstant())
-      GV->setLinkage(llvm::GlobalVariable::WeakODRLinkage);
-    else
-      GV->setLinkage(llvm::GlobalVariable::WeakAnyLinkage);
-  } else if (Linkage == GVA_TemplateInstantiation ||
-             Linkage == GVA_ExplicitTemplateInstantiation)
-    // FIXME: It seems like we can provide more specific linkage here
-    // (LinkOnceODR, WeakODR).
-    GV->setLinkage(llvm::GlobalVariable::WeakAnyLinkage);   
-  else if (!getLangOptions().CPlusPlus && !CodeGenOpts.NoCommon &&
-           !D->hasExternalStorage() && !D->getInit() &&
-           !D->getAttr<SectionAttr>() && !D->isThreadSpecified()) {
-    // Thread local vars aren't considered common linkage.
-    GV->setLinkage(llvm::GlobalVariable::CommonLinkage);
+  llvm::GlobalValue::LinkageTypes Linkage = 
+    GetLLVMLinkageVarDefinition(D, GV);
+  GV->setLinkage(Linkage);
+  if (Linkage == llvm::GlobalVariable::CommonLinkage)
     // common vars aren't constant even if declared const.
     GV->setConstant(false);
-  } else
-    GV->setLinkage(llvm::GlobalVariable::ExternalLinkage);
 
   SetCommonAttributes(D, GV);
+
+  // Emit the initializer function if necessary.
+  if (NonConstInit)
+    EmitCXXGlobalVarDeclInitFunc(D, GV);
 
   // Emit global variable debug information.
   if (CGDebugInfo *DI = getDebugInfo()) {
     DI->setLocation(D->getLocation());
     DI->EmitGlobalVariable(GV, D);
   }
+}
+
+llvm::GlobalValue::LinkageTypes
+CodeGenModule::GetLLVMLinkageVarDefinition(const VarDecl *D,
+                                           llvm::GlobalVariable *GV) {
+  GVALinkage Linkage = getContext().GetGVALinkageForVariable(D);
+  if (Linkage == GVA_Internal)
+    return llvm::Function::InternalLinkage;
+  else if (D->hasAttr<DLLImportAttr>())
+    return llvm::Function::DLLImportLinkage;
+  else if (D->hasAttr<DLLExportAttr>())
+    return llvm::Function::DLLExportLinkage;
+  else if (D->hasAttr<WeakAttr>()) {
+    if (GV->isConstant())
+      return llvm::GlobalVariable::WeakODRLinkage;
+    else
+      return llvm::GlobalVariable::WeakAnyLinkage;
+  } else if (Linkage == GVA_TemplateInstantiation ||
+             Linkage == GVA_ExplicitTemplateInstantiation)
+    // FIXME: It seems like we can provide more specific linkage here
+    // (LinkOnceODR, WeakODR).
+    return llvm::GlobalVariable::WeakAnyLinkage;
+  else if (!getLangOptions().CPlusPlus && !CodeGenOpts.NoCommon &&
+           !D->hasExternalStorage() && !D->getInit() &&
+           !D->getAttr<SectionAttr>() && !D->isThreadSpecified()) {
+    // Thread local vars aren't considered common linkage.
+    return llvm::GlobalVariable::CommonLinkage;
+  }
+  return llvm::GlobalVariable::ExternalLinkage;
 }
 
 /// ReplaceUsesOfNonProtoTypeWithRealFunction - This function is called when we
@@ -1294,7 +1297,7 @@ static void ReplaceUsesOfNonProtoTypeWithRealFunction(llvm::GlobalValue *Old,
 void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD) {
   const FunctionDecl *D = cast<FunctionDecl>(GD.getDecl());
   const llvm::FunctionType *Ty = getTypes().GetFunctionType(GD);
-  getMangleContext().mangleInitDiscriminator();
+  getCXXABI().getMangleContext().mangleInitDiscriminator();
   // Get or create the prototype for the function.
   llvm::Constant *Entry = GetAddrOfFunction(GD, Ty);
 
@@ -1344,8 +1347,15 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD) {
     Entry = NewFn;
   }
 
+  // We need to set linkage and visibility on the function before
+  // generating code for it because various parts of IR generation
+  // want to propagate this information down (e.g. to local static
+  // declarations).
   llvm::Function *Fn = cast<llvm::Function>(Entry);
   setFunctionLinkage(D, Fn);
+
+  // FIXME: this is redundant with part of SetFunctionDefinitionAttributes
+  setGlobalVisibility(Fn, D, /*ForDef*/ true);
 
   CodeGenFunction(*this).GenerateCode(D, Fn);
 
@@ -1493,18 +1503,9 @@ GetConstantCFStringEntry(llvm::StringMap<llvm::Constant*> &Map,
   const UTF8 *FromPtr = (UTF8 *)String.data();
   UTF16 *ToPtr = &ToBuf[0];
 
-  ConversionResult Result = ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes,
-                                               &ToPtr, ToPtr + NumBytes,
-                                               strictConversion);
-
-  // Check for conversion failure.
-  if (Result != conversionOK) {
-    // FIXME: Have Sema::CheckObjCString() validate the UTF-8 string and remove
-    // this duplicate code.
-    assert(Result == sourceIllegal && "UTF-8 to UTF-16 conversion failed");
-    StringLength = NumBytes;
-    return Map.GetOrCreateValue(String);
-  }
+  (void)ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes,
+                           &ToPtr, ToPtr + NumBytes,
+                           strictConversion);
 
   // ConvertUTF8toUTF16 returns the length in ToPtr.
   StringLength = ToPtr - &ToBuf[0];
@@ -1617,7 +1618,7 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
 }
 
 llvm::Constant *
-CodeGenModule::GetAddrOfConstantNSString(const StringLiteral *Literal) {
+CodeGenModule::GetAddrOfConstantString(const StringLiteral *Literal) {
   unsigned StringLength = 0;
   bool isUTF16 = false;
   llvm::StringMapEntry<llvm::Constant*> &Entry =
@@ -1633,16 +1634,27 @@ CodeGenModule::GetAddrOfConstantNSString(const StringLiteral *Literal) {
   llvm::Constant *Zeros[] = { Zero, Zero };
   
   // If we don't already have it, get _NSConstantStringClassReference.
-  if (!NSConstantStringClassRef) {
+  if (!ConstantStringClassRef) {
+    std::string StringClass(getLangOptions().ObjCConstantStringClass);
     const llvm::Type *Ty = getTypes().ConvertType(getContext().IntTy);
     Ty = llvm::ArrayType::get(Ty, 0);
-    llvm::Constant *GV = CreateRuntimeVariable(Ty, 
-                                        Features.ObjCNonFragileABI ?
-                                        "OBJC_CLASS_$_NSConstantString" :
-                                        "_NSConstantStringClassReference");
+    llvm::Constant *GV;
+    if (StringClass.empty())
+      GV = CreateRuntimeVariable(Ty, 
+                                 Features.ObjCNonFragileABI ?
+                                 "OBJC_CLASS_$_NSConstantString" :
+                                 "_NSConstantStringClassReference");
+    else {
+      std::string str;
+      if (Features.ObjCNonFragileABI)
+        str = "OBJC_CLASS_$_" + StringClass;
+      else
+        str = "_" + StringClass + "ClassReference";
+      GV = CreateRuntimeVariable(Ty, str);
+    }
     // Decay array -> ptr
-    NSConstantStringClassRef = 
-      llvm::ConstantExpr::getGetElementPtr(GV, Zeros, 2);
+    ConstantStringClassRef = 
+    llvm::ConstantExpr::getGetElementPtr(GV, Zeros, 2);
   }
   
   QualType NSTy = getContext().getNSConstantStringType();
@@ -1653,7 +1665,7 @@ CodeGenModule::GetAddrOfConstantNSString(const StringLiteral *Literal) {
   std::vector<llvm::Constant*> Fields(3);
   
   // Class pointer.
-  Fields[0] = NSConstantStringClassRef;
+  Fields[0] = ConstantStringClassRef;
   
   // String pointer.
   llvm::Constant *C = llvm::ConstantArray::get(VMContext, Entry.getKey().str());

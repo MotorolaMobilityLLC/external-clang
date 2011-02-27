@@ -28,6 +28,47 @@ using namespace clang;
 using llvm::StringRef;
 
 //===----------------------------------------------------------------------===//
+// Code completion context implementation
+//===----------------------------------------------------------------------===//
+
+bool CodeCompletionContext::wantConstructorResults() const {
+  switch (Kind) {
+  case CCC_Recovery:
+  case CCC_Statement:
+  case CCC_Expression:
+  case CCC_ObjCMessageReceiver:
+  case CCC_ParenthesizedExpression:
+    return true;
+    
+  case CCC_TopLevel:
+  case CCC_ObjCInterface:
+  case CCC_ObjCImplementation:
+  case CCC_ObjCIvarList:
+  case CCC_ClassStructUnion:
+  case CCC_MemberAccess:
+  case CCC_EnumTag:
+  case CCC_UnionTag:
+  case CCC_ClassOrStructTag:
+  case CCC_ObjCProtocolName:
+  case CCC_Namespace:
+  case CCC_Type:
+  case CCC_Name:
+  case CCC_PotentiallyQualifiedName:
+  case CCC_MacroName:
+  case CCC_MacroNameUse:
+  case CCC_PreprocessorExpression:
+  case CCC_PreprocessorDirective:
+  case CCC_NaturalLanguage:
+  case CCC_SelectorName:
+  case CCC_TypeQualifiers:
+  case CCC_Other:
+    return false;
+  }
+  
+  return false;
+}
+
+//===----------------------------------------------------------------------===//
 // Code completion string implementation
 //===----------------------------------------------------------------------===//
 CodeCompletionString::Chunk::Chunk(ChunkKind Kind, llvm::StringRef Text) 
@@ -256,126 +297,6 @@ CodeCompletionString::Clone(CodeCompletionString *Result) const {
   return Result;
 }
 
-static void WriteUnsigned(llvm::raw_ostream &OS, unsigned Value) {
-  OS.write((const char *)&Value, sizeof(unsigned));
-}
-
-static bool ReadUnsigned(const char *&Memory, const char *MemoryEnd,
-                         unsigned &Value) {
-  if (Memory + sizeof(unsigned) > MemoryEnd)
-    return true;
-
-  memmove(&Value, Memory, sizeof(unsigned));
-  Memory += sizeof(unsigned);
-  return false;
-}
-
-void CodeCompletionString::Serialize(llvm::raw_ostream &OS) const {
-  // Write the number of chunks.
-  WriteUnsigned(OS, size());
-
-  for (iterator C = begin(), CEnd = end(); C != CEnd; ++C) {
-    WriteUnsigned(OS, C->Kind);
-
-    switch (C->Kind) {
-    case CK_TypedText:
-    case CK_Text:
-    case CK_Placeholder:
-    case CK_Informative:
-    case CK_ResultType:
-    case CK_CurrentParameter: {
-      const char *Text = C->Text;
-      unsigned StrLen = strlen(Text);
-      WriteUnsigned(OS, StrLen);
-      OS.write(Text, StrLen);
-      break;
-    }
-
-    case CK_Optional:
-      C->Optional->Serialize(OS);
-      break;
-
-    case CK_LeftParen:
-    case CK_RightParen:
-    case CK_LeftBracket:
-    case CK_RightBracket:
-    case CK_LeftBrace:
-    case CK_RightBrace:
-    case CK_LeftAngle:
-    case CK_RightAngle:
-    case CK_Comma:
-    case CK_Colon:
-    case CK_SemiColon:
-    case CK_Equal:
-    case CK_HorizontalSpace:
-    case CK_VerticalSpace:
-      break;
-    }
-  }
-}
-
-bool CodeCompletionString::Deserialize(const char *&Str, const char *StrEnd) {
-  if (Str == StrEnd || *Str == 0)
-    return false;
-
-  unsigned NumBlocks;
-  if (ReadUnsigned(Str, StrEnd, NumBlocks))
-    return false;
-
-  for (unsigned I = 0; I != NumBlocks; ++I) {
-    if (Str + 1 >= StrEnd)
-      break;
-
-    // Parse the next kind.
-    unsigned KindValue;
-    if (ReadUnsigned(Str, StrEnd, KindValue))
-      return false;
-
-    switch (ChunkKind Kind = (ChunkKind)KindValue) {
-    case CK_TypedText:
-    case CK_Text:
-    case CK_Placeholder:
-    case CK_Informative:
-    case CK_ResultType:
-    case CK_CurrentParameter: {
-      unsigned StrLen;
-      if (ReadUnsigned(Str, StrEnd, StrLen) || (Str + StrLen > StrEnd))
-        return false;
-
-      AddChunk(Chunk(Kind, StringRef(Str, StrLen)));
-      Str += StrLen;
-      break;
-    }
-
-    case CK_Optional: {
-      std::auto_ptr<CodeCompletionString> Optional(new CodeCompletionString());
-      if (Optional->Deserialize(Str, StrEnd))
-        AddOptionalChunk(Optional);
-      break;
-    }
-
-    case CK_LeftParen:
-    case CK_RightParen:
-    case CK_LeftBracket:
-    case CK_RightBracket:
-    case CK_LeftBrace:
-    case CK_RightBrace:
-    case CK_LeftAngle:
-    case CK_RightAngle:
-    case CK_Comma:
-    case CK_Colon:
-    case CK_SemiColon:
-    case CK_Equal:
-    case CK_HorizontalSpace:
-    case CK_VerticalSpace:
-      AddChunk(Chunk(Kind));
-      break;      
-    }
-  };
-  
-  return true;
-}
-
 void CodeCompletionResult::Destroy() {
   if (Kind == RK_Pattern) {
     delete Pattern;
@@ -388,9 +309,16 @@ unsigned CodeCompletionResult::getPriorityFromDecl(NamedDecl *ND) {
     return CCP_Unlikely;
   
   // Context-based decisions.
-  DeclContext *DC = ND->getDeclContext()->getLookupContext();
-  if (DC->isFunctionOrMethod() || isa<BlockDecl>(DC))
+  DeclContext *DC = ND->getDeclContext()->getRedeclContext();
+  if (DC->isFunctionOrMethod() || isa<BlockDecl>(DC)) {
+    // _cmd is relatively rare
+    if (ImplicitParamDecl *ImplicitParam = dyn_cast<ImplicitParamDecl>(ND))
+      if (ImplicitParam->getIdentifier() &&
+          ImplicitParam->getIdentifier()->isStr("_cmd"))
+        return CCP_ObjC_cmd;
+    
     return CCP_LocalDeclaration;
+  }
   if (DC->isRecord() || isa<ObjCContainerDecl>(DC))
     return CCP_MemberDeclaration;
   
@@ -399,6 +327,7 @@ unsigned CodeCompletionResult::getPriorityFromDecl(NamedDecl *ND) {
     return CCP_Constant;
   if (isa<TypeDecl>(ND) || isa<ObjCInterfaceDecl>(ND))
     return CCP_Type;
+  
   return CCP_Declaration;
 }
 
@@ -510,95 +439,13 @@ void CodeCompletionResult::computeCursorKindAndAvailability() {
     else if (Declaration->getAttr<DeprecatedAttr>())
       Availability = CXAvailability_Deprecated;
       
-    switch (Declaration->getKind()) {
-    case Decl::Record:
-    case Decl::CXXRecord:
-    case Decl::ClassTemplateSpecialization: {
-      RecordDecl *Record = cast<RecordDecl>(Declaration);
-      if (Record->isStruct())
-        CursorKind = CXCursor_StructDecl;
-      else if (Record->isUnion())
-        CursorKind = CXCursor_UnionDecl;
-      else
-        CursorKind = CXCursor_ClassDecl;
-      break;
-    }
-      
-    case Decl::ObjCMethod: {
-      ObjCMethodDecl *Method = cast<ObjCMethodDecl>(Declaration);
-      if (Method->isInstanceMethod())
-          CursorKind = CXCursor_ObjCInstanceMethodDecl;
-      else
-        CursorKind = CXCursor_ObjCClassMethodDecl;
-      break;
-    }
-      
-    case Decl::Typedef:
-      CursorKind = CXCursor_TypedefDecl;
-      break;
-        
-    case Decl::Enum:
-      CursorKind = CXCursor_EnumDecl;
-      break;
-        
-    case Decl::Field:
-      CursorKind = CXCursor_FieldDecl;
-      break;
-        
-    case Decl::EnumConstant:
-      CursorKind = CXCursor_EnumConstantDecl;
-      break;      
-        
-    case Decl::Function:
-    case Decl::CXXMethod:
-    case Decl::CXXConstructor:
-    case Decl::CXXDestructor:
-    case Decl::CXXConversion:
-      CursorKind = CXCursor_FunctionDecl;
-      if (cast<FunctionDecl>(Declaration)->isDeleted())
+    if (FunctionDecl *Function = dyn_cast<FunctionDecl>(Declaration))
+      if (Function->isDeleted())
         Availability = CXAvailability_NotAvailable;
-      break;
-        
-    case Decl::Var:
-      CursorKind = CXCursor_VarDecl;
-      break;
-        
-    case Decl::ParmVar:
-      CursorKind = CXCursor_ParmDecl;
-      break;
-        
-    case Decl::ObjCInterface:
-      CursorKind = CXCursor_ObjCInterfaceDecl;
-      break;
-        
-    case Decl::ObjCCategory:
-      CursorKind = CXCursor_ObjCCategoryDecl;
-      break;
-        
-    case Decl::ObjCProtocol:
-      CursorKind = CXCursor_ObjCProtocolDecl;
-      break;
-
-    case Decl::ObjCProperty:
-      CursorKind = CXCursor_ObjCPropertyDecl;
-      break;
-        
-    case Decl::ObjCIvar:
-      CursorKind = CXCursor_ObjCIvarDecl;
-      break;
-        
-    case Decl::ObjCImplementation:
-      CursorKind = CXCursor_ObjCImplementationDecl;
-      break;
-        
-    case Decl::ObjCCategoryImpl:
-      CursorKind = CXCursor_ObjCCategoryImplDecl;
-      break;
-        
-    default:
+      
+    CursorKind = getCursorKindForDecl(Declaration);
+    if (CursorKind == CXCursor_UnexposedDecl)
       CursorKind = CXCursor_NotImplemented;
-      break;
-    }
     break;
 
   case RK_Macro:
@@ -666,48 +513,6 @@ bool clang::operator<(const CodeCompletionResult &X,
   cmp = XStr.compare(YStr);
   if (cmp)
     return cmp < 0;
-
-  // Non-hidden names precede hidden names.
-  if (X.Hidden != Y.Hidden)
-    return !X.Hidden;
-  
-  // Non-nested-name-specifiers precede nested-name-specifiers.
-  if (X.StartsNestedNameSpecifier != Y.StartsNestedNameSpecifier)
-    return !X.StartsNestedNameSpecifier;
   
   return false;
-}
-
-void 
-CIndexCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &SemaRef,
-                                                 CodeCompletionContext Context,
-                                                 CodeCompletionResult *Results,
-                                                       unsigned NumResults) {
-  // Print the results.
-  for (unsigned I = 0; I != NumResults; ++I) {
-    WriteUnsigned(OS, Results[I].CursorKind);
-    WriteUnsigned(OS, Results[I].Priority);
-    WriteUnsigned(OS, Results[I].Availability);
-    CodeCompletionString *CCS = Results[I].CreateCodeCompletionString(SemaRef);
-    assert(CCS && "No code-completion string?");
-    CCS->Serialize(OS);
-    delete CCS;
-  }
-}
-
-void 
-CIndexCodeCompleteConsumer::ProcessOverloadCandidates(Sema &SemaRef,
-                                                      unsigned CurrentArg,
-                                                OverloadCandidate *Candidates,
-                                                       unsigned NumCandidates) {
-  for (unsigned I = 0; I != NumCandidates; ++I) {
-    WriteUnsigned(OS, CXCursor_NotImplemented);
-    WriteUnsigned(OS, /*Priority=*/I);
-    WriteUnsigned(OS, /*Availability=*/CXAvailability_Available);
-    CodeCompletionString *CCS
-      = Candidates[I].CreateSignatureString(CurrentArg, SemaRef);
-    assert(CCS && "No code-completion string?");
-    CCS->Serialize(OS);
-    delete CCS;
-  }
 }

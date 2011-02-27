@@ -77,7 +77,14 @@ ExprResult Sema::ParseObjCStringLiteral(SourceLocation *AtLocs,
   if (!Ty.isNull()) {
     Ty = Context.getObjCObjectPointerType(Ty);
   } else if (getLangOptions().NoConstantCFStrings) {
-    IdentifierInfo *NSIdent = &Context.Idents.get("NSConstantString");
+    IdentifierInfo *NSIdent=0;
+    std::string StringClass(getLangOptions().ObjCConstantStringClass);
+    
+    if (StringClass.empty())
+      NSIdent = &Context.Idents.get("NSConstantString");
+    else
+      NSIdent = &Context.Idents.get(StringClass);
+    
     NamedDecl *IF = LookupSingleName(TUScope, NSIdent, AtLocs[0],
                                      LookupOrdinaryName);
     if (ObjCInterfaceDecl *StrIF = dyn_cast_or_null<ObjCInterfaceDecl>(IF)) {
@@ -241,10 +248,9 @@ bool Sema::CheckMessageArgumentTypes(Expr **Args, unsigned NumArgs,
                               << argExpr->getSourceRange()))
       return true;
 
-    InitializedEntity Entity = InitializedEntity::InitializeParameter(Param);
-    ExprResult ArgE = PerformCopyInitialization(Entity,
-                                                      SourceLocation(),
-                                                      Owned(argExpr->Retain()));
+    InitializedEntity Entity = InitializedEntity::InitializeParameter(Context,
+                                                                      Param);
+    ExprResult ArgE = PerformCopyInitialization(Entity, lbrac, Owned(argExpr));
     if (ArgE.isInvalid())
       IsError = true;
     else
@@ -335,7 +341,9 @@ ObjCMethodDecl *Sema::LookupPrivateInstanceMethod(Selector Sel,
 ExprResult Sema::
 HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
                           Expr *BaseExpr, DeclarationName MemberName,
-                          SourceLocation MemberLoc) {
+                          SourceLocation MemberLoc,
+                          SourceLocation SuperLoc, QualType SuperType,
+                          bool Super) {
   const ObjCInterfaceType *IFaceT = OPT->getInterfaceType();
   ObjCInterfaceDecl *IFace = IFaceT->getDecl();
   IdentifierInfo *Member = MemberName.getAsIdentifierInfo();
@@ -350,8 +358,13 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
     ObjCMethodDecl *Getter = IFace->lookupInstanceMethod(Sel);
     if (DiagnosePropertyAccessorMismatch(PD, Getter, MemberLoc))
       ResTy = Getter->getSendResultType();
-    return Owned(new (Context) ObjCPropertyRefExpr(PD, ResTy,
-                                                   MemberLoc, BaseExpr));
+    if (Super)
+      return Owned(new (Context) ObjCPropertyRefExpr(PD, ResTy,
+                                                     MemberLoc, 
+                                                     SuperLoc, SuperType));
+    else
+      return Owned(new (Context) ObjCPropertyRefExpr(PD, ResTy,
+                                                     MemberLoc, BaseExpr));
   }
   // Check protocols on qualified interfaces.
   for (ObjCObjectPointerType::qual_iterator I = OPT->qual_begin(),
@@ -360,9 +373,14 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
       // Check whether we can reference this property.
       if (DiagnoseUseOfDecl(PD, MemberLoc))
         return ExprError();
-
+      if (Super)
       return Owned(new (Context) ObjCPropertyRefExpr(PD, PD->getType(),
-                                                     MemberLoc, BaseExpr));
+                                                     MemberLoc, 
+                                                     SuperLoc, SuperType));
+      else
+        return Owned(new (Context) ObjCPropertyRefExpr(PD, PD->getType(),
+                                                       MemberLoc,
+                                                       BaseExpr));
     }
   // If that failed, look for an "implicit" property by seeing if the nullary
   // selector is implemented.
@@ -406,8 +424,15 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
   if (Getter) {
     QualType PType;
     PType = Getter->getSendResultType();
-    return Owned(new (Context) ObjCImplicitSetterGetterRefExpr(Getter, PType,
-                                    Setter, MemberLoc, BaseExpr));
+    if (Super)
+      return Owned(new (Context) ObjCImplicitSetterGetterRefExpr(Getter, PType,
+                                    Setter, MemberLoc,
+                                    SuperLoc, SuperType));
+    else
+      return Owned(new (Context) ObjCImplicitSetterGetterRefExpr(Getter, PType,
+                                                                 Setter, MemberLoc, 
+                                                                 BaseExpr));
+
   }
 
   // Attempt to correct for typos in property names.
@@ -421,7 +446,8 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
     ObjCPropertyDecl *Property = Res.getAsSingle<ObjCPropertyDecl>();
     Diag(Property->getLocation(), diag::note_previous_decl)
       << Property->getDeclName();
-    return HandleExprPropertyRefExpr(OPT, BaseExpr, TypoResult, MemberLoc);
+    return HandleExprPropertyRefExpr(OPT, BaseExpr, TypoResult, MemberLoc,
+                                     SuperLoc, SuperType, Super);
   }
   
   Diag(MemberLoc, diag::err_property_not_found)
@@ -452,11 +478,11 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
           QualType T = 
             Context.getObjCInterfaceType(CurMethod->getClassInterface());
           T = Context.getObjCObjectPointerType(T);
-          Expr *SuperExpr = new (Context) ObjCSuperExpr(receiverNameLoc, T);
         
           return HandleExprPropertyRefExpr(T->getAsObjCInterfacePointerType(),
-                                           SuperExpr, &propertyName,
-                                           propertyNameLoc);
+                                           /*BaseExpr*/0, &propertyName,
+                                           propertyNameLoc,
+                                           receiverNameLoc, T, true);
         }
 
         // Otherwise, if this is a class method, try dispatching to our
@@ -536,9 +562,10 @@ Sema::ObjCMessageKind Sema::getObjCMessageKind(Scope *S,
   ReceiverType = ParsedType();
 
   // If the identifier is "super" and there is no trailing dot, we're
-  // messaging super.
-  if (IsSuper && !HasTrailingDot && S->isInObjcMethodScope())
-    return ObjCSuperMessage;
+  // messaging super. If the identifier is "super" and there is a
+  // trailing dot, it's an instance message.
+  if (IsSuper && S->isInObjcMethodScope())
+    return HasTrailingDot? ObjCInstanceMessage : ObjCSuperMessage;
   
   LookupResult Result(*this, Name, NameLoc, LookupOrdinaryName);
   LookupName(Result, S);
@@ -547,14 +574,15 @@ Sema::ObjCMessageKind Sema::getObjCMessageKind(Scope *S,
   case LookupResult::NotFound:
     // Normal name lookup didn't find anything. If we're in an
     // Objective-C method, look for ivars. If we find one, we're done!
-    // FIXME: This is a hack. Ivar lookup should be part of normal lookup.
+    // FIXME: This is a hack. Ivar lookup should be part of normal
+    // lookup.
     if (ObjCMethodDecl *Method = getCurMethodDecl()) {
       ObjCInterfaceDecl *ClassDeclared;
       if (Method->getClassInterface()->lookupInstanceVariable(Name, 
                                                               ClassDeclared))
         return ObjCInstanceMessage;
     }
-      
+  
     // Break out; we'll perform typo correction below.
     break;
 
@@ -626,12 +654,12 @@ Sema::ObjCMessageKind Sema::getObjCMessageKind(Scope *S,
 }
 
 ExprResult Sema::ActOnSuperMessage(Scope *S, 
-                                               SourceLocation SuperLoc,
-                                               Selector Sel,
-                                               SourceLocation LBracLoc,
-                                               SourceLocation SelectorLoc,
-                                               SourceLocation RBracLoc,
-                                               MultiExprArg Args) {
+                                   SourceLocation SuperLoc,
+                                   Selector Sel,
+                                   SourceLocation LBracLoc,
+                                   SourceLocation SelectorLoc,
+                                   SourceLocation RBracLoc,
+                                   MultiExprArg Args) {
   // Determine whether we are inside a method or not.
   ObjCMethodDecl *Method = getCurMethodDecl();
   if (!Method) {
@@ -702,13 +730,21 @@ ExprResult Sema::ActOnSuperMessage(Scope *S,
 ///
 /// \param Args The message arguments.
 ExprResult Sema::BuildClassMessage(TypeSourceInfo *ReceiverTypeInfo,
-                                               QualType ReceiverType,
-                                               SourceLocation SuperLoc,
-                                               Selector Sel,
-                                               ObjCMethodDecl *Method,
-                                               SourceLocation LBracLoc, 
-                                               SourceLocation RBracLoc,
-                                               MultiExprArg ArgsIn) {
+                                   QualType ReceiverType,
+                                   SourceLocation SuperLoc,
+                                   Selector Sel,
+                                   ObjCMethodDecl *Method,
+                                   SourceLocation LBracLoc, 
+                                   SourceLocation RBracLoc,
+                                   MultiExprArg ArgsIn) {
+  SourceLocation Loc = SuperLoc.isValid()? SuperLoc
+    : ReceiverTypeInfo->getTypeLoc().getSourceRange().getBegin();
+  if (LBracLoc.isInvalid()) {
+    Diag(Loc, diag::err_missing_open_square_message_send)
+      << FixItHint::CreateInsertion(Loc, "[");
+    LBracLoc = Loc;
+  }
+  
   if (ReceiverType->isDependentType()) {
     // If the receiver type is dependent, we can't type-check anything
     // at this point. Build a dependent expression.
@@ -720,9 +756,6 @@ ExprResult Sema::BuildClassMessage(TypeSourceInfo *ReceiverTypeInfo,
                                          Args, NumArgs, RBracLoc));
   }
   
-  SourceLocation Loc = SuperLoc.isValid()? SuperLoc
-             : ReceiverTypeInfo->getTypeLoc().getLocalSourceRange().getBegin();
-
   // Find the class to which we are sending this message.
   ObjCInterfaceDecl *Class = 0;
   const ObjCObjectType *ClassType = ReceiverType->getAs<ObjCObjectType>();
@@ -781,12 +814,12 @@ ExprResult Sema::BuildClassMessage(TypeSourceInfo *ReceiverTypeInfo,
 // ArgExprs is optional - if it is present, the number of expressions
 // is obtained from Sel.getNumArgs().
 ExprResult Sema::ActOnClassMessage(Scope *S, 
-                                               ParsedType Receiver,
-                                               Selector Sel,
-                                               SourceLocation LBracLoc,
-                                               SourceLocation SelectorLoc,
-                                               SourceLocation RBracLoc,
-                                               MultiExprArg Args) {
+                                   ParsedType Receiver,
+                                   Selector Sel,
+                                   SourceLocation LBracLoc,
+                                   SourceLocation SelectorLoc,
+                                   SourceLocation RBracLoc,
+                                   MultiExprArg Args) {
   TypeSourceInfo *ReceiverTypeInfo;
   QualType ReceiverType = GetTypeFromParser(Receiver, &ReceiverTypeInfo);
   if (ReceiverType.isNull())
@@ -837,6 +870,15 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
                                                   SourceLocation LBracLoc, 
                                                   SourceLocation RBracLoc,
                                                   MultiExprArg ArgsIn) {
+  // The location of the receiver.
+  SourceLocation Loc = SuperLoc.isValid()? SuperLoc : Receiver->getLocStart();
+  
+  if (LBracLoc.isInvalid()) {
+    Diag(Loc, diag::err_missing_open_square_message_send)
+      << FixItHint::CreateInsertion(Loc, "[");
+    LBracLoc = Loc;
+  }
+
   // If we have a receiver expression, perform appropriate promotions
   // and determine receiver type.
   if (Receiver) {
@@ -857,9 +899,6 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
     DefaultFunctionArrayLvalueConversion(Receiver);
     ReceiverType = Receiver->getType();
   }
-
-  // The location of the receiver.
-  SourceLocation Loc = SuperLoc.isValid()? SuperLoc : Receiver->getLocStart();
 
   if (!Method) {
     // Handle messages to id.

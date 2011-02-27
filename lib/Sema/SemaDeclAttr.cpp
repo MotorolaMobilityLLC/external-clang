@@ -371,10 +371,27 @@ static void HandleNonNullAttr(Decl *d, const AttributeList &Attr, Sema &S) {
       QualType T = getFunctionOrMethodArgType(d, I);
       if (T->isAnyPointerType() || T->isBlockPointerType())
         NonNullArgs.push_back(I);
+      else if (const RecordType *UT = T->getAsUnionType()) {
+        if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>()) {
+          RecordDecl *UD = UT->getDecl();
+          for (RecordDecl::field_iterator it = UD->field_begin(),
+               itend = UD->field_end(); it != itend; ++it) {
+            T = it->getType();
+            if (T->isAnyPointerType() || T->isBlockPointerType()) {
+              NonNullArgs.push_back(I);
+              break;
+            }
+          }
+        }
+      }
     }
 
+    // No pointer arguments?
     if (NonNullArgs.empty()) {
-      S.Diag(Attr.getLoc(), diag::warn_attribute_nonnull_no_pointers);
+      // Warn the trivial case only if attribute is not coming from a
+      // macro instantiation.
+      if (Attr.getLoc().isFileID())
+        S.Diag(Attr.getLoc(), diag::warn_attribute_nonnull_no_pointers);
       return;
     }
   }
@@ -557,13 +574,11 @@ static void HandleWeakRefAttr(Decl *d, const AttributeList &Attr, Sema &S) {
   //   static int a __attribute__((weakref ("v2")));
   // }
   // we reject them
-  if (const DeclContext *Ctx = d->getDeclContext()) {
-    Ctx = Ctx->getLookupContext();
-    if (!isa<TranslationUnitDecl>(Ctx) && !isa<NamespaceDecl>(Ctx) ) {
-      S.Diag(Attr.getLoc(), diag::err_attribute_weakref_not_global_context) <<
-    dyn_cast<NamedDecl>(d)->getNameAsString();
-      return;
-    }
+  const DeclContext *Ctx = d->getDeclContext()->getRedeclContext();
+  if (!Ctx->isFileContext()) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_weakref_not_global_context) <<
+        dyn_cast<NamedDecl>(d)->getNameAsString();
+    return;
   }
 
   // The GCC manual says
@@ -634,9 +649,9 @@ static void HandleAliasAttr(Decl *d, const AttributeList &Attr, Sema &S) {
   d->addAttr(::new (S.Context) AliasAttr(Attr.getLoc(), S.Context, Str->getString()));
 }
 
-static void HandleAlwaysInlineAttr(Decl *d, const AttributeList &Attr,
+static void HandleNakedAttr(Decl *d, const AttributeList &Attr,
                                    Sema &S) {
-  // check the attribute arguments.
+  // Check the attribute arguments.
   if (Attr.getNumArgs() != 0) {
     S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 0;
     return;
@@ -644,7 +659,24 @@ static void HandleAlwaysInlineAttr(Decl *d, const AttributeList &Attr,
 
   if (!isa<FunctionDecl>(d)) {
     S.Diag(Attr.getLoc(), diag::warn_attribute_wrong_decl_type)
-    << Attr.getName() << 0 /*function*/;
+      << Attr.getName() << 0 /*function*/;
+    return;
+  }
+
+  d->addAttr(::new (S.Context) NakedAttr(Attr.getLoc(), S.Context));
+}
+
+static void HandleAlwaysInlineAttr(Decl *d, const AttributeList &Attr,
+                                   Sema &S) {
+  // Check the attribute arguments.
+  if (Attr.getNumArgs() != 0) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 0;
+    return;
+  }
+
+  if (!isa<FunctionDecl>(d)) {
+    S.Diag(Attr.getLoc(), diag::warn_attribute_wrong_decl_type)
+      << Attr.getName() << 0 /*function*/;
     return;
   }
 
@@ -652,7 +684,7 @@ static void HandleAlwaysInlineAttr(Decl *d, const AttributeList &Attr,
 }
 
 static void HandleMallocAttr(Decl *d, const AttributeList &Attr, Sema &S) {
-  // check the attribute arguments.
+  // Check the attribute arguments.
   if (Attr.getNumArgs() != 0) {
     S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 0;
     return;
@@ -726,7 +758,7 @@ static void HandleVecReturnAttr(Decl *d, const AttributeList &Attr,
     return result; // This will be returned in a register
   }
 */
-  if (!isa<CXXRecordDecl>(d)) {
+  if (!isa<RecordDecl>(d)) {
     S.Diag(Attr.getLoc(), diag::err_attribute_wrong_decl_type)
       << Attr.getName() << 9 /*class*/;
     return;
@@ -735,6 +767,27 @@ static void HandleVecReturnAttr(Decl *d, const AttributeList &Attr,
   if (d->getAttr<VecReturnAttr>()) {
     S.Diag(Attr.getLoc(), diag::err_repeat_attribute) << "vecreturn";
     return;
+  }
+
+  RecordDecl *record = cast<RecordDecl>(d);
+  int count = 0;
+
+  if (!isa<CXXRecordDecl>(record)) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_vecreturn_only_vector_member);
+    return;
+  }
+
+  if (!cast<CXXRecordDecl>(record)->isPOD()) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_vecreturn_only_pod_record);
+    return;
+  }
+
+  for (RecordDecl::field_iterator iter = record->field_begin(); iter != record->field_end(); iter++) {
+    if ((count == 1) || !iter->getType()->isVectorType()) {
+      S.Diag(Attr.getLoc(), diag::err_attribute_vecreturn_only_vector_member);
+      return;
+    }
+    count++;
   }
 
   d->addAttr(::new (S.Context) VecReturnAttr(Attr.getLoc(), S.Context));
@@ -849,22 +902,52 @@ static void HandleDestructorAttr(Decl *d, const AttributeList &Attr, Sema &S) {
 
 static void HandleDeprecatedAttr(Decl *d, const AttributeList &Attr, Sema &S) {
   // check the attribute arguments.
-  if (Attr.getNumArgs() != 0) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 0;
+  int noArgs = Attr.getNumArgs();
+  if (noArgs > 1) {
+    S.Diag(Attr.getLoc(), 
+           diag::err_attribute_wrong_number_arguments) << "0 or 1";
     return;
   }
+  // Handle the case where deprecated attribute has a text message.
+  StringLiteral *SE;
+  if (noArgs == 1) {
+    Expr *ArgExpr = static_cast<Expr *>(Attr.getArg(0));
+    SE = dyn_cast<StringLiteral>(ArgExpr);
+    if (!SE) {
+      S.Diag(ArgExpr->getLocStart(), 
+             diag::err_attribute_not_string) << "deprecated";
+      return;
+    }
+  }
+  else
+    SE = StringLiteral::CreateEmpty(S.Context, 1);
 
-  d->addAttr(::new (S.Context) DeprecatedAttr(Attr.getLoc(), S.Context));
+  d->addAttr(::new (S.Context) DeprecatedAttr(Attr.getLoc(), S.Context,
+                                              SE->getString()));
 }
 
 static void HandleUnavailableAttr(Decl *d, const AttributeList &Attr, Sema &S) {
   // check the attribute arguments.
-  if (Attr.getNumArgs() != 0) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 0;
+  int noArgs = Attr.getNumArgs();
+  if (noArgs > 1) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << "0 or 1";
     return;
   }
-
-  d->addAttr(::new (S.Context) UnavailableAttr(Attr.getLoc(), S.Context));
+  // Handle the case where unavailable attribute has a text message.
+  StringLiteral *SE;
+  if (noArgs == 1) {
+    Expr *ArgExpr = static_cast<Expr *>(Attr.getArg(0));
+    SE = dyn_cast<StringLiteral>(ArgExpr);
+    if (!SE) {
+      S.Diag(ArgExpr->getLocStart(), 
+             diag::err_attribute_not_string) << "unavailable";
+      return;
+    }
+  }
+  else
+    SE = StringLiteral::CreateEmpty(S.Context, 1);
+  d->addAttr(::new (S.Context) UnavailableAttr(Attr.getLoc(), S.Context,
+                                               SE->getString()));
 }
 
 static void HandleVisibilityAttr(Decl *d, const AttributeList &Attr, Sema &S) {
@@ -1984,8 +2067,12 @@ static void HandleCallConvAttr(Decl *d, const AttributeList &Attr, Sema &S) {
     return;
   case AttributeList::AT_thiscall:
     d->addAttr(::new (S.Context) ThisCallAttr(Attr.getLoc(), S.Context));
+    return;
   case AttributeList::AT_cdecl:
     d->addAttr(::new (S.Context) CDeclAttr(Attr.getLoc(), S.Context));
+    return;
+  case AttributeList::AT_pascal:
+    d->addAttr(::new (S.Context) PascalAttr(Attr.getLoc(), S.Context));
     return;
   default:
     llvm_unreachable("unexpected attribute kind");
@@ -2240,6 +2327,7 @@ static void ProcessDeclAttribute(Scope *scope, Decl *D,
   case AttributeList::AT_ownership_takes:
   case AttributeList::AT_ownership_holds:
       HandleOwnershipAttr     (D, Attr, S); break;
+  case AttributeList::AT_naked:       HandleNakedAttr       (D, Attr, S); break;
   case AttributeList::AT_noreturn:    HandleNoReturnAttr    (D, Attr, S); break;
   case AttributeList::AT_nothrow:     HandleNothrowAttr     (D, Attr, S); break;
   case AttributeList::AT_override:    HandleOverrideAttr    (D, Attr, S); break;
@@ -2295,6 +2383,7 @@ static void ProcessDeclAttribute(Scope *scope, Decl *D,
   case AttributeList::AT_cdecl:
   case AttributeList::AT_fastcall:
   case AttributeList::AT_thiscall:
+  case AttributeList::AT_pascal:
     HandleCallConvAttr(D, Attr, S);
     break;
   default:
@@ -2378,14 +2467,18 @@ void Sema::DeclApplyPragmaWeak(Scope *S, NamedDecl *ND, WeakInfo &W) {
 /// it, apply them to D.  This is a bit tricky because PD can have attributes
 /// specified in many different places, and we need to find and apply them all.
 void Sema::ProcessDeclAttributes(Scope *S, Decl *D, const Declarator &PD) {
-  // Handle #pragma weak
-  if (NamedDecl *ND = dyn_cast<NamedDecl>(D)) {
-    if (ND->hasLinkage()) {
-      WeakInfo W = WeakUndeclaredIdentifiers.lookup(ND->getIdentifier());
-      if (W != WeakInfo()) {
-        // Identifier referenced by #pragma weak before it was declared
-        DeclApplyPragmaWeak(S, ND, W);
-        WeakUndeclaredIdentifiers[ND->getIdentifier()] = W;
+  // It's valid to "forward-declare" #pragma weak, in which case we
+  // have to do this.
+  if (!WeakUndeclaredIdentifiers.empty()) {
+    if (NamedDecl *ND = dyn_cast<NamedDecl>(D)) {
+      if (IdentifierInfo *Id = ND->getIdentifier()) {
+        llvm::DenseMap<IdentifierInfo*,WeakInfo>::iterator I
+          = WeakUndeclaredIdentifiers.find(Id);
+        if (I != WeakUndeclaredIdentifiers.end() && ND->hasLinkage()) {
+          WeakInfo W = I->second;
+          DeclApplyPragmaWeak(S, ND, W);
+          WeakUndeclaredIdentifiers[Id] = W;
+        }
       }
     }
   }
@@ -2476,20 +2569,30 @@ void Sema::HandleDelayedDeprecationCheck(DelayedDiagnostic &DD,
     return;
 
   DD.Triggered = true;
-  Diag(DD.Loc, diag::warn_deprecated)
-    << DD.DeprecationData.Decl->getDeclName();
+  if (!DD.getDeprecationMessage().empty())
+    Diag(DD.Loc, diag::warn_deprecated_message)
+      << DD.getDeprecationDecl()->getDeclName()
+      << DD.getDeprecationMessage();
+  else
+    Diag(DD.Loc, diag::warn_deprecated)
+      << DD.getDeprecationDecl()->getDeclName();
 }
 
-void Sema::EmitDeprecationWarning(NamedDecl *D, SourceLocation Loc) {
+void Sema::EmitDeprecationWarning(NamedDecl *D, llvm::StringRef Message,
+                                  SourceLocation Loc) {
   // Delay if we're currently parsing a declaration.
   if (ParsingDeclDepth) {
-    DelayedDiagnostics.push_back(DelayedDiagnostic::makeDeprecation(Loc, D));
+    DelayedDiagnostics.push_back(DelayedDiagnostic::makeDeprecation(Loc, D, 
+                                                                    Message));
     return;
   }
 
   // Otherwise, don't warn if our current context is deprecated.
   if (isDeclDeprecated(cast<Decl>(CurContext)))
     return;
-
-  Diag(Loc, diag::warn_deprecated) << D->getDeclName();
+  if (!Message.empty())
+    Diag(Loc, diag::warn_deprecated_message) << D->getDeclName() 
+                                             << Message;
+  else
+    Diag(Loc, diag::warn_deprecated) << D->getDeclName();
 }

@@ -55,9 +55,15 @@ void Sema::ActOnStartOfObjCMethodDef(Scope *FnBodyScope, Decl *D) {
 
   // Introduce all of the other parameters into this scope.
   for (ObjCMethodDecl::param_iterator PI = MDecl->param_begin(),
-       E = MDecl->param_end(); PI != E; ++PI)
+       E = MDecl->param_end(); PI != E; ++PI) {
+    ParmVarDecl *Param = (*PI);
+    if (!Param->isInvalidDecl() &&
+        RequireCompleteType(Param->getLocation(), Param->getType(),
+                            diag::err_typecheck_decl_incomplete_type))
+          Param->setInvalidDecl();
     if ((*PI)->getIdentifier())
       PushOnScopeChains(*PI, FnBodyScope);
+  }
 }
 
 Decl *Sema::
@@ -485,8 +491,7 @@ ActOnStartCategoryInterface(SourceLocation AtInterfaceLoc,
     // Protocols in the class extension belong to the class.
     if (CDecl->IsClassExtension())
      IDecl->mergeClassExtensionProtocolList((ObjCProtocolDecl**)ProtoRefs, 
-                                            NumProtoRefs, ProtoLocs,
-                                            Context); 
+                                            NumProtoRefs, Context); 
   }
 
   CheckObjCDeclScope(CDecl);
@@ -740,36 +745,164 @@ void Sema::WarnUndefinedMethod(SourceLocation ImpLoc, ObjCMethodDecl *method,
     Diag(ImpLoc, diag::warn_incomplete_impl);
     IncompleteImpl = true;
   }
-  Diag(method->getLocation(), DiagID) 
-    << method->getDeclName();
+  if (DiagID == diag::warn_unimplemented_protocol_method)
+    Diag(ImpLoc, DiagID) << method->getDeclName();
+  else
+    Diag(method->getLocation(), DiagID) << method->getDeclName();
 }
+
+/// Determines if type B can be substituted for type A.  Returns true if we can
+/// guarantee that anything that the user will do to an object of type A can 
+/// also be done to an object of type B.  This is trivially true if the two 
+/// types are the same, or if B is a subclass of A.  It becomes more complex
+/// in cases where protocols are involved.
+///
+/// Object types in Objective-C describe the minimum requirements for an
+/// object, rather than providing a complete description of a type.  For
+/// example, if A is a subclass of B, then B* may refer to an instance of A.
+/// The principle of substitutability means that we may use an instance of A
+/// anywhere that we may use an instance of B - it will implement all of the
+/// ivars of B and all of the methods of B.  
+///
+/// This substitutability is important when type checking methods, because 
+/// the implementation may have stricter type definitions than the interface.
+/// The interface specifies minimum requirements, but the implementation may
+/// have more accurate ones.  For example, a method may privately accept 
+/// instances of B, but only publish that it accepts instances of A.  Any
+/// object passed to it will be type checked against B, and so will implicitly
+/// by a valid A*.  Similarly, a method may return a subclass of the class that
+/// it is declared as returning.
+///
+/// This is most important when considering subclassing.  A method in a
+/// subclass must accept any object as an argument that its superclass's
+/// implementation accepts.  It may, however, accept a more general type
+/// without breaking substitutability (i.e. you can still use the subclass
+/// anywhere that you can use the superclass, but not vice versa).  The
+/// converse requirement applies to return types: the return type for a
+/// subclass method must be a valid object of the kind that the superclass
+/// advertises, but it may be specified more accurately.  This avoids the need
+/// for explicit down-casting by callers.
+///
+/// Note: This is a stricter requirement than for assignment.  
+static bool isObjCTypeSubstitutable(ASTContext &Context,
+                                    const ObjCObjectPointerType *A,
+                                    const ObjCObjectPointerType *B,
+                                    bool rejectId) {
+  // Reject a protocol-unqualified id.
+  if (rejectId && B->isObjCIdType()) return false;
+
+  // If B is a qualified id, then A must also be a qualified id and it must
+  // implement all of the protocols in B.  It may not be a qualified class.
+  // For example, MyClass<A> can be assigned to id<A>, but MyClass<A> is a
+  // stricter definition so it is not substitutable for id<A>.
+  if (B->isObjCQualifiedIdType()) {
+    return A->isObjCQualifiedIdType() &&
+           Context.ObjCQualifiedIdTypesAreCompatible(QualType(A, 0),
+                                                     QualType(B,0),
+                                                     false);
+  }
+
+  /*
+  // id is a special type that bypasses type checking completely.  We want a
+  // warning when it is used in one place but not another.
+  if (C.isObjCIdType(A) || C.isObjCIdType(B)) return false;
+
+
+  // If B is a qualified id, then A must also be a qualified id (which it isn't
+  // if we've got this far)
+  if (B->isObjCQualifiedIdType()) return false;
+  */
+
+  // Now we know that A and B are (potentially-qualified) class types.  The
+  // normal rules for assignment apply.
+  return Context.canAssignObjCInterfaces(A, B);
+}
+
+static SourceRange getTypeRange(TypeSourceInfo *TSI) {
+  return (TSI ? TSI->getTypeLoc().getSourceRange() : SourceRange());
+}
+
+static void CheckMethodOverrideReturn(Sema &S,
+                                      ObjCMethodDecl *MethodImpl,
+                                      ObjCMethodDecl *MethodIface) {
+  if (S.Context.hasSameUnqualifiedType(MethodImpl->getResultType(),
+                                       MethodIface->getResultType()))
+    return;
+
+  unsigned DiagID = diag::warn_conflicting_ret_types;
+
+  // Mismatches between ObjC pointers go into a different warning
+  // category, and sometimes they're even completely whitelisted.
+  if (const ObjCObjectPointerType *ImplPtrTy =
+        MethodImpl->getResultType()->getAs<ObjCObjectPointerType>()) {
+    if (const ObjCObjectPointerType *IfacePtrTy =
+          MethodIface->getResultType()->getAs<ObjCObjectPointerType>()) {
+      // Allow non-matching return types as long as they don't violate
+      // the principle of substitutability.  Specifically, we permit
+      // return types that are subclasses of the declared return type,
+      // or that are more-qualified versions of the declared type.
+      if (isObjCTypeSubstitutable(S.Context, IfacePtrTy, ImplPtrTy, false))
+        return;
+
+      DiagID = diag::warn_non_covariant_ret_types;
+    }
+  }
+
+  S.Diag(MethodImpl->getLocation(), DiagID)
+    << MethodImpl->getDeclName()
+    << MethodIface->getResultType()
+    << MethodImpl->getResultType()
+    << getTypeRange(MethodImpl->getResultTypeSourceInfo());
+  S.Diag(MethodIface->getLocation(), diag::note_previous_definition)
+    << getTypeRange(MethodIface->getResultTypeSourceInfo());
+}
+
+static void CheckMethodOverrideParam(Sema &S,
+                                     ObjCMethodDecl *MethodImpl,
+                                     ObjCMethodDecl *MethodIface,
+                                     ParmVarDecl *ImplVar,
+                                     ParmVarDecl *IfaceVar) {
+  QualType ImplTy = ImplVar->getType();
+  QualType IfaceTy = IfaceVar->getType();
+  if (S.Context.hasSameUnqualifiedType(ImplTy, IfaceTy))
+    return;
+
+  unsigned DiagID = diag::warn_conflicting_param_types;
+
+  // Mismatches between ObjC pointers go into a different warning
+  // category, and sometimes they're even completely whitelisted.
+  if (const ObjCObjectPointerType *ImplPtrTy =
+        ImplTy->getAs<ObjCObjectPointerType>()) {
+    if (const ObjCObjectPointerType *IfacePtrTy =
+          IfaceTy->getAs<ObjCObjectPointerType>()) {
+      // Allow non-matching argument types as long as they don't
+      // violate the principle of substitutability.  Specifically, the
+      // implementation must accept any objects that the superclass
+      // accepts, however it may also accept others.
+      if (isObjCTypeSubstitutable(S.Context, ImplPtrTy, IfacePtrTy, true))
+        return;
+
+      DiagID = diag::warn_non_contravariant_param_types;
+    }
+  }
+
+  S.Diag(ImplVar->getLocation(), DiagID)
+    << getTypeRange(ImplVar->getTypeSourceInfo())
+    << MethodImpl->getDeclName() << IfaceTy << ImplTy;
+  S.Diag(IfaceVar->getLocation(), diag::note_previous_definition)
+    << getTypeRange(IfaceVar->getTypeSourceInfo());
+}
+                                     
 
 void Sema::WarnConflictingTypedMethods(ObjCMethodDecl *ImpMethodDecl,
                                        ObjCMethodDecl *IntfMethodDecl) {
-  if (!Context.typesAreCompatible(IntfMethodDecl->getResultType(),
-                                  ImpMethodDecl->getResultType()) &&
-      !Context.QualifiedIdConformsQualifiedId(IntfMethodDecl->getResultType(),
-                                              ImpMethodDecl->getResultType())) {
-    Diag(ImpMethodDecl->getLocation(), diag::warn_conflicting_ret_types)
-      << ImpMethodDecl->getDeclName() << IntfMethodDecl->getResultType()
-      << ImpMethodDecl->getResultType();
-    Diag(IntfMethodDecl->getLocation(), diag::note_previous_definition);
-  }
+  CheckMethodOverrideReturn(*this, ImpMethodDecl, IntfMethodDecl);
 
   for (ObjCMethodDecl::param_iterator IM = ImpMethodDecl->param_begin(),
        IF = IntfMethodDecl->param_begin(), EM = ImpMethodDecl->param_end();
-       IM != EM; ++IM, ++IF) {
-    QualType ParmDeclTy = (*IF)->getType().getUnqualifiedType();
-    QualType ParmImpTy = (*IM)->getType().getUnqualifiedType();
-    if (Context.typesAreCompatible(ParmDeclTy, ParmImpTy) ||
-        Context.QualifiedIdConformsQualifiedId(ParmDeclTy, ParmImpTy))
-      continue;
+       IM != EM; ++IM, ++IF)
+    CheckMethodOverrideParam(*this, ImpMethodDecl, IntfMethodDecl, *IM, *IF);
 
-    Diag((*IM)->getLocation(), diag::warn_conflicting_param_types)
-      << ImpMethodDecl->getDeclName() << (*IF)->getType()
-      << (*IM)->getType();
-    Diag((*IF)->getLocation(), diag::note_previous_definition);
-  }
   if (ImpMethodDecl->isVariadic() != IntfMethodDecl->isVariadic()) {
     Diag(ImpMethodDecl->getLocation(), diag::warn_conflicting_variadic);
     Diag(IntfMethodDecl->getLocation(), diag::note_previous_declaration);
@@ -838,6 +971,7 @@ void Sema::CheckProtocolMethodDefs(SourceLocation ImpLoc,
               unsigned DIAG = diag::warn_unimplemented_protocol_method;
               if (Diags.getDiagnosticLevel(DIAG) != Diagnostic::Ignored) {
                 WarnUndefinedMethod(ImpLoc, method, IncompleteImpl, DIAG);
+                Diag(method->getLocation(), diag::note_method_declared_at);
                 Diag(CDecl->getLocation(), diag::note_required_for_protocol_at)
                   << PDecl->getDeclName();
               }
@@ -855,6 +989,7 @@ void Sema::CheckProtocolMethodDefs(SourceLocation ImpLoc,
       unsigned DIAG = diag::warn_unimplemented_protocol_method;
       if (Diags.getDiagnosticLevel(DIAG) != Diagnostic::Ignored) {
         WarnUndefinedMethod(ImpLoc, method, IncompleteImpl, DIAG);
+        Diag(method->getLocation(), diag::note_method_declared_at);
         Diag(IDecl->getLocation(), diag::note_required_for_protocol_at) <<
           PDecl->getDeclName();
       }
@@ -922,10 +1057,20 @@ void Sema::MatchAllMethodDeclarations(const llvm::DenseSet<Selector> &InsMap,
       WarnConflictingTypedMethods(ImpMethodDecl, IntfMethodDecl);
     }
   }
+  
   if (ObjCInterfaceDecl *I = dyn_cast<ObjCInterfaceDecl> (CDecl)) {
+    // Also methods in class extensions need be looked at next.
+    for (const ObjCCategoryDecl *ClsExtDecl = I->getFirstClassExtension(); 
+         ClsExtDecl; ClsExtDecl = ClsExtDecl->getNextClassExtension())
+      MatchAllMethodDeclarations(InsMap, ClsMap, InsMapSeen, ClsMapSeen,
+                                 IMPDecl,
+                                 const_cast<ObjCCategoryDecl *>(ClsExtDecl), 
+                                 IncompleteImpl, false);
+    
     // Check for any implementation of a methods declared in protocol.
-    for (ObjCInterfaceDecl::protocol_iterator PI = I->protocol_begin(),
-         E = I->protocol_end(); PI != E; ++PI)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+          PI = I->all_referenced_protocol_begin(),
+          E = I->all_referenced_protocol_end(); PI != E; ++PI)
       MatchAllMethodDeclarations(InsMap, ClsMap, InsMapSeen, ClsMapSeen,
                                  IMPDecl,
                                  (*PI), IncompleteImpl, false);
@@ -971,8 +1116,9 @@ void Sema::ImplMethodsVsClassMethods(Scope *S, ObjCImplDecl* IMPDecl,
   // implemented in the implementation class.
 
   if (ObjCInterfaceDecl *I = dyn_cast<ObjCInterfaceDecl> (CDecl)) {
-    for (ObjCInterfaceDecl::protocol_iterator PI = I->protocol_begin(),
-         E = I->protocol_end(); PI != E; ++PI)
+    for (ObjCInterfaceDecl::all_protocol_iterator
+          PI = I->all_referenced_protocol_begin(),
+          E = I->all_referenced_protocol_end(); PI != E; ++PI)
       CheckProtocolMethodDefs(IMPDecl->getLocation(), *PI, IncompleteImpl,
                               InsMap, ClsMap, I);
     // Check class extensions (unnamed categories)
@@ -1618,15 +1764,19 @@ Decl *Sema::ActOnMethodDeclaration(
   // If the interface declared this method, and it was deprecated there,
   // mark it deprecated here.
   if (InterfaceMD)
-   if (Attr *DA = InterfaceMD->getAttr<DeprecatedAttr>())
-    ObjCMethod->addAttr(::new (Context) DeprecatedAttr(DA->getLocation(),
-                                                       Context));
+   if (Attr *DA = InterfaceMD->getAttr<DeprecatedAttr>()) {
+    StringLiteral *SE = StringLiteral::CreateEmpty(Context, 1);
+    ObjCMethod->addAttr(::new (Context) 
+                        DeprecatedAttr(DA->getLocation(),
+                                       Context, 
+                                       SE->getString()));
+   }
 
   return ObjCMethod;
 }
 
 bool Sema::CheckObjCDeclScope(Decl *D) {
-  if (isa<TranslationUnitDecl>(CurContext->getLookupContext()))
+  if (isa<TranslationUnitDecl>(CurContext->getRedeclContext()))
     return false;
 
   Diag(D->getLocation(), diag::err_objc_decls_may_only_appear_in_global_scope);

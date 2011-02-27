@@ -21,6 +21,9 @@
 #include <set>
 using namespace clang;
 
+
+static void NoteAllOverloadCandidates(Expr* const Expr, Sema& sema);
+
 enum TryCastResult {
   TC_NotApplicable, ///< The cast method is not applicable.
   TC_Success,       ///< The cast method is appropriate and successful.
@@ -36,6 +39,9 @@ enum CastType {
   CT_CStyle,      ///< (Type)expr
   CT_Functional   ///< Type(expr)
 };
+
+
+
 
 static void CheckConstCast(Sema &Self, Expr *&SrcExpr, QualType DestType,
                            const SourceRange &OpRange,
@@ -145,6 +151,10 @@ Sema::BuildCXXNamedCast(SourceLocation OpLoc, tok::TokenKind Kind,
   // If the type is dependent, we won't do the semantic analysis now.
   // FIXME: should we check this in a more fine-grained manner?
   bool TypeDependent = DestType->isDependentType() || Ex->isTypeDependent();
+
+  if (Ex->isBoundMemberFunction(Context))
+    Diag(Ex->getLocStart(), diag::err_invalid_use_of_bound_member_func)
+      << Ex->getSourceRange();
 
   switch (Kind) {
   default: assert(0 && "Unknown C++ cast!");
@@ -465,8 +475,21 @@ CheckReinterpretCast(Sema &Self, Expr *&SrcExpr, QualType DestType,
   if (TryReinterpretCast(Self, SrcExpr, DestType, /*CStyle*/false, OpRange,
                          msg, Kind)
       != TC_Success && msg != 0)
-    Self.Diag(OpRange.getBegin(), msg) << CT_Reinterpret
+  {
+    if (SrcExpr->getType() == Self.Context.OverloadTy)
+    {
+      //FIXME: &f<int>; is overloaded and resolvable 
+      Self.Diag(OpRange.getBegin(), diag::err_bad_reinterpret_cast_overload) 
+        << OverloadExpr::find(SrcExpr).Expression->getName()
+        << DestType << OpRange;
+      NoteAllOverloadCandidates(SrcExpr, Self);
+
+    }
+    else
+      Self.Diag(OpRange.getBegin(), msg) << CT_Reinterpret
       << SrcExpr->getType() << DestType << OpRange;
+  }
+    
 }
 
 
@@ -491,8 +514,18 @@ CheckStaticCast(Sema &Self, Expr *&SrcExpr, QualType DestType,
   unsigned msg = diag::err_bad_cxx_cast_generic;
   if (TryStaticCast(Self, SrcExpr, DestType, /*CStyle*/false, OpRange, msg,
                     Kind, BasePath) != TC_Success && msg != 0)
-    Self.Diag(OpRange.getBegin(), msg) << CT_Static
+  {
+    if ( SrcExpr->getType() == Self.Context.OverloadTy )
+    {
+      OverloadExpr* oe = OverloadExpr::find(SrcExpr).Expression;
+      Self.Diag(OpRange.getBegin(), diag::err_bad_static_cast_overload)
+        << oe->getName() << DestType << OpRange << oe->getQualifierRange();
+      NoteAllOverloadCandidates(SrcExpr, Self);
+    }
+    else
+      Self.Diag(OpRange.getBegin(), msg) << CT_Static
       << SrcExpr->getType() << DestType << OpRange;
+  }
   else if (Kind == CK_Unknown || Kind == CK_BitCast)
     Self.CheckCastAlign(SrcExpr, DestType, OpRange);
 }
@@ -556,6 +589,15 @@ static TryCastResult TryStaticCast(Sema &Self, Expr *&SrcExpr,
   QualType OrigSrcType = SrcExpr->getType();
 
   QualType SrcType = Self.Context.getCanonicalType(SrcExpr->getType());
+
+  // C++0x 5.2.9p9: A value of a scoped enumeration type can be explicitly
+  // converted to an integral type.
+  if (Self.getLangOptions().CPlusPlus0x && SrcType->isEnumeralType()) {
+    if (DestType->isIntegralType(Self.Context)) {
+      Kind = CK_IntegralCast;
+      return TC_Success;
+    }
+  }
 
   // Reverse integral promotion/conversion. All such conversions are themselves
   // again integral promotions or conversions and are thus already handled by
@@ -951,17 +993,20 @@ TryStaticImplicitCast(Sema &Self, Expr *&SrcExpr, QualType DestType,
     }
   }
   
-  // At this point of CheckStaticCast, if the destination is a reference,
-  // this has to work. There is no other way that works.
-  // On the other hand, if we're checking a C-style cast, we've still got
-  // the reinterpret_cast way.
   InitializedEntity Entity = InitializedEntity::InitializeTemporary(DestType);
   InitializationKind InitKind
     = InitializationKind::CreateCast(/*FIXME:*/OpRange, 
                                                                CStyle);    
   InitializationSequence InitSeq(Self, Entity, InitKind, &SrcExpr, 1);
+
+  // At this point of CheckStaticCast, if the destination is a reference,
+  // or the expression is an overload expression this has to work. 
+  // There is no other way that works.
+  // On the other hand, if we're checking a C-style cast, we've still got
+  // the reinterpret_cast way.
+  
   if (InitSeq.getKind() == InitializationSequence::FailedSequence && 
-      (CStyle || !DestType->isReferenceType()))
+    (CStyle || !DestType->isReferenceType()))
     return TC_NotApplicable;
     
   ExprResult Result
@@ -1049,6 +1094,31 @@ static TryCastResult TryConstCast(Sema &Self, Expr *SrcExpr, QualType DestType,
   return TC_Success;
 }
 
+
+static void NoteAllOverloadCandidates(Expr* const Expr, Sema& sema)
+{
+  
+  assert(Expr->getType() == sema.Context.OverloadTy);
+
+  OverloadExpr::FindResult Ovl = OverloadExpr::find(Expr);
+  OverloadExpr *const OvlExpr = Ovl.Expression;
+
+  for (UnresolvedSetIterator it = OvlExpr->decls_begin(),
+    end = OvlExpr->decls_end(); it != end; ++it) {
+    if ( FunctionTemplateDecl *ftd = 
+              dyn_cast<FunctionTemplateDecl>((*it)->getUnderlyingDecl()) )
+    {
+	    sema.NoteOverloadCandidate(ftd->getTemplatedDecl());   
+    }
+    else if ( FunctionDecl *f = 
+                dyn_cast<FunctionDecl>((*it)->getUnderlyingDecl()) )
+    {
+      sema.NoteOverloadCandidate(f);
+    }
+  }
+}
+
+
 static TryCastResult TryReinterpretCast(Sema &Self, Expr *SrcExpr,
                                         QualType DestType, bool CStyle,
                                         const SourceRange &OpRange,
@@ -1058,6 +1128,12 @@ static TryCastResult TryReinterpretCast(Sema &Self, Expr *SrcExpr,
   
   DestType = Self.Context.getCanonicalType(DestType);
   QualType SrcType = SrcExpr->getType();
+
+  // Is the source an overloaded name? (i.e. &foo)
+  // If so, reinterpret_cast can not help us here (13.4, p1, bullet 5)
+  if (SrcType == Self.Context.OverloadTy )
+    return TC_NotApplicable;
+
   if (const ReferenceType *DestTypeTmp = DestType->getAs<ReferenceType>()) {
     bool LValue = DestTypeTmp->isLValueReferenceType();
     if (LValue && SrcExpr->isLvalue(Self.Context) != Expr::LV_Valid) {
@@ -1073,6 +1149,7 @@ static TryCastResult TryReinterpretCast(Sema &Self, Expr *SrcExpr,
     // This code does this transformation for the checked types.
     DestType = Self.Context.getPointerType(DestTypeTmp->getPointeeType());
     SrcType = Self.Context.getPointerType(SrcType);
+    
     IsLValueCast = true;
   }
 
@@ -1264,6 +1341,11 @@ Sema::CXXCheckCStyleCast(SourceRange R, QualType CastTy, Expr *&CastExpr,
                          CastKind &Kind, 
                          CXXCastPath &BasePath,
                          bool FunctionalStyle) {
+  if (CastExpr->isBoundMemberFunction(Context))
+    return Diag(CastExpr->getLocStart(),
+                diag::err_invalid_use_of_bound_member_func)
+        << CastExpr->getSourceRange();
+
   // This test is outside everything else because it's the only case where
   // a non-lvalue-reference target type does not lead to decay.
   // C++ 5.2.9p4: Any expression can be explicitly converted to type "cv void".
@@ -1307,9 +1389,20 @@ Sema::CXXCheckCStyleCast(SourceRange R, QualType CastTy, Expr *&CastExpr,
     }
   }
 
-  if (tcr != TC_Success && msg != 0)
-    Diag(R.getBegin(), msg) << (FunctionalStyle ? CT_Functional : CT_CStyle)
-      << CastExpr->getType() << CastTy << R;
+  if (tcr != TC_Success && msg != 0) {
+    if (CastExpr->getType() == Context.OverloadTy) {
+      DeclAccessPair Found;
+      FunctionDecl *Fn = ResolveAddressOfOverloadedFunction(CastExpr, 
+                                CastTy,
+                                /* Complain */ true,
+                                Found);
+      assert(!Fn && "cast failed but able to resolve overload expression!!");
+      (void)Fn;
+    } else {
+      Diag(R.getBegin(), msg) << (FunctionalStyle ? CT_Functional : CT_CStyle)
+        << CastExpr->getType() << CastTy << R;
+    }
+  }
   else if (Kind == CK_Unknown || Kind == CK_BitCast)
     CheckCastAlign(CastExpr, CastTy, R);
 

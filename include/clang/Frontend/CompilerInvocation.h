@@ -12,6 +12,7 @@
 
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/TargetOptions.h"
+#include "clang/Basic/FileSystemOptions.h"
 #include "clang/Frontend/AnalyzerOptions.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "clang/Frontend/DependencyOutputOptions.h"
@@ -52,6 +53,9 @@ class CompilerInvocation {
   /// Options controlling the diagnostic engine.
   DiagnosticOptions DiagnosticOpts;
 
+  /// Options controlling file system operations.
+  FileSystemOptions FileSystemOpts;
+
   /// Options controlling the frontend itself.
   FrontendOptions FrontendOpts;
 
@@ -83,8 +87,10 @@ public:
   /// \param ArgBegin - The first element in the argument vector.
   /// \param ArgEnd - The last element in the argument vector.
   /// \param Diags - The diagnostic engine to use for errors.
-  static void CreateFromArgs(CompilerInvocation &Res, const char **ArgBegin,
-                             const char **ArgEnd, Diagnostic &Diags);
+  static void CreateFromArgs(CompilerInvocation &Res,
+                             const char* const *ArgBegin,
+                             const char* const *ArgEnd,
+                             Diagnostic &Diags);
 
   /// GetBuiltinIncludePath - Get the directory where the compiler headers
   /// reside, relative to the compiler binary (found by the passed in
@@ -123,6 +129,11 @@ public:
 
   DiagnosticOptions &getDiagnosticOpts() { return DiagnosticOpts; }
   const DiagnosticOptions &getDiagnosticOpts() const { return DiagnosticOpts; }
+
+  FileSystemOptions &getFileSystemOpts() { return FileSystemOpts; }
+  const FileSystemOptions &getFileSystemOpts() const {
+    return FileSystemOpts;
+  }
 
   HeaderSearchOptions &getHeaderSearchOpts() { return HeaderSearchOpts; }
   const HeaderSearchOptions &getHeaderSearchOpts() const {

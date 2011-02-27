@@ -124,8 +124,8 @@ std::size_t ExplicitTemplateArgumentList::sizeFor(
 }
 
 void DeclRefExpr::computeDependence() {
-  TypeDependent = false;
-  ValueDependent = false;
+  ExprBits.TypeDependent = false;
+  ExprBits.ValueDependent = false;
   
   NamedDecl *D = getDecl();
 
@@ -140,27 +140,27 @@ void DeclRefExpr::computeDependence() {
   //  (TD)  - an identifier that was declared with dependent type
   //  (VD)  - a name declared with a dependent type,
   if (getType()->isDependentType()) {
-    TypeDependent = true;
-    ValueDependent = true;
+    ExprBits.TypeDependent = true;
+    ExprBits.ValueDependent = true;
   }
   //  (TD)  - a conversion-function-id that specifies a dependent type
   else if (D->getDeclName().getNameKind() 
                                == DeclarationName::CXXConversionFunctionName &&
            D->getDeclName().getCXXNameType()->isDependentType()) {
-    TypeDependent = true;
-    ValueDependent = true;
+    ExprBits.TypeDependent = true;
+    ExprBits.ValueDependent = true;
   }
   //  (TD)  - a template-id that is dependent,
   else if (hasExplicitTemplateArgs() && 
            TemplateSpecializationType::anyDependentTemplateArguments(
                                                        getTemplateArgs(), 
                                                        getNumTemplateArgs())) {
-    TypeDependent = true;
-    ValueDependent = true;
+    ExprBits.TypeDependent = true;
+    ExprBits.ValueDependent = true;
   }
   //  (VD)  - the name of a non-type template parameter,
   else if (isa<NonTypeTemplateParmDecl>(D))
-    ValueDependent = true;
+    ExprBits.ValueDependent = true;
   //  (VD) - a constant with integral or enumeration type and is
   //         initialized with an expression that is value-dependent.
   else if (VarDecl *Var = dyn_cast<VarDecl>(D)) {
@@ -168,20 +168,20 @@ void DeclRefExpr::computeDependence() {
         Var->getType().getCVRQualifiers() == Qualifiers::Const) {
       if (const Expr *Init = Var->getAnyInitializer())
         if (Init->isValueDependent())
-          ValueDependent = true;
+          ExprBits.ValueDependent = true;
     } 
     // (VD) - FIXME: Missing from the standard: 
     //      -  a member function or a static data member of the current 
     //         instantiation
     else if (Var->isStaticDataMember() && 
              Var->getDeclContext()->isDependentContext())
-      ValueDependent = true;
+      ExprBits.ValueDependent = true;
   } 
   // (VD) - FIXME: Missing from the standard: 
   //      -  a member function or a static data member of the current 
   //         instantiation
   else if (isa<CXXMethodDecl>(D) && D->getDeclContext()->isDependentContext())
-    ValueDependent = true;
+    ExprBits.ValueDependent = true;
   //  (TD)  - a nested-name-specifier or a qualified-id that names a
   //          member of an unknown specialization.
   //        (handled by DependentScopeDeclRefExpr)
@@ -257,7 +257,7 @@ DeclRefExpr *DeclRefExpr::Create(ASTContext &Context,
   if (TemplateArgs)
     Size += ExplicitTemplateArgumentList::sizeFor(*TemplateArgs);
   
-  void *Mem = Context.Allocate(Size, llvm::alignof<DeclRefExpr>());
+  void *Mem = Context.Allocate(Size, llvm::alignOf<DeclRefExpr>());
   return new (Mem) DeclRefExpr(Qualifier, QualifierRange, D, NameInfo,
                                TemplateArgs, T);
 }
@@ -271,7 +271,7 @@ DeclRefExpr *DeclRefExpr::CreateEmpty(ASTContext &Context, bool HasQualifier,
   if (NumTemplateArgs)
     Size += ExplicitTemplateArgumentList::sizeFor(NumTemplateArgs);
   
-  void *Mem = Context.Allocate(Size, llvm::alignof<DeclRefExpr>());
+  void *Mem = Context.Allocate(Size, llvm::alignOf<DeclRefExpr>());
   return new (Mem) DeclRefExpr(EmptyShell());
 }
 
@@ -432,7 +432,7 @@ StringLiteral *StringLiteral::Create(ASTContext &C, const char *StrData,
   // any concatenated string tokens.
   void *Mem = C.Allocate(sizeof(StringLiteral)+
                          sizeof(SourceLocation)*(NumStrs-1),
-                         llvm::alignof<StringLiteral>());
+                         llvm::alignOf<StringLiteral>());
   StringLiteral *SL = new (Mem) StringLiteral(Ty);
 
   // OPTIMIZE: could allocate this appended to the StringLiteral.
@@ -452,7 +452,7 @@ StringLiteral *StringLiteral::Create(ASTContext &C, const char *StrData,
 StringLiteral *StringLiteral::CreateEmpty(ASTContext &C, unsigned NumStrs) {
   void *Mem = C.Allocate(sizeof(StringLiteral)+
                          sizeof(SourceLocation)*(NumStrs-1),
-                         llvm::alignof<StringLiteral>());
+                         llvm::alignOf<StringLiteral>());
   StringLiteral *SL = new (Mem) StringLiteral(QualType());
   SL->StrData = 0;
   SL->ByteLength = 0;
@@ -559,6 +559,14 @@ CallExpr::CallExpr(ASTContext &C, StmtClass SC, EmptyShell Empty)
 
 Decl *CallExpr::getCalleeDecl() {
   Expr *CEE = getCallee()->IgnoreParenCasts();
+  // If we're calling a dereference, look at the pointer instead.
+  if (BinaryOperator *BO = dyn_cast<BinaryOperator>(CEE)) {
+    if (BO->isPtrMemOp())
+      CEE = BO->getRHS()->IgnoreParenCasts();
+  } else if (UnaryOperator *UO = dyn_cast<UnaryOperator>(CEE)) {
+    if (UO->getOpcode() == UO_Deref)
+      CEE = UO->getSubExpr()->IgnoreParenCasts();
+  }
   if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(CEE))
     return DRE->getDecl();
   if (MemberExpr *ME = dyn_cast<MemberExpr>(CEE))
@@ -706,7 +714,7 @@ MemberExpr *MemberExpr::Create(ASTContext &C, Expr *base, bool isarrow,
   if (targs)
     Size += ExplicitTemplateArgumentList::sizeFor(*targs);
 
-  void *Mem = C.Allocate(Size, llvm::alignof<MemberExpr>());
+  void *Mem = C.Allocate(Size, llvm::alignOf<MemberExpr>());
   MemberExpr *E = new (Mem) MemberExpr(base, isarrow, memberdecl, nameinfo, ty);
 
   if (hasQualOrFound) {
@@ -991,9 +999,9 @@ InitListExpr::InitListExpr(ASTContext &C, SourceLocation lbraceloc,
 {      
   for (unsigned I = 0; I != numInits; ++I) {
     if (initExprs[I]->isTypeDependent())
-      TypeDependent = true;
+      ExprBits.TypeDependent = true;
     if (initExprs[I]->isValueDependent())
-      ValueDependent = true;
+      ExprBits.ValueDependent = true;
   }
       
   InitExprs.insert(C, InitExprs.end(), initExprs, initExprs+numInits);
@@ -1018,6 +1026,35 @@ Expr *InitListExpr::updateInit(ASTContext &C, unsigned Init, Expr *expr) {
   Expr *Result = cast_or_null<Expr>(InitExprs[Init]);
   InitExprs[Init] = expr;
   return Result;
+}
+
+SourceRange InitListExpr::getSourceRange() const {
+  if (SyntacticForm)
+    return SyntacticForm->getSourceRange();
+  SourceLocation Beg = LBraceLoc, End = RBraceLoc;
+  if (Beg.isInvalid()) {
+    // Find the first non-null initializer.
+    for (InitExprsTy::const_iterator I = InitExprs.begin(),
+                                     E = InitExprs.end(); 
+      I != E; ++I) {
+      if (Stmt *S = *I) {
+        Beg = S->getLocStart();
+        break;
+      }  
+    }
+  }
+  if (End.isInvalid()) {
+    // Find the first non-null initializer from the end.
+    for (InitExprsTy::const_reverse_iterator I = InitExprs.rbegin(),
+                                             E = InitExprs.rend();
+      I != E; ++I) {
+      if (Stmt *S = *I) {
+        End = S->getSourceRange().getEnd();
+        break;
+      }  
+    }
+  }
+  return SourceRange(Beg, End);
 }
 
 /// getFunctionType - Return the underlying function type for this block.
@@ -1217,9 +1254,13 @@ bool Expr::isUnusedResultAWarning(SourceLocation &Loc, SourceRange &R1,
     // however, if the result of the stmt expr is dead, we don't want to emit a
     // warning.
     const CompoundStmt *CS = cast<StmtExpr>(this)->getSubStmt();
-    if (!CS->body_empty())
+    if (!CS->body_empty()) {
       if (const Expr *E = dyn_cast<Expr>(CS->body_back()))
         return E->isUnusedResultAWarning(Loc, R1, R2, Ctx);
+      if (const LabelStmt *Label = dyn_cast<LabelStmt>(CS->body_back()))
+        if (const Expr *E = dyn_cast<Expr>(Label->getSubStmt()))
+          return E->isUnusedResultAWarning(Loc, R1, R2, Ctx);
+    }
 
     if (getType()->isVoidType())
       return false;
@@ -1311,12 +1352,256 @@ bool Expr::isOBJCGCCandidate(ASTContext &Ctx) const {
     return cast<ArraySubscriptExpr>(this)->getBase()->isOBJCGCCandidate(Ctx);
   }
 }
+
+bool Expr::isBoundMemberFunction(ASTContext &Ctx) const {
+  if (isTypeDependent())
+    return false;
+  return isLvalue(Ctx) == Expr::LV_MemberFunction;
+}
+
+static Expr::CanThrowResult MergeCanThrow(Expr::CanThrowResult CT1,
+                                          Expr::CanThrowResult CT2) {
+  // CanThrowResult constants are ordered so that the maximum is the correct
+  // merge result.
+  return CT1 > CT2 ? CT1 : CT2;
+}
+
+static Expr::CanThrowResult CanSubExprsThrow(ASTContext &C, const Expr *CE) {
+  Expr *E = const_cast<Expr*>(CE);
+  Expr::CanThrowResult R = Expr::CT_Cannot;
+  for (Expr::child_iterator I = E->child_begin(), IE = E->child_end();
+       I != IE && R != Expr::CT_Can; ++I) {
+    R = MergeCanThrow(R, cast<Expr>(*I)->CanThrow(C));
+  }
+  return R;
+}
+
+static Expr::CanThrowResult CanCalleeThrow(const Decl *D,
+                                           bool NullThrows = true) {
+  if (!D)
+    return NullThrows ? Expr::CT_Can : Expr::CT_Cannot;
+
+  // See if we can get a function type from the decl somehow.
+  const ValueDecl *VD = dyn_cast<ValueDecl>(D);
+  if (!VD) // If we have no clue what we're calling, assume the worst.
+    return Expr::CT_Can;
+
+  // As an extension, we assume that __attribute__((nothrow)) functions don't
+  // throw.
+  if (isa<FunctionDecl>(D) && D->hasAttr<NoThrowAttr>())
+    return Expr::CT_Cannot;
+
+  QualType T = VD->getType();
+  const FunctionProtoType *FT;
+  if ((FT = T->getAs<FunctionProtoType>())) {
+  } else if (const PointerType *PT = T->getAs<PointerType>())
+    FT = PT->getPointeeType()->getAs<FunctionProtoType>();
+  else if (const ReferenceType *RT = T->getAs<ReferenceType>())
+    FT = RT->getPointeeType()->getAs<FunctionProtoType>();
+  else if (const MemberPointerType *MT = T->getAs<MemberPointerType>())
+    FT = MT->getPointeeType()->getAs<FunctionProtoType>();
+  else if (const BlockPointerType *BT = T->getAs<BlockPointerType>())
+    FT = BT->getPointeeType()->getAs<FunctionProtoType>();
+
+  if (!FT)
+    return Expr::CT_Can;
+
+  return FT->hasEmptyExceptionSpec() ? Expr::CT_Cannot : Expr::CT_Can;
+}
+
+static Expr::CanThrowResult CanDynamicCastThrow(const CXXDynamicCastExpr *DC) {
+  if (DC->isTypeDependent())
+    return Expr::CT_Dependent;
+
+  if (!DC->getTypeAsWritten()->isReferenceType())
+    return Expr::CT_Cannot;
+
+  return DC->getCastKind() == clang::CK_Dynamic? Expr::CT_Can : Expr::CT_Cannot;
+}
+
+static Expr::CanThrowResult CanTypeidThrow(ASTContext &C,
+                                           const CXXTypeidExpr *DC) {
+  if (DC->isTypeOperand())
+    return Expr::CT_Cannot;
+
+  Expr *Op = DC->getExprOperand();
+  if (Op->isTypeDependent())
+    return Expr::CT_Dependent;
+
+  const RecordType *RT = Op->getType()->getAs<RecordType>();
+  if (!RT)
+    return Expr::CT_Cannot;
+
+  if (!cast<CXXRecordDecl>(RT->getDecl())->isPolymorphic())
+    return Expr::CT_Cannot;
+
+  if (Op->Classify(C).isPRValue())
+    return Expr::CT_Cannot;
+
+  return Expr::CT_Can;
+}
+
+Expr::CanThrowResult Expr::CanThrow(ASTContext &C) const {
+  // C++ [expr.unary.noexcept]p3:
+  //   [Can throw] if in a potentially-evaluated context the expression would
+  //   contain:
+  switch (getStmtClass()) {
+  case CXXThrowExprClass:
+    //   - a potentially evaluated throw-expression
+    return CT_Can;
+
+  case CXXDynamicCastExprClass: {
+    //   - a potentially evaluated dynamic_cast expression dynamic_cast<T>(v),
+    //     where T is a reference type, that requires a run-time check
+    CanThrowResult CT = CanDynamicCastThrow(cast<CXXDynamicCastExpr>(this));
+    if (CT == CT_Can)
+      return CT;
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+  case CXXTypeidExprClass:
+    //   - a potentially evaluated typeid expression applied to a glvalue
+    //     expression whose type is a polymorphic class type
+    return CanTypeidThrow(C, cast<CXXTypeidExpr>(this));
+
+    //   - a potentially evaluated call to a function, member function, function
+    //     pointer, or member function pointer that does not have a non-throwing
+    //     exception-specification
+  case CallExprClass:
+  case CXXOperatorCallExprClass:
+  case CXXMemberCallExprClass: {
+    CanThrowResult CT = CanCalleeThrow(cast<CallExpr>(this)->getCalleeDecl());
+    if (CT == CT_Can)
+      return CT;
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+  case CXXConstructExprClass:
+  case CXXTemporaryObjectExprClass: {
+    CanThrowResult CT = CanCalleeThrow(
+        cast<CXXConstructExpr>(this)->getConstructor());
+    if (CT == CT_Can)
+      return CT;
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+  case CXXNewExprClass: {
+    CanThrowResult CT = MergeCanThrow(
+        CanCalleeThrow(cast<CXXNewExpr>(this)->getOperatorNew()),
+        CanCalleeThrow(cast<CXXNewExpr>(this)->getConstructor(),
+                       /*NullThrows*/false));
+    if (CT == CT_Can)
+      return CT;
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+  case CXXDeleteExprClass: {
+    CanThrowResult CT = CanCalleeThrow(
+        cast<CXXDeleteExpr>(this)->getOperatorDelete());
+    if (CT == CT_Can)
+      return CT;
+    const Expr *Arg = cast<CXXDeleteExpr>(this)->getArgument();
+    // Unwrap exactly one implicit cast, which converts all pointers to void*.
+    if (const ImplicitCastExpr *Cast = dyn_cast<ImplicitCastExpr>(Arg))
+      Arg = Cast->getSubExpr();
+    if (const PointerType *PT = Arg->getType()->getAs<PointerType>()) {
+      if (const RecordType *RT = PT->getPointeeType()->getAs<RecordType>()) {
+        CanThrowResult CT2 = CanCalleeThrow(
+            cast<CXXRecordDecl>(RT->getDecl())->getDestructor());
+        if (CT2 == CT_Can)
+          return CT2;
+        CT = MergeCanThrow(CT, CT2);
+      }
+    }
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+  case CXXBindTemporaryExprClass: {
+    // The bound temporary has to be destroyed again, which might throw.
+    CanThrowResult CT = CanCalleeThrow(
+      cast<CXXBindTemporaryExpr>(this)->getTemporary()->getDestructor());
+    if (CT == CT_Can)
+      return CT;
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+    // ObjC message sends are like function calls, but never have exception
+    // specs.
+  case ObjCMessageExprClass:
+  case ObjCPropertyRefExprClass:
+  case ObjCImplicitSetterGetterRefExprClass:
+    return CT_Can;
+
+    // Many other things have subexpressions, so we have to test those.
+    // Some are simple:
+  case ParenExprClass:
+  case MemberExprClass:
+  case CXXReinterpretCastExprClass:
+  case CXXConstCastExprClass:
+  case ConditionalOperatorClass:
+  case CompoundLiteralExprClass:
+  case ExtVectorElementExprClass:
+  case InitListExprClass:
+  case DesignatedInitExprClass:
+  case ParenListExprClass:
+  case VAArgExprClass:
+  case CXXDefaultArgExprClass:
+  case CXXExprWithTemporariesClass:
+  case ObjCIvarRefExprClass:
+  case ObjCIsaExprClass:
+  case ShuffleVectorExprClass:
+    return CanSubExprsThrow(C, this);
+
+    // Some might be dependent for other reasons.
+  case UnaryOperatorClass:
+  case ArraySubscriptExprClass:
+  case ImplicitCastExprClass:
+  case CStyleCastExprClass:
+  case CXXStaticCastExprClass:
+  case CXXFunctionalCastExprClass:
+  case BinaryOperatorClass:
+  case CompoundAssignOperatorClass: {
+    CanThrowResult CT = isTypeDependent() ? CT_Dependent : CT_Cannot;
+    return MergeCanThrow(CT, CanSubExprsThrow(C, this));
+  }
+
+    // FIXME: We should handle StmtExpr, but that opens a MASSIVE can of worms.
+  case StmtExprClass:
+    return CT_Can;
+
+  case ChooseExprClass:
+    if (isTypeDependent() || isValueDependent())
+      return CT_Dependent;
+    return cast<ChooseExpr>(this)->getChosenSubExpr(C)->CanThrow(C);
+
+    // Some expressions are always dependent.
+  case DependentScopeDeclRefExprClass:
+  case CXXUnresolvedConstructExprClass:
+  case CXXDependentScopeMemberExprClass:
+    return CT_Dependent;
+
+  default:
+    // All other expressions don't have subexpressions, or else they are
+    // unevaluated.
+    return CT_Cannot;
+  }
+}
+
 Expr* Expr::IgnoreParens() {
   Expr* E = this;
-  while (ParenExpr* P = dyn_cast<ParenExpr>(E))
-    E = P->getSubExpr();
-
-  return E;
+  while (true) {
+    if (ParenExpr* P = dyn_cast<ParenExpr>(E)) {
+      E = P->getSubExpr();
+      continue;
+    }
+    if (UnaryOperator* P = dyn_cast<UnaryOperator>(E)) {
+      if (P->getOpcode() == UO_Extension) {
+        E = P->getSubExpr();
+        continue;
+      }
+    }
+    return E;
+  }
 }
 
 /// IgnoreParenCasts - Ignore parentheses and casts.  Strip off any ParenExpr
@@ -1324,24 +1609,42 @@ Expr* Expr::IgnoreParens() {
 Expr *Expr::IgnoreParenCasts() {
   Expr *E = this;
   while (true) {
-    if (ParenExpr *P = dyn_cast<ParenExpr>(E))
+    if (ParenExpr* P = dyn_cast<ParenExpr>(E)) {
       E = P->getSubExpr();
-    else if (CastExpr *P = dyn_cast<CastExpr>(E))
+      continue;
+    }
+    if (CastExpr *P = dyn_cast<CastExpr>(E)) {
       E = P->getSubExpr();
-    else
-      return E;
+      continue;
+    }
+    if (UnaryOperator* P = dyn_cast<UnaryOperator>(E)) {
+      if (P->getOpcode() == UO_Extension) {
+        E = P->getSubExpr();
+        continue;
+      }
+    }
+    return E;
   }
 }
 
 Expr *Expr::IgnoreParenImpCasts() {
   Expr *E = this;
   while (true) {
-    if (ParenExpr *P = dyn_cast<ParenExpr>(E))
+    if (ParenExpr *P = dyn_cast<ParenExpr>(E)) {
       E = P->getSubExpr();
-    else if (ImplicitCastExpr *P = dyn_cast<ImplicitCastExpr>(E))
+      continue;
+    }
+    if (ImplicitCastExpr *P = dyn_cast<ImplicitCastExpr>(E)) {
       E = P->getSubExpr();
-    else
-      return E;
+      continue;
+    }
+    if (UnaryOperator* P = dyn_cast<UnaryOperator>(E)) {
+      if (P->getOpcode() == UO_Extension) {
+        E = P->getSubExpr();
+        continue;
+      }
+    }
+    return E;
   }
 }
 
@@ -1366,12 +1669,19 @@ Expr *Expr::IgnoreParenNoopCasts(ASTContext &Ctx) {
         continue;
       }
 
-      if ((E->getType()->isPointerType() || 
+      if ((E->getType()->isPointerType() ||
            E->getType()->isIntegralType(Ctx)) &&
-          (SE->getType()->isPointerType() || 
+          (SE->getType()->isPointerType() ||
            SE->getType()->isIntegralType(Ctx)) &&
           Ctx.getTypeSize(E->getType()) == Ctx.getTypeSize(SE->getType())) {
         E = SE;
+        continue;
+      }
+    }
+
+    if (UnaryOperator* P = dyn_cast<UnaryOperator>(E)) {
+      if (P->getOpcode() == UO_Extension) {
+        E = P->getSubExpr();
         continue;
       }
     }
@@ -1411,46 +1721,41 @@ static const Expr *skipTemporaryBindingsAndNoOpCasts(const Expr *E) {
   return E;
 }
 
-const Expr *Expr::getTemporaryObject() const {
+/// isTemporaryObject - Determines if this expression produces a
+/// temporary of the given class type.
+bool Expr::isTemporaryObject(ASTContext &C, const CXXRecordDecl *TempTy) const {
+  if (!C.hasSameUnqualifiedType(getType(), C.getTypeDeclType(TempTy)))
+    return false;
+
   const Expr *E = skipTemporaryBindingsAndNoOpCasts(this);
 
-  // A cast can produce a temporary object. The object's construction
-  // is represented as a CXXConstructExpr.
-  if (const CastExpr *Cast = dyn_cast<CastExpr>(E)) {
-    // Only user-defined and constructor conversions can produce
-    // temporary objects.
-    if (Cast->getCastKind() != CK_ConstructorConversion &&
-        Cast->getCastKind() != CK_UserDefinedConversion)
-      return 0;
-
-    // Strip off temporary bindings and no-op casts.
-    const Expr *Sub = skipTemporaryBindingsAndNoOpCasts(Cast->getSubExpr());
-
-    // If this is a constructor conversion, see if we have an object
-    // construction.
-    if (Cast->getCastKind() == CK_ConstructorConversion)
-      return dyn_cast<CXXConstructExpr>(Sub);
-
-    // If this is a user-defined conversion, see if we have a call to
-    // a function that itself returns a temporary object.
-    if (Cast->getCastKind() == CK_UserDefinedConversion)
-      if (const CallExpr *CE = dyn_cast<CallExpr>(Sub))
-        if (CE->getCallReturnType()->isRecordType())
-          return CE;
-
-    return 0;
+  // Temporaries are by definition pr-values of class type.
+  if (!E->Classify(C).isPRValue()) {
+    // In this context, property reference is a message call and is pr-value.
+    if (!isa<ObjCPropertyRefExpr>(E) && 
+        !isa<ObjCImplicitSetterGetterRefExpr>(E))
+      return false;
   }
 
-  // A call returning a class type returns a temporary.
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    if (CE->getCallReturnType()->isRecordType())
-      return CE;
+  // Black-list a few cases which yield pr-values of class type that don't
+  // refer to temporaries of that type:
 
-    return 0;
+  // - implicit derived-to-base conversions
+  if (isa<ImplicitCastExpr>(E)) {
+    switch (cast<ImplicitCastExpr>(E)->getCastKind()) {
+    case CK_DerivedToBase:
+    case CK_UncheckedDerivedToBase:
+      return false;
+    default:
+      break;
+    }
   }
 
-  // Explicit temporary object constructors create temporaries.
-  return dyn_cast<CXXTemporaryObjectExpr>(E);
+  // - member expressions (all)
+  if (isa<MemberExpr>(E))
+    return false;
+
+  return true;
 }
 
 /// hasAnyTypeDependentArguments - Determines if any of the expressions
@@ -1532,6 +1837,9 @@ bool Expr::isConstantInitializer(ASTContext &Ctx, bool IsForRef) const {
     return true;
   case ParenExprClass:
     return cast<ParenExpr>(this)->getSubExpr()
+      ->isConstantInitializer(Ctx, IsForRef);
+  case ChooseExprClass:
+    return cast<ChooseExpr>(this)->getChosenSubExpr(Ctx)
       ->isConstantInitializer(Ctx, IsForRef);
   case UnaryOperatorClass: {
     const UnaryOperator* Exp = cast<UnaryOperator>(this);
@@ -1623,6 +1931,13 @@ bool Expr::isNullPointerConstant(ASTContext &Ctx,
   if (getType()->isNullPtrType())
     return true;
 
+  if (const RecordType *UT = getType()->getAsUnionType())
+    if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>())
+      if (const CompoundLiteralExpr *CLE = dyn_cast<CompoundLiteralExpr>(this)){
+        const Expr *InitExpr = CLE->getInitializer();
+        if (const InitListExpr *ILE = dyn_cast<InitListExpr>(InitExpr))
+          return ILE->getInit(0)->isNullPointerConstant(Ctx, NPC);
+      }
   // This expression must be an integer type.
   if (!getType()->isIntegerType() || 
       (Ctx.getLangOptions().CPlusPlus && getType()->isEnumeralType()))
@@ -1647,6 +1962,11 @@ FieldDecl *Expr::getBitField() {
 
   if (MemberExpr *MemRef = dyn_cast<MemberExpr>(E))
     if (FieldDecl *Field = dyn_cast<FieldDecl>(MemRef->getMemberDecl()))
+      if (Field->isBitField())
+        return Field;
+
+  if (DeclRefExpr *DeclRef = dyn_cast<DeclRefExpr>(E))
+    if (FieldDecl *Field = dyn_cast<FieldDecl>(DeclRef->getDecl()))
       if (Field->isBitField())
         return Field;
 
@@ -1944,7 +2264,7 @@ DesignatedInitExpr::DesignatedInitExpr(ASTContext &C, QualType Ty,
     if (this->Designators[I].isArrayDesignator()) {
       // Compute type- and value-dependence.
       Expr *Index = IndexExprs[IndexIdx];
-      ValueDependent = ValueDependent ||
+      ExprBits.ValueDependent = ExprBits.ValueDependent ||
         Index->isTypeDependent() || Index->isValueDependent();
 
       // Copy the index expressions into permanent storage.
@@ -1953,7 +2273,7 @@ DesignatedInitExpr::DesignatedInitExpr(ASTContext &C, QualType Ty,
       // Compute type- and value-dependence.
       Expr *Start = IndexExprs[IndexIdx];
       Expr *End = IndexExprs[IndexIdx + 1];
-      ValueDependent = ValueDependent ||
+      ExprBits.ValueDependent = ExprBits.ValueDependent ||
         Start->isTypeDependent() || Start->isValueDependent() ||
         End->isTypeDependent() || End->isValueDependent();
 
@@ -2102,22 +2422,34 @@ Stmt::child_iterator ObjCIvarRefExpr::child_begin() { return &Base; }
 Stmt::child_iterator ObjCIvarRefExpr::child_end() { return &Base+1; }
 
 // ObjCPropertyRefExpr
-Stmt::child_iterator ObjCPropertyRefExpr::child_begin() { return &Base; }
-Stmt::child_iterator ObjCPropertyRefExpr::child_end() { return &Base+1; }
+Stmt::child_iterator ObjCPropertyRefExpr::child_begin()
+{ 
+  if (BaseExprOrSuperType.is<Stmt*>()) {
+    // Hack alert!
+    return reinterpret_cast<Stmt**> (&BaseExprOrSuperType);
+  }
+  return child_iterator(); 
+}
+
+Stmt::child_iterator ObjCPropertyRefExpr::child_end()
+{ return BaseExprOrSuperType.is<Stmt*>() ? 
+          reinterpret_cast<Stmt**> (&BaseExprOrSuperType)+1 : 
+          child_iterator(); 
+}
 
 // ObjCImplicitSetterGetterRefExpr
 Stmt::child_iterator ObjCImplicitSetterGetterRefExpr::child_begin() {
-  // If this is accessing a class member, skip that entry.
-  if (Base) return &Base;
-  return &Base+1;
+  // If this is accessing a class member or super, skip that entry.
+  // Technically, 2nd condition is sufficient. But I want to be verbose
+  if (isSuperReceiver() || !Base)
+    return child_iterator();
+  return &Base;
 }
 Stmt::child_iterator ObjCImplicitSetterGetterRefExpr::child_end() {
+  if (isSuperReceiver() || !Base)
+    return child_iterator();
   return &Base+1;
 }
-
-// ObjCSuperExpr
-Stmt::child_iterator ObjCSuperExpr::child_begin() { return child_iterator(); }
-Stmt::child_iterator ObjCSuperExpr::child_end() { return child_iterator(); }
 
 // ObjCIsaExpr
 Stmt::child_iterator ObjCIsaExpr::child_begin() { return &Base; }

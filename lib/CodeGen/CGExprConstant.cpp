@@ -13,6 +13,7 @@
 
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
+#include "CGCXXABI.h"
 #include "CGObjCRuntime.h"
 #include "CGRecordLayout.h"
 #include "clang/AST/APValue.h"
@@ -754,7 +755,7 @@ public:
         if (!VD->hasLocalStorage()) {
           if (VD->isFileVarDecl() || VD->hasExternalStorage())
             return CGM.GetAddrOfGlobalVar(VD);
-          else if (VD->isBlockVarDecl()) {
+          else if (VD->isLocalVarDecl()) {
             assert(CGF && "Can't access static local vars without CGF");
             return CGF->GetAddrOfStaticLocalVar(VD);
           }
@@ -979,7 +980,7 @@ FillInNullDataMemberPointers(CodeGenModule &CGM, QualType T,
       if (CGM.getTypes().isZeroInitializable(BaseDecl))
         continue;
 
-      uint64_t BaseOffset = Layout.getBaseClassOffset(BaseDecl);
+      uint64_t BaseOffset = Layout.getBaseClassOffsetInBits(BaseDecl);
       FillInNullDataMemberPointers(CGM, I->getType(),
                                    Elements, StartOffset + BaseOffset);
     }
