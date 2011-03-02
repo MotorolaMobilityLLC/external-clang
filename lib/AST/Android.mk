@@ -11,7 +11,8 @@ TBLGEN_TABLES :=    \
 	Attrs.inc	\
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
-    DiagnosticCommonKinds.inc	\
+	DiagnosticCommonKinds.inc	\
+	DiagnosticSemaKinds.inc	\
 	StmtNodes.inc
 
 clang_ast_SRC_FILES :=	\

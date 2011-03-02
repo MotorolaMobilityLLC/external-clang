@@ -43,6 +43,7 @@ clang_codegen_SRC_FILES :=	\
 	CodeGenAction.cpp	\
 	CodeGenFunction.cpp	\
 	CodeGenModule.cpp	\
+	CodeGenTBAA.cpp	\
 	CodeGenTypes.cpp	\
 	ItaniumCXXABI.cpp	\
 	Mangle.cpp	\
