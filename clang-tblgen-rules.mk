@@ -23,6 +23,13 @@ $(intermediates)/include/clang/Basic/AttrList.inc: $(CLANG_ROOT_PATH)/include/cl
 	$(call transform-host-td-to-out,clang-attr-list)
 endif
 
+ifneq ($(findstring AttrSpellings.inc,$(TBLGEN_TABLES)),)
+    LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Lex/AttrSpellings.inc
+$(intermediates)/include/clang/Lex/AttrSpellings.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(TBLGEN)
+	@echo "Building Clang attribute spelling list with tblgen"
+	$(call transform-host-td-to-out,clang-attr-spelling-list)
+endif
+
 ifneq ($(findstring AttrPCHRead.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Serialization/AttrPCHRead.inc
 $(intermediates)/include/clang/Serialization/AttrPCHRead.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(TBLGEN)

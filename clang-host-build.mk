@@ -4,6 +4,10 @@ LOCAL_CFLAGS :=	\
 	-Wno-long-long	\
 	$(LOCAL_CFLAGS)
 
+LOCAL_CPPFLAGS := \
+	-Wno-sign-promo \
+	$(LOCAL_CPPFLAGS)
+
 # Make sure bionic is first so we can include system headers.
 LOCAL_C_INCLUDES :=	\
 	$(CLANG_ROOT_PATH)/include	\
