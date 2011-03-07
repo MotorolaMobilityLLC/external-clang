@@ -7,7 +7,6 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/Analysis \
   lib/AST \
   lib/Basic \
-  lib/Checker \
   lib/CodeGen \
   lib/Driver \
   lib/Frontend \
@@ -18,6 +17,9 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/Rewrite \
   lib/Sema \
   lib/Serialization \
+  lib/StaticAnalyzer/Checkers \
+  lib/StaticAnalyzer/Core \
+  lib/StaticAnalyzer/Frontend \
   tools/driver \
   ))
 

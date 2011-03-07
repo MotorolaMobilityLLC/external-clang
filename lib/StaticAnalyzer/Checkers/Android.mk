@@ -1,98 +1,55 @@
 LOCAL_PATH:= $(call my-dir)
 
-# For the host only
-# =====================================================
-include $(CLEAR_VARS)
-include $(CLEAR_TBLGEN_VARS)
-
-LOCAL_MODULE:= libclangChecker
-
-LOCAL_MODULE_TAGS := optional
-
-TBLGEN_TABLES := \
+clang_static_analyzer_checkers_TBLGEN_TABLES := \
+  AttrKinds.inc \
   AttrList.inc \
   Attrs.inc \
+  Checkers.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   StmtNodes.inc
-#  AttrPCHRead.inc \
-#  AttrPCHWrite.inc \
-#  DiagnosticFrontendKinds.inc \
-#  Attrs.inc \
-#  Version.inc
 
-clang_checker_SRC_FILES := \
+clang_static_analyzer_checkers_SRC_FILES := \
   AdjustedReturnValueChecker.cpp \
-  AggExprVisitor.cpp \
-  AnalysisConsumer.cpp \
-  AnalysisManager.cpp \
   AnalyzerStatsChecker.cpp \
   ArrayBoundChecker.cpp \
+  ArrayBoundCheckerV2.cpp \
   AttrNonNullChecker.cpp \
-  BasicConstraintManager.cpp \
   BasicObjCFoundationChecks.cpp \
-  BasicStore.cpp \
-  BasicValueFactory.cpp \
-  BugReporter.cpp \
-  BugReporterVisitors.cpp \
   BuiltinFunctionChecker.cpp \
-  CFRefCount.cpp \
+  CStringChecker.cpp \
   CallAndMessageChecker.cpp \
   CastSizeChecker.cpp \
   CastToStructChecker.cpp \
-  CheckDeadStores.cpp \
   CheckObjCDealloc.cpp \
   CheckObjCInstMethSignature.cpp \
   CheckSecuritySyntaxOnly.cpp \
   CheckSizeofPointer.cpp \
-  Checker.cpp \
-  CheckerHelpers.cpp \
   ChrootChecker.cpp \
-  CocoaConventions.cpp \
-  CStringChecker.cpp \
+  ClangSACheckerProvider.cpp \
+  DeadStoresChecker.cpp \
+  DebugCheckers.cpp \
   DereferenceChecker.cpp \
   DivZeroChecker.cpp \
-  Environment.cpp \
-  ExplodedGraph.cpp \
   FixedAddressChecker.cpp \
-  FlatStore.cpp \
-  FrontendActions.cpp \
-  GRBlockCounter.cpp \
-  GRCXXExprEngine.cpp \
-  GRCoreEngine.cpp \
-  GRExprEngine.cpp \
-  GRExprEngineExperimentalChecks.cpp \
-  GRState.cpp \
-  HTMLDiagnostics.cpp \
   IdempotentOperationChecker.cpp \
   LLVMConventionsChecker.cpp \
   MacOSXAPIChecker.cpp \
   MallocChecker.cpp \
-  ManagerRegistry.cpp \
-  MemRegion.cpp \
   NSAutoreleasePoolChecker.cpp \
   NSErrorChecker.cpp \
   NoReturnFunctionChecker.cpp \
   OSAtomicChecker.cpp \
-  ObjCUnusedIVarsChecker.cpp \
   ObjCAtSyncChecker.cpp \
-  PathDiagnostic.cpp \
-  PlistDiagnostics.cpp \
+  ObjCSelfInitChecker.cpp \
+  ObjCUnusedIVarsChecker.cpp \
   PointerArithChecker.cpp \
   PointerSubChecker.cpp \
   PthreadLockChecker.cpp \
-  RangeConstraintManager.cpp \
-  RegionStore.cpp \
   ReturnPointerRangeChecker.cpp \
   ReturnUndefChecker.cpp \
-  SVals.cpp \
-  SValuator.cpp \
-  SimpleConstraintManager.cpp \
-  SimpleSValuator.cpp \
-  StackAddrLeakChecker.cpp \
-  Store.cpp \
+  StackAddrEscapeChecker.cpp \
   StreamChecker.cpp \
-  SymbolManager.cpp \
   UndefBranchChecker.cpp \
   UndefCapturedBlockVarChecker.cpp \
   UndefResultChecker.cpp \
@@ -100,11 +57,20 @@ clang_checker_SRC_FILES := \
   UndefinedAssignmentChecker.cpp \
   UnixAPIChecker.cpp \
   UnreachableCodeChecker.cpp \
-  VLASizeChecker.cpp \
-  ValueManager.cpp
+  VLASizeChecker.cpp
 
-LOCAL_SRC_FILES := $(clang_checker_SRC_FILES)
+# For the host only
+# =====================================================
+include $(CLEAR_VARS)
+include $(CLEAR_TBLGEN_VARS)
 
+TBLGEN_TABLES := $(clang_static_analyzer_checkers_TBLGEN_TABLES)
+
+LOCAL_SRC_FILES := $(clang_static_analyzer_checkers_SRC_FILES)
+
+LOCAL_MODULE:= libclangStaticAnalyzerCheckers
+
+LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)

@@ -51,6 +51,16 @@ $(intermediates)/include/clang/AST/Attrs.inc: $(CLANG_ROOT_PATH)/include/clang/B
 	$(call transform-host-td-to-out,clang-attr-classes)
 endif
 
+ifneq ($(findstring Checkers.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/Checkers.inc
+$(intermediates)/Checkers.inc: \
+  $(CLANG_ROOT_PATH)/lib/StaticAnalyzer/Checkers/Checkers.td \
+  $(CLANG_ROOT_PATH)/include/clang/StaticAnalyzer/Checkers/CheckerBase.td \
+  $(TBLGEN)
+	@echo "Building Clang static analyzer checkers list with tblgen"
+	$(call transform-host-td-to-out,clang-sa-checkers)
+endif
+
 ifneq ($(filter Diagnostic%Kinds.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(addprefix $(intermediates)/include/clang/Basic/,$(filter Diagnostic%Kinds.inc,$(TBLGEN_TABLES)))
 $(intermediates)/include/clang/Basic/Diagnostic%Kinds.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Diagnostic.td $(TBLGEN)
