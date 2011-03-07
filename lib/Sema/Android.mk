@@ -47,6 +47,7 @@ clang_sema_SRC_FILES :=	\
 	SemaTemplateDeduction.cpp	\
 	SemaTemplateInstantiate.cpp	\
 	SemaTemplateInstantiateDecl.cpp	\
+	SemaTemplateVariadic.cpp	\
 	SemaType.cpp	\
 	TargetAttributesSema.cpp
 

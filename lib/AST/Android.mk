@@ -24,6 +24,7 @@ clang_ast_SRC_FILES :=	\
 	AttrImpl.cpp	\
 	CXXInheritance.cpp	\
 	Decl.cpp	\
+	DeclarationName.cpp	\
 	DeclBase.cpp	\
 	DeclCXX.cpp	\
 	DeclFriend.cpp	\
@@ -31,15 +32,18 @@ clang_ast_SRC_FILES :=	\
 	DeclObjC.cpp	\
 	DeclPrinter.cpp	\
 	DeclTemplate.cpp	\
-	DeclarationName.cpp	\
+	DumpXML.cpp	\
 	Expr.cpp	\
-	ExprCXX.cpp	\
 	ExprClassification.cpp	\
 	ExprConstant.cpp	\
-	FullExpr.cpp	\
-	ItaniumCXXABI.cpp	\
+	ExprCXX.cpp	\
+	ExternalASTSource.cpp	\
 	InheritViz.cpp	\
+	ItaniumCXXABI.cpp	\
+	ItaniumMangle.cpp	\
+	Mangle.cpp	\
 	MicrosoftCXXABI.cpp	\
+	MicrosoftMangle.cpp	\
 	NestedNameSpecifier.cpp	\
 	ParentMap.cpp	\
 	RecordLayout.cpp	\
