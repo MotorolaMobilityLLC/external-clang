@@ -18,35 +18,36 @@ clang_codegen_SRC_FILES :=	\
 	BackendUtil.cpp	\
 	CGBlocks.cpp	\
 	CGBuiltin.cpp	\
-	CGCXX.cpp	\
 	CGCall.cpp	\
 	CGClass.cpp	\
+	CGCXX.cpp	\
+	CGCXXABI.cpp	\
+	CGCleanup.cpp	\
 	CGDebugInfo.cpp	\
 	CGDecl.cpp	\
 	CGDeclCXX.cpp	\
 	CGException.cpp	\
 	CGExpr.cpp	\
 	CGExprAgg.cpp	\
-	CGExprCXX.cpp	\
 	CGExprComplex.cpp	\
 	CGExprConstant.cpp	\
+	CGExprCXX.cpp	\
 	CGExprScalar.cpp	\
 	CGObjC.cpp	\
 	CGObjCGNU.cpp	\
 	CGObjCMac.cpp	\
-	CGRTTI.cpp	\
 	CGRecordLayoutBuilder.cpp	\
+	CGRTTI.cpp	\
 	CGStmt.cpp	\
 	CGTemporaries.cpp	\
-	CGVTT.cpp	\
 	CGVTables.cpp	\
+	CGVTT.cpp	\
 	CodeGenAction.cpp	\
 	CodeGenFunction.cpp	\
 	CodeGenModule.cpp	\
 	CodeGenTBAA.cpp	\
 	CodeGenTypes.cpp	\
 	ItaniumCXXABI.cpp	\
-	Mangle.cpp	\
 	MicrosoftCXXABI.cpp	\
 	ModuleBuilder.cpp	\
 	TargetInfo.cpp
@@ -54,7 +55,6 @@ clang_codegen_SRC_FILES :=	\
 LOCAL_SRC_FILES := $(clang_codegen_SRC_FILES)
 
 LOCAL_MODULE:= libclangCodeGen
-LOCAL_MODULE_TAGS := optional
 
 LOCAL_MODULE_TAGS := optional
 

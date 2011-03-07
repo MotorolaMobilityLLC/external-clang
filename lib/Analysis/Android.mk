@@ -16,14 +16,17 @@ TBLGEN_TABLES :=    \
 clang_analysis_SRC_FILES :=	\
 	AnalysisContext.cpp	\
 	CFG.cpp	\
+	CFGReachabilityAnalysis.cpp	\
 	CFGStmtMap.cpp	\
+	CocoaConventions.cpp	\
 	FormatString.cpp	\
 	LiveVariables.cpp	\
 	PrintfFormatString.cpp	\
 	PseudoConstantAnalysis.cpp	\
 	ReachableCode.cpp	\
 	ScanfFormatString.cpp	\
-	UninitializedValues.cpp
+	UninitializedValues.cpp	\
+	UninitializedValuesV2.cpp
 
 
 LOCAL_SRC_FILES := $(clang_analysis_SRC_FILES)

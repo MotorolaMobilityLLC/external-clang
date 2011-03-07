@@ -33,23 +33,24 @@ LOCAL_STATIC_LIBRARIES := \
   libclangCodeGen \
   libclangParse \
   libclangSema \
-  libclangChecker \
+  libclangStaticAnalyzerFrontend \
+  libclangStaticAnalyzerCheckers \
+  libclangStaticAnalyzerCore \
   libclangAnalysis \
   libclangIndex \
   libclangRewrite \
   libclangAST \
   libclangLex \
   libclangBasic \
-  libLLVMARMAsmPrinter \
   libLLVMARMAsmParser \
   libLLVMARMCodeGen \
   libLLVMARMDisassembler \
   libLLVMX86Info \
-  libLLVMX86AsmPrinter \
   libLLVMX86AsmParser \
   libLLVMX86CodeGen \
   libLLVMX86Disassembler \
-  libLLVMX86InstPrinter \
+  libLLVMX86AsmPrinter \
+  libLLVMX86Utils \
   libLLVMARMInfo \
   libLLVMAsmParser \
   libLLVMAsmPrinter \
@@ -68,7 +69,6 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMAnalysis \
   libLLVMCore \
   libLLVMSupport \
-  libLLVMSystem \
   libLLVMTarget
 
 LOCAL_LDLIBS += -lpthread -lm -ldl

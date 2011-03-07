@@ -21,7 +21,9 @@ clang_basic_SRC_FILES :=	\
 	Builtins.cpp	\
 	ConvertUTF.c	\
 	Diagnostic.cpp	\
+	DiagnosticIDs.cpp	\
 	FileManager.cpp	\
+	FileSystemStatCache.cpp	\
 	IdentifierTable.cpp	\
 	SourceLocation.cpp	\
 	SourceManager.cpp	\

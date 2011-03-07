@@ -33,9 +33,11 @@ clang_frontend_SRC_FILES := \
   FrontendAction.cpp \
   FrontendActions.cpp \
   FrontendOptions.cpp \
+  HeaderIncludeGen.cpp \
   InitHeaderSearch.cpp \
   InitPreprocessor.cpp \
   LangStandards.cpp \
+  MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
   StmtXML.cpp \
   TextDiagnosticBuffer.cpp \
