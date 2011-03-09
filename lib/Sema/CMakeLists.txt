@@ -1,5 +1,3 @@
-set(LLVM_NO_RTTI 1)
-
 set(LLVM_USED_LIBS clangBasic clangAST clangLex clangAnalysis)
 
 add_clang_library(clangSema
@@ -33,6 +31,7 @@ add_clang_library(clangSema
   SemaTemplateDeduction.cpp
   SemaTemplateInstantiate.cpp
   SemaTemplateInstantiateDecl.cpp
+  SemaTemplateVariadic.cpp
   SemaType.cpp
   TargetAttributesSema.cpp
   )

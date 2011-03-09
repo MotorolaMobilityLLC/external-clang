@@ -14,7 +14,7 @@ ifndef CLANG_LEVEL
 
 IS_TOP_LEVEL := 1
 CLANG_LEVEL := .
-DIRS := include lib tools runtime docs
+DIRS := include lib tools runtime docs unittests
 
 PARALLEL_DIRS :=
 
@@ -48,7 +48,7 @@ CPP.Flags += -DCLANG_VENDOR='"$(CLANG_VENDOR) "'
 endif
 
 # Disable -fstrict-aliasing. Darwin disables it by default (and LLVM doesn't
-# work with it enabled with GCC), Clang/llvm-gc don't support it yet, and newer
+# work with it enabled with GCC), Clang/llvm-gcc don't support it yet, and newer
 # GCC's have false positive warnings with it on Linux (which prove a pain to
 # fix). For example:
 #   http://gcc.gnu.org/PR41874
@@ -64,10 +64,12 @@ ifeq ($(IS_TOP_LEVEL),1)
 
 ifneq ($(PROJ_SRC_ROOT),$(PROJ_OBJ_ROOT))
 $(RecursiveTargets)::
-	$(Verb) if [ ! -f test/Makefile ]; then \
-	  $(MKDIR) test; \
-	  $(CP) $(PROJ_SRC_DIR)/test/Makefile test/Makefile; \
-	fi
+	$(Verb) for dir in test unittests; do \
+	  if [ ! -f $${dir}/Makefile ]; then \
+	    $(MKDIR) $${dir}; \
+	    $(CP) $(PROJ_SRC_DIR)/$${dir}/Makefile $${dir}/Makefile; \
+	  fi \
+	done
 endif
 
 test::

@@ -248,6 +248,10 @@ namespace clang {
     /// \brief Read any preallocated preprocessed entities from the external
     /// source.
     virtual void ReadPreprocessedEntities() = 0;
+    
+    /// \brief Read the preprocessed entity at the given offset.
+    virtual PreprocessedEntity *
+    ReadPreprocessedEntityAtOffset(uint64_t Offset) = 0;
   };
   
   /// \brief A record of the steps taken while preprocessing a source file,
@@ -294,7 +298,7 @@ namespace clang {
     iterator end(bool OnlyLocalEntities = false);
     const_iterator begin(bool OnlyLocalEntities = false) const;
     const_iterator end(bool OnlyLocalEntities = false) const;
-    
+
     /// \brief Add a new preprocessed entity to this record.
     void addPreprocessedEntity(PreprocessedEntity *Entity);
     
@@ -302,6 +306,11 @@ namespace clang {
     void SetExternalSource(ExternalPreprocessingRecordSource &Source,
                            unsigned NumPreallocatedEntities);
 
+    /// \brief Retrieve the external source for preprocessed entities.
+    ExternalPreprocessingRecordSource *getExternalSource() const {
+      return ExternalSource;
+    }
+    
     unsigned getNumPreallocatedEntities() const {
       return NumPreallocatedEntities;
     }
@@ -325,9 +334,8 @@ namespace clang {
     MacroDefinition *findMacroDefinition(const MacroInfo *MI);
     
     virtual void MacroExpands(const Token &Id, const MacroInfo* MI);
-    virtual void MacroDefined(const IdentifierInfo *II, const MacroInfo *MI);
-    virtual void MacroUndefined(SourceLocation Loc, const IdentifierInfo *II,
-                                const MacroInfo *MI);
+    virtual void MacroDefined(const Token &Id, const MacroInfo *MI);
+    virtual void MacroUndefined(const Token &Id, const MacroInfo *MI);
     virtual void InclusionDirective(SourceLocation HashLoc,
                                     const Token &IncludeTok,
                                     llvm::StringRef FileName,

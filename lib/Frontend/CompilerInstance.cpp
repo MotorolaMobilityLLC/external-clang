@@ -27,15 +27,16 @@
 #include "clang/Frontend/Utils.h"
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
-#include "llvm/LLVMContext.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Timer.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Path.h"
-#include "llvm/System/Program.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/system_error.h"
 using namespace clang;
 
 CompilerInstance::CompilerInstance()
@@ -43,10 +44,6 @@ CompilerInstance::CompilerInstance()
 }
 
 CompilerInstance::~CompilerInstance() {
-}
-
-void CompilerInstance::setLLVMContext(llvm::LLVMContext *Value) {
-  LLVMContext.reset(Value);
 }
 
 void CompilerInstance::setInvocation(CompilerInvocation *Value) {
@@ -122,7 +119,8 @@ llvm::IntrusiveRefCntPtr<Diagnostic>
 CompilerInstance::createDiagnostics(const DiagnosticOptions &Opts,
                                     int Argc, const char* const *Argv,
                                     DiagnosticClient *Client) {
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(new Diagnostic());
+  llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(new Diagnostic(DiagID));
 
   // Create the diagnostic client for reporting errors or for
   // implementing -verify.
@@ -147,14 +145,13 @@ CompilerInstance::createDiagnostics(const DiagnosticOptions &Opts,
 // File Manager
 
 void CompilerInstance::createFileManager() {
-  FileMgr.reset(new FileManager());
+  FileMgr.reset(new FileManager(getFileSystemOpts()));
 }
 
 // Source Manager
 
-void CompilerInstance::createSourceManager(FileManager &FileMgr,
-                                           const FileSystemOptions &FSOpts) {
-  SourceMgr.reset(new SourceManager(getDiagnostics(), FileMgr, FSOpts));
+void CompilerInstance::createSourceManager(FileManager &FileMgr) {
+  SourceMgr.reset(new SourceManager(getDiagnostics(), FileMgr));
 }
 
 // Preprocessor
@@ -163,8 +160,8 @@ void CompilerInstance::createPreprocessor() {
   PP.reset(createPreprocessor(getDiagnostics(), getLangOpts(),
                               getPreprocessorOpts(), getHeaderSearchOpts(),
                               getDependencyOutputOpts(), getTarget(),
-                              getFrontendOpts(), getFileSystemOpts(),
-                              getSourceManager(), getFileManager()));
+                              getFrontendOpts(), getSourceManager(),
+                              getFileManager()));
 }
 
 Preprocessor *
@@ -175,16 +172,15 @@ CompilerInstance::createPreprocessor(Diagnostic &Diags,
                                      const DependencyOutputOptions &DepOpts,
                                      const TargetInfo &Target,
                                      const FrontendOptions &FEOpts,
-                                     const FileSystemOptions &FSOpts,
                                      SourceManager &SourceMgr,
                                      FileManager &FileMgr) {
   // Create a PTH manager if we are using some form of a token cache.
   PTHManager *PTHMgr = 0;
   if (!PPOpts.TokenCache.empty())
-    PTHMgr = PTHManager::Create(PPOpts.TokenCache, FileMgr, FSOpts, Diags);
+    PTHMgr = PTHManager::Create(PPOpts.TokenCache, Diags);
 
   // Create the Preprocessor.
-  HeaderSearch *HeaderInfo = new HeaderSearch(FileMgr, FSOpts);
+  HeaderSearch *HeaderInfo = new HeaderSearch(FileMgr);
   Preprocessor *PP = new Preprocessor(Diags, LangInfo, Target,
                                       SourceMgr, *HeaderInfo, PTHMgr,
                                       /*OwnsHeaderSearch=*/true);
@@ -200,11 +196,21 @@ CompilerInstance::createPreprocessor(Diagnostic &Diags,
   if (PPOpts.DetailedRecord)
     PP->createPreprocessingRecord();
   
-  InitializePreprocessor(*PP, FSOpts, PPOpts, HSOpts, FEOpts);
+  InitializePreprocessor(*PP, PPOpts, HSOpts, FEOpts);
 
   // Handle generating dependencies, if requested.
   if (!DepOpts.OutputFile.empty())
     AttachDependencyFileGen(*PP, DepOpts);
+
+  // Handle generating header include information, if requested.
+  if (DepOpts.ShowHeaderIncludes)
+    AttachHeaderIncludeGen(*PP);
+  if (!DepOpts.HeaderIncludeOutputFile.empty()) {
+    llvm::StringRef OutputPath = DepOpts.HeaderIncludeOutputFile;
+    if (OutputPath == "-")
+      OutputPath = "";
+    AttachHeaderIncludeGen(*PP, /*ShowAllHeaders=*/true, OutputPath);
+  }
 
   return PP;
 }
@@ -223,11 +229,13 @@ void CompilerInstance::createASTContext() {
 
 void CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
                                                   bool DisablePCHValidation,
+                                                  bool DisableStatCache,
                                                  void *DeserializationListener){
   llvm::OwningPtr<ExternalASTSource> Source;
   bool Preamble = getPreprocessorOpts().PrecompiledPreambleBytes.first != 0;
   Source.reset(createPCHExternalASTSource(Path, getHeaderSearchOpts().Sysroot,
-                                          DisablePCHValidation,
+                                          DisablePCHValidation, 
+                                          DisableStatCache,
                                           getPreprocessor(), getASTContext(),
                                           DeserializationListener,
                                           Preamble));
@@ -238,6 +246,7 @@ ExternalASTSource *
 CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
                                              const std::string &Sysroot,
                                              bool DisablePCHValidation,
+                                             bool DisableStatCache,
                                              Preprocessor &PP,
                                              ASTContext &Context,
                                              void *DeserializationListener,
@@ -245,7 +254,7 @@ CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
   llvm::OwningPtr<ASTReader> Reader;
   Reader.reset(new ASTReader(PP, &Context,
                              Sysroot.empty() ? 0 : Sysroot.c_str(),
-                             DisablePCHValidation));
+                             DisablePCHValidation, DisableStatCache));
 
   Reader->setDeserializationListener(
             static_cast<ASTDeserializationListener *>(DeserializationListener));
@@ -277,8 +286,7 @@ static bool EnableCodeCompletion(Preprocessor &PP,
                                  unsigned Column) {
   // Tell the source manager to chop off the given file at a specific
   // line and column.
-  const FileEntry *Entry = PP.getFileManager().getFile(Filename,
-                                                       PP.getFileSystemOpts());
+  const FileEntry *Entry = PP.getFileManager().getFile(Filename);
   if (!Entry) {
     PP.getDiagnostics().Report(diag::err_fe_invalid_code_complete_file)
       << Filename;
@@ -381,16 +389,17 @@ CompilerInstance::createDefaultOutputFile(bool Binary,
                                           llvm::StringRef InFile,
                                           llvm::StringRef Extension) {
   return createOutputFile(getFrontendOpts().OutputFile, Binary,
-                          InFile, Extension);
+                          /*RemoveFileOnSignal=*/true, InFile, Extension);
 }
 
 llvm::raw_fd_ostream *
 CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
-                                   bool Binary,
+                                   bool Binary, bool RemoveFileOnSignal,
                                    llvm::StringRef InFile,
                                    llvm::StringRef Extension) {
   std::string Error, OutputPathName, TempPathName;
   llvm::raw_fd_ostream *OS = createOutputFile(OutputPath, Error, Binary,
+                                              RemoveFileOnSignal,
                                               InFile, Extension,
                                               &OutputPathName,
                                               &TempPathName);
@@ -412,6 +421,7 @@ llvm::raw_fd_ostream *
 CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
                                    std::string &Error,
                                    bool Binary,
+                                   bool RemoveFileOnSignal,
                                    llvm::StringRef InFile,
                                    llvm::StringRef Extension,
                                    std::string *ResultPathName,
@@ -434,7 +444,8 @@ CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
     llvm::sys::Path OutPath(OutFile);
     // Only create the temporary if we can actually write to OutPath, otherwise
     // we want to fail early.
-    if (!OutPath.exists() ||
+    bool Exists;
+    if ((llvm::sys::fs::exists(OutPath.str(), Exists) || !Exists) ||
         (OutPath.isRegularFile() && OutPath.canWrite())) {
       // Create a temporary file.
       llvm::sys::Path TempPath(OutFile);
@@ -454,7 +465,8 @@ CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
     return 0;
 
   // Make sure the out stream file gets removed if we crash.
-  llvm::sys::RemoveFileOnSignal(llvm::sys::Path(OSFile));
+  if (RemoveFileOnSignal)
+    llvm::sys::RemoveFileOnSignal(llvm::sys::Path(OSFile));
 
   if (ResultPathName)
     *ResultPathName = OutFile;
@@ -468,35 +480,36 @@ CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
 
 bool CompilerInstance::InitializeSourceManager(llvm::StringRef InputFile) {
   return InitializeSourceManager(InputFile, getDiagnostics(), getFileManager(),
-                                 getFileSystemOpts(),
                                  getSourceManager(), getFrontendOpts());
 }
 
 bool CompilerInstance::InitializeSourceManager(llvm::StringRef InputFile,
                                                Diagnostic &Diags,
                                                FileManager &FileMgr,
-                                               const FileSystemOptions &FSOpts,
                                                SourceManager &SourceMgr,
                                                const FrontendOptions &Opts) {
-  // Figure out where to get and map in the main file.
-  if (InputFile != "-") {
-    const FileEntry *File = FileMgr.getFile(InputFile, FSOpts);
+  // Figure out where to get and map in the main file, unless it's already
+  // been created (e.g., by a precompiled preamble).
+  if (!SourceMgr.getMainFileID().isInvalid()) {
+    // Do nothing: the main file has already been set.
+  } else if (InputFile != "-") {
+    const FileEntry *File = FileMgr.getFile(InputFile);
     if (!File) {
       Diags.Report(diag::err_fe_error_reading) << InputFile;
       return false;
     }
     SourceMgr.createMainFileID(File);
   } else {
-    llvm::MemoryBuffer *SB = llvm::MemoryBuffer::getSTDIN();
-    if (!SB) {
+    llvm::OwningPtr<llvm::MemoryBuffer> SB;
+    if (llvm::MemoryBuffer::getSTDIN(SB)) {
+      // FIXME: Give ec.message() in this diag.
       Diags.Report(diag::err_fe_error_reading_stdin);
       return false;
     }
     const FileEntry *File = FileMgr.getVirtualFile(SB->getBufferIdentifier(),
-                                                   SB->getBufferSize(), 0,
-                                                   FSOpts);
+                                                   SB->getBufferSize(), 0);
     SourceMgr.createMainFileID(File);
-    SourceMgr.overrideFileContents(File, SB);
+    SourceMgr.overrideFileContents(File, SB.take());
   }
 
   assert(!SourceMgr.getMainFileID().isInvalid() &&
@@ -552,9 +565,10 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
   }
 
   if (getDiagnosticOpts().ShowCarets) {
-    unsigned NumWarnings = getDiagnostics().getNumWarnings();
-    unsigned NumErrors = getDiagnostics().getNumErrors() - 
-                               getDiagnostics().getNumErrorsSuppressed();
+    // We can have multiple diagnostics sharing one diagnostic client.
+    // Get the total number of warnings/errors from the client.
+    unsigned NumWarnings = getDiagnostics().getClient()->getNumWarnings();
+    unsigned NumErrors = getDiagnostics().getClient()->getNumErrors();
     
     if (NumWarnings)
       OS << NumWarnings << " warning" << (NumWarnings == 1 ? "" : "s");
@@ -571,15 +585,7 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
     OS << "\n";
   }
 
-  // Return the appropriate status when verifying diagnostics.
-  //
-  // FIXME: If we could make getNumErrors() do the right thing, we wouldn't need
-  // this.
-  if (getDiagnosticOpts().VerifyDiagnostics)
-    return !static_cast<VerifyDiagnosticsClient&>(
-      getDiagnosticClient()).HadErrors();
-
-  return !getDiagnostics().getNumErrors();
+  return !getDiagnostics().getClient()->getNumErrors();
 }
 
 

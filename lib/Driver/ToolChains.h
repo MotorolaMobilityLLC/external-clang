@@ -176,6 +176,18 @@ public:
             getTriple().getArch() == llvm::Triple::x86_64);
 #endif
   }
+  virtual bool IsStrictAliasingDefault() const {
+#ifdef DISABLE_DEFAULT_STRICT_ALIASING
+    return false;
+#else
+    return ToolChain::IsStrictAliasingDefault();
+#endif
+  }
+  
+  virtual bool IsObjCDefaultSynthPropertiesDefault() const {
+    return false;
+  }
+
   virtual bool IsObjCNonFragileABIDefault() const {
     // Non-fragile ABI is default for everything but i386.
     return getTriple().getArch() != llvm::Triple::x86;
@@ -199,6 +211,8 @@ public:
   }
   virtual const char *GetDefaultRelocationModel() const;
   virtual const char *GetForcedPicModel() const;
+
+  virtual bool SupportsProfiling() const;
 
   virtual bool SupportsObjCGC() const;
 
@@ -295,6 +309,13 @@ public:
 class LLVM_LIBRARY_VISIBILITY FreeBSD : public Generic_ELF {
 public:
   FreeBSD(const HostInfo &Host, const llvm::Triple& Triple);
+
+  virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
+};
+
+class LLVM_LIBRARY_VISIBILITY NetBSD : public Generic_ELF {
+public:
+  NetBSD(const HostInfo &Host, const llvm::Triple& Triple);
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA) const;
 };

@@ -3,12 +3,12 @@
 
 void bar(id(^)(void));
 void foo(id <NSObject>(^objectCreationBlock)(void)) {
-    return bar(objectCreationBlock); // expected-warning{{incompatible pointer types converting 'id<NSObject> (^)()' to type 'id (^)()'}}
+    return bar(objectCreationBlock); // OK
 }
 
 void bar2(id(*)(void));
 void foo2(id <NSObject>(*objectCreationBlock)(void)) {
-    return bar2(objectCreationBlock); // expected-warning{{incompatible pointer types converting 'id<NSObject> (*)()' to type 'id (*)()'}}
+    return bar2(objectCreationBlock); // expected-warning{{incompatible pointer types passing 'id<NSObject> (*)()' to parameter of type 'id (*)()'}}
 }
 
 void bar3(id(*)()); // expected-note{{candidate function}}
@@ -73,4 +73,48 @@ namespace N1 {
         test2();
       });
   }
+}
+
+// Make sure we successfully instantiate the copy constructor of a
+// __block variable's type.
+namespace N2 {
+  template <int n> struct A {
+    A() {}
+    A(const A &other) {
+      int invalid[-n]; // expected-error 2 {{array with a negative size}}
+    }
+  };
+
+  void test1() {
+    __block A<1> x; // expected-note {{requested here}}
+  }
+
+  template <int n> void test2() {
+    __block A<n> x; // expected-note {{requested here}}
+  }
+  template void test2<2>();
+}
+
+// Handle value-dependent block declaration references.
+namespace N3 {
+  template<int N> struct X { };
+
+  template<int N>
+  void f() {
+    X<N> xN = ^() { return X<N>(); }();
+  }
+}
+
+// rdar://8979379
+
+@interface A
+@end
+
+@interface B : A
+@end
+
+void f(int (^bl)(A* a)); // expected-note {{candidate function not viable: no known conversion from 'int (^)(B *)' to 'int (^)(A *)' for 1st argument}}
+
+void g() {
+  f(^(B* b) { return 0; }); // expected-error {{no matching function for call to 'f'}}
 }

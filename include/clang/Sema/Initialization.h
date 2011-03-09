@@ -64,6 +64,8 @@ public:
     EK_Temporary,
     /// \brief The entity being initialized is a base member subobject.
     EK_Base,
+    /// \brief The initialization is being done by a delegating constructor.
+    EK_Delegation,
     /// \brief The entity being initialized is an element of a vector.
     /// or vector.
     EK_VectorElement,
@@ -210,6 +212,11 @@ public:
   static InitializedEntity InitializeBase(ASTContext &Context,
                                           CXXBaseSpecifier *Base,
                                           bool IsInheritedVirtualBase);
+
+  /// \brief Create the initialization entity for a delegated constructor.
+  static InitializedEntity InitializeDelegation(QualType Type) {
+    return InitializedEntity(EK_Delegation, SourceLocation(), Type);
+  }
   
   /// \brief Create the initialization entity for a member subobject.
   static InitializedEntity InitializeMember(FieldDecl *Member,
@@ -217,6 +224,12 @@ public:
     return InitializedEntity(Member, Parent);
   }
   
+  /// \brief Create the initialization entity for a member subobject.
+  static InitializedEntity InitializeMember(IndirectFieldDecl *Member,
+                                      const InitializedEntity *Parent = 0) {
+    return InitializedEntity(Member->getAnonField(), Parent);
+  }
+
   /// \brief Create the initialization entity for an array element.
   static InitializedEntity InitializeElement(ASTContext &Context, 
                                              unsigned Index, 
@@ -461,7 +474,10 @@ public:
     CAssignment,
 
     /// \brief String initialization
-    StringInit
+    StringInit,
+
+    /// \brief Array initialization from another array (GNU C extension).
+    ArrayInit
   };
   
   /// \brief Describes the kind of a particular step in an initialization
@@ -507,7 +523,10 @@ public:
     SK_StringInit,
     /// \brief An initialization that "converts" an Objective-C object
     /// (not a point to an object) to another Objective-C object type.
-    SK_ObjCObjectConversion
+    SK_ObjCObjectConversion,
+    /// \brief Array initialization (from an array rvalue).
+    /// This is a GNU C extension.
+    SK_ArrayInit
   };
   
   /// \brief A single step in the initialization sequence.
@@ -557,6 +576,10 @@ public:
     /// \brief Array must be initialized with an initializer list or a 
     /// string literal.
     FK_ArrayNeedsInitListOrStringLiteral,
+    /// \brief Array type mismatch.
+    FK_ArrayTypeMismatch,
+    /// \brief Non-constant array initializer
+    FK_NonConstantArrayInit,
     /// \brief Cannot resolve the address of an overloaded function.
     FK_AddressOfOverloadFailed,
     /// \brief Overloading due to reference initialization failed.
@@ -769,6 +792,9 @@ public:
   /// always a no-op.
   void AddObjCObjectConversionStep(QualType T);
 
+  /// \brief Add an array initialization step.
+  void AddArrayInitStep(QualType T);
+
   /// \brief Note that this initialization sequence failed.
   void SetFailed(FailureKind Failure) {
     SequenceKind = FailedSequence;
@@ -785,12 +811,18 @@ public:
     return FailedCandidateSet;
   }
 
+  /// brief Get the overloading result, for when the initialization
+  /// sequence failed due to a bad overload.
+  OverloadingResult getFailedOverloadResult() const {
+    return FailedOverloadResult;
+  }
+
   /// \brief Determine why initialization failed.
   FailureKind getFailureKind() const {
     assert(getKind() == FailedSequence && "Not an initialization failure!");
     return Failure;
   }
-  
+
   /// \brief Dump a representation of this initialization sequence to 
   /// the given stream, for debugging purposes.
   void dump(llvm::raw_ostream &OS) const;

@@ -283,27 +283,20 @@ void USRGenerator::VisitNamespaceAliasDecl(NamespaceAliasDecl *D) {
 }
 
 void USRGenerator::VisitObjCMethodDecl(ObjCMethodDecl *D) {
-  Decl *container = cast<Decl>(D->getDeclContext());
-  
-  // The USR for a method declared in a class extension is based on
-  // the ObjCInterfaceDecl, not the ObjCCategoryDecl.
-  do {
-    if (ObjCCategoryDecl *CD = dyn_cast<ObjCCategoryDecl>(container))
-      if (CD->IsClassExtension()) {
-        // ID can be null with invalid code.
-        if (ObjCInterfaceDecl *ID = CD->getClassInterface()) {
-          Visit(ID);
-          break;
-        }
-        // Invalid code.  Can't generate USR.
-        IgnoreResults = true;
-        return;
-      }
-
-    Visit(container);
+  DeclContext *container = D->getDeclContext();
+  if (ObjCProtocolDecl *pd = dyn_cast<ObjCProtocolDecl>(container)) {
+    Visit(pd);
   }
-  while (false);
-  
+  else {
+    // The USR for a method declared in a class extension or category is based on
+    // the ObjCInterfaceDecl, not the ObjCCategoryDecl.
+    ObjCInterfaceDecl *ID = D->getClassInterface();
+    if (!ID) {
+      IgnoreResults = true;
+      return;
+    }
+    Visit(ID);
+  }
   // Ideally we would use 'GenObjCMethod', but this is such a hot path
   // for Objective-C code that we don't want to use
   // DeclarationName::getAsString().
@@ -488,8 +481,7 @@ bool USRGenerator::GenLoc(const Decl *D) {
   const std::pair<FileID, unsigned> &Decomposed = SM.getDecomposedLoc(L);
   const FileEntry *FE = SM.getFileEntryForID(Decomposed.first);
   if (FE) {
-    llvm::sys::Path P(FE->getName());
-    Out << P.getLast();
+    Out << llvm::sys::path::filename(FE->getName());
   }
   else {
     // This case really isn't interesting.
@@ -524,6 +516,11 @@ void USRGenerator::VisitType(QualType T) {
 
     // Mangle in ObjC GC qualifiers?
 
+    if (const PackExpansionType *Expansion = T->getAs<PackExpansionType>()) {
+      Out << 'P';
+      T = Expansion->getPattern();
+    }
+    
     if (const BuiltinType *BT = T->getAs<BuiltinType>()) {
       unsigned char c = '\0';
       switch (BT->getKind()) {
@@ -551,7 +548,8 @@ void USRGenerator::VisitType(QualType T) {
         case BuiltinType::Char_S:
         case BuiltinType::SChar:
           c = 'C'; break;
-        case BuiltinType::WChar:
+        case BuiltinType::WChar_S:
+        case BuiltinType::WChar_U:
           c = 'W'; break;
         case BuiltinType::Short:
           c = 'S'; break;
@@ -573,7 +571,6 @@ void USRGenerator::VisitType(QualType T) {
           c = 'n'; break;
         case BuiltinType::Overload:
         case BuiltinType::Dependent:
-        case BuiltinType::UndeducedAuto:
           IgnoreResults = true;
           return;
         case BuiltinType::ObjCId:
@@ -666,17 +663,23 @@ void USRGenerator::VisitTemplateParameterList(
        P != PEnd; ++P) {
     Out << '#';
     if (isa<TemplateTypeParmDecl>(*P)) {
+      if (cast<TemplateTypeParmDecl>(*P)->isParameterPack())
+        Out<< 'p';
       Out << 'T';
       continue;
     }
     
     if (NonTypeTemplateParmDecl *NTTP = dyn_cast<NonTypeTemplateParmDecl>(*P)) {
+      if (NTTP->isParameterPack())
+        Out << 'p';
       Out << 'N';
       VisitType(NTTP->getType());
       continue;
     }
     
     TemplateTemplateParmDecl *TTP = cast<TemplateTemplateParmDecl>(*P);
+    if (TTP->isParameterPack())
+      Out << 'p';
     Out << 't';
     VisitTemplateParameterList(TTP->getTemplateParameters());
   }
@@ -707,8 +710,11 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
       Visit(D);
     break;
       
+  case TemplateArgument::TemplateExpansion:
+    Out << 'P'; // pack expansion of...
+    // Fall through
   case TemplateArgument::Template:
-    VisitTemplateName(Arg.getAsTemplate());
+    VisitTemplateName(Arg.getAsTemplateOrTemplatePattern());
     break;
       
   case TemplateArgument::Expression:
@@ -716,7 +722,10 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
     break;
       
   case TemplateArgument::Pack:
-    // FIXME: Variadic templates
+    Out << 'p' << Arg.pack_size();
+    for (TemplateArgument::pack_iterator P = Arg.pack_begin(), PEnd = Arg.pack_end();
+         P != PEnd; ++P)
+      VisitTemplateArgument(*P);
     break;
       
   case TemplateArgument::Type:

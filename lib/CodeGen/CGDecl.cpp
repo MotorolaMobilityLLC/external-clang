@@ -14,6 +14,7 @@
 #include "CGDebugInfo.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
+#include "CGBlocks.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/Decl.h"
@@ -44,6 +45,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::CXXDestructor:
   case Decl::CXXConversion:
   case Decl::Field:
+  case Decl::IndirectField:
   case Decl::ObjCIvar:
   case Decl::ObjCAtDefsField:      
   case Decl::ParmVar:
@@ -68,7 +70,6 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::Friend:
   case Decl::FriendTemplate:
   case Decl::Block:
-    
     assert(0 && "Declaration not should not be in declstmts!");
   case Decl::Function:  // void X();
   case Decl::Record:    // struct/union/class X;
@@ -80,6 +81,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::UsingDirective: // using namespace X; [C++]
   case Decl::NamespaceAlias:
   case Decl::StaticAssert: // static_assert(X, ""); [C++0x]
+  case Decl::Label:        // __label__ x;
     // None of these decls require codegen support.
     return;
 
@@ -103,9 +105,6 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
 /// EmitVarDecl - This method handles emission of any variable declaration
 /// inside a function, including static vars etc.
 void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
-  if (D.hasAttr<AsmLabelAttr>())
-    CGM.ErrorUnsupported(&D, "__asm__");
-
   switch (D.getStorageClass()) {
   case SC_None:
   case SC_Auto:
@@ -144,14 +143,24 @@ static std::string GetStaticDeclName(CodeGenFunction &CGF, const VarDecl &D,
   }
   
   std::string ContextName;
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CGF.CurFuncDecl)) {
+  if (!CGF.CurFuncDecl) {
+    // Better be in a block declared in global scope.
+    const NamedDecl *ND = cast<NamedDecl>(&D);
+    const DeclContext *DC = ND->getDeclContext();
+    if (const BlockDecl *BD = dyn_cast<BlockDecl>(DC)) {
+      MangleBuffer Name;
+      CGM.getBlockMangledName(GlobalDecl(), Name, BD);
+      ContextName = Name.getString();
+    }
+    else
+      assert(0 && "Unknown context for block static var decl");
+  } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CGF.CurFuncDecl)) {
     llvm::StringRef Name = CGM.getMangledName(FD);
     ContextName = Name.str();
   } else if (isa<ObjCMethodDecl>(CGF.CurFuncDecl))
     ContextName = CGF.CurFn->getName();
   else
-    // FIXME: What about in a block??
-    assert(0 && "Unknown context for block var decl");
+    assert(0 && "Unknown context for static var decl");
   
   return ContextName + Separator + D.getNameAsString();
 }
@@ -280,8 +289,7 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   // FIXME: It is really dangerous to store this in the map; if anyone
   // RAUW's the GV uses of this constant will be invalid.
   const llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(D.getType());
-  const llvm::Type *LPtrTy =
-    llvm::PointerType::get(LTy, D.getType().getAddressSpace());
+  const llvm::Type *LPtrTy = LTy->getPointerTo(D.getType().getAddressSpace());
   DMEntry = llvm::ConstantExpr::getBitCast(GV, LPtrTy);
 
   // Emit global variable debug descriptor for static vars.
@@ -298,6 +306,15 @@ unsigned CodeGenFunction::getByRefValueLLVMField(const ValueDecl *VD) const {
   return ByRefValueInfo.find(VD)->second.second;
 }
 
+llvm::Value *CodeGenFunction::BuildBlockByrefAddress(llvm::Value *BaseAddr,
+                                                     const VarDecl *V) {
+  llvm::Value *Loc = Builder.CreateStructGEP(BaseAddr, 1, "forwarding");
+  Loc = Builder.CreateLoad(Loc);
+  Loc = Builder.CreateStructGEP(Loc, getByRefValueLLVMField(V),
+                                V->getNameAsString());
+  return Loc;
+}
+
 /// BuildByRefType - This routine changes a __block variable declared as T x
 ///   into:
 ///
@@ -312,7 +329,7 @@ unsigned CodeGenFunction::getByRefValueLLVMField(const ValueDecl *VD) const {
 ///        T x;
 ///      } x
 ///
-const llvm::Type *CodeGenFunction::BuildByRefType(const ValueDecl *D) {
+const llvm::Type *CodeGenFunction::BuildByRefType(const VarDecl *D) {
   std::pair<const llvm::Type *, unsigned> &Info = ByRefValueInfo[D];
   if (Info.first)
     return Info.first;
@@ -321,9 +338,7 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const ValueDecl *D) {
 
   std::vector<const llvm::Type *> Types;
   
-  const llvm::PointerType *Int8PtrTy = llvm::Type::getInt8PtrTy(VMContext);
-
-  llvm::PATypeHolder ByRefTypeHolder = llvm::OpaqueType::get(VMContext);
+  llvm::PATypeHolder ByRefTypeHolder = llvm::OpaqueType::get(getLLVMContext());
   
   // void *__isa;
   Types.push_back(Int8PtrTy);
@@ -337,7 +352,7 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const ValueDecl *D) {
   // int32_t __size;
   Types.push_back(Int32Ty);
 
-  bool HasCopyAndDispose = BlockRequiresCopying(Ty);
+  bool HasCopyAndDispose = getContext().BlockRequiresCopying(Ty);
   if (HasCopyAndDispose) {
     /// void *__copy_helper;
     Types.push_back(Int8PtrTy);
@@ -348,7 +363,7 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const ValueDecl *D) {
 
   bool Packed = false;
   CharUnits Align = getContext().getDeclAlign(D);
-  if (Align > CharUnits::fromQuantity(Target.getPointerAlign(0) / 8)) {
+  if (Align > getContext().toCharUnitsFromBits(Target.getPointerAlign(0))) {
     // We have to insert padding.
     
     // The struct above has 2 32-bit integers.
@@ -364,7 +379,7 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const ValueDecl *D) {
     
     unsigned NumPaddingBytes = AlignedOffsetInBytes - CurrentOffsetInBytes;
     if (NumPaddingBytes > 0) {
-      const llvm::Type *Ty = llvm::Type::getInt8Ty(VMContext);
+      const llvm::Type *Ty = llvm::Type::getInt8Ty(getLLVMContext());
       // FIXME: We need a sema error for alignment larger than the minimum of
       // the maximal stack alignmint and the alignment of malloc on the system.
       if (NumPaddingBytes > 1)
@@ -380,7 +395,7 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const ValueDecl *D) {
   // T x;
   Types.push_back(ConvertTypeForMem(Ty));
   
-  const llvm::Type *T = llvm::StructType::get(VMContext, Types, Packed);
+  const llvm::Type *T = llvm::StructType::get(getLLVMContext(), Types, Packed);
   
   cast<llvm::OpaqueType>(ByRefTypeHolder.get())->refineAbstractTypeTo(T);
   CGM.getModule().addTypeName("struct.__block_byref_" + D->getNameAsString(), 
@@ -459,14 +474,19 @@ namespace {
   struct CallCleanupFunction : EHScopeStack::Cleanup {
     llvm::Constant *CleanupFn;
     const CGFunctionInfo &FnInfo;
-    llvm::Value *Addr;
     const VarDecl &Var;
     
     CallCleanupFunction(llvm::Constant *CleanupFn, const CGFunctionInfo *Info,
-                        llvm::Value *Addr, const VarDecl *Var)
-      : CleanupFn(CleanupFn), FnInfo(*Info), Addr(Addr), Var(*Var) {}
+                        const VarDecl *Var)
+      : CleanupFn(CleanupFn), FnInfo(*Info), Var(*Var) {}
 
     void Emit(CodeGenFunction &CGF, bool IsForEH) {
+      DeclRefExpr DRE(const_cast<VarDecl*>(&Var), Var.getType(), VK_LValue,
+                      SourceLocation());
+      // Compute the address of the local variable, in case it's a byref
+      // or something.
+      llvm::Value *Addr = CGF.EmitDeclRefLValue(&DRE).getAddress();
+
       // In some cases, the type of the function argument will be different from
       // the type of the pointer. An example of this is
       // void f(void* arg);
@@ -489,47 +509,148 @@ namespace {
     CallBlockRelease(llvm::Value *Addr) : Addr(Addr) {}
 
     void Emit(CodeGenFunction &CGF, bool IsForEH) {
-      llvm::Value *V = CGF.Builder.CreateStructGEP(Addr, 1, "forwarding");
-      V = CGF.Builder.CreateLoad(V);
-      CGF.BuildBlockRelease(V);
+      CGF.BuildBlockRelease(Addr, BLOCK_FIELD_IS_BYREF);
     }
   };
 }
 
-/// EmitLocalVarDecl - Emit code and set up an entry in LocalDeclMap for a
+
+/// canEmitInitWithFewStoresAfterMemset - Decide whether we can emit the
+/// non-zero parts of the specified initializer with equal or fewer than
+/// NumStores scalar stores.
+static bool canEmitInitWithFewStoresAfterMemset(llvm::Constant *Init,
+                                                unsigned &NumStores) {
+  // Zero and Undef never requires any extra stores.
+  if (isa<llvm::ConstantAggregateZero>(Init) ||
+      isa<llvm::ConstantPointerNull>(Init) ||
+      isa<llvm::UndefValue>(Init))
+    return true;
+  if (isa<llvm::ConstantInt>(Init) || isa<llvm::ConstantFP>(Init) ||
+      isa<llvm::ConstantVector>(Init) || isa<llvm::BlockAddress>(Init) ||
+      isa<llvm::ConstantExpr>(Init))
+    return Init->isNullValue() || NumStores--;
+
+  // See if we can emit each element.
+  if (isa<llvm::ConstantArray>(Init) || isa<llvm::ConstantStruct>(Init)) {
+    for (unsigned i = 0, e = Init->getNumOperands(); i != e; ++i) {
+      llvm::Constant *Elt = cast<llvm::Constant>(Init->getOperand(i));
+      if (!canEmitInitWithFewStoresAfterMemset(Elt, NumStores))
+        return false;
+    }
+    return true;
+  }
+  
+  // Anything else is hard and scary.
+  return false;
+}
+
+/// emitStoresForInitAfterMemset - For inits that
+/// canEmitInitWithFewStoresAfterMemset returned true for, emit the scalar
+/// stores that would be required.
+static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
+                                         bool isVolatile, CGBuilderTy &Builder) {
+  // Zero doesn't require any stores.
+  if (isa<llvm::ConstantAggregateZero>(Init) ||
+      isa<llvm::ConstantPointerNull>(Init) ||
+      isa<llvm::UndefValue>(Init))
+    return;
+  
+  if (isa<llvm::ConstantInt>(Init) || isa<llvm::ConstantFP>(Init) ||
+      isa<llvm::ConstantVector>(Init) || isa<llvm::BlockAddress>(Init) ||
+      isa<llvm::ConstantExpr>(Init)) {
+    if (!Init->isNullValue())
+      Builder.CreateStore(Init, Loc, isVolatile);
+    return;
+  }
+  
+  assert((isa<llvm::ConstantStruct>(Init) || isa<llvm::ConstantArray>(Init)) &&
+         "Unknown value type!");
+  
+  for (unsigned i = 0, e = Init->getNumOperands(); i != e; ++i) {
+    llvm::Constant *Elt = cast<llvm::Constant>(Init->getOperand(i));
+    if (Elt->isNullValue()) continue;
+    
+    // Otherwise, get a pointer to the element and emit it.
+    emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
+                                 isVolatile, Builder);
+  }
+}
+
+
+/// shouldUseMemSetPlusStoresToInitialize - Decide whether we should use memset
+/// plus some stores to initialize a local variable instead of using a memcpy
+/// from a constant global.  It is beneficial to use memset if the global is all
+/// zeros, or mostly zeros and large.
+static bool shouldUseMemSetPlusStoresToInitialize(llvm::Constant *Init,
+                                                  uint64_t GlobalSize) {
+  // If a global is all zeros, always use a memset.
+  if (isa<llvm::ConstantAggregateZero>(Init)) return true;
+
+
+  // If a non-zero global is <= 32 bytes, always use a memcpy.  If it is large,
+  // do it if it will require 6 or fewer scalar stores.
+  // TODO: Should budget depends on the size?  Avoiding a large global warrants
+  // plopping in more stores.
+  unsigned StoreBudget = 6;
+  uint64_t SizeLimit = 32;
+  
+  return GlobalSize > SizeLimit && 
+         canEmitInitWithFewStoresAfterMemset(Init, StoreBudget);
+}
+
+
+/// EmitAutoVarDecl - Emit code and set up an entry in LocalDeclMap for a
 /// variable declaration with auto, register, or no storage class specifier.
 /// These turn into simple stack objects, or GlobalValues depending on target.
-void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
-                                      SpecialInitFn *SpecialInit) {
-  QualType Ty = D.getType();
-  unsigned Alignment = getContext().getDeclAlign(&D).getQuantity();
-  bool isByRef = D.hasAttr<BlocksAttr>();
-  bool needsDispose = false;
-  CharUnits Align = CharUnits::Zero();
-  bool IsSimpleConstantInitializer = false;
+void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D) {
+  AutoVarEmission emission = EmitAutoVarAlloca(D);
+  EmitAutoVarInit(emission);
+  EmitAutoVarCleanups(emission);
+}
 
-  bool NRVO = false;
-  llvm::Value *NRVOFlag = 0;
+/// EmitAutoVarAlloca - Emit the alloca and debug information for a
+/// local variable.  Does not emit initalization or destruction.
+CodeGenFunction::AutoVarEmission
+CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
+  QualType Ty = D.getType();
+
+  AutoVarEmission emission(D);
+
+  bool isByRef = D.hasAttr<BlocksAttr>();
+  emission.IsByRef = isByRef;
+
+  CharUnits alignment = getContext().getDeclAlign(&D);
+  emission.Alignment = alignment;
+
   llvm::Value *DeclPtr;
   if (Ty->isConstantSizeType()) {
     if (!Target.useGlobalsForAutomaticVariables()) {
-      NRVO = getContext().getLangOptions().ElideConstructors && 
-             D.isNRVOVariable();
-      // If this value is an array or struct, is POD, and if the initializer is
-      // a staticly determinable constant, try to optimize it (unless the NRVO
-      // is already optimizing this).
-      if (!NRVO && D.getInit() && !isByRef &&
-          (Ty->isArrayType() || Ty->isRecordType()) &&
-          Ty->isPODType() &&
+      bool NRVO = getContext().getLangOptions().ElideConstructors && 
+                  D.isNRVOVariable();
+
+      // If this value is a POD array or struct with a statically
+      // determinable constant initializer, there are optimizations we
+      // can do.
+      // TODO: we can potentially constant-evaluate non-POD structs and
+      // arrays as long as the initialization is trivial (e.g. if they
+      // have a non-trivial destructor, but not a non-trivial constructor).
+      if (D.getInit() &&
+          (Ty->isArrayType() || Ty->isRecordType()) && Ty->isPODType() &&
           D.getInit()->isConstantInitializer(getContext(), false)) {
-        // If this variable is marked 'const', emit the value as a global.
-        if (CGM.getCodeGenOpts().MergeAllConstants &&
-            Ty.isConstant(getContext())) {
-          EmitStaticVarDecl(D, llvm::GlobalValue::InternalLinkage);
-          return;
+
+        // If the variable's a const type, and it's neither an NRVO
+        // candidate nor a __block variable, emit it as a global instead.
+        if (CGM.getCodeGenOpts().MergeAllConstants && Ty.isConstQualified() &&
+            !NRVO && !isByRef) {
+          EmitStaticVarDecl(D, llvm::GlobalValue::PrivateLinkage);
+
+          emission.Address = 0; // signal this condition to later callbacks
+          assert(emission.wasEmittedAsGlobal());
+          return emission;
         }
-        
-        IsSimpleConstantInitializer = true;
+
+        // Otherwise, tell the initialization code that we're in this case.
+        emission.IsConstantAggregate = true;
       }
       
       // A normal fixed sized variable becomes an alloca in the entry block,
@@ -547,13 +668,14 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
             // Create a flag that is used to indicate when the NRVO was applied
             // to this variable. Set it to zero to indicate that NRVO was not 
             // applied.
-            const llvm::Type *BoolTy = llvm::Type::getInt1Ty(VMContext);
-            llvm::Value *Zero = llvm::ConstantInt::get(BoolTy, 0);
-            NRVOFlag = CreateTempAlloca(BoolTy, "nrvo");            
+            llvm::Value *Zero = Builder.getFalse();
+            llvm::Value *NRVOFlag = CreateTempAlloca(Zero->getType(), "nrvo");
+            EnsureInsertPoint();
             Builder.CreateStore(Zero, NRVOFlag);
             
             // Record the NRVO flag for this variable.
             NRVOFlags[&D] = NRVOFlag;
+            emission.NRVOFlag = NRVOFlag;
           }
         }
       } else {
@@ -563,11 +685,11 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
         llvm::AllocaInst *Alloc = CreateTempAlloca(LTy);
         Alloc->setName(D.getNameAsString());
 
-        Align = getContext().getDeclAlign(&D);
+        CharUnits allocaAlignment = alignment;
         if (isByRef)
-          Align = std::max(Align, 
-              CharUnits::fromQuantity(Target.getPointerAlign(0) / 8));
-        Alloc->setAlignment(Align.getQuantity());
+          allocaAlignment = std::max(allocaAlignment, 
+              getContext().toCharUnitsFromBits(Target.getPointerAlign(0)));
+        Alloc->setAlignment(allocaAlignment.getQuantity());
         DeclPtr = Alloc;
       }
     } else {
@@ -586,8 +708,7 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
 
     if (!DidCallStackSave) {
       // Save the stack.
-      const llvm::Type *LTy = llvm::Type::getInt8PtrTy(VMContext);
-      llvm::Value *Stack = CreateTempAlloca(LTy, "saved_stack");
+      llvm::Value *Stack = CreateTempAlloca(Int8PtrTy, "saved_stack");
 
       llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::stacksave);
       llvm::Value *V = Builder.CreateCall(F);
@@ -597,20 +718,20 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
       DidCallStackSave = true;
 
       // Push a cleanup block and restore the stack there.
+      // FIXME: in general circumstances, this should be an EH cleanup.
       EHStack.pushCleanup<CallStackRestore>(NormalCleanup, Stack);
     }
 
     // Get the element type.
     const llvm::Type *LElemTy = ConvertTypeForMem(Ty);
-    const llvm::Type *LElemPtrTy =
-      llvm::PointerType::get(LElemTy, Ty.getAddressSpace());
+    const llvm::Type *LElemPtrTy = LElemTy->getPointerTo(Ty.getAddressSpace());
 
     llvm::Value *VLASize = EmitVLASize(Ty);
 
     // Allocate memory for the array.
     llvm::AllocaInst *VLA = 
-      Builder.CreateAlloca(llvm::Type::getInt8Ty(VMContext), VLASize, "vla");
-    VLA->setAlignment(getContext().getDeclAlign(&D).getQuantity());
+      Builder.CreateAlloca(llvm::Type::getInt8Ty(getLLVMContext()), VLASize, "vla");
+    VLA->setAlignment(alignment.getQuantity());
 
     DeclPtr = Builder.CreateBitCast(VLA, LElemPtrTy, "tmp");
   }
@@ -618,6 +739,7 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
   llvm::Value *&DMEntry = LocalDeclMap[&D];
   assert(DMEntry == 0 && "Decl already exists in localdeclmap!");
   DMEntry = DeclPtr;
+  emission.Address = DeclPtr;
 
   // Emit debug info for local var declaration.
   if (CGDebugInfo *DI = getDebugInfo()) {
@@ -630,197 +752,278 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
       DI->EmitDeclareOfAutoVariable(&D, DeclPtr, Builder);
   }
 
+  return emission;
+}
+
+/// Determines whether the given __block variable is potentially
+/// captured by the given expression.
+static bool isCapturedBy(const VarDecl &var, const Expr *e) {
+  // Skip the most common kinds of expressions that make
+  // hierarchy-walking expensive.
+  e = e->IgnoreParenCasts();
+
+  if (const BlockExpr *be = dyn_cast<BlockExpr>(e)) {
+    const BlockDecl *block = be->getBlockDecl();
+    for (BlockDecl::capture_const_iterator i = block->capture_begin(),
+           e = block->capture_end(); i != e; ++i) {
+      if (i->getVariable() == &var)
+        return true;
+    }
+
+    // No need to walk into the subexpressions.
+    return false;
+  }
+
+  for (Stmt::const_child_range children = e->children(); children; ++children)
+    if (isCapturedBy(var, cast<Expr>(*children)))
+      return true;
+
+  return false;
+}
+
+void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
+  assert(emission.Variable && "emission was not valid!");
+
+  // If this was emitted as a global constant, we're done.
+  if (emission.wasEmittedAsGlobal()) return;
+
+  const VarDecl &D = *emission.Variable;
+  QualType type = D.getType();
+
   // If this local has an initializer, emit it now.
   const Expr *Init = D.getInit();
 
   // If we are at an unreachable point, we don't need to emit the initializer
   // unless it contains a label.
   if (!HaveInsertPoint()) {
-    if (!ContainsLabel(Init))
-      Init = 0;
-    else
-      EnsureInsertPoint();
+    if (!Init || !ContainsLabel(Init)) return;
+    EnsureInsertPoint();
   }
 
-  if (isByRef) {
-    const llvm::PointerType *PtrToInt8Ty = llvm::Type::getInt8PtrTy(VMContext);
+  CharUnits alignment = emission.Alignment;
 
-    EnsureInsertPoint();
-    llvm::Value *isa_field = Builder.CreateStructGEP(DeclPtr, 0);
-    llvm::Value *forwarding_field = Builder.CreateStructGEP(DeclPtr, 1);
-    llvm::Value *flags_field = Builder.CreateStructGEP(DeclPtr, 2);
-    llvm::Value *size_field = Builder.CreateStructGEP(DeclPtr, 3);
+  if (emission.IsByRef) {
     llvm::Value *V;
-    int flag = 0;
-    int flags = 0;
 
-    needsDispose = true;
+    BlockFieldFlags fieldFlags;
+    bool fieldNeedsCopyDispose = false;
 
-    if (Ty->isBlockPointerType()) {
-      flag |= BLOCK_FIELD_IS_BLOCK;
-      flags |= BLOCK_HAS_COPY_DISPOSE;
-    } else if (BlockRequiresCopying(Ty)) {
-      flag |= BLOCK_FIELD_IS_OBJECT;
-      flags |= BLOCK_HAS_COPY_DISPOSE;
+    if (type->isBlockPointerType()) {
+      fieldFlags |= BLOCK_FIELD_IS_BLOCK;
+      fieldNeedsCopyDispose = true;
+    } else if (getContext().isObjCNSObjectType(type) || 
+               type->isObjCObjectPointerType()) {
+      fieldFlags |= BLOCK_FIELD_IS_OBJECT;
+      fieldNeedsCopyDispose = true;
+    } else if (getLangOptions().CPlusPlus) {
+      if (getContext().getBlockVarCopyInits(&D))
+        fieldNeedsCopyDispose = true;
+      else if (const CXXRecordDecl *record = type->getAsCXXRecordDecl())
+        fieldNeedsCopyDispose = !record->hasTrivialDestructor();
     }
 
+    llvm::Value *addr = emission.Address;
+
     // FIXME: Someone double check this.
-    if (Ty.isObjCGCWeak())
-      flag |= BLOCK_FIELD_IS_WEAK;
+    if (type.isObjCGCWeak())
+      fieldFlags |= BLOCK_FIELD_IS_WEAK;
 
+    // Initialize the 'isa', which is just 0 or 1.
     int isa = 0;
-    if (flag&BLOCK_FIELD_IS_WEAK)
+    if (fieldFlags & BLOCK_FIELD_IS_WEAK)
       isa = 1;
-    V = llvm::ConstantInt::get(Int32Ty, isa);
-    V = Builder.CreateIntToPtr(V, PtrToInt8Ty, "isa");
-    Builder.CreateStore(V, isa_field);
+    V = Builder.CreateIntToPtr(Builder.getInt32(isa), Int8PtrTy, "isa");
+    Builder.CreateStore(V, Builder.CreateStructGEP(addr, 0, "byref.isa"));
 
-    Builder.CreateStore(DeclPtr, forwarding_field);
+    // Store the address of the variable into its own forwarding pointer.
+    Builder.CreateStore(addr,
+                        Builder.CreateStructGEP(addr, 1, "byref.forwarding"));
 
-    V = llvm::ConstantInt::get(Int32Ty, flags);
-    Builder.CreateStore(V, flags_field);
+    // Blocks ABI:
+    //   c) the flags field is set to either 0 if no helper functions are
+    //      needed or BLOCK_HAS_COPY_DISPOSE if they are,
+    BlockFlags flags;
+    if (fieldNeedsCopyDispose) flags |= BLOCK_HAS_COPY_DISPOSE;
+    Builder.CreateStore(llvm::ConstantInt::get(IntTy, flags.getBitMask()),
+                        Builder.CreateStructGEP(addr, 2, "byref.flags"));
 
     const llvm::Type *V1;
-    V1 = cast<llvm::PointerType>(DeclPtr->getType())->getElementType();
-    V = llvm::ConstantInt::get(Int32Ty,
-                               CGM.GetTargetTypeStoreSize(V1).getQuantity());
-    Builder.CreateStore(V, size_field);
+    V1 = cast<llvm::PointerType>(addr->getType())->getElementType();
+    V = llvm::ConstantInt::get(IntTy, CGM.GetTargetTypeStoreSize(V1).getQuantity());
+    Builder.CreateStore(V, Builder.CreateStructGEP(addr, 3, "byref.size"));
 
-    if (flags & BLOCK_HAS_COPY_DISPOSE) {
-      SynthesizeCopyDisposeHelpers = true;
-      llvm::Value *copy_helper = Builder.CreateStructGEP(DeclPtr, 4);
-      Builder.CreateStore(BuildbyrefCopyHelper(DeclPtr->getType(), flag, 
-                                               Align.getQuantity()),
+    if (fieldNeedsCopyDispose) {
+      llvm::Value *copy_helper = Builder.CreateStructGEP(addr, 4);
+      Builder.CreateStore(CGM.BuildbyrefCopyHelper(addr->getType(), fieldFlags,
+                                                   alignment.getQuantity(), &D),
                           copy_helper);
 
-      llvm::Value *destroy_helper = Builder.CreateStructGEP(DeclPtr, 5);
-      Builder.CreateStore(BuildbyrefDestroyHelper(DeclPtr->getType(), flag,
-                                                  Align.getQuantity()),
+      llvm::Value *destroy_helper = Builder.CreateStructGEP(addr, 5);
+      Builder.CreateStore(CGM.BuildbyrefDestroyHelper(addr->getType(),
+                                                      fieldFlags,
+                                                      alignment.getQuantity(),
+                                                      &D),
                           destroy_helper);
     }
   }
 
-  if (SpecialInit) {
-    SpecialInit(*this, D, DeclPtr);
-  } else if (Init) {
-    llvm::Value *Loc = DeclPtr;
-    if (isByRef)
-      Loc = Builder.CreateStructGEP(DeclPtr, getByRefValueLLVMField(&D), 
-                                    D.getNameAsString());
-    
-    bool isVolatile = getContext().getCanonicalType(Ty).isVolatileQualified();
-    
-    // If the initializer was a simple constant initializer, we can optimize it
-    // in various ways.
-    if (IsSimpleConstantInitializer) {
-      llvm::Constant *Init = CGM.EmitConstantExpr(D.getInit(), Ty,this);
-      assert(Init != 0 && "Wasn't a simple constant init?");
-      
-      llvm::Value *AlignVal = 
-      llvm::ConstantInt::get(Int32Ty, Align.getQuantity());
-      const llvm::Type *IntPtr =
-      llvm::IntegerType::get(VMContext, LLVMPointerWidth);
-      llvm::Value *SizeVal =
-      llvm::ConstantInt::get(IntPtr, 
-                             getContext().getTypeSizeInChars(Ty).getQuantity());
-      
-      const llvm::Type *BP = llvm::Type::getInt8PtrTy(VMContext);
-      if (Loc->getType() != BP)
-        Loc = Builder.CreateBitCast(Loc, BP, "tmp");
-      
-      llvm::Value *NotVolatile =
-        llvm::ConstantInt::get(llvm::Type::getInt1Ty(VMContext), 0);
+  if (!Init) return;
 
-      // If the initializer is all zeros, codegen with memset.
-      if (isa<llvm::ConstantAggregateZero>(Init)) {
-        llvm::Value *Zero =
-          llvm::ConstantInt::get(llvm::Type::getInt8Ty(VMContext), 0);
-        Builder.CreateCall5(CGM.getMemSetFn(Loc->getType(), SizeVal->getType()),
-                            Loc, Zero, SizeVal, AlignVal, NotVolatile);
-      } else {
-        // Otherwise, create a temporary global with the initializer then 
-        // memcpy from the global to the alloca.
-        std::string Name = GetStaticDeclName(*this, D, ".");
-        llvm::GlobalVariable *GV =
+  // Check whether this is a byref variable that's potentially
+  // captured and moved by its own initializer.  If so, we'll need to
+  // emit the initializer first, then copy into the variable.
+  bool capturedByInit = emission.IsByRef && isCapturedBy(D, Init);
+
+  llvm::Value *Loc =
+    capturedByInit ? emission.Address : emission.getObjectAddress(*this);
+
+  bool isVolatile = type.isVolatileQualified();
+    
+  // If this is a simple aggregate initialization, we can optimize it
+  // in various ways.
+  if (emission.IsConstantAggregate) {
+    assert(!capturedByInit && "constant init contains a capturing block?");
+
+    llvm::Constant *Init = CGM.EmitConstantExpr(D.getInit(), type, this);
+    assert(Init != 0 && "Wasn't a simple constant init?");
+
+    llvm::Value *SizeVal =
+      llvm::ConstantInt::get(IntPtrTy, 
+                             getContext().getTypeSizeInChars(type).getQuantity());
+
+    const llvm::Type *BP = Int8PtrTy;
+    if (Loc->getType() != BP)
+      Loc = Builder.CreateBitCast(Loc, BP, "tmp");
+
+    // If the initializer is all or mostly zeros, codegen with memset then do
+    // a few stores afterward.
+    if (shouldUseMemSetPlusStoresToInitialize(Init, 
+                      CGM.getTargetData().getTypeAllocSize(Init->getType()))) {
+      Builder.CreateMemSet(Loc, llvm::ConstantInt::get(Int8Ty, 0), SizeVal,
+                           alignment.getQuantity(), isVolatile);
+      if (!Init->isNullValue()) {
+        Loc = Builder.CreateBitCast(Loc, Init->getType()->getPointerTo());
+        emitStoresForInitAfterMemset(Init, Loc, isVolatile, Builder);
+      }
+    } else {
+      // Otherwise, create a temporary global with the initializer then 
+      // memcpy from the global to the alloca.
+      std::string Name = GetStaticDeclName(*this, D, ".");
+      llvm::GlobalVariable *GV =
         new llvm::GlobalVariable(CGM.getModule(), Init->getType(), true,
                                  llvm::GlobalValue::InternalLinkage,
                                  Init, Name, 0, false, 0);
-        GV->setAlignment(Align.getQuantity());
+      GV->setAlignment(alignment.getQuantity());
         
-        llvm::Value *SrcPtr = GV;
-        if (SrcPtr->getType() != BP)
-          SrcPtr = Builder.CreateBitCast(SrcPtr, BP, "tmp");
+      llvm::Value *SrcPtr = GV;
+      if (SrcPtr->getType() != BP)
+        SrcPtr = Builder.CreateBitCast(SrcPtr, BP, "tmp");
 
-        Builder.CreateCall5(CGM.getMemCpyFn(Loc->getType(), SrcPtr->getType(),
-                                            SizeVal->getType()),
-                            Loc, SrcPtr, SizeVal, AlignVal, NotVolatile);
-      }
-    } else if (Ty->isReferenceType()) {
-      RValue RV = EmitReferenceBindingToExpr(Init, &D);
-      EmitStoreOfScalar(RV.getScalarVal(), Loc, false, Alignment, Ty);
-    } else if (!hasAggregateLLVMType(Init->getType())) {
-      llvm::Value *V = EmitScalarExpr(Init);
-      EmitStoreOfScalar(V, Loc, isVolatile, Alignment, Ty);
-    } else if (Init->getType()->isAnyComplexType()) {
-      EmitComplexExprIntoAddr(Init, Loc, isVolatile);
-    } else {
-      EmitAggExpr(Init, AggValueSlot::forAddr(Loc, isVolatile, true));
+      Builder.CreateMemCpy(Loc, SrcPtr, SizeVal, alignment.getQuantity(),
+                           isVolatile);
     }
+  } else if (type->isReferenceType()) {
+    RValue RV = EmitReferenceBindingToExpr(Init, &D);
+    if (capturedByInit) Loc = BuildBlockByrefAddress(Loc, &D);
+    EmitStoreOfScalar(RV.getScalarVal(), Loc, false, alignment.getQuantity(),
+                      type);
+  } else if (!hasAggregateLLVMType(type)) {
+    llvm::Value *V = EmitScalarExpr(Init);
+    if (capturedByInit) Loc = BuildBlockByrefAddress(Loc, &D);
+    EmitStoreOfScalar(V, Loc, isVolatile, alignment.getQuantity(), type);
+  } else if (type->isAnyComplexType()) {
+    ComplexPairTy complex = EmitComplexExpr(Init);
+    if (capturedByInit) Loc = BuildBlockByrefAddress(Loc, &D);
+    StoreComplexToAddr(complex, Loc, isVolatile);
+  } else {
+    // TODO: how can we delay here if D is captured by its initializer?
+    EmitAggExpr(Init, AggValueSlot::forAddr(Loc, isVolatile, true, false));
   }
+}
 
-  // Handle CXX destruction of variables.
-  QualType DtorTy(Ty);
-  while (const ArrayType *Array = getContext().getAsArrayType(DtorTy))
-    DtorTy = getContext().getBaseElementType(Array);
-  if (const RecordType *RT = DtorTy->getAs<RecordType>())
-    if (CXXRecordDecl *ClassDecl = dyn_cast<CXXRecordDecl>(RT->getDecl())) {      
+void CodeGenFunction::EmitAutoVarCleanups(const AutoVarEmission &emission) {
+  assert(emission.Variable && "emission was not valid!");
+
+  // If this was emitted as a global constant, we're done.
+  if (emission.wasEmittedAsGlobal()) return;
+
+  const VarDecl &D = *emission.Variable;
+
+  // Handle C++ destruction of variables.
+  if (getLangOptions().CPlusPlus) {
+    QualType type = D.getType();
+    QualType baseType = getContext().getBaseElementType(type);
+    if (const RecordType *RT = baseType->getAs<RecordType>()) {
+      CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(RT->getDecl());
       if (!ClassDecl->hasTrivialDestructor()) {
         // Note: We suppress the destructor call when the corresponding NRVO
         // flag has been set.
-        llvm::Value *Loc = DeclPtr;
-        if (isByRef)
-          Loc = Builder.CreateStructGEP(DeclPtr, getByRefValueLLVMField(&D), 
-                                        D.getNameAsString());
+
+        // Note that for __block variables, we want to destroy the
+        // original stack object, not the possible forwarded object.
+        llvm::Value *Loc = emission.getObjectAddress(*this);
         
         const CXXDestructorDecl *D = ClassDecl->getDestructor();
         assert(D && "EmitLocalBlockVarDecl - destructor is nul");
         
-        if (const ConstantArrayType *Array = 
-              getContext().getAsConstantArrayType(Ty)) {
+        if (type != baseType) {
+          const ConstantArrayType *Array = 
+            getContext().getAsConstantArrayType(type);
+          assert(Array && "types changed without array?");
           EHStack.pushCleanup<CallArrayDtor>(NormalAndEHCleanup,
                                              D, Array, Loc);
         } else {
           EHStack.pushCleanup<CallVarDtor>(NormalAndEHCleanup,
-                                           D, NRVOFlag, Loc);
+                                           D, emission.NRVOFlag, Loc);
         }
       }
+    }
   }
 
-  // Handle the cleanup attribute
+  // Handle the cleanup attribute.
   if (const CleanupAttr *CA = D.getAttr<CleanupAttr>()) {
     const FunctionDecl *FD = CA->getFunctionDecl();
 
-    llvm::Constant* F = CGM.GetAddrOfFunction(FD);
+    llvm::Constant *F = CGM.GetAddrOfFunction(FD);
     assert(F && "Could not find function!");
 
     const CGFunctionInfo &Info = CGM.getTypes().getFunctionInfo(FD);
-    EHStack.pushCleanup<CallCleanupFunction>(NormalAndEHCleanup,
-                                             F, &Info, DeclPtr, &D);
+    EHStack.pushCleanup<CallCleanupFunction>(NormalAndEHCleanup, F, &Info, &D);
   }
 
-  // If this is a block variable, clean it up.
-  if (needsDispose && CGM.getLangOptions().getGCMode() != LangOptions::GCOnly)
-    EHStack.pushCleanup<CallBlockRelease>(NormalAndEHCleanup, DeclPtr);
+  // If this is a block variable, call _Block_object_destroy
+  // (on the unforwarded address).
+  if (emission.IsByRef &&
+      CGM.getLangOptions().getGCMode() != LangOptions::GCOnly)
+    EHStack.pushCleanup<CallBlockRelease>(NormalAndEHCleanup, emission.Address);
 }
 
 /// Emit an alloca (or GlobalValue depending on target)
 /// for the specified parameter and set up LocalDeclMap.
-void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg) {
+void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
+                                   unsigned ArgNo) {
   // FIXME: Why isn't ImplicitParamDecl a ParmVarDecl?
   assert((isa<ParmVarDecl>(D) || isa<ImplicitParamDecl>(D)) &&
          "Invalid argument to EmitParmDecl");
+
+  Arg->setName(D.getName());
+
+  // Use better IR generation for certain implicit parameters.
+  if (isa<ImplicitParamDecl>(D)) {
+    // The only implicit argument a block has is its literal.
+    if (BlockInfo) {
+      LocalDeclMap[&D] = Arg;
+
+      if (CGDebugInfo *DI = getDebugInfo()) {
+        DI->setLocation(D.getLocation());
+        DI->EmitDeclareOfBlockLiteralArgVariable(*BlockInfo, Arg, Builder);
+      }
+
+      return;
+    }
+  }
+
   QualType Ty = D.getType();
-  CanQualType CTy = getContext().getCanonicalType(Ty);
 
   llvm::Value *DeclPtr;
   // If this is an aggregate or variable sized value, reuse the input pointer.
@@ -832,10 +1035,10 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg) {
     DeclPtr = CreateMemTemp(Ty, D.getName() + ".addr");
 
     // Store the initial value into the alloca.
-    unsigned Alignment = getContext().getDeclAlign(&D).getQuantity();
-    EmitStoreOfScalar(Arg, DeclPtr, CTy.isVolatileQualified(), Alignment, Ty);
+    EmitStoreOfScalar(Arg, DeclPtr, Ty.isVolatileQualified(),
+                      getContext().getDeclAlign(&D).getQuantity(), Ty,
+                      CGM.getTBAAInfo(Ty));
   }
-  Arg->setName(D.getName());
 
   llvm::Value *&DMEntry = LocalDeclMap[&D];
   assert(DMEntry == 0 && "Decl already exists in localdeclmap!");
@@ -844,6 +1047,6 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg) {
   // Emit debug info for param declaration.
   if (CGDebugInfo *DI = getDebugInfo()) {
     DI->setLocation(D.getLocation());
-    DI->EmitDeclareOfArgVariable(&D, DeclPtr, Builder);
+    DI->EmitDeclareOfArgVariable(&D, DeclPtr, ArgNo, Builder);
   }
 }

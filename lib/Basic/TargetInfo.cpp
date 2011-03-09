@@ -15,6 +15,7 @@
 #include "clang/Basic/LangOptions.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
+#include <cctype>
 #include <cstdlib>
 using namespace clang;
 
@@ -25,6 +26,7 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
   TLSSupported = true;
   NoAsmVariants = false;
   PointerWidth = PointerAlign = 32;
+  BoolWidth = BoolAlign = 8;
   IntWidth = IntAlign = 32;
   LongWidth = LongAlign = 32;
   LongLongWidth = LongLongAlign = 64;
@@ -54,6 +56,7 @@ TargetInfo::TargetInfo(const std::string &T) : Triple(T) {
   DescriptionString = "E-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
                       "i64:64:64-f32:32:32-f64:64:64-n32";
   UserLabelPrefix = "_";
+  MCountName = "mcount";
   HasAlignMac68kSupport = false;
 
   // Default to no types using fpret.
@@ -132,7 +135,7 @@ unsigned TargetInfo::getTypeAlign(IntType T) const {
 
 /// isTypeSigned - Return whether an integer types is signed. Returns true if
 /// the type is signed; false otherwise.
-bool TargetInfo::isTypeSigned(IntType T) const {
+bool TargetInfo::isTypeSigned(IntType T) {
   switch (T) {
   default: assert(0 && "not an integer!");
   case SignedShort:

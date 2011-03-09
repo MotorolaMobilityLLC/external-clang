@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -verify %s 
+// RUN: %clang_cc1 -fsyntax-only -Wnon-virtual-dtor -verify %s
 class A {
 public:
   ~A();
@@ -100,11 +100,11 @@ namespace test6 {
       T::deleteIt(p); // expected-error {{type 'int' cannot be used prior to '::'}}
     }
 
-    virtual ~A() {} // expected-note {{in instantiation of member function 'test6::A<int>::operator delete' requested here}}
+    virtual ~A() {}
   };
 
-  class B : A<int> { B(); };
-  B::B() {} // expected-note {{in instantiation of member function 'test6::A<int>::~A' requested here}}
+  class B : A<int> { B(); }; // expected-note {{in instantiation of member function 'test6::A<int>::operator delete' requested here}}
+  B::B() {}
 }
 
 // Make sure classes are marked invalid when they have invalid
@@ -118,5 +118,75 @@ namespace test7 {
   void test() {
     B *b;
     b->~B();
+  }
+}
+
+namespace nonvirtualdtor {
+struct S1 { // expected-warning {{has virtual functions but non-virtual destructor}}
+  virtual void m();
+};
+
+struct S2 {
+  ~S2(); // expected-warning {{has virtual functions but non-virtual destructor}}
+  virtual void m();
+};
+
+struct S3 : public S1 {  // expected-warning {{has virtual functions but non-virtual destructor}}
+  virtual void m();
+};
+
+struct S4 : public S2 {  // expected-warning {{has virtual functions but non-virtual destructor}}
+  virtual void m();
+};
+
+struct B {
+  virtual ~B();
+  virtual void m();
+};
+
+struct S5 : public B {
+  virtual void m();
+};
+
+struct S6 {
+  virtual void m();
+private:
+  ~S6();
+};
+
+struct S7 {
+  virtual void m();
+protected:
+  ~S7();
+};
+
+template<class T> class TS : public B {
+  virtual void m();
+};
+
+TS<int> baz;
+
+template<class T> class TS2 { // expected-warning {{'nonvirtualdtor::TS2<int>' has virtual functions but non-virtual destructor}}
+  virtual void m();
+};
+
+TS2<int> foo; // expected-note {{instantiation}}
+}
+
+namespace PR9238 {
+  class B { public: ~B(); };
+  class C : virtual B { public: ~C() { } };
+}
+
+namespace PR7900 {
+  struct A { // expected-note 2{{type 'PR7900::A' is declared here}}
+  };
+  struct B : public A {
+  };
+  void foo() {
+    B b;
+    b.~B();
+    b.~A(); // expected-error{{destructor type 'PR7900::A' in object destruction expression does not match the type 'PR7900::B' of the object being destroyed}}
+    (&b)->~A(); // expected-error{{destructor type 'PR7900::A' in object destruction expression does not match the type 'PR7900::B' of the object being destroyed}}
   }
 }

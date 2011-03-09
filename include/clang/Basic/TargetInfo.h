@@ -18,7 +18,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include <cassert>
 #include <vector>
 #include <string>
@@ -26,8 +26,6 @@
 namespace llvm {
 struct fltSemantics;
 class StringRef;
-class LLVMContext;
-class Type;
 }
 
 namespace clang {
@@ -66,6 +64,7 @@ protected:
   bool TLSSupported;
   bool NoAsmVariants;  // True if {|} are normal characters.
   unsigned char PointerWidth, PointerAlign;
+  unsigned char BoolWidth, BoolAlign;
   unsigned char IntWidth, IntAlign;
   unsigned char FloatWidth, FloatAlign;
   unsigned char DoubleWidth, DoubleAlign;
@@ -75,6 +74,7 @@ protected:
   unsigned char LongLongWidth, LongLongAlign;
   const char *DescriptionString;
   const char *UserLabelPrefix;
+  const char *MCountName;
   const llvm::fltSemantics *FloatFormat, *DoubleFormat, *LongDoubleFormat;
   unsigned char RegParmMax, SSERegParmMax;
   TargetCXXABI CXXABI;
@@ -151,7 +151,7 @@ public:
 
   /// isTypeSigned - Return whether an integer types is signed. Returns true if
   /// the type is signed; false otherwise.
-  bool isTypeSigned(IntType T) const;
+  static bool isTypeSigned(IntType T);
 
   /// getPointerWidth - Return the width of pointers on this target, for the
   /// specified address space.
@@ -164,8 +164,8 @@ public:
 
   /// getBoolWidth/Align - Return the size of '_Bool' and C++ 'bool' for this
   /// target, in bits.
-  unsigned getBoolWidth(bool isWide = false) const { return 8; }  // FIXME
-  unsigned getBoolAlign(bool isWide = false) const { return 8; }  // FIXME
+  unsigned getBoolWidth() const { return BoolWidth; }
+  unsigned getBoolAlign() const { return BoolAlign; }
 
   unsigned getCharWidth() const { return 8; } // FIXME
   unsigned getCharAlign() const { return 8; } // FIXME
@@ -240,6 +240,11 @@ public:
   /// others.
   const char *getUserLabelPrefix() const {
     return UserLabelPrefix;
+  }
+
+  /// MCountName - This returns name of the mcount instrumentation function.
+  const char *getMCountName() const {
+    return MCountName;
   }
 
   bool useBitFieldTypeAlignment() const {
@@ -524,12 +529,6 @@ public:
   /// initialization functions.
   virtual const char *getStaticInitSectionSpecifier() const {
     return 0;
-  }
-
-  virtual const llvm::Type* adjustInlineAsmType(std::string& Constraint, 
-                                     const llvm::Type* Ty,
-                                     llvm::LLVMContext& Context) const {
-    return Ty;
   }
 protected:
   virtual uint64_t getPointerWidthV(unsigned AddrSpace) const {

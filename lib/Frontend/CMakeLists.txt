@@ -1,12 +1,11 @@
-set(LLVM_NO_RTTI 1)
-
 set( LLVM_USED_LIBS
+  clangAST
+  clangBasic
   clangDriver
+  clangLex
   clangParse
   clangSema
-  clangAST
-  clangLex
-  clangBasic
+  clangSerialization
   )
 
 add_clang_library(clangFrontend
@@ -24,9 +23,11 @@ add_clang_library(clangFrontend
   FrontendAction.cpp
   FrontendActions.cpp
   FrontendOptions.cpp
+  HeaderIncludeGen.cpp
   InitHeaderSearch.cpp
   InitPreprocessor.cpp
   LangStandards.cpp
+  MultiplexConsumer.cpp
   PrintPreprocessedOutput.cpp
   StmtXML.cpp
   TextDiagnosticBuffer.cpp

@@ -35,7 +35,7 @@ extern "C" {
   #define CINDEX_LINKAGE
 #endif
 
-/** \defgroup CINDEX C Interface to Clang
+/** \defgroup CINDEX libclang: C Interface to Clang
  *
  * The C Interface to Clang provides a relatively small API that exposes
  * facilities for parsing source code into an abstract syntax tree (AST),
@@ -63,10 +63,7 @@ typedef void *CXIndex;
 /**
  * \brief A single translation unit, which resides in an index.
  */
-typedef struct CXTranslationUnitImpl {
-  void *TUData;
-  void *StringPool;
-} *CXTranslationUnit;  /* A translation unit instance. */
+typedef struct CXTranslationUnitImpl *CXTranslationUnit;
 
 /**
  * \brief Opaque pointer representing client data that will be passed through
@@ -502,7 +499,34 @@ enum CXDiagnosticDisplayOptions {
    * This option corresponds to the clang flag
    * \c -fdiagnostics-print-source-range-info.
    */
-  CXDiagnostic_DisplaySourceRanges = 0x04
+  CXDiagnostic_DisplaySourceRanges = 0x04,
+  
+  /**
+   * \brief Display the option name associated with this diagnostic, if any.
+   *
+   * The option name displayed (e.g., -Wconversion) will be placed in brackets
+   * after the diagnostic text. This option corresponds to the clang flag
+   * \c -fdiagnostics-show-option.
+   */
+  CXDiagnostic_DisplayOption = 0x08,
+  
+  /**
+   * \brief Display the category number associated with this diagnostic, if any.
+   *
+   * The category number is displayed within brackets after the diagnostic text.
+   * This option corresponds to the clang flag 
+   * \c -fdiagnostics-show-category=id.
+   */
+  CXDiagnostic_DisplayCategoryId = 0x10,
+
+  /**
+   * \brief Display the category name associated with this diagnostic, if any.
+   *
+   * The category name is displayed within brackets after the diagnostic text.
+   * This option corresponds to the clang flag 
+   * \c -fdiagnostics-show-category=name.
+   */
+  CXDiagnostic_DisplayCategoryName = 0x20
 };
 
 /**
@@ -533,10 +557,6 @@ CINDEX_LINKAGE CXString clang_formatDiagnostic(CXDiagnostic Diagnostic,
 CINDEX_LINKAGE unsigned clang_defaultDiagnosticDisplayOptions(void);
 
 /**
- * \brief Print a diagnostic to the given file.
- */
-
-/**
  * \brief Determine the severity of the given diagnostic.
  */
 CINDEX_LINKAGE enum CXDiagnosticSeverity
@@ -555,6 +575,43 @@ CINDEX_LINKAGE CXSourceLocation clang_getDiagnosticLocation(CXDiagnostic);
  */
 CINDEX_LINKAGE CXString clang_getDiagnosticSpelling(CXDiagnostic);
 
+/**
+ * \brief Retrieve the name of the command-line option that enabled this
+ * diagnostic.
+ *
+ * \param Diag The diagnostic to be queried.
+ *
+ * \param Disable If non-NULL, will be set to the option that disables this
+ * diagnostic (if any).
+ *
+ * \returns A string that contains the command-line option used to enable this
+ * warning, such as "-Wconversion" or "-pedantic". 
+ */
+CINDEX_LINKAGE CXString clang_getDiagnosticOption(CXDiagnostic Diag,
+                                                  CXString *Disable);
+
+/**
+ * \brief Retrieve the category number for this diagnostic.
+ *
+ * Diagnostics can be categorized into groups along with other, related
+ * diagnostics (e.g., diagnostics under the same warning flag). This routine 
+ * retrieves the category number for the given diagnostic.
+ *
+ * \returns The number of the category that contains this diagnostic, or zero
+ * if this diagnostic is uncategorized.
+ */
+CINDEX_LINKAGE unsigned clang_getDiagnosticCategory(CXDiagnostic);
+
+/**
+ * \brief Retrieve the name of a particular diagnostic category.
+ *
+ * \param Category A diagnostic category number, as returned by 
+ * \c clang_getDiagnosticCategory().
+ *
+ * \returns The name of the given diagnostic category.
+ */
+CINDEX_LINKAGE CXString clang_getDiagnosticCategoryName(unsigned Category);
+  
 /**
  * \brief Determine the number of source ranges associated with the given
  * diagnostic.
@@ -1294,6 +1351,11 @@ CINDEX_LINKAGE CXCursor clang_getTranslationUnitCursor(CXTranslationUnit);
 CINDEX_LINKAGE unsigned clang_equalCursors(CXCursor, CXCursor);
 
 /**
+ * \brief Compute a hash value for the given cursor.
+ */
+CINDEX_LINKAGE unsigned clang_hashCursor(CXCursor);
+  
+/**
  * \brief Retrieve the kind of the given cursor.
  */
 CINDEX_LINKAGE enum CXCursorKind clang_getCursorKind(CXCursor);
@@ -1398,7 +1460,38 @@ CINDEX_LINKAGE enum CXLanguageKind {
  */
 CINDEX_LINKAGE enum CXLanguageKind clang_getCursorLanguage(CXCursor cursor);
 
-  
+
+/**
+ * \brief A fast container representing a set of CXCursors.
+ */
+typedef struct CXCursorSetImpl *CXCursorSet;
+
+/**
+ * \brief Creates an empty CXCursorSet.
+ */
+CINDEX_LINKAGE CXCursorSet clang_createCXCursorSet();
+
+/**
+ * \brief Disposes a CXCursorSet and releases its associated memory.
+ */
+CINDEX_LINKAGE void clang_disposeCXCursorSet(CXCursorSet cset);
+
+/**
+ * \brief Queries a CXCursorSet to see if it contains a specific CXCursor.
+ *
+ * \returns non-zero if the set contains the specified cursor.
+*/
+CINDEX_LINKAGE unsigned clang_CXCursorSet_contains(CXCursorSet cset,
+                                                   CXCursor cursor);
+
+/**
+ * \brief Inserts a CXCursor into a CXCursorSet.
+ *
+ * \returns zero if the CXCursor was already in the set, and non-zero otherwise.
+*/
+CINDEX_LINKAGE unsigned clang_CXCursorSet_insert(CXCursorSet cset,
+                                                 CXCursor cursor);
+
 /**
  * \brief Determine the semantic parent of the given cursor.
  *
@@ -1429,6 +1522,8 @@ CINDEX_LINKAGE enum CXLanguageKind clang_getCursorLanguage(CXCursor cursor);
  * In the example above, both declarations of \c C::f have \c C as their
  * semantic context, while the lexical context of the first \c C::f is \c C
  * and the lexical context of the second \c C::f is the translation unit.
+ *
+ * For global declarations, the semantic parent is the translation unit.
  */
 CINDEX_LINKAGE CXCursor clang_getCursorSemanticParent(CXCursor cursor);
 
@@ -1462,6 +1557,9 @@ CINDEX_LINKAGE CXCursor clang_getCursorSemanticParent(CXCursor cursor);
  * In the example above, both declarations of \c C::f have \c C as their
  * semantic context, while the lexical context of the first \c C::f is \c C
  * and the lexical context of the second \c C::f is the translation unit.
+ *
+ * For declarations written in the global scope, the lexical parent is
+ * the translation unit.
  */
 CINDEX_LINKAGE CXCursor clang_getCursorLexicalParent(CXCursor cursor);
 
@@ -1684,6 +1782,24 @@ CINDEX_LINKAGE unsigned clang_equalTypes(CXType A, CXType B);
 CINDEX_LINKAGE CXType clang_getCanonicalType(CXType T);
 
 /**
+ *  \determine Determine whether a CXType has the "const" qualifier set, 
+ *  without looking through typedefs that may have added "const" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isConstQualifiedType(CXType T);
+
+/**
+ *  \determine Determine whether a CXType has the "volatile" qualifier set,
+ *  without looking through typedefs that may have added "volatile" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isVolatileQualifiedType(CXType T);
+
+/**
+ *  \determine Determine whether a CXType has the "restrict" qualifier set,
+ *  without looking through typedefs that may have added "restrict" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isRestrictQualifiedType(CXType T);
+
+/**
  * \brief For pointer types, returns the type of the pointee.
  *
  */
@@ -1694,6 +1810,10 @@ CINDEX_LINKAGE CXType clang_getPointeeType(CXType T);
  */
 CINDEX_LINKAGE CXCursor clang_getTypeDeclaration(CXType T);
 
+/**
+ * Returns the Objective-C type encoding for the specified declaration.
+ */
+CINDEX_LINKAGE CXString clang_getDeclObjCTypeEncoding(CXCursor C);
 
 /**
  * \brief Retrieve the spelling of a given CXTypeKind.
@@ -2016,6 +2136,32 @@ CINDEX_LINKAGE CXCursor clang_getCursorDefinition(CXCursor);
  * is also a definition of that entity.
  */
 CINDEX_LINKAGE unsigned clang_isCursorDefinition(CXCursor);
+
+/**
+ * \brief Retrieve the canonical cursor corresponding to the given cursor.
+ *
+ * In the C family of languages, many kinds of entities can be declared several
+ * times within a single translation unit. For example, a structure type can
+ * be forward-declared (possibly multiple times) and later defined:
+ *
+ * \code
+ * struct X;
+ * struct X;
+ * struct X {
+ *   int member;
+ * };
+ * \endcode
+ *
+ * The declarations and the definition of \c X are represented by three 
+ * different cursors, all of which are declarations of the same underlying 
+ * entity. One of these cursor is considered the "canonical" cursor, which
+ * is effectively the representative for the underlying entity. One can 
+ * determine if two cursors are declarations of the same underlying entity by
+ * comparing their canonical cursors.
+ *
+ * \returns The canonical cursor for the entity referred to by the given cursor.
+ */
+CINDEX_LINKAGE CXCursor clang_getCanonicalCursor(CXCursor);
 
 /**
  * @}

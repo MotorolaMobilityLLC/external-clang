@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 %s -fsyntax-only -Wmicrosoft -verify -fms-extensions -fexceptions
+// RUN: %clang_cc1 %s -fsyntax-only -Wmicrosoft -verify -fms-extensions -fexceptions -fcxx-exceptions
 
 
 // ::type_info is predeclared with forward class declartion
@@ -96,4 +96,29 @@ enum ENUM2 {
 	ENUM2_a = (enum ENUM2) 4,
 	ENUM2_b = 0x9FFFFFFF, // expected-warning {{enumerator value is not representable in the underlying type 'int'}}
 	ENUM2_c = 0x100000000 // expected-warning {{enumerator value is not representable in the underlying type 'int'}}
+};
+
+
+void f(long long);
+void f(int);
+ 
+int main()
+{
+  // This is an ambiguous call in standard C++.
+  // This calls f(long long) in Microsoft mode because LL is always signed.
+  f(0xffffffffffffffffLL);
+  f(0xffffffffffffffffi64);
+}
+
+// Enumeration types with a fixed underlying type.
+const int seventeen = 17;
+typedef int Int;
+
+struct X0 {
+  enum E1 : Int { SomeOtherValue } field; // expected-warning{{enumeration types with a fixed underlying type are a Microsoft extension}}
+  enum E1 : seventeen;
+};
+
+enum : long long {  // expected-warning{{enumeration types with a fixed underlying type are a Microsoft extension}}
+  SomeValue = 0x100000000
 };

@@ -17,6 +17,7 @@
 #include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtCXX.h"
+#include "clang/Frontend/CodeGenOptions.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -180,8 +181,17 @@ CodeGenFunction::GetAddressOfBaseClass(llvm::Value *Value,
 
   llvm::Value *VirtualOffset = 0;
 
-  if (VBase)
-    VirtualOffset = GetVirtualBaseClassOffset(Value, Derived, VBase);
+  if (VBase) {
+    if (Derived->hasAttr<FinalAttr>()) {
+      VirtualOffset = 0;
+
+      const ASTRecordLayout &Layout = getContext().getASTRecordLayout(Derived);
+
+      uint64_t VBaseOffset = Layout.getVBaseClassOffsetInBits(VBase);
+      NonVirtualOffset += VBaseOffset / 8;
+    } else
+      VirtualOffset = GetVirtualBaseClassOffset(Value, Derived, VBase);
+  }
 
   // Apply the offsets.
   Value = ApplyNonVirtualAndVirtualOffset(*this, Value, NonVirtualOffset, 
@@ -309,7 +319,7 @@ static llvm::Value *GetVTTParameter(CodeGenFunction &CGF, GlobalDecl GD,
     VTT = CGF.Builder.CreateConstInBoundsGEP1_64(VTT, SubVTTIndex);
   } else {
     // We're the complete constructor, so get the VTT by name.
-    VTT = CGF.CGM.getVTables().getVTT(RD);
+    VTT = CGF.CGM.getVTables().GetAddrOfVTT(RD);
     VTT = CGF.Builder.CreateConstInBoundsGEP2_64(VTT, 0, SubVTTIndex);
   }
 
@@ -363,7 +373,7 @@ static bool BaseInitializerUsesThis(ASTContext &C, const Expr *Init) {
 
 static void EmitBaseInitializer(CodeGenFunction &CGF, 
                                 const CXXRecordDecl *ClassDecl,
-                                CXXBaseOrMemberInitializer *BaseInit,
+                                CXXCtorInitializer *BaseInit,
                                 CXXCtorType CtorType) {
   assert(BaseInit->isBaseInitializer() &&
          "Must have base initializer!");
@@ -397,7 +407,8 @@ static void EmitBaseInitializer(CodeGenFunction &CGF,
 
   CGF.EmitAggExpr(BaseInit->getInit(), AggSlot);
   
-  if (CGF.Exceptions && !BaseClassDecl->hasTrivialDestructor())
+  if (CGF.CGM.getLangOptions().Exceptions && 
+      !BaseClassDecl->hasTrivialDestructor())
     CGF.EHStack.pushCleanup<CallBaseDtor>(EHCleanup, BaseClassDecl,
                                           isBaseVirtual);
 }
@@ -405,7 +416,7 @@ static void EmitBaseInitializer(CodeGenFunction &CGF,
 static void EmitAggMemberInitializer(CodeGenFunction &CGF,
                                      LValue LHS,
                                      llvm::Value *ArrayIndexVar,
-                                     CXXBaseOrMemberInitializer *MemberInit,
+                                     CXXCtorInitializer *MemberInit,
                                      QualType T,
                                      unsigned Index) {
   if (Index == MemberInit->getNumArrayIndices()) {
@@ -509,29 +520,29 @@ namespace {
   
 static void EmitMemberInitializer(CodeGenFunction &CGF,
                                   const CXXRecordDecl *ClassDecl,
-                                  CXXBaseOrMemberInitializer *MemberInit,
+                                  CXXCtorInitializer *MemberInit,
                                   const CXXConstructorDecl *Constructor,
                                   FunctionArgList &Args) {
-  assert(MemberInit->isMemberInitializer() &&
+  assert(MemberInit->isAnyMemberInitializer() &&
          "Must have member initializer!");
   
   // non-static data member initializers.
-  FieldDecl *Field = MemberInit->getMember();
+  FieldDecl *Field = MemberInit->getAnyMember();
   QualType FieldType = CGF.getContext().getCanonicalType(Field->getType());
 
   llvm::Value *ThisPtr = CGF.LoadCXXThis();
   LValue LHS;
   
   // If we are initializing an anonymous union field, drill down to the field.
-  if (MemberInit->getAnonUnionMember()) {
-    Field = MemberInit->getAnonUnionMember();
-    LHS = CGF.EmitLValueForAnonRecordField(ThisPtr, Field, 0);
-    FieldType = Field->getType();
+  if (MemberInit->isIndirectMemberInitializer()) {
+    LHS = CGF.EmitLValueForAnonRecordField(ThisPtr,
+                                           MemberInit->getIndirectMember(), 0);
+    FieldType = MemberInit->getIndirectMember()->getAnonField()->getType();
   } else {
     LHS = CGF.EmitLValueForFieldInitialization(ThisPtr, Field, 0);
   }
 
-  // FIXME: If there's no initializer and the CXXBaseOrMemberInitializer
+  // FIXME: If there's no initializer and the CXXCtorInitializer
   // was implicitly generated, we shouldn't be zeroing memory.
   RValue RHS;
   if (FieldType->isReferenceType()) {
@@ -595,7 +606,7 @@ static void EmitMemberInitializer(CodeGenFunction &CGF,
     
     EmitAggMemberInitializer(CGF, LHS, ArrayIndexVar, MemberInit, FieldType, 0);
     
-    if (!CGF.Exceptions)
+    if (!CGF.CGM.getLangOptions().Exceptions)
       return;
 
     // FIXME: If we have an array of classes w/ non-trivial destructors, 
@@ -707,12 +718,12 @@ void CodeGenFunction::EmitCtorPrologue(const CXXConstructorDecl *CD,
                                        FunctionArgList &Args) {
   const CXXRecordDecl *ClassDecl = CD->getParent();
 
-  llvm::SmallVector<CXXBaseOrMemberInitializer *, 8> MemberInitializers;
+  llvm::SmallVector<CXXCtorInitializer *, 8> MemberInitializers;
   
   for (CXXConstructorDecl::init_const_iterator B = CD->init_begin(),
        E = CD->init_end();
        B != E; ++B) {
-    CXXBaseOrMemberInitializer *Member = (*B);
+    CXXCtorInitializer *Member = (*B);
     
     if (Member->isBaseInitializer())
       EmitBaseInitializer(*this, ClassDecl, Member, CtorType);
@@ -787,6 +798,10 @@ void CodeGenFunction::EmitDestructorBody(FunctionArgList &Args) {
       assert(Dtor->isImplicit() && "bodyless dtor not implicit");
       // nothing to do besides what's in the epilogue
     }
+    // -fapple-kext must inline any call to this dtor into
+    // the caller's body.
+    if (getContext().getLangOptions().AppleKext)
+      CurFn->addFnAttr(llvm::Attribute::AlwaysInline);
     break;
   }
 
@@ -1126,6 +1141,16 @@ CodeGenFunction::EmitCXXConstructorCall(const CXXConstructorDecl *D,
                                         llvm::Value *This,
                                         CallExpr::const_arg_iterator ArgBeg,
                                         CallExpr::const_arg_iterator ArgEnd) {
+
+  CGDebugInfo *DI = getDebugInfo();
+  if (DI && CGM.getCodeGenOpts().LimitDebugInfo) {
+    // If debug info for this class has been emitted then this is the right time
+    // to do so.
+    const CXXRecordDecl *Parent = D->getParent();
+    DI->getOrCreateRecordType(CGM.getContext().getTypeDeclType(Parent),
+                              Parent->getLocation());
+  }
+
   if (D->isTrivial()) {
     if (ArgBeg == ArgEnd) {
       // Trivial default constructor, no codegen required.
@@ -1255,7 +1280,13 @@ void CodeGenFunction::EmitCXXDestructorCall(const CXXDestructorDecl *DD,
                                             llvm::Value *This) {
   llvm::Value *VTT = GetVTTParameter(*this, GlobalDecl(DD, Type), 
                                      ForVirtualBase);
-  llvm::Value *Callee = CGM.GetAddrOfCXXDestructor(DD, Type);
+  llvm::Value *Callee = 0;
+  if (getContext().getLangOptions().AppleKext)
+    Callee = BuildAppleKextVirtualDestructorCall(DD, Type, 
+                                                 DD->getParent());
+    
+  if (!Callee)
+    Callee = CGM.GetAddrOfCXXDestructor(DD, Type);
   
   EmitCXXMemberCall(DD, Callee, ReturnValueSlot(), This, VTT, 0, 0);
 }
@@ -1293,9 +1324,6 @@ llvm::Value *
 CodeGenFunction::GetVirtualBaseClassOffset(llvm::Value *This,
                                            const CXXRecordDecl *ClassDecl,
                                            const CXXRecordDecl *BaseClassDecl) {
-  const llvm::Type *Int8PtrTy = 
-    llvm::Type::getInt8Ty(VMContext)->getPointerTo();
-
   llvm::Value *VTablePtr = GetVTablePtr(This, Int8PtrTy);
   int64_t VBaseOffsetOffset = 
     CGM.getVTables().getVirtualBaseOffsetOffset(ClassDecl, BaseClassDecl);

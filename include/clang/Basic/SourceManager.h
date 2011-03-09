@@ -16,7 +16,7 @@
 
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/DenseMap.h"
@@ -33,7 +33,6 @@ namespace clang {
 class Diagnostic;
 class SourceManager;
 class FileManager;
-class FileSystemOptions;
 class FileEntry;
 class LineTableInfo;
   
@@ -67,10 +66,16 @@ namespace SrcMgr {
     mutable llvm::PointerIntPair<const llvm::MemoryBuffer *, 2> Buffer;
 
   public:
-    /// Reference to the file entry.  This reference does not own
-    /// the FileEntry object.  It is possible for this to be NULL if
+    /// Reference to the file entry representing this ContentCache.
+    /// This reference does not own the FileEntry object.
+    /// It is possible for this to be NULL if
     /// the ContentCache encapsulates an imaginary text buffer.
-    const FileEntry *Entry;
+    const FileEntry *OrigEntry;
+
+    /// \brief References the file which the contents were actually loaded from.
+    /// Can be different from 'Entry' if we overridden the contents of one file
+    /// with the contents of another file.
+    const FileEntry *ContentsEntry;
 
     /// SourceLineCache - A bump pointer allocated array of offsets for each
     /// source line.  This is lazily computed.  This is owned by the
@@ -133,7 +138,12 @@ namespace SrcMgr {
     }
     
     ContentCache(const FileEntry *Ent = 0)
-      : Buffer(0, false), Entry(Ent), SourceLineCache(0), NumLines(0) {}
+      : Buffer(0, false), OrigEntry(Ent), ContentsEntry(Ent),
+        SourceLineCache(0), NumLines(0) {}
+
+    ContentCache(const FileEntry *Ent, const FileEntry *contentEnt)
+      : Buffer(0, false), OrigEntry(Ent), ContentsEntry(contentEnt),
+        SourceLineCache(0), NumLines(0) {}
 
     ~ContentCache();
 
@@ -143,7 +153,8 @@ namespace SrcMgr {
     ContentCache(const ContentCache &RHS) 
       : Buffer(0, false), SourceLineCache(0) 
     {
-      Entry = RHS.Entry;
+      OrigEntry = RHS.OrigEntry;
+      ContentsEntry = RHS.ContentsEntry;
 
       assert (RHS.Buffer.getPointer() == 0 && RHS.SourceLineCache == 0
               && "Passed ContentCache object cannot own a buffer.");
@@ -372,7 +383,6 @@ class SourceManager {
   Diagnostic &Diag;
 
   FileManager &FileMgr;
-  const FileSystemOptions &FileSystemOpts;
 
   mutable llvm::BumpPtrAllocator ContentCacheAlloc;
 
@@ -381,6 +391,9 @@ class SourceManager {
   /// on their FileEntry*.  All ContentCache objects will thus have unique,
   /// non-null, FileEntry pointers.
   llvm::DenseMap<const FileEntry*, SrcMgr::ContentCache*> FileInfos;
+
+  /// \brief Files that have been overriden with the contents from another file.
+  llvm::DenseMap<const FileEntry *, const FileEntry *> OverriddenFiles;
 
   /// MemBufferInfos - Information about various memory buffers that we have
   /// read in.  All FileEntry* within the stored ContentCache objects are NULL,
@@ -431,13 +444,7 @@ class SourceManager {
   explicit SourceManager(const SourceManager&);
   void operator=(const SourceManager&);
 public:
-  SourceManager(Diagnostic &Diag, FileManager &FileMgr,
-                const FileSystemOptions &FSOpts)
-    : Diag(Diag), FileMgr(FileMgr), FileSystemOpts(FSOpts),
-      ExternalSLocEntries(0), LineTable(0), NumLinearScans(0),
-      NumBinaryProbes(0) {
-    clearIDTables();
-  }
+  SourceManager(Diagnostic &Diag, FileManager &FileMgr);
   ~SourceManager();
 
   void clearIDTables();
@@ -445,7 +452,6 @@ public:
   Diagnostic &getDiagnostics() const { return Diag; }
 
   FileManager &getFileManager() const { return FileMgr; }
-  const FileSystemOptions &getFileSystemOpts() const { return FileSystemOpts; }
 
   //===--------------------------------------------------------------------===//
   // MainFileID creation and querying methods.
@@ -461,6 +467,13 @@ public:
     return MainFileID;
   }
 
+  /// \brief Set the file ID for the precompiled preamble, which is also the
+  /// main file.
+  void SetPreambleFileID(FileID Preamble) {
+    assert(MainFileID.isInvalid() && "MainFileID already set!");
+    MainFileID = Preamble;
+  }
+  
   //===--------------------------------------------------------------------===//
   // Methods to create new FileID's and instantiations.
   //===--------------------------------------------------------------------===//
@@ -529,6 +542,15 @@ public:
                             const llvm::MemoryBuffer *Buffer,
                             bool DoNotFree = false);
 
+  /// \brief Override the the given source file with another one.
+  ///
+  /// \param SourceFile the source file which will be overriden.
+  ///
+  /// \param NewFile the file whose contents will be used as the
+  /// data instead of the contents of the given source file.
+  void overrideFileContents(const FileEntry *SourceFile,
+                            const FileEntry *NewFile);
+
   //===--------------------------------------------------------------------===//
   // FileID manipulation methods.
   //===--------------------------------------------------------------------===//
@@ -549,7 +571,7 @@ public:
   
   /// getFileEntryForID - Returns the FileEntry record for the provided FileID.
   const FileEntry *getFileEntryForID(FileID FID) const {
-    return getSLocEntry(FID).getFile().getContentCache()->Entry;
+    return getSLocEntry(FID).getFile().getContentCache()->OrigEntry;
   }
 
   /// getBufferData - Return a StringRef to the source buffer data for the
@@ -686,10 +708,10 @@ public:
   /// before calling this method.
   unsigned getColumnNumber(FileID FID, unsigned FilePos, 
                            bool *Invalid = 0) const;
-  unsigned getSpellingColumnNumber(SourceLocation Loc,
-                                   bool *Invalid = 0) const;
+  unsigned getSpellingColumnNumber(SourceLocation Loc, bool *Invalid = 0) const;
   unsigned getInstantiationColumnNumber(SourceLocation Loc,
                                         bool *Invalid = 0) const;
+  unsigned getPresumedColumnNumber(SourceLocation Loc, bool *Invalid = 0) const;
 
 
   /// getLineNumber - Given a SourceLocation, return the spelling line number
@@ -697,10 +719,10 @@ public:
   /// line offsets for the MemoryBuffer, so this is not cheap: use only when
   /// about to emit a diagnostic.
   unsigned getLineNumber(FileID FID, unsigned FilePos, bool *Invalid = 0) const;
-
+  unsigned getSpellingLineNumber(SourceLocation Loc, bool *Invalid = 0) const;
   unsigned getInstantiationLineNumber(SourceLocation Loc, 
                                       bool *Invalid = 0) const;
-  unsigned getSpellingLineNumber(SourceLocation Loc, bool *Invalid = 0) const;
+  unsigned getPresumedLineNumber(SourceLocation Loc, bool *Invalid = 0) const;
 
   /// Return the filename or buffer identifier of the buffer the location is in.
   /// Note that this name does not respect #line directives.  Use getPresumedLoc
@@ -785,7 +807,7 @@ public:
   /// If the source file is included multiple times, the source location will
   /// be based upon the first inclusion.
   SourceLocation getLocation(const FileEntry *SourceFile,
-                             unsigned Line, unsigned Col) const;
+                             unsigned Line, unsigned Col);
 
   /// \brief Determines the order of 2 source locations in the translation unit.
   ///
