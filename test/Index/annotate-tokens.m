@@ -102,7 +102,41 @@ Rdar8595462_A * Rdar8595462_aFunction() {
 static Rdar8595462_A * Rdar8595462_staticVar;
 @end
 
-// RUN: c-index-test -test-annotate-tokens=%s:1:1:104:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck %s
+// <rdar://problem/8595386> Issues doing syntax coloring of properties
+@interface Rdar8595386 {
+  Foo *_foo;
+}
+
+@property (readonly, copy) Foo *foo;
+@property (readonly) Foo *foo2;
+@end
+
+@implementation Rdar8595386
+@synthesize foo = _foo;
+@dynamic foo2;
+@end
+
+// <rdar://problem/8778404> Blocks don't get colored if annotation starts within the block itself
+@interface Rdar8778404
+@end
+
+@implementation Rdar8778404
+- (int)blah:(int)arg, ... { return arg; }
+- (int)blarg:(int)x {
+  (void)^ {
+    int result = [self blah:5, x];
+    Rdar8778404 *a = self;
+    return 0;
+  };
+}
+@end
+
+@interface Rdar8062781
++ (Foo*)getB;
+@property (readonly, nonatomic) Foo *blah;
+@end
+
+// RUN: c-index-test -test-annotate-tokens=%s:1:1:118:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck %s
 // CHECK: Punctuation: "@" [1:1 - 1:2] ObjCInterfaceDecl=Foo:1:12
 // CHECK: Keyword: "interface" [1:2 - 1:11] ObjCInterfaceDecl=Foo:1:12
 // CHECK: Identifier: "Foo" [1:12 - 1:15] ObjCInterfaceDecl=Foo:1:12
@@ -276,22 +310,22 @@ static Rdar8595462_A * Rdar8595462_staticVar;
 // CHECK: Identifier: "anOutlet" [53:21 - 53:29] ObjCIvarDecl=anOutlet:53:21 (Definition)
 // CHECK: Punctuation: ";" [53:29 - 53:30] ObjCInterfaceDecl=IBOutletTests:51:12
 // CHECK: Punctuation: "}" [54:1 - 54:2] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: "-" [55:1 - 55:2] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: "(" [55:3 - 55:4] ObjCInterfaceDecl=IBOutletTests:51:12
+// CHECK: Punctuation: "-" [55:1 - 55:2] ObjCInstanceMethodDecl=actionMethod::55:1
+// CHECK: Punctuation: "(" [55:3 - 55:4] ObjCInstanceMethodDecl=actionMethod::55:1
 // CHECK: Identifier: "IBAction" [55:4 - 55:12] macro instantiation=IBAction
-// CHECK: Punctuation: ")" [55:12 - 55:13] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Identifier: "actionMethod" [55:14 - 55:26] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: ":" [55:26 - 55:27] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: "(" [55:27 - 55:28] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Identifier: "id" [55:28 - 55:30] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: ")" [55:30 - 55:31] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Identifier: "arg" [55:31 - 55:34] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: ";" [55:34 - 55:35] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: "@" [56:1 - 56:2] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Keyword: "property" [56:2 - 56:10] ObjCInterfaceDecl=IBOutletTests:51:12
+// CHECK: Punctuation: ")" [55:12 - 55:13] ObjCInstanceMethodDecl=actionMethod::55:1
+// CHECK: Identifier: "actionMethod" [55:14 - 55:26] ObjCInstanceMethodDecl=actionMethod::55:1
+// CHECK: Punctuation: ":" [55:26 - 55:27] ObjCInstanceMethodDecl=actionMethod::55:1
+// CHECK: Punctuation: "(" [55:27 - 55:28] ObjCInstanceMethodDecl=actionMethod::55:1
+// CHECK: Identifier: "id" [55:28 - 55:30] TypeRef=id:0:0
+// CHECK: Punctuation: ")" [55:30 - 55:31] ParmDecl=arg:55:31 (Definition)
+// CHECK: Identifier: "arg" [55:31 - 55:34] ParmDecl=arg:55:31 (Definition)
+// CHECK: Punctuation: ";" [55:34 - 55:35] ObjCInstanceMethodDecl=actionMethod::55:1
+// CHECK: Punctuation: "@" [56:1 - 56:2] ObjCPropertyDecl=aPropOutlet:56:26
+// CHECK: Keyword: "property" [56:2 - 56:10] ObjCPropertyDecl=aPropOutlet:56:26
 // CHECK: Identifier: "IBOutlet" [56:11 - 56:19] macro instantiation=IBOutlet
-// CHECK: Keyword: "int" [56:20 - 56:23] ObjCInterfaceDecl=IBOutletTests:51:12
-// CHECK: Punctuation: "*" [56:24 - 56:25] ObjCInterfaceDecl=IBOutletTests:51:12
+// CHECK: Keyword: "int" [56:20 - 56:23] ObjCPropertyDecl=aPropOutlet:56:26
+// CHECK: Punctuation: "*" [56:24 - 56:25] ObjCPropertyDecl=aPropOutlet:56:26
 // CHECK: Identifier: "aPropOutlet" [56:26 - 56:37] ObjCPropertyDecl=aPropOutlet:56:26
 // CHECK: Punctuation: ";" [56:37 - 56:38] ObjCInterfaceDecl=IBOutletTests:51:12
 // CHECK: Punctuation: "@" [57:1 - 57:2] ObjCInterfaceDecl=IBOutletTests:51:12
@@ -447,3 +481,70 @@ static Rdar8595462_A * Rdar8595462_staticVar;
 // CHECK: Punctuation: "@" [103:1 - 103:2] ObjCImplementationDecl=Rdar8595462_B:97:1 (Definition)
 // CHECK: Keyword: "end" [103:2 - 103:5]
 
+// CHECK: Punctuation: "@" [110:1 - 110:2] ObjCPropertyDecl=foo:110:33
+// CHECK: Keyword: "property" [110:2 - 110:10] ObjCPropertyDecl=foo:110:33
+// CHECK: Punctuation: "(" [110:11 - 110:12] ObjCPropertyDecl=foo:110:33
+// CHECK: Identifier: "readonly" [110:12 - 110:20] ObjCPropertyDecl=foo:110:33
+// CHECK: Punctuation: "," [110:20 - 110:21] ObjCPropertyDecl=foo:110:33
+// CHECK: Identifier: "copy" [110:22 - 110:26] ObjCPropertyDecl=foo:110:33
+// CHECK: Punctuation: ")" [110:26 - 110:27] ObjCPropertyDecl=foo:110:33
+// CHECK: Identifier: "Foo" [110:28 - 110:31] ObjCClassRef=Foo:1:12
+// CHECK: Punctuation: "*" [110:32 - 110:33] ObjCPropertyDecl=foo:110:33
+// CHECK: Identifier: "foo" [110:33 - 110:36] ObjCPropertyDecl=foo:110:33
+// CHECK: Keyword: "property" [111:2 - 111:10] ObjCPropertyDecl=foo2:111:27
+// CHECK: Punctuation: "(" [111:11 - 111:12] ObjCPropertyDecl=foo2:111:27
+// CHECK: Identifier: "readonly" [111:12 - 111:20] ObjCPropertyDecl=foo2:111:27
+// CHECK: Punctuation: ")" [111:20 - 111:21] ObjCPropertyDecl=foo2:111:27
+// CHECK: Identifier: "Foo" [111:22 - 111:25] ObjCClassRef=Foo:1:12
+// CHECK: Punctuation: "*" [111:26 - 111:27] ObjCPropertyDecl=foo2:111:27
+// CHECK: Identifier: "foo2" [111:27 - 111:31] ObjCPropertyDecl=foo2:111:27
+
+// CHECK: Punctuation: "@" [115:1 - 115:2] UnexposedDecl=foo:110:33 (Definition)
+// CHECK: Keyword: "synthesize" [115:2 - 115:12] UnexposedDecl=foo:110:33 (Definition)
+// CHECK: Identifier: "foo" [115:13 - 115:16] UnexposedDecl=foo:110:33 (Definition)
+// CHECK: Punctuation: "=" [115:17 - 115:18] UnexposedDecl=foo:110:33 (Definition)
+// CHECK: Identifier: "_foo" [115:19 - 115:23] MemberRef=_foo:107:8
+// CHECK: Punctuation: ";" [115:23 - 115:24] ObjCImplementationDecl=Rdar8595386:114:1 (Definition)
+
+// RUN: c-index-test -test-annotate-tokens=%s:127:1:130:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck -check-prefix=CHECK-INSIDE_BLOCK %s
+// CHECK-INSIDE_BLOCK: Keyword: "int" [127:5 - 127:8] VarDecl=result:127:9 (Definition)
+// CHECK-INSIDE_BLOCK: Identifier: "result" [127:9 - 127:15] VarDecl=result:127:9 (Definition)
+// CHECK-INSIDE_BLOCK: Punctuation: "=" [127:16 - 127:17] VarDecl=result:127:9 (Definition)
+// CHECK-INSIDE_BLOCK: Punctuation: "[" [127:18 - 127:19] ObjCMessageExpr=blah::124:1
+// CHECK-INSIDE_BLOCK: Identifier: "self" [127:19 - 127:23] DeclRefExpr=self:0:0
+// CHECK-INSIDE_BLOCK: Identifier: "blah" [127:24 - 127:28] ObjCMessageExpr=blah::124:1
+// CHECK-INSIDE_BLOCK: Punctuation: ":" [127:28 - 127:29] ObjCMessageExpr=blah::124:1
+// CHECK-INSIDE_BLOCK: Literal: "5" [127:29 - 127:30] UnexposedExpr=
+// CHECK-INSIDE_BLOCK: Punctuation: "," [127:30 - 127:31] ObjCMessageExpr=blah::124:1
+// CHECK-INSIDE_BLOCK: Identifier: "x" [127:32 - 127:33] DeclRefExpr=x:125:19
+// CHECK-INSIDE_BLOCK: Punctuation: "]" [127:33 - 127:34] ObjCMessageExpr=blah::124:1
+// CHECK-INSIDE_BLOCK: Punctuation: ";" [127:34 - 127:35] UnexposedStmt=
+// CHECK-INSIDE_BLOCK: Identifier: "Rdar8778404" [128:5 - 128:16] ObjCClassRef=Rdar8778404:120:12
+// CHECK-INSIDE_BLOCK: Punctuation: "*" [128:17 - 128:18] VarDecl=a:128:18 (Definition)
+// CHECK-INSIDE_BLOCK: Identifier: "a" [128:18 - 128:19] VarDecl=a:128:18 (Definition)
+// CHECK-INSIDE_BLOCK: Punctuation: "=" [128:20 - 128:21] VarDecl=a:128:18 (Definition)
+// CHECK-INSIDE_BLOCK: Identifier: "self" [128:22 - 128:26] DeclRefExpr=self:0:0
+
+// RUN: c-index-test -test-annotate-tokens=%s:134:1:137:1 %s -DIBOutlet='__attribute__((iboutlet))' -DIBAction='void)__attribute__((ibaction)' | FileCheck -check-prefix=CHECK-PROP-AFTER-METHOD %s
+// CHECK-PROP-AFTER-METHOD: Punctuation: "@" [134:1 - 134:2] ObjCInterfaceDecl=Rdar8062781:134:12
+// CHECK-PROP-AFTER-METHOD: Keyword: "interface" [134:2 - 134:11] ObjCInterfaceDecl=Rdar8062781:134:12
+// CHECK-PROP-AFTER-METHOD: Identifier: "Rdar8062781" [134:12 - 134:23] ObjCInterfaceDecl=Rdar8062781:134:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "+" [135:1 - 135:2] ObjCClassMethodDecl=getB:135:1
+// CHECK-PROP-AFTER-METHOD: Punctuation: "(" [135:3 - 135:4] ObjCClassMethodDecl=getB:135:1
+// CHECK-PROP-AFTER-METHOD: Identifier: "Foo" [135:4 - 135:7] ObjCClassRef=Foo:1:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "*" [135:7 - 135:8] ObjCClassMethodDecl=getB:135:1
+// CHECK-PROP-AFTER-METHOD: Punctuation: ")" [135:8 - 135:9] ObjCClassMethodDecl=getB:135:1
+// CHECK-PROP-AFTER-METHOD: Identifier: "getB" [135:9 - 135:13] ObjCClassMethodDecl=getB:135:1
+// CHECK-PROP-AFTER-METHOD: Punctuation: ";" [135:13 - 135:14] ObjCClassMethodDecl=getB:135:1
+// CHECK-PROP-AFTER-METHOD: Punctuation: "@" [136:1 - 136:2] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Keyword: "property" [136:2 - 136:10] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Punctuation: "(" [136:11 - 136:12] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Identifier: "readonly" [136:12 - 136:20] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Punctuation: "," [136:20 - 136:21] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Identifier: "nonatomic" [136:22 - 136:31] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Punctuation: ")" [136:31 - 136:32] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Identifier: "Foo" [136:33 - 136:36] ObjCClassRef=Foo:1:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "*" [136:37 - 136:38] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Identifier: "blah" [136:38 - 136:42] ObjCPropertyDecl=blah:136:38
+// CHECK-PROP-AFTER-METHOD: Punctuation: ";" [136:42 - 136:43] ObjCInterfaceDecl=Rdar8062781:134:12
+// CHECK-PROP-AFTER-METHOD: Punctuation: "@" [137:1 - 137:2] ObjCInterfaceDecl=Rdar8062781:134:12

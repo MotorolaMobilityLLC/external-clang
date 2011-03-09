@@ -76,6 +76,10 @@ int test_multi_declaration(void) {
   return 0;
 }
 
+@protocol P1
+- (void)method;
+@end
+
 // CHECK: usrs.m c:usrs.m@85@F@my_helper Extent=[3:19 - 3:60]
 // CHECK: usrs.m c:usrs.m@95@F@my_helper@x Extent=[3:29 - 3:34]
 // CHECK: usrs.m c:usrs.m@102@F@my_helper@y Extent=[3:36 - 3:41]
@@ -88,16 +92,16 @@ int test_multi_declaration(void) {
 // CHECK: usrs.m c:@SA@MyStruct Extent=[15:9 - 18:2]
 // CHECK: usrs.m c:@SA@MyStruct@FI@wa Extent=[16:7 - 16:9]
 // CHECK: usrs.m c:@SA@MyStruct@FI@moo Extent=[17:7 - 17:10]
-// CHECK: usrs.m c:usrs.m@219@T@MyStruct Extent=[18:3 - 18:11]
+// CHECK: usrs.m c:usrs.m@179@T@MyStruct Extent=[15:1 - 18:11]
 // CHECK: usrs.m c:@E@Pizza Extent=[20:1 - 23:2]
 // CHECK: usrs.m c:@E@Pizza@CHEESE Extent=[21:3 - 21:9]
 // CHECK: usrs.m c:@E@Pizza@MUSHROOMS Extent=[22:3 - 22:12]
 // CHECK: usrs.m c:objc(cs)Foo Extent=[25:1 - 32:5]
 // CHECK: usrs.m c:objc(cs)Foo@x Extent=[26:6 - 26:7]
 // CHECK: usrs.m c:objc(cs)Foo@y Extent=[27:6 - 27:7]
-// CHECK: usrs.m c:objc(cs)Foo(py)d1 Extent=[31:15 - 31:17]
 // CHECK: usrs.m c:objc(cs)Foo(im)godzilla Extent=[29:1 - 29:17]
 // CHECK: usrs.m c:objc(cs)Foo(cm)kingkong Extent=[30:1 - 30:17]
+// CHECK: usrs.m c:objc(cs)Foo(py)d1 Extent=[31:1 - 31:17]
 // CHECK: usrs.m c:objc(cs)Foo(im)d1 Extent=[31:15 - 31:17]
 // CHECK: usrs.m c:objc(cs)Foo(im)setD1: Extent=[31:15 - 31:17]
 // CHECK: usrs.m c:usrs.m@352objc(cs)Foo(im)setD1:@d1 Extent=[31:15 - 31:17]
@@ -119,18 +123,20 @@ int test_multi_declaration(void) {
 // CHECK: usrs.m c:objc(ext)CWithExt@usrs.m@654 Extent=[57:1 - 59:5]
 // CHECK: usrs.m c:objc(cs)CWithExt(im)meth3 Extent=[58:1 - 58:14]
 // CHECK: usrs.m c:objc(cy)CWithExt@Bar Extent=[60:1 - 62:5]
-// CHECK: usrs.m c:objc(cy)CWithExt@Bar(im)meth4 Extent=[61:1 - 61:14]
+// CHECK: usrs.m c:objc(cs)CWithExt(im)meth4 Extent=[61:1 - 61:14]
 // CHECK: usrs.m c:objc(cs)CWithExt Extent=[63:1 - 67:2]
 // CHECK: usrs.m c:objc(cs)CWithExt(im)meth1 Extent=[64:1 - 64:27]
 // CHECK: usrs.m c:objc(cs)CWithExt(im)meth2 Extent=[65:1 - 65:27]
 // CHECK: usrs.m c:objc(cs)CWithExt(im)meth3 Extent=[66:1 - 66:27]
 // CHECK: usrs.m c:objc(cy)CWithExt@Bar Extent=[68:1 - 70:2]
-// CHECK: usrs.m c:objc(cy)CWithExt@Bar(im)meth4 Extent=[69:1 - 69:27]
+// CHECK: usrs.m c:objc(cs)CWithExt(im)meth4 Extent=[69:1 - 69:27]
 // CHECK: usrs.m c:@F@aux_1 Extent=[72:6 - 72:26]
 // CHECK: usrs.m c:@F@test_multi_declaration Extent=[73:5 - 77:2]
 // CHECK: usrs.m c:usrs.m@980@F@test_multi_declaration@foo Extent=[74:3 - 74:14]
 // CHECK: usrs.m c:usrs.m@980@F@test_multi_declaration@bar Extent=[74:16 - 74:23]
 // CHECK: usrs.m c:usrs.m@980@F@test_multi_declaration@baz Extent=[74:25 - 74:32]
+// CHECK: usrs.m c:objc(pl)P1 Extent=[79:1 - 81:5]
+// CHECK: usrs.m c:objc(pl)P1(im)method Extent=[80:1 - 80:16]
 
 // RUN: c-index-test -test-load-source all %s | FileCheck -check-prefix=CHECK-source %s
 // CHECK-source: usrs.m:3:19: FunctionDecl=my_helper:3:19 (Definition) Extent=[3:19 - 3:60]
@@ -150,7 +156,7 @@ int test_multi_declaration(void) {
 // CHECK-source: usrs.m:15:9: StructDecl=:15:9 (Definition) Extent=[15:9 - 18:2]
 // CHECK-source: usrs.m:16:7: FieldDecl=wa:16:7 (Definition) Extent=[16:7 - 16:9]
 // CHECK-source: usrs.m:17:7: FieldDecl=moo:17:7 (Definition) Extent=[17:7 - 17:10]
-// CHECK-source: usrs.m:18:3: TypedefDecl=MyStruct:18:3 (Definition) Extent=[18:3 - 18:11]
+// CHECK-source: usrs.m:18:3: TypedefDecl=MyStruct:18:3 (Definition) Extent=[15:1 - 18:11]
 // CHECK-source: usrs.m:15:9: TypeRef=MyStruct:15:9 Extent=[15:9 - 15:15]
 // CHECK-source: usrs.m:20:6: EnumDecl=Pizza:20:6 (Definition) Extent=[20:1 - 23:2]
 // CHECK-source: usrs.m:21:3: EnumConstantDecl=CHEESE:21:3 (Definition) Extent=[21:3 - 21:9]
@@ -160,11 +166,11 @@ int test_multi_declaration(void) {
 // CHECK-source: usrs.m:26:3: TypeRef=id:0:0 Extent=[26:3 - 26:5]
 // CHECK-source: usrs.m:27:6: ObjCIvarDecl=y:27:6 (Definition) Extent=[27:6 - 27:7]
 // CHECK-source: usrs.m:27:3: TypeRef=id:0:0 Extent=[27:3 - 27:5]
-// CHECK-source: usrs.m:31:15: ObjCPropertyDecl=d1:31:15 Extent=[31:15 - 31:17]
 // CHECK-source: usrs.m:29:1: ObjCInstanceMethodDecl=godzilla:29:1 Extent=[29:1 - 29:17]
 // CHECK-source: usrs.m:29:4: TypeRef=id:0:0 Extent=[29:4 - 29:6]
 // CHECK-source: usrs.m:30:1: ObjCClassMethodDecl=kingkong:30:1 Extent=[30:1 - 30:17]
 // CHECK-source: usrs.m:30:4: TypeRef=id:0:0 Extent=[30:4 - 30:6]
+// CHECK-source: usrs.m:31:15: ObjCPropertyDecl=d1:31:15 Extent=[31:1 - 31:17]
 // CHECK-source: usrs.m:31:15: ObjCInstanceMethodDecl=d1:31:15 Extent=[31:15 - 31:17]
 // CHECK-source: usrs.m:31:15: ObjCInstanceMethodDecl=setD1::31:15 Extent=[31:15 - 31:17]
 // CHECK-source: usrs.m:31:15: ParmDecl=d1:31:15 (Definition) Extent=[31:15 - 31:17]
@@ -189,7 +195,7 @@ int test_multi_declaration(void) {
 // CHECK-source: usrs.m:42:10: UnexposedExpr= Extent=[42:10 - 42:11]
 // CHECK-source: usrs.m:42:10: UnexposedExpr= Extent=[42:10 - 42:11]
 // CHECK-source: usrs.m:44:13: ObjCIvarDecl=d1:44:13 (Definition) Extent=[44:13 - 44:15]
-// CHECK-source: usrs.m:44:13: UnexposedDecl=:44:13 (Definition) Extent=[44:1 - 44:15]
+// CHECK-source: usrs.m:44:13: UnexposedDecl=d1:31:15 (Definition) Extent=[44:1 - 44:15]
 // CHECK-source: usrs.m:47:5: VarDecl=z:47:5 Extent=[47:1 - 47:6]
 // CHECK-source: usrs.m:49:12: FunctionDecl=local_func:49:12 (Definition) Extent=[49:12 - 49:43]
 // CHECK-source: usrs.m:49:27: ParmDecl=x:49:27 (Definition) Extent=[49:23 - 49:28]
@@ -259,6 +265,6 @@ int test_multi_declaration(void) {
 // CHECK-source: usrs.m:75:19: DeclRefExpr=baz:74:25 Extent=[75:19 - 75:22]
 // CHECK-source: usrs.m:76:3: UnexposedStmt= Extent=[76:3 - 76:11]
 // CHECK-source: usrs.m:76:10: UnexposedExpr= Extent=[76:10 - 76:11]
-
-
+// CHECK-source: usrs.m:79:1: ObjCProtocolDecl=P1:79:1 (Definition) Extent=[79:1 - 81:5]
+// CHECK-source: usrs.m:80:1: ObjCInstanceMethodDecl=method:80:1 Extent=[80:1 - 80:16]
 

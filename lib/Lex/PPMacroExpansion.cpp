@@ -223,7 +223,7 @@ bool Preprocessor::HandleMacroExpandedIdentifier(Token &Identifier,
   }
 
   // Notice that this macro has been used.
-  MI->setIsUsed(true);
+  markMacroAsUsed(MI);
 
   // If we started lexing a macro, enter the macro expansion body.
 
@@ -248,6 +248,7 @@ bool Preprocessor::HandleMacroExpandedIdentifier(Token &Identifier,
       if (IsAtStartOfLine) Identifier.setFlag(Token::StartOfLine);
       if (HadLeadingSpace) Identifier.setFlag(Token::LeadingSpace);
     }
+    Identifier.setFlag(Token::LeadingEmptyMacro);
     ++NumFastMacroExpanded;
     return false;
 
@@ -354,9 +355,9 @@ MacroArgs *Preprocessor::ReadFunctionLikeMacroArgs(Token &MacroName,
         LexUnexpandedToken(Tok);
       }
       
-      if (Tok.is(tok::eof) || Tok.is(tok::eom)) { // "#if f(<eof>" & "#if f(\n"
+      if (Tok.is(tok::eof) || Tok.is(tok::eod)) { // "#if f(<eof>" & "#if f(\n"
         Diag(MacroName, diag::err_unterm_macro_invoc);
-        // Do not lose the EOF/EOM.  Return it to the client.
+        // Do not lose the EOF/EOD.  Return it to the client.
         MacroName = Tok;
         return 0;
       } else if (Tok.is(tok::r_paren)) {
@@ -535,31 +536,56 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("attribute_ext_vector_type", true)
            .Case("attribute_ns_returns_not_retained", true)
            .Case("attribute_ns_returns_retained", true)
+           .Case("attribute_ns_consumes_self", true)
+           .Case("attribute_ns_consumed", true)
+           .Case("attribute_cf_consumed", true)
            .Case("attribute_objc_ivar_unused", true)
+           .Case("attribute_objc_method_family", true)
            .Case("attribute_overloadable", true)
            .Case("attribute_unavailable_with_message", true)
            .Case("blocks", LangOpts.Blocks)
-           .Case("cxx_attributes", LangOpts.CPlusPlus0x)
-           .Case("cxx_auto_type", LangOpts.CPlusPlus0x)
-           .Case("cxx_decltype", LangOpts.CPlusPlus0x)
-           .Case("cxx_deleted_functions", true) // Accepted as an extension.
            .Case("cxx_exceptions", LangOpts.Exceptions)
            .Case("cxx_rtti", LangOpts.RTTI)
-           .Case("cxx_strong_enums", LangOpts.CPlusPlus0x)
-           .Case("cxx_static_assert", LangOpts.CPlusPlus0x)
-           .Case("cxx_trailing_return", LangOpts.CPlusPlus0x)
            .Case("enumerator_attributes", true)
            .Case("objc_nonfragile_abi", LangOpts.ObjCNonFragileABI)
            .Case("objc_weak_class", LangOpts.ObjCNonFragileABI)
            .Case("ownership_holds", true)
            .Case("ownership_returns", true)
            .Case("ownership_takes", true)
-           .Case("cxx_inline_namespaces", true)
-         //.Case("cxx_concepts", false)
+           // C++0x features
+           .Case("cxx_attributes", LangOpts.CPlusPlus0x)
+           .Case("cxx_auto_type", LangOpts.CPlusPlus0x)
+           .Case("cxx_decltype", LangOpts.CPlusPlus0x)
+           .Case("cxx_default_function_template_args", LangOpts.CPlusPlus0x)
+           .Case("cxx_deleted_functions", LangOpts.CPlusPlus0x)
+           .Case("cxx_inline_namespaces", LangOpts.CPlusPlus0x)
          //.Case("cxx_lambdas", false)
          //.Case("cxx_nullptr", false)
-         //.Case("cxx_rvalue_references", false)
-         //.Case("cxx_variadic_templates", false)
+           .Case("cxx_reference_qualified_functions", LangOpts.CPlusPlus0x)
+           .Case("cxx_rvalue_references", LangOpts.CPlusPlus0x)
+           .Case("cxx_strong_enums", LangOpts.CPlusPlus0x)
+           .Case("cxx_static_assert", LangOpts.CPlusPlus0x)
+           .Case("cxx_trailing_return", LangOpts.CPlusPlus0x)
+           .Case("cxx_variadic_templates", LangOpts.CPlusPlus0x)
+           // Type traits
+           .Case("has_nothrow_assign", LangOpts.CPlusPlus)
+           .Case("has_nothrow_copy", LangOpts.CPlusPlus)
+           .Case("has_nothrow_constructor", LangOpts.CPlusPlus)
+           .Case("has_trivial_assign", LangOpts.CPlusPlus)
+           .Case("has_trivial_copy", LangOpts.CPlusPlus)
+           .Case("has_trivial_constructor", LangOpts.CPlusPlus)
+           .Case("has_trivial_destructor", LangOpts.CPlusPlus)
+           .Case("has_virtual_destructor", LangOpts.CPlusPlus)
+           .Case("is_abstract", LangOpts.CPlusPlus)
+           .Case("is_base_of", LangOpts.CPlusPlus)
+           .Case("is_class", LangOpts.CPlusPlus)
+           .Case("is_convertible_to", LangOpts.CPlusPlus)
+           .Case("is_empty", LangOpts.CPlusPlus)
+           .Case("is_enum", LangOpts.CPlusPlus)
+           .Case("is_pod", LangOpts.CPlusPlus)
+           .Case("is_polymorphic", LangOpts.CPlusPlus)
+           .Case("is_union", LangOpts.CPlusPlus)
+           .Case("is_literal", LangOpts.CPlusPlus)
            .Case("tls", PP.getTargetInfo().isTLSSupported())
            .Default(false);
 }
@@ -575,9 +601,9 @@ static bool HasAttribute(const IdentifierInfo *II) {
 /// EvaluateHasIncludeCommon - Process a '__has_include("path")'
 /// or '__has_include_next("path")' expression.
 /// Returns true if successful.
-static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
-        IdentifierInfo *II, Preprocessor &PP,
-        const DirectoryLookup *LookupFrom) {
+static bool EvaluateHasIncludeCommon(Token &Tok,
+                                     IdentifierInfo *II, Preprocessor &PP,
+                                     const DirectoryLookup *LookupFrom) {
   SourceLocation LParenLoc;
 
   // Get '('.
@@ -601,8 +627,8 @@ static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
   SourceLocation EndLoc;
   
   switch (Tok.getKind()) {
-  case tok::eom:
-    // If the token kind is EOM, the error has already been diagnosed.
+  case tok::eod:
+    // If the token kind is EOD, the error has already been diagnosed.
     return false;
 
   case tok::angle_string_literal:
@@ -619,7 +645,7 @@ static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
     // case, glue the tokens together into FilenameBuffer and interpret those.
     FilenameBuffer.push_back('<');
     if (PP.ConcatenateIncludeName(FilenameBuffer, EndLoc))
-      return false;   // Found <eom> but no ">"?  Diagnostic already emitted.
+      return false;   // Found <eod> but no ">"?  Diagnostic already emitted.
     Filename = FilenameBuffer.str();
     break;
   default:
@@ -638,7 +664,7 @@ static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
   const FileEntry *File = PP.LookupFile(Filename, isAngled, LookupFrom, CurDir);
 
   // Get the result value.  Result = true means the file exists.
-  Result = File != 0;
+  bool Result = File != 0;
 
   // Get ')'.
   PP.LexNonComment(Tok);
@@ -650,19 +676,19 @@ static bool EvaluateHasIncludeCommon(bool &Result, Token &Tok,
     return false;
   }
 
-  return true;
+  return Result;
 }
 
 /// EvaluateHasInclude - Process a '__has_include("path")' expression.
 /// Returns true if successful.
-static bool EvaluateHasInclude(bool &Result, Token &Tok, IdentifierInfo *II,
+static bool EvaluateHasInclude(Token &Tok, IdentifierInfo *II,
                                Preprocessor &PP) {
-  return(EvaluateHasIncludeCommon(Result, Tok, II, PP, NULL));
+  return EvaluateHasIncludeCommon(Tok, II, PP, NULL);
 }
 
 /// EvaluateHasIncludeNext - Process '__has_include_next("path")' expression.
 /// Returns true if successful.
-static bool EvaluateHasIncludeNext(bool &Result, Token &Tok,
+static bool EvaluateHasIncludeNext(Token &Tok,
                                    IdentifierInfo *II, Preprocessor &PP) {
   // __has_include_next is like __has_include, except that we start
   // searching after the current found directory.  If we can't do this,
@@ -678,7 +704,7 @@ static bool EvaluateHasIncludeNext(bool &Result, Token &Tok,
     ++Lookup;
   }
 
-  return(EvaluateHasIncludeCommon(Result, Tok, II, PP, Lookup));
+  return EvaluateHasIncludeCommon(Tok, II, PP, Lookup);
 }
 
 /// ExpandBuiltinMacro - If an identifier token is read that is to be expanded
@@ -855,16 +881,23 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
     // The argument to these two builtins should be a parenthesized
     // file name string literal using angle brackets (<>) or
     // double-quotes ("").
-    bool Value = false;
-    bool IsValid;
+    bool Value;
     if (II == Ident__has_include)
-      IsValid = EvaluateHasInclude(Value, Tok, II, *this);
+      Value = EvaluateHasInclude(Tok, II, *this);
     else
-      IsValid = EvaluateHasIncludeNext(Value, Tok, II, *this);
+      Value = EvaluateHasIncludeNext(Tok, II, *this);
     OS << (int)Value;
     Tok.setKind(tok::numeric_constant);
   } else {
     assert(0 && "Unknown identifier!");
   }
   CreateString(OS.str().data(), OS.str().size(), Tok, Tok.getLocation());
+}
+
+void Preprocessor::markMacroAsUsed(MacroInfo *MI) {
+  // If the 'used' status changed, and the macro requires 'unused' warning,
+  // remove its SourceLocation from the warn-for-unused-macro locations.
+  if (MI->isWarnIfUnused() && !MI->isUsed())
+    WarnUnusedMacroLocs.erase(MI->getDefinitionLoc());
+  MI->setIsUsed(true);
 }

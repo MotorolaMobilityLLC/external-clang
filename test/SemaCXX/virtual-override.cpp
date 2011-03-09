@@ -32,7 +32,7 @@ struct a { };
 struct b : private a { }; // expected-note{{declared private here}}
   
 class A {
-  virtual a* f(); // expected-note{{overridden virtual function is here}}
+  virtual a* f(); // FIXME: desired-note{{overridden virtual function is here}}
 };
 
 class B : A {
@@ -121,7 +121,7 @@ namespace T9 {
   struct a { };
   
   template<typename T> struct b : a {
-    int a[sizeof(T) ? -1 : -1]; // expected-error {{array size is negative}}
+    int a[sizeof(T) ? -1 : -1]; // expected-error {{array with a negative size}}
   };
   
   class A {
@@ -167,7 +167,7 @@ void test2() {
 };
 
 struct Foo3 {
-  virtual void f(int) = 0; // expected-note{{pure virtual function}}
+  virtual void f(int) = 0; // expected-note{{unimplemented pure virtual method}}
 };
 
 template<typename T>

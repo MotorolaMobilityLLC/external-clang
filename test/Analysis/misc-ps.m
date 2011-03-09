@@ -1,12 +1,12 @@
 // NOTE: Use '-fobjc-gc' to test the analysis being run twice, and multiple reports are not issued.
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=basic -fobjc-gc -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=basic -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=basic -fobjc-gc -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=basic -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-experimental-internal-checks -analyzer-check-objc-mem -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-disable-checker=core.experimental.Malloc -analyzer-store=basic -fobjc-gc -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-disable-checker=core.experimental.Malloc -analyzer-store=basic -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple i386-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-disable-checker=core.experimental.Malloc -analyzer-store=basic -fobjc-gc -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-disable-checker=core.experimental.Malloc -analyzer-store=basic -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-store=region -analyzer-constraints=basic -verify -fblocks -Wno-unreachable-code %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,core.experimental,cocoa.AtSync -analyzer-store=region -analyzer-constraints=range -verify -fblocks -Wno-unreachable-code %s
 
 #ifndef __clang_analyzer__
 #error __clang__analyzer__ not defined
@@ -822,7 +822,7 @@ struct trie {
 
 struct kwset {
   struct trie *trie;
-  unsigned char delta[10];
+  unsigned char y[10];
   struct trie* next[10];
   int d;
 };
@@ -837,9 +837,9 @@ void f(kwset_t *kws, char const *p, char const *q) {
   register char const *end = p;
   register char const *lim = q;
   register int d = 1;
-  register unsigned char const *delta = kws->delta;
+  register unsigned char const *y = kws->y;
 
-  d = delta[c = (end+=d)[-1]]; // no-warning
+  d = y[c = (end+=d)[-1]]; // no-warning
   trie = next[c];
 }
 
@@ -1212,3 +1212,79 @@ void pr8619(int a, int b, int c) {
 }
 
 
+// PR 8646 - crash in the analyzer when handling unions.
+union pr8648_union {
+        signed long long pr8648_union_field;
+};
+void pr8648() {
+  long long y;
+  union pr8648_union x = { .pr8648_union_field = 0LL };
+  y = x.pr8648_union_field;
+  
+  union pr8648_union z;
+  z = (union pr8648_union) { .pr8648_union_field = 0LL };
+
+  union pr8648_union w;
+  w = ({ (union pr8648_union) { .pr8648_union_field = 0LL }; }); 
+
+  // crash, no assignment
+  (void) ({ (union pr8648_union) { .pr8648_union_field = 0LL }; }).pr8648_union_field;
+
+  // crash with assignment
+  y = ({ (union pr8648_union) { .pr8648_union_field = 0LL }; }).pr8648_union_field;
+}
+
+// PR 9269 - don't assert when building the following CFG.  The for statement
+// contains a condition with multiple basic blocks, and the value of the
+// statement expression is then indexed as part of a bigger condition expression.
+// This example exposed a bug in child traversal in the CFGBuilder.
+void pr9269() {
+  struct s { char *bar[10]; } baz[2] = { 0 };
+  unsigned i = 0;
+  for (i = 0;
+  (* ({ while(0); ({ &baz[0]; }); })).bar[0] != 0;
+       ++i) {}
+}
+
+// Test evaluation of GNU-style ?:.
+int pr9287(int type) { return type ? : 0; } // no-warning
+
+void pr9287_b(int type, int *p) { 
+  int x = type ? : 0;
+  if (x) {
+    p = 0;
+  }
+  if (type) {
+    *p = 0xDEADBEEF; // expected-warning {{null pointer}}
+  }
+}
+
+void pr9287_c(int type, int *p) { 
+  int x = type ? : 0;
+  if (x) {
+    p = 0;
+  }
+  if (!type) {
+    *p = 0xDEADBEEF; // no-warning
+  }
+}
+
+void test_switch() {
+  switch (4) {
+    case 1: {
+      int *p = 0;
+      *p = 0xDEADBEEF; // no-warning
+      break;
+    }
+    case 4: {
+      int *p = 0;
+      *p = 0xDEADBEEF; // expected-warning {{null}}
+      break;
+    }
+    default: {
+      int *p = 0;
+      *p = 0xDEADBEEF; // no-warning
+      break;
+    }
+  }
+}

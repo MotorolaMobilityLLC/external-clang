@@ -33,14 +33,14 @@ using llvm::utostr;
 namespace {
   class RewriteObjC : public ASTConsumer {
     enum {
-      BLOCK_FIELD_IS_OBJECT   =  3,  /* id, NSObject, __attribute__((NSObject)), 
+      BLOCK_FIELD_IS_OBJECT   =  3,  /* id, NSObject, __attribute__((NSObject)),
                                         block, ... */
       BLOCK_FIELD_IS_BLOCK    =  7,  /* a block variable */
       BLOCK_FIELD_IS_BYREF    =  8,  /* the on stack structure holding the 
                                         __block variable */
-      BLOCK_FIELD_IS_WEAK     = 16,  /* declared __weak, only used in byref copy 
+      BLOCK_FIELD_IS_WEAK     = 16,  /* declared __weak, only used in byref copy
                                         helpers */
-      BLOCK_BYREF_CALLER      = 128, /* called from __block (byref) copy/dispose 
+      BLOCK_BYREF_CALLER      = 128, /* called from __block (byref) copy/dispose
                                         support routines */
       BLOCK_BYREF_CURRENT_MAX = 256
     };
@@ -252,7 +252,7 @@ namespace {
     void RewriteTypeIntoString(QualType T, std::string &ResultStr,
                                const FunctionType *&FPRetType);
     void RewriteByRefString(std::string &ResultStr, const std::string &Name,
-                            ValueDecl *VD);
+                            ValueDecl *VD, bool def=false);
     void RewriteCategoryDecl(ObjCCategoryDecl *Dcl);
     void RewriteProtocolDecl(ObjCProtocolDecl *Dcl);
     void RewriteForwardProtocolDecl(ObjCForwardProtocolDecl *Dcl);
@@ -298,6 +298,7 @@ namespace {
     Stmt *RewriteObjCThrowStmt(ObjCAtThrowStmt *S);
     Stmt *RewriteObjCForCollectionStmt(ObjCForCollectionStmt *S,
                                        SourceLocation OrigEnd);
+    bool IsDeclStmtInForeachHeader(DeclStmt *DS);
     CallExpr *SynthesizeCallToFunctionDecl(FunctionDecl *FD,
                                       Expr **args, unsigned nargs,
                                       SourceLocation StartLoc=SourceLocation(),
@@ -450,20 +451,30 @@ namespace {
           To += From[i];
       }
     }
+
+    QualType getSimpleFunctionType(QualType result,
+                                   const QualType *args,
+                                   unsigned numArgs,
+                                   bool variadic = false) {
+      FunctionProtoType::ExtProtoInfo fpi;
+      fpi.Variadic = variadic;
+      return Context->getFunctionType(result, args, numArgs, fpi);
+    }
   };
 
   // Helper function: create a CStyleCastExpr with trivial type source info.
   CStyleCastExpr* NoTypeInfoCStyleCastExpr(ASTContext *Ctx, QualType Ty,
                                            CastKind Kind, Expr *E) {
     TypeSourceInfo *TInfo = Ctx->getTrivialTypeSourceInfo(Ty, SourceLocation());
-    return CStyleCastExpr::Create(*Ctx, Ty, Kind, E, 0, TInfo,
+    return CStyleCastExpr::Create(*Ctx, Ty, VK_RValue, Kind, E, 0, TInfo,
                                   SourceLocation(), SourceLocation());
   }
 }
 
 void RewriteObjC::RewriteBlocksInFunctionProtoType(QualType funcType,
                                                    NamedDecl *D) {
-  if (FunctionProtoType *fproto = dyn_cast<FunctionProtoType>(funcType)) {
+  if (const FunctionProtoType *fproto
+      = dyn_cast<FunctionProtoType>(funcType.IgnoreParens())) {
     for (FunctionProtoType::arg_type_iterator I = fproto->arg_type_begin(),
          E = fproto->arg_type_end(); I && (I != E); ++I)
       if (isTopLevelBlockPointerType(*I)) {
@@ -1228,32 +1239,28 @@ Stmt *RewriteObjC::RewritePropertyOrImplicitSetter(BinaryOperator *BinOp, Expr *
   bool Super = false;
   QualType SuperTy;
   SourceLocation SuperLocation;
+  SourceLocation SelectorLoc;
   // Synthesize a ObjCMessageExpr from a ObjCPropertyRefExpr or ObjCImplicitSetterGetterRefExpr.
   // This allows us to reuse all the fun and games in SynthMessageExpr().
-  if (ObjCPropertyRefExpr *PropRefExpr = dyn_cast<ObjCPropertyRefExpr>(BinOp->getLHS())) {
-    ObjCPropertyDecl *PDecl = PropRefExpr->getProperty();
-    OMD = PDecl->getSetterMethodDecl();
-    Ty = PDecl->getType();
-    Sel = PDecl->getSetterName();
-    Super = PropRefExpr->isSuperReceiver();
-    if (!Super)
-      Receiver = PropRefExpr->getBase();
-    else {
-      SuperTy = PropRefExpr->getSuperType();
-      SuperLocation = PropRefExpr->getSuperLocation();
+  if (ObjCPropertyRefExpr *PropRefExpr =
+        dyn_cast<ObjCPropertyRefExpr>(BinOp->getLHS())) {
+    SelectorLoc = PropRefExpr->getLocation();
+    if (PropRefExpr->isExplicitProperty()) {
+      ObjCPropertyDecl *PDecl = PropRefExpr->getExplicitProperty();
+      OMD = PDecl->getSetterMethodDecl();
+      Ty = PDecl->getType();
+      Sel = PDecl->getSetterName();
+    } else {
+      OMD = PropRefExpr->getImplicitPropertySetter();
+      Sel = OMD->getSelector();
+      Ty = PropRefExpr->getType();
     }
-  }
-  else if (ObjCImplicitSetterGetterRefExpr *ImplicitRefExpr = 
-           dyn_cast<ObjCImplicitSetterGetterRefExpr>(BinOp->getLHS())) {
-    OMD = ImplicitRefExpr->getSetterMethod();
-    Sel = OMD->getSelector();
-    Ty = ImplicitRefExpr->getType();
-    Super = ImplicitRefExpr->isSuperReceiver();
-    if (!Super)
-      Receiver = ImplicitRefExpr->getBase();
-    else {
-      SuperTy = ImplicitRefExpr->getSuperType();
-      SuperLocation = ImplicitRefExpr->getSuperLocation();
+    Super = PropRefExpr->isSuperReceiver();
+    if (!Super) {
+      Receiver = PropRefExpr->getBase();
+    } else {
+      SuperTy = PropRefExpr->getSuperReceiverType();
+      SuperLocation = PropRefExpr->getReceiverLocation();
     }
   }
   
@@ -1265,11 +1272,12 @@ Stmt *RewriteObjC::RewritePropertyOrImplicitSetter(BinaryOperator *BinOp, Expr *
   if (Super)
     MsgExpr = ObjCMessageExpr::Create(*Context, 
                                       Ty.getNonReferenceType(),
+                                      Expr::getValueKindForType(Ty),
                                       /*FIXME?*/SourceLocation(),
                                       SuperLocation,
                                       /*IsInstanceSuper=*/true,
                                       SuperTy,
-                                      Sel, OMD,
+                                      Sel, SelectorLoc, OMD,
                                       &ExprVec[0], 1,
                                       /*FIXME:*/SourceLocation());
   else {
@@ -1283,9 +1291,10 @@ Stmt *RewriteObjC::RewritePropertyOrImplicitSetter(BinaryOperator *BinOp, Expr *
   
     MsgExpr = ObjCMessageExpr::Create(*Context, 
                                       Ty.getNonReferenceType(),
+                                      Expr::getValueKindForType(Ty),
                                       /*FIXME: */SourceLocation(),
                                       cast<Expr>(Receiver),
-                                      Sel, OMD,
+                                      Sel, SelectorLoc, OMD,
                                       &ExprVec[0], 1,
                                       /*FIXME:*/SourceLocation());
   }
@@ -1310,31 +1319,26 @@ Stmt *RewriteObjC::RewritePropertyOrImplicitGetter(Expr *PropOrGetterRefExpr) {
   bool Super = false;
   QualType SuperTy;
   SourceLocation SuperLocation;
+  SourceLocation SelectorLoc;
   if (ObjCPropertyRefExpr *PropRefExpr = 
         dyn_cast<ObjCPropertyRefExpr>(PropOrGetterRefExpr)) {
-    ObjCPropertyDecl *PDecl = PropRefExpr->getProperty();
-    OMD = PDecl->getGetterMethodDecl();
-    Ty = PDecl->getType();
-    Sel = PDecl->getGetterName();
+    SelectorLoc = PropRefExpr->getLocation();
+    if (PropRefExpr->isExplicitProperty()) {
+      ObjCPropertyDecl *PDecl = PropRefExpr->getExplicitProperty();
+      OMD = PDecl->getGetterMethodDecl();
+      Ty = PDecl->getType();
+      Sel = PDecl->getGetterName();
+    } else {
+      OMD = PropRefExpr->getImplicitPropertyGetter();
+      Sel = OMD->getSelector();
+      Ty = PropRefExpr->getType();
+    }
     Super = PropRefExpr->isSuperReceiver();
     if (!Super)
       Receiver = PropRefExpr->getBase();
     else {
-      SuperTy = PropRefExpr->getSuperType();
-      SuperLocation = PropRefExpr->getSuperLocation();
-    }
-  }
-  else if (ObjCImplicitSetterGetterRefExpr *ImplicitRefExpr = 
-            dyn_cast<ObjCImplicitSetterGetterRefExpr>(PropOrGetterRefExpr)) {
-    OMD = ImplicitRefExpr->getGetterMethod();
-    Sel = OMD->getSelector();
-    Ty = ImplicitRefExpr->getType();
-    Super = ImplicitRefExpr->isSuperReceiver();
-    if (!Super)
-      Receiver = ImplicitRefExpr->getBase();
-    else {
-      SuperTy = ImplicitRefExpr->getSuperType();
-      SuperLocation = ImplicitRefExpr->getSuperLocation();
+      SuperTy = PropRefExpr->getSuperReceiverType();
+      SuperLocation = PropRefExpr->getReceiverLocation();
     }
   }
   
@@ -1344,13 +1348,14 @@ Stmt *RewriteObjC::RewritePropertyOrImplicitGetter(Expr *PropOrGetterRefExpr) {
   if (Super)
     MsgExpr = ObjCMessageExpr::Create(*Context, 
                                       Ty.getNonReferenceType(),
-                                      /*FIXME?*/SourceLocation(),
+                                      Expr::getValueKindForType(Ty),
+                                      PropOrGetterRefExpr->getLocStart(),
                                       SuperLocation,
                                       /*IsInstanceSuper=*/true,
                                       SuperTy,
-                                      Sel, OMD,
+                                      Sel, SelectorLoc, OMD,
                                       0, 0, 
-                                      /*FIXME:*/SourceLocation());
+                                      PropOrGetterRefExpr->getLocEnd());
   else {
     assert (Receiver && "RewritePropertyOrImplicitGetter - Receiver is null");
     if (Expr *Exp = dyn_cast<Expr>(Receiver))
@@ -1359,24 +1364,33 @@ Stmt *RewriteObjC::RewritePropertyOrImplicitGetter(Expr *PropOrGetterRefExpr) {
         Receiver = PropGetters[Exp];
     MsgExpr = ObjCMessageExpr::Create(*Context, 
                                       Ty.getNonReferenceType(),
-                                      /*FIXME:*/SourceLocation(),
+                                      Expr::getValueKindForType(Ty),
+                                      PropOrGetterRefExpr->getLocStart(),
                                       cast<Expr>(Receiver),
-                                      Sel, OMD,
+                                      Sel, SelectorLoc, OMD,
                                       0, 0, 
-                                      /*FIXME:*/SourceLocation());
+                                      PropOrGetterRefExpr->getLocEnd());
   }
 
-  Stmt *ReplacingStmt = SynthMessageExpr(MsgExpr);
+  Stmt *ReplacingStmt = SynthMessageExpr(MsgExpr, MsgExpr->getLocStart(),
+                                         MsgExpr->getLocEnd());
 
   if (!PropParentMap)
     PropParentMap = new ParentMap(CurrentBody);
-
+  bool NestedPropertyRef = false;
   Stmt *Parent = PropParentMap->getParent(PropOrGetterRefExpr);
-  if (Parent && (isa<ObjCPropertyRefExpr>(Parent) ||
-                 isa<ObjCImplicitSetterGetterRefExpr>(Parent))) {
+  ImplicitCastExpr*ICE=0;
+  if (Parent)
+    if ((ICE = dyn_cast<ImplicitCastExpr>(Parent))) {
+      assert((ICE->getCastKind() == CK_GetObjCProperty)
+             && "RewritePropertyOrImplicitGetter");
+      Parent = PropParentMap->getParent(Parent);
+      NestedPropertyRef = (Parent && isa<ObjCPropertyRefExpr>(Parent));
+    }
+  if (NestedPropertyRef) {
     // We stash away the ReplacingStmt since actually doing the
     // replacement/rewrite won't work for nested getters (e.g. obj.p.i)
-    PropGetters[PropOrGetterRefExpr] = ReplacingStmt;
+    PropGetters[ICE] = ReplacingStmt;
     // NOTE: We don't want to call MsgExpr->Destroy(), as it holds references
     // to things that stay around.
     Context->Deallocate(MsgExpr);
@@ -1398,7 +1412,7 @@ Stmt *RewriteObjC::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV,
   const Expr *BaseExpr = IV->getBase();
   if (CurMethodDef) {
     if (BaseExpr->getType()->isObjCObjectPointerType()) {
-      ObjCInterfaceType *iFaceDecl =
+      const ObjCInterfaceType *iFaceDecl =
         dyn_cast<ObjCInterfaceType>(BaseExpr->getType()->getPointeeType());
       assert(iFaceDecl && "RewriteObjCIvarRefExpr - iFaceDecl is null");
       // lookup which class implements the instance variable.
@@ -1420,14 +1434,15 @@ Stmt *RewriteObjC::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV,
                                                     IV->getBase());
       // Don't forget the parens to enforce the proper binding.
       ParenExpr *PE = new (Context) ParenExpr(IV->getBase()->getLocStart(),
-                                               IV->getBase()->getLocEnd(),
-                                               castExpr);
+                                              IV->getBase()->getLocEnd(),
+                                              castExpr);
       replaced = true;
       if (IV->isFreeIvar() &&
           CurMethodDef->getClassInterface() == iFaceDecl->getDecl()) {
         MemberExpr *ME = new (Context) MemberExpr(PE, true, D,
-                                                   IV->getLocation(),
-                                                   D->getType());
+                                                  IV->getLocation(),
+                                                  D->getType(),
+                                                  VK_LValue, OK_Ordinary);
         // delete IV; leak for now, see RewritePropertyOrImplicitSetter() usage for more info.
         return ME;
       }
@@ -1444,7 +1459,7 @@ Stmt *RewriteObjC::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV,
     // Explicit ivar refs need to have a cast inserted.
     // FIXME: consider sharing some of this code with the code above.
     if (BaseExpr->getType()->isObjCObjectPointerType()) {
-      ObjCInterfaceType *iFaceDecl =
+      const ObjCInterfaceType *iFaceDecl =
         dyn_cast<ObjCInterfaceType>(BaseExpr->getType()->getPointeeType());
       // lookup which class implements the instance variable.
       ObjCInterfaceDecl *clsDeclared = 0;
@@ -1478,8 +1493,7 @@ Stmt *RewriteObjC::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV,
 }
 
 Stmt *RewriteObjC::RewriteObjCNestedIvarRefExpr(Stmt *S, bool &replaced) {
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI) {
+  for (Stmt::child_range CI = S->children(); CI; ++CI) {
     if (*CI) {
       Stmt *newStmt = RewriteObjCNestedIvarRefExpr(*CI, replaced);
       if (newStmt)
@@ -1824,8 +1838,7 @@ Stmt *RewriteObjC::RewriteObjCSynchronizedStmt(ObjCAtSynchronizedStmt *S) {
 void RewriteObjC::WarnAboutReturnGotoStmts(Stmt *S)
 {
   // Perform a bottom up traversal of all children.
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
     if (*CI)
       WarnAboutReturnGotoStmts(*CI);
 
@@ -1839,8 +1852,7 @@ void RewriteObjC::WarnAboutReturnGotoStmts(Stmt *S)
 void RewriteObjC::HasReturnStmts(Stmt *S, bool &hasReturns) 
 {  
   // Perform a bottom up traversal of all children.
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-        CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
    if (*CI)
      HasReturnStmts(*CI, hasReturns);
 
@@ -1851,8 +1863,7 @@ void RewriteObjC::HasReturnStmts(Stmt *S, bool &hasReturns)
 
 void RewriteObjC::RewriteTryReturnStmts(Stmt *S) {
  // Perform a bottom up traversal of all children.
- for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-      CI != E; ++CI)
+ for (Stmt::child_range CI = S->children(); CI; ++CI)
    if (*CI) {
      RewriteTryReturnStmts(*CI);
    }
@@ -1875,8 +1886,7 @@ void RewriteObjC::RewriteTryReturnStmts(Stmt *S) {
 
 void RewriteObjC::RewriteSyncReturnStmts(Stmt *S, std::string syncExitBuf) {
   // Perform a bottom up traversal of all children.
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
     if (*CI) {
       RewriteSyncReturnStmts(*CI, syncExitBuf);
     }
@@ -1939,7 +1949,6 @@ Stmt *RewriteObjC::RewriteObjCTryStmt(ObjCAtTryStmt *S) {
     buf += "}";
     ReplaceText(lastCurlyLoc, 1, buf);
   }
-  bool sawIdTypedCatch = false;
   Stmt *lastCatchBody = 0;
   for (unsigned I = 0, N = S->getNumCatchStmts(); I != N; ++I) {
     ObjCAtCatchStmt *Catch = S->getCatchStmt(I);
@@ -1972,7 +1981,6 @@ Stmt *RewriteObjC::RewriteObjCTryStmt(ObjCAtTryStmt *S) {
       if (t == Context->getObjCIdType()) {
         buf += "1) { ";
         ReplaceText(startLoc, lParenLoc-startBuf+1, buf);
-        sawIdTypedCatch = true;
       } else if (const ObjCObjectPointerType *Ptr =
                    t->getAs<ObjCObjectPointerType>()) {
         // Should be a pointer to a class.
@@ -2135,7 +2143,8 @@ CallExpr *RewriteObjC::SynthesizeCallToFunctionDecl(
   QualType msgSendType = FD->getType();
 
   // Create a reference to the objc_msgSend() declaration.
-  DeclRefExpr *DRE = new (Context) DeclRefExpr(FD, msgSendType, SourceLocation());
+  DeclRefExpr *DRE =
+    new (Context) DeclRefExpr(FD, msgSendType, VK_LValue, SourceLocation());
 
   // Now, we cast the reference to a pointer to the objc_msgSend type.
   QualType pToFunc = Context->getPointerType(msgSendType);
@@ -2147,7 +2156,8 @@ CallExpr *RewriteObjC::SynthesizeCallToFunctionDecl(
 
   CallExpr *Exp =  
     new (Context) CallExpr(*Context, ICE, args, nargs, 
-                           FT->getCallResultType(*Context), EndLoc);
+                           FT->getCallResultType(*Context),
+                           VK_RValue, EndLoc);
   return Exp;
 }
 
@@ -2347,11 +2357,8 @@ void RewriteObjC::SynthSelGetUidFunctionDecl() {
   IdentifierInfo *SelGetUidIdent = &Context->Idents.get("sel_registerName");
   llvm::SmallVector<QualType, 16> ArgTys;
   ArgTys.push_back(Context->getPointerType(Context->CharTy.withConst()));
-  QualType getFuncType = Context->getFunctionType(Context->getObjCSelType(),
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  false /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType getFuncType =
+    getSimpleFunctionType(Context->getObjCSelType(), &ArgTys[0], ArgTys.size());
   SelGetUidFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                            SourceLocation(),
                                            SelGetUidIdent, getFuncType, 0,
@@ -2446,11 +2453,8 @@ void RewriteObjC::SynthSuperContructorFunctionDecl() {
   assert(!argT.isNull() && "Can't find 'id' type");
   ArgTys.push_back(argT);
   ArgTys.push_back(argT);
-  QualType msgSendType = Context->getFunctionType(Context->getObjCIdType(),
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  false, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType msgSendType = getSimpleFunctionType(Context->getObjCIdType(),
+                                               &ArgTys[0], ArgTys.size());
   SuperContructorFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                          SourceLocation(),
                                          msgSendIdent, msgSendType, 0,
@@ -2468,11 +2472,9 @@ void RewriteObjC::SynthMsgSendFunctionDecl() {
   argT = Context->getObjCSelType();
   assert(!argT.isNull() && "Can't find 'SEL' type");
   ArgTys.push_back(argT);
-  QualType msgSendType = Context->getFunctionType(Context->getObjCIdType(),
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  true /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType msgSendType = getSimpleFunctionType(Context->getObjCIdType(),
+                                               &ArgTys[0], ArgTys.size(),
+                                               true /*isVariadic*/);
   MsgSendFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                          SourceLocation(),
                                          msgSendIdent, msgSendType, 0,
@@ -2493,11 +2495,9 @@ void RewriteObjC::SynthMsgSendSuperFunctionDecl() {
   argT = Context->getObjCSelType();
   assert(!argT.isNull() && "Can't find 'SEL' type");
   ArgTys.push_back(argT);
-  QualType msgSendType = Context->getFunctionType(Context->getObjCIdType(),
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  true /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType msgSendType = getSimpleFunctionType(Context->getObjCIdType(),
+                                               &ArgTys[0], ArgTys.size(),
+                                               true /*isVariadic*/);
   MsgSendSuperFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                               SourceLocation(),
                                               msgSendIdent, msgSendType, 0,
@@ -2515,11 +2515,9 @@ void RewriteObjC::SynthMsgSendStretFunctionDecl() {
   argT = Context->getObjCSelType();
   assert(!argT.isNull() && "Can't find 'SEL' type");
   ArgTys.push_back(argT);
-  QualType msgSendType = Context->getFunctionType(Context->getObjCIdType(),
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  true /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType msgSendType = getSimpleFunctionType(Context->getObjCIdType(),
+                                               &ArgTys[0], ArgTys.size(),
+                                               true /*isVariadic*/);
   MsgSendStretFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                          SourceLocation(),
                                          msgSendIdent, msgSendType, 0,
@@ -2542,11 +2540,9 @@ void RewriteObjC::SynthMsgSendSuperStretFunctionDecl() {
   argT = Context->getObjCSelType();
   assert(!argT.isNull() && "Can't find 'SEL' type");
   ArgTys.push_back(argT);
-  QualType msgSendType = Context->getFunctionType(Context->getObjCIdType(),
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  true /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType msgSendType = getSimpleFunctionType(Context->getObjCIdType(),
+                                               &ArgTys[0], ArgTys.size(),
+                                               true /*isVariadic*/);
   MsgSendSuperStretFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                                        SourceLocation(),
                                               msgSendIdent, msgSendType, 0,
@@ -2564,11 +2560,9 @@ void RewriteObjC::SynthMsgSendFpretFunctionDecl() {
   argT = Context->getObjCSelType();
   assert(!argT.isNull() && "Can't find 'SEL' type");
   ArgTys.push_back(argT);
-  QualType msgSendType = Context->getFunctionType(Context->DoubleTy,
-                                                  &ArgTys[0], ArgTys.size(),
-                                                  true /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                  FunctionType::ExtInfo());
+  QualType msgSendType = getSimpleFunctionType(Context->DoubleTy,
+                                               &ArgTys[0], ArgTys.size(),
+                                               true /*isVariadic*/);
   MsgSendFpretFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                               SourceLocation(),
                                               msgSendIdent, msgSendType, 0,
@@ -2581,11 +2575,8 @@ void RewriteObjC::SynthGetClassFunctionDecl() {
   IdentifierInfo *getClassIdent = &Context->Idents.get("objc_getClass");
   llvm::SmallVector<QualType, 16> ArgTys;
   ArgTys.push_back(Context->getPointerType(Context->CharTy.withConst()));
-  QualType getClassType = Context->getFunctionType(Context->getObjCIdType(),
-                                                   &ArgTys[0], ArgTys.size(),
-                                                   false /*isVariadic*/, 0,
-                                                  false, false, 0, 0,
-                                                   FunctionType::ExtInfo());
+  QualType getClassType = getSimpleFunctionType(Context->getObjCIdType(),
+                                                &ArgTys[0], ArgTys.size());
   GetClassFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                           SourceLocation(),
                                           getClassIdent, getClassType, 0,
@@ -2599,11 +2590,8 @@ void RewriteObjC::SynthGetSuperClassFunctionDecl() {
     &Context->Idents.get("class_getSuperclass");
   llvm::SmallVector<QualType, 16> ArgTys;
   ArgTys.push_back(Context->getObjCClassType());
-  QualType getClassType = Context->getFunctionType(Context->getObjCClassType(),
-                                                   &ArgTys[0], ArgTys.size(),
-                                                   false /*isVariadic*/, 0,
-                                                   false, false, 0, 0,
-                                                   FunctionType::ExtInfo());
+  QualType getClassType = getSimpleFunctionType(Context->getObjCClassType(),
+                                                &ArgTys[0], ArgTys.size());
   GetSuperClassFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                                    SourceLocation(),
                                                    getSuperClassIdent,
@@ -2618,11 +2606,8 @@ void RewriteObjC::SynthGetMetaClassFunctionDecl() {
   IdentifierInfo *getClassIdent = &Context->Idents.get("objc_getMetaClass");
   llvm::SmallVector<QualType, 16> ArgTys;
   ArgTys.push_back(Context->getPointerType(Context->CharTy.withConst()));
-  QualType getClassType = Context->getFunctionType(Context->getObjCIdType(),
-                                                   &ArgTys[0], ArgTys.size(),
-                                                   false /*isVariadic*/, 0,
-                                                   false, false, 0, 0,
-                                                   FunctionType::ExtInfo());
+  QualType getClassType = getSimpleFunctionType(Context->getObjCIdType(),
+                                                &ArgTys[0], ArgTys.size());
   GetMetaClassFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                               SourceLocation(),
                                               getClassIdent, getClassType, 0,
@@ -2662,10 +2647,12 @@ Stmt *RewriteObjC::RewriteObjCStringLiteral(ObjCStringLiteral *Exp) {
   VarDecl *NewVD = VarDecl::Create(*Context, TUDecl, SourceLocation(),
                                     &Context->Idents.get(S), strType, 0,
                                     SC_Static, SC_None);
-  DeclRefExpr *DRE = new (Context) DeclRefExpr(NewVD, strType, SourceLocation());
+  DeclRefExpr *DRE = new (Context) DeclRefExpr(NewVD, strType, VK_LValue,
+                                               SourceLocation());
   Expr *Unop = new (Context) UnaryOperator(DRE, UO_AddrOf,
                                  Context->getPointerType(DRE->getType()),
-                                 SourceLocation());
+                                           VK_RValue, OK_Ordinary,
+                                           SourceLocation());
   // cast to NSConstantString *
   CastExpr *cast = NoTypeInfoCStyleCastExpr(Context, Exp->getType(),
                                             CK_BitCast, Unop);
@@ -2784,8 +2771,9 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       NoTypeInfoCStyleCastExpr(Context, Context->getObjCIdType(),
                                CK_BitCast,
                    new (Context) DeclRefExpr(CurMethodDef->getSelfDecl(),
-                                   Context->getObjCIdType(),
-                                   SourceLocation()))
+                                             Context->getObjCIdType(),
+                                             VK_RValue,
+                                             SourceLocation()))
                         ); // set the 'receiver'.
 
     // (id)class_getSuperclass((Class)objc_getClass("CurrentClass"))
@@ -2824,10 +2812,12 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       SynthSuperContructorFunctionDecl();
       // Simulate a contructor call...
       DeclRefExpr *DRE = new (Context) DeclRefExpr(SuperContructorFunctionDecl,
-                                         superType, SourceLocation());
+                                                   superType, VK_LValue,
+                                                   SourceLocation());
       SuperRep = new (Context) CallExpr(*Context, DRE, &InitExprs[0],
                                         InitExprs.size(),
-                                        superType, SourceLocation());
+                                        superType, VK_LValue,
+                                        SourceLocation());
       // The code for super is a little tricky to prevent collision with
       // the structure definition in the header. The rewriter has it's own
       // internal definition (__rw_objc_super) that is uses. This is why
@@ -2836,7 +2826,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       //
       SuperRep = new (Context) UnaryOperator(SuperRep, UO_AddrOf,
                                Context->getPointerType(SuperRep->getType()),
-                               SourceLocation());
+                                             VK_RValue, OK_Ordinary,
+                                             SourceLocation());
       SuperRep = NoTypeInfoCStyleCastExpr(Context,
                                           Context->getPointerType(superType),
                                           CK_BitCast, SuperRep);
@@ -2849,11 +2840,13 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       TypeSourceInfo *superTInfo
         = Context->getTrivialTypeSourceInfo(superType);
       SuperRep = new (Context) CompoundLiteralExpr(SourceLocation(), superTInfo,
-                                                   superType, ILE, false);
+                                                   superType, VK_LValue,
+                                                   ILE, false);
       // struct objc_super *
       SuperRep = new (Context) UnaryOperator(SuperRep, UO_AddrOf,
                                Context->getPointerType(SuperRep->getType()),
-                               SourceLocation());
+                                             VK_RValue, OK_Ordinary,
+                                             SourceLocation());
     }
     MsgExprs.push_back(SuperRep);
     break;
@@ -2890,8 +2883,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       NoTypeInfoCStyleCastExpr(Context, Context->getObjCIdType(),
                                CK_BitCast,
                    new (Context) DeclRefExpr(CurMethodDef->getSelfDecl(),
-                                   Context->getObjCIdType(),
-                                   SourceLocation()))
+                                             Context->getObjCIdType(),
+                                             VK_RValue, SourceLocation()))
                         ); // set the 'receiver'.
     
     // (id)class_getSuperclass((Class)objc_getClass("CurrentClass"))
@@ -2929,10 +2922,11 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       SynthSuperContructorFunctionDecl();
       // Simulate a contructor call...
       DeclRefExpr *DRE = new (Context) DeclRefExpr(SuperContructorFunctionDecl,
-                                         superType, SourceLocation());
+                                                   superType, VK_LValue,
+                                                   SourceLocation());
       SuperRep = new (Context) CallExpr(*Context, DRE, &InitExprs[0],
                                         InitExprs.size(),
-                                        superType, SourceLocation());
+                                        superType, VK_LValue, SourceLocation());
       // The code for super is a little tricky to prevent collision with
       // the structure definition in the header. The rewriter has it's own
       // internal definition (__rw_objc_super) that is uses. This is why
@@ -2941,6 +2935,7 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       //
       SuperRep = new (Context) UnaryOperator(SuperRep, UO_AddrOf,
                                Context->getPointerType(SuperRep->getType()),
+                               VK_RValue, OK_Ordinary,
                                SourceLocation());
       SuperRep = NoTypeInfoCStyleCastExpr(Context,
                                Context->getPointerType(superType),
@@ -2954,7 +2949,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
       TypeSourceInfo *superTInfo
         = Context->getTrivialTypeSourceInfo(superType);
       SuperRep = new (Context) CompoundLiteralExpr(SourceLocation(), superTInfo,
-                                                   superType, ILE, false);
+                                                   superType, VK_RValue, ILE,
+                                                   false);
     }
     MsgExprs.push_back(SuperRep);
     break;
@@ -2992,9 +2988,9 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
     // Make all implicit casts explicit...ICE comes in handy:-)
     if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(userExpr)) {
       // Reuse the ICE type, it is exactly what the doctor ordered.
-      QualType type = ICE->getType()->isObjCQualifiedIdType()
-                                ? Context->getObjCIdType()
-                                : ICE->getType();
+      QualType type = ICE->getType();
+      if (needToScanForQualifiers(type))
+        type = Context->getObjCIdType();
       // Make sure we convert "type (^)(...)" to "type (*)(...)".
       (void)convertBlockPointerToFunctionPointer(type);
       userExpr = NoTypeInfoCStyleCastExpr(Context, type, CK_BitCast,
@@ -3048,7 +3044,7 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
 
   // Create a reference to the objc_msgSend() declaration.
   DeclRefExpr *DRE = new (Context) DeclRefExpr(MsgSendFlavor, msgSendType,
-                                     SourceLocation());
+                                               VK_LValue, SourceLocation());
 
   // Need to cast objc_msgSend to "void *" (to workaround a GCC bandaid).
   // If we don't do this cast, we get the following bizarre warning/note:
@@ -3059,12 +3055,10 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
                                   CK_BitCast, DRE);
 
   // Now do the "normal" pointer to function cast.
-  QualType castType = Context->getFunctionType(returnType,
-    &ArgTypes[0], ArgTypes.size(),
-    // If we don't have a method decl, force a variadic cast.
-    Exp->getMethodDecl() ? Exp->getMethodDecl()->isVariadic() : true, 0,
-                                               false, false, 0, 0,
-                                               FunctionType::ExtInfo());
+  QualType castType =
+    getSimpleFunctionType(returnType, &ArgTypes[0], ArgTypes.size(),
+      // If we don't have a method decl, force a variadic cast.
+      Exp->getMethodDecl() ? Exp->getMethodDecl()->isVariadic() : true);
   castType = Context->getPointerType(castType);
   cast = NoTypeInfoCStyleCastExpr(Context, castType, CK_BitCast,
                                   cast);
@@ -3075,7 +3069,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
   const FunctionType *FT = msgSendType->getAs<FunctionType>();
   CallExpr *CE = new (Context) CallExpr(*Context, PE, &MsgExprs[0],
                                         MsgExprs.size(),
-                                        FT->getResultType(), EndLoc);
+                                        FT->getResultType(), VK_RValue,
+                                        EndLoc);
   Stmt *ReplacingStmt = CE;
   if (MsgSendStretFlavor) {
     // We have the method which returns a struct/union. Must also generate
@@ -3085,17 +3080,14 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
 
     // Create a reference to the objc_msgSend_stret() declaration.
     DeclRefExpr *STDRE = new (Context) DeclRefExpr(MsgSendStretFlavor, msgSendType,
-                                         SourceLocation());
+                                                   VK_LValue, SourceLocation());
     // Need to cast objc_msgSend_stret to "void *" (see above comment).
     cast = NoTypeInfoCStyleCastExpr(Context,
                                     Context->getPointerType(Context->VoidTy),
                                     CK_BitCast, STDRE);
     // Now do the "normal" pointer to function cast.
-    castType = Context->getFunctionType(returnType,
-      &ArgTypes[0], ArgTypes.size(),
-      Exp->getMethodDecl() ? Exp->getMethodDecl()->isVariadic() : false, 0,
-                                        false, false, 0, 0,
-                                        FunctionType::ExtInfo());
+    castType = getSimpleFunctionType(returnType, &ArgTypes[0], ArgTypes.size(),
+      Exp->getMethodDecl() ? Exp->getMethodDecl()->isVariadic() : false);
     castType = Context->getPointerType(castType);
     cast = NoTypeInfoCStyleCastExpr(Context, castType, CK_BitCast,
                                     cast);
@@ -3106,7 +3098,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
     FT = msgSendType->getAs<FunctionType>();
     CallExpr *STCE = new (Context) CallExpr(*Context, PE, &MsgExprs[0],
                                             MsgExprs.size(),
-                                            FT->getResultType(), SourceLocation());
+                                            FT->getResultType(), VK_RValue,
+                                            SourceLocation());
 
     // Build sizeof(returnType)
     SizeOfAlignOfExpr *sizeofExpr = new (Context) SizeOfAlignOfExpr(true,
@@ -3123,16 +3116,15 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
                                                    llvm::APInt(IntSize, 8),
                                                    Context->IntTy,
                                                    SourceLocation());
-    BinaryOperator *lessThanExpr = new (Context) BinaryOperator(sizeofExpr, limit,
-                                                      BO_LE,
-                                                      Context->IntTy,
-                                                      SourceLocation());
+    BinaryOperator *lessThanExpr = 
+      new (Context) BinaryOperator(sizeofExpr, limit, BO_LE, Context->IntTy,
+                                   VK_RValue, OK_Ordinary, SourceLocation());
     // (sizeof(returnType) <= 8 ? objc_msgSend(...) : objc_msgSend_stret(...))
     ConditionalOperator *CondExpr =
       new (Context) ConditionalOperator(lessThanExpr,
                                         SourceLocation(), CE,
-                                        SourceLocation(), STCE, (Expr*)0,
-                                        returnType);
+                                        SourceLocation(), STCE,
+                                        returnType, VK_RValue, OK_Ordinary);
     ReplacingStmt = new (Context) ParenExpr(SourceLocation(), SourceLocation(), 
                                             CondExpr);
   }
@@ -3157,7 +3149,7 @@ QualType RewriteObjC::getProtocolType() {
     TypeSourceInfo *TInfo
       = Context->getTrivialTypeSourceInfo(Context->getObjCIdType());
     ProtocolTypeDecl = TypedefDecl::Create(*Context, TUDecl,
-                                           SourceLocation(),
+                                           SourceLocation(), SourceLocation(),
                                            &Context->Idents.get("Protocol"),
                                            TInfo);
   }
@@ -3174,10 +3166,11 @@ Stmt *RewriteObjC::RewriteObjCProtocolExpr(ObjCProtocolExpr *Exp) {
   VarDecl *VD = VarDecl::Create(*Context, TUDecl, SourceLocation(),
                                 ID, getProtocolType(), 0,
                                 SC_Extern, SC_None);
-  DeclRefExpr *DRE = new (Context) DeclRefExpr(VD, getProtocolType(), SourceLocation());
+  DeclRefExpr *DRE = new (Context) DeclRefExpr(VD, getProtocolType(), VK_LValue,
+                                               SourceLocation());
   Expr *DerefExpr = new (Context) UnaryOperator(DRE, UO_AddrOf,
                              Context->getPointerType(DRE->getType()),
-                             SourceLocation());
+                             VK_RValue, OK_Ordinary, SourceLocation());
   CastExpr *castExpr = NoTypeInfoCStyleCastExpr(Context, DerefExpr->getType(),
                                                 CK_BitCast,
                                                 DerefExpr);
@@ -4122,10 +4115,12 @@ void RewriteObjC::SynthesizeMetaDataIntoBuffer(std::string &Result) {
 
 void RewriteObjC::RewriteByRefString(std::string &ResultStr, 
                                      const std::string &Name,
-                                     ValueDecl *VD) {
+                                     ValueDecl *VD, bool def) {
   assert(BlockByRefDeclNo.count(VD) && 
          "RewriteByRefString: ByRef decl missing");
-  ResultStr += "struct __Block_byref_" + Name + 
+  if (def)
+    ResultStr += "struct ";
+  ResultStr += "__Block_byref_" + Name + 
     "_" + utostr(BlockByRefDeclNo[VD]) ;
 }
 
@@ -4547,8 +4542,7 @@ void RewriteObjC::InsertBlockLiteralsWithinMethod(ObjCMethodDecl *MD) {
 }
 
 void RewriteObjC::GetBlockDeclRefExprs(Stmt *S) {
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
     if (*CI) {
       if (BlockExpr *CBE = dyn_cast<BlockExpr>(*CI))
         GetBlockDeclRefExprs(CBE->getBody());
@@ -4564,8 +4558,9 @@ void RewriteObjC::GetBlockDeclRefExprs(Stmt *S) {
   else if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(S))
     if (HasLocalVariableExternalStorage(DRE->getDecl())) {
         BlockDeclRefExpr *BDRE = 
-          new (Context)BlockDeclRefExpr(DRE->getDecl(), DRE->getType(), 
-                                        DRE->getLocation(), false);
+          new (Context)BlockDeclRefExpr(cast<VarDecl>(DRE->getDecl()),
+                                        DRE->getType(), 
+                                        VK_LValue, DRE->getLocation(), false);
         BlockDeclRefs.push_back(BDRE);
     }
   
@@ -4575,8 +4570,7 @@ void RewriteObjC::GetBlockDeclRefExprs(Stmt *S) {
 void RewriteObjC::GetInnerBlockDeclRefExprs(Stmt *S, 
                 llvm::SmallVector<BlockDeclRefExpr *, 8> &InnerBlockDeclRefs,
                 llvm::SmallPtrSet<const DeclContext *, 8> &InnerContexts) {
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
     if (*CI) {
       if (BlockExpr *CBE = dyn_cast<BlockExpr>(*CI)) {
         InnerContexts.insert(cast<DeclContext>(CBE->getBlockDecl()));
@@ -4631,9 +4625,7 @@ QualType RewriteObjC::convertFunctionTypeOfBlocks(const FunctionType *FT) {
   // FIXME. Does this work if block takes no argument but has a return type
   // which is of block type?
   if (HasBlockType)
-    FuncType = Context->getFunctionType(Res,
-                        &ArgTypes[0], ArgTypes.size(), false/*no variadic*/, 0,
-                        false, false, 0, 0, FunctionType::ExtInfo());
+    FuncType = getSimpleFunctionType(Res, &ArgTypes[0], ArgTypes.size());
   else FuncType = QualType(FT, 0);
   return FuncType;
 }
@@ -4666,8 +4658,7 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
       new (Context) ConditionalOperator(CONDExp,
                                       SourceLocation(), cast<Expr>(LHSStmt),
                                       SourceLocation(), cast<Expr>(RHSStmt),
-                                      (Expr*)0,
-                                      Exp->getType());
+                                      Exp->getType(), VK_RValue, OK_Ordinary);
     return CondExpr;
   } else if (const ObjCIvarRefExpr *IRE = dyn_cast<ObjCIvarRefExpr>(BlockExp)) {
     CPT = IRE->getType()->getAs<BlockPointerType>();
@@ -4701,10 +4692,8 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
     }
   }
   // Now do the pointer to function cast.
-  QualType PtrToFuncCastType = Context->getFunctionType(Exp->getType(),
-    &ArgTypes[0], ArgTypes.size(), false/*no variadic*/, 0,
-                                                        false, false, 0, 0, 
-                                                       FunctionType::ExtInfo());
+  QualType PtrToFuncCastType
+    = getSimpleFunctionType(Exp->getType(), &ArgTypes[0], ArgTypes.size());
 
   PtrToFuncCastType = Context->getPointerType(PtrToFuncCastType);
 
@@ -4720,7 +4709,8 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
                      &Context->Idents.get("FuncPtr"), Context->VoidPtrTy, 0,
                                     /*BitWidth=*/0, /*Mutable=*/true);
   MemberExpr *ME = new (Context) MemberExpr(PE, true, FD, SourceLocation(),
-                                            FD->getType());
+                                            FD->getType(), VK_LValue,
+                                            OK_Ordinary);
 
   
   CastExpr *FunkCast = NoTypeInfoCStyleCastExpr(Context, PtrToFuncCastType,
@@ -4737,7 +4727,8 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
   }
   CallExpr *CE = new (Context) CallExpr(*Context, PE, &BlkExprs[0],
                                         BlkExprs.size(),
-                                        Exp->getType(), SourceLocation());
+                                        Exp->getType(), VK_RValue,
+                                        SourceLocation());
   return CE;
 }
 
@@ -4772,7 +4763,8 @@ Stmt *RewriteObjC::RewriteBlockDeclRefExpr(Expr *DeclRefExp) {
                                     /*BitWidth=*/0, /*Mutable=*/true);
   MemberExpr *ME = new (Context) MemberExpr(DeclRefExp, isArrow,
                                             FD, SourceLocation(),
-                                            FD->getType());
+                                            FD->getType(), VK_LValue,
+                                            OK_Ordinary);
 
   llvm::StringRef Name = VD->getName();
   FD = FieldDecl::Create(*Context, 0, SourceLocation(),
@@ -4780,7 +4772,7 @@ Stmt *RewriteObjC::RewriteBlockDeclRefExpr(Expr *DeclRefExp) {
                          Context->VoidPtrTy, 0,
                          /*BitWidth=*/0, /*Mutable=*/true);
   ME = new (Context) MemberExpr(ME, true, FD, SourceLocation(),
-                                DeclRefExp->getType());
+                                DeclRefExp->getType(), VK_LValue, OK_Ordinary);
   
   
   
@@ -4799,8 +4791,9 @@ Stmt *RewriteObjC::RewriteLocalVariableExternalStorage(DeclRefExpr *DRE) {
   if (VarDecl *Var = dyn_cast<VarDecl>(VD))
     if (!ImportedLocalExternalDecls.count(Var))
       return DRE;
-  Expr *Exp = new (Context) UnaryOperator(DRE, UO_Deref,
-                                    DRE->getType(), DRE->getLocation());
+  Expr *Exp = new (Context) UnaryOperator(DRE, UO_Deref, DRE->getType(),
+                                          VK_LValue, OK_Ordinary,
+                                          DRE->getLocation());
   // Need parens to enforce precedence.
   ParenExpr *PE = new (Context) ParenExpr(SourceLocation(), SourceLocation(), 
                                           Exp);
@@ -5116,7 +5109,7 @@ void RewriteObjC::RewriteByRefVar(VarDecl *ND) {
   const char *endBuf = SM->getCharacterData(X);
   std::string Name(ND->getNameAsString());
   std::string ByrefType;
-  RewriteByRefString(ByrefType, Name, ND);
+  RewriteByRefString(ByrefType, Name, ND, true);
   ByrefType += " {\n";
   ByrefType += "  void *__isa;\n";
   RewriteByRefString(ByrefType, Name, ND);
@@ -5277,6 +5270,7 @@ FunctionDecl *RewriteObjC::SynthBlockInitFunctionDecl(llvm::StringRef name) {
 
 Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
           const llvm::SmallVector<BlockDeclRefExpr *, 8> &InnerBlockDeclRefs) {
+  const BlockDecl *block = Exp->getBlockDecl();
   Blocks.push_back(Exp);
 
   CollectBlockDeclRefInfo(Exp);
@@ -5335,13 +5329,14 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
 
   // Simulate a contructor call...
   FD = SynthBlockInitFunctionDecl(Tag);
-  DeclRefExpr *DRE = new (Context) DeclRefExpr(FD, FType, SourceLocation());
+  DeclRefExpr *DRE = new (Context) DeclRefExpr(FD, FType, VK_RValue,
+                                               SourceLocation());
 
   llvm::SmallVector<Expr*, 4> InitExprs;
 
   // Initialize the block function.
   FD = SynthBlockInitFunctionDecl(Func);
-  DeclRefExpr *Arg = new (Context) DeclRefExpr(FD, FD->getType(),
+  DeclRefExpr *Arg = new (Context) DeclRefExpr(FD, FD->getType(), VK_LValue,
                                                SourceLocation());
   CastExpr *castExpr = NoTypeInfoCStyleCastExpr(Context, Context->VoidPtrTy,
                                                 CK_BitCast, Arg);
@@ -5354,12 +5349,15 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
                                     &Context->Idents.get(DescData.c_str()), 
                                     Context->VoidPtrTy, 0,
                                     SC_Static, SC_None);
-  UnaryOperator *DescRefExpr = new (Context) UnaryOperator(
-                                  new (Context) DeclRefExpr(NewVD, 
-                                    Context->VoidPtrTy, SourceLocation()), 
-                                  UO_AddrOf,
-                                  Context->getPointerType(Context->VoidPtrTy), 
-                                  SourceLocation());
+  UnaryOperator *DescRefExpr =
+    new (Context) UnaryOperator(new (Context) DeclRefExpr(NewVD,
+                                                          Context->VoidPtrTy,
+                                                          VK_LValue,
+                                                          SourceLocation()), 
+                                UO_AddrOf,
+                                Context->getPointerType(Context->VoidPtrTy), 
+                                VK_RValue, OK_Ordinary,
+                                SourceLocation());
   InitExprs.push_back(DescRefExpr); 
   
   // Add initializers for any closure decl refs.
@@ -5371,26 +5369,29 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
       if (isObjCType((*I)->getType())) {
         // FIXME: Conform to ABI ([[obj retain] autorelease]).
         FD = SynthBlockInitFunctionDecl((*I)->getName());
-        Exp = new (Context) DeclRefExpr(FD, FD->getType(), SourceLocation());
+        Exp = new (Context) DeclRefExpr(FD, FD->getType(), VK_LValue,
+                                        SourceLocation());
         if (HasLocalVariableExternalStorage(*I)) {
           QualType QT = (*I)->getType();
           QT = Context->getPointerType(QT);
-          Exp = new (Context) UnaryOperator(Exp, UO_AddrOf, QT,
-                                            SourceLocation());
+          Exp = new (Context) UnaryOperator(Exp, UO_AddrOf, QT, VK_RValue,
+                                            OK_Ordinary, SourceLocation());
         }
       } else if (isTopLevelBlockPointerType((*I)->getType())) {
         FD = SynthBlockInitFunctionDecl((*I)->getName());
-        Arg = new (Context) DeclRefExpr(FD, FD->getType(), SourceLocation());
+        Arg = new (Context) DeclRefExpr(FD, FD->getType(), VK_LValue,
+                                        SourceLocation());
         Exp = NoTypeInfoCStyleCastExpr(Context, Context->VoidPtrTy,
                                        CK_BitCast, Arg);
       } else {
         FD = SynthBlockInitFunctionDecl((*I)->getName());
-        Exp = new (Context) DeclRefExpr(FD, FD->getType(), SourceLocation());
+        Exp = new (Context) DeclRefExpr(FD, FD->getType(), VK_LValue,
+                                        SourceLocation());
         if (HasLocalVariableExternalStorage(*I)) {
           QualType QT = (*I)->getType();
           QT = Context->getPointerType(QT);
-          Exp = new (Context) UnaryOperator(Exp, UO_AddrOf, QT, 
-                                            SourceLocation());
+          Exp = new (Context) UnaryOperator(Exp, UO_AddrOf, QT, VK_RValue,
+                                            OK_Ordinary, SourceLocation());
         }
         
       }
@@ -5402,7 +5403,7 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
       ValueDecl *ND = (*I);
       std::string Name(ND->getNameAsString());
       std::string RecName;
-      RewriteByRefString(RecName, Name, ND);
+      RewriteByRefString(RecName, Name, ND, true);
       IdentifierInfo *II = &Context->Idents.get(RecName.c_str() 
                                                 + sizeof("struct"));
       RecordDecl *RD = RecordDecl::Create(*Context, TTK_Struct, TUDecl,
@@ -5411,10 +5412,26 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
       QualType castT = Context->getPointerType(Context->getTagDeclType(RD));
       
       FD = SynthBlockInitFunctionDecl((*I)->getName());
-      Exp = new (Context) DeclRefExpr(FD, FD->getType(), SourceLocation());
-      Exp = new (Context) UnaryOperator(Exp, UO_AddrOf,
-                              Context->getPointerType(Exp->getType()),
-                              SourceLocation());
+      Exp = new (Context) DeclRefExpr(FD, FD->getType(), VK_LValue,
+                                      SourceLocation());
+      bool isNestedCapturedVar = false;
+      if (block)
+        for (BlockDecl::capture_const_iterator ci = block->capture_begin(),
+             ce = block->capture_end(); ci != ce; ++ci) {
+          const VarDecl *variable = ci->getVariable();
+          if (variable == ND && ci->isNested()) {
+            assert (ci->isByRef() && 
+                    "SynthBlockInitExpr - captured block variable is not byref");
+            isNestedCapturedVar = true;
+            break;
+          }
+        }
+      // captured nested byref variable has its address passed. Do not take
+      // its address again.
+      if (!isNestedCapturedVar)
+          Exp = new (Context) UnaryOperator(Exp, UO_AddrOf,
+                                     Context->getPointerType(Exp->getType()),
+                                     VK_RValue, OK_Ordinary, SourceLocation());
       Exp = NoTypeInfoCStyleCastExpr(Context, castT, CK_BitCast, Exp);
       InitExprs.push_back(Exp);
     }
@@ -5429,10 +5446,10 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
     InitExprs.push_back(FlagExp);
   }
   NewRep = new (Context) CallExpr(*Context, DRE, &InitExprs[0], InitExprs.size(),
-                                  FType, SourceLocation());
+                                  FType, VK_LValue, SourceLocation());
   NewRep = new (Context) UnaryOperator(NewRep, UO_AddrOf,
                              Context->getPointerType(NewRep->getType()),
-                             SourceLocation());
+                             VK_RValue, OK_Ordinary, SourceLocation());
   NewRep = NoTypeInfoCStyleCastExpr(Context, FType, CK_BitCast,
                                     NewRep);
   BlockDeclRefs.clear();
@@ -5442,6 +5459,13 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
   BlockByCopyDeclsPtrSet.clear();
   ImportedBlockDecls.clear();
   return NewRep;
+}
+
+bool RewriteObjC::IsDeclStmtInForeachHeader(DeclStmt *DS) {
+  if (const ObjCForCollectionStmt * CS = 
+      dyn_cast<ObjCForCollectionStmt>(Stmts.back()))
+        return CS->getElement() == DS;
+  return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -5456,16 +5480,14 @@ Stmt *RewriteObjC::SynthBlockInitExpr(BlockExpr *Exp,
 // we get this right.
 void RewriteObjC::CollectPropertySetters(Stmt *S) {
   // Perform a bottom up traversal of all children.
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
     if (*CI)
       CollectPropertySetters(*CI);
 
   if (BinaryOperator *BinOp = dyn_cast<BinaryOperator>(S)) {
     if (BinOp->isAssignmentOp()) {
-        if (isa<ObjCPropertyRefExpr>(BinOp->getLHS()) || 
-            isa<ObjCImplicitSetterGetterRefExpr>(BinOp->getLHS()))
-          PropSetters[BinOp->getLHS()] = BinOp;
+      if (isa<ObjCPropertyRefExpr>(BinOp->getLHS()))
+        PropSetters[BinOp->getLHS()] = BinOp;
     }
   }
 }
@@ -5482,8 +5504,7 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
   SourceRange OrigStmtRange = S->getSourceRange();
 
   // Perform a bottom up rewrite of all children.
-  for (Stmt::child_iterator CI = S->child_begin(), E = S->child_end();
-       CI != E; ++CI)
+  for (Stmt::child_range CI = S->children(); CI; ++CI)
     if (*CI) {
       Stmt *newStmt;
       Stmt *S = (*CI);
@@ -5507,8 +5528,7 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
       // setter messaging. This involvs the RHS too. Do not attempt to rewrite
       // RHS again.
       if (Expr *Exp = dyn_cast<Expr>(S))
-        if (isa<ObjCPropertyRefExpr>(Exp) || 
-            isa<ObjCImplicitSetterGetterRefExpr>(Exp)) {
+        if (isa<ObjCPropertyRefExpr>(Exp)) {
           if (PropSetters[Exp]) {
             ++CI;
             continue;
@@ -5545,7 +5565,7 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
   if (ObjCEncodeExpr *AtEncode = dyn_cast<ObjCEncodeExpr>(S))
     return RewriteAtEncode(AtEncode);
 
-  if (isa<ObjCPropertyRefExpr>(S) || isa<ObjCImplicitSetterGetterRefExpr>(S)) {
+  if (isa<ObjCPropertyRefExpr>(S)) {
     Expr *PropOrImplicitRefExpr = dyn_cast<Expr>(S);
     assert(PropOrImplicitRefExpr && "Property or implicit setter/getter is null");
     
@@ -5670,7 +5690,7 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
     //   for (id <FooProtocol> index in someArray) ;
     // This is because RewriteObjCForCollectionStmt() does textual rewriting 
     // and it depends on the original text locations/positions.
-    if (Stmts.empty() || !isa<ObjCForCollectionStmt>(Stmts.back()))
+    if (Stmts.empty() || !IsDeclStmtInForeachHeader(DS))
       RewriteObjCQualifiedInterfaceTypes(*DS->decl_begin());
 
     // Blocks rewrite rules.

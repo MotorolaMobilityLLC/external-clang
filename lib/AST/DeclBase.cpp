@@ -110,8 +110,20 @@ void Decl::add(Kind k) {
 bool Decl::isTemplateParameterPack() const {
   if (const TemplateTypeParmDecl *TTP = dyn_cast<TemplateTypeParmDecl>(this))
     return TTP->isParameterPack();
-
+  if (const NonTypeTemplateParmDecl *NTTP
+                                = dyn_cast<NonTypeTemplateParmDecl>(this))
+    return NTTP->isParameterPack();
+  if (const TemplateTemplateParmDecl *TTP
+                                    = dyn_cast<TemplateTemplateParmDecl>(this))
+    return TTP->isParameterPack();
   return false;
+}
+
+bool Decl::isParameterPack() const {
+  if (const ParmVarDecl *Parm = dyn_cast<ParmVarDecl>(this))
+    return Parm->isParameterPack();
+  
+  return isTemplateParameterPack();
 }
 
 bool Decl::isFunctionOrFunctionTemplate() const {
@@ -161,9 +173,6 @@ void PrettyStackTraceDecl::print(llvm::raw_ostream &OS) const {
 Decl::~Decl() { }
 
 void Decl::setDeclContext(DeclContext *DC) {
-  if (isOutOfSemaDC())
-    delete getMultipleDC();
-
   DeclCtx = DC;
 }
 
@@ -248,6 +257,10 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
     case ObjCMethod:
     case ObjCProperty:
       return IDNS_Ordinary;
+    case Label:
+      return IDNS_Label;
+    case IndirectField:
+      return IDNS_Ordinary | IDNS_Member;
 
     case ObjCCompatibleAlias:
     case ObjCInterface:
@@ -421,8 +434,8 @@ SourceLocation Decl::getBodyRBrace() const {
   return SourceLocation();
 }
 
-#ifndef NDEBUG
 void Decl::CheckAccessDeclContext() const {
+#ifndef NDEBUG
   // Suppress this check if any of the following hold:
   // 1. this is the translation unit (and thus has no parent)
   // 2. this is a template parameter (and thus doesn't belong to its context)
@@ -446,9 +459,25 @@ void Decl::CheckAccessDeclContext() const {
 
   assert(Access != AS_none &&
          "Access specifier is AS_none inside a record decl");
+#endif
 }
 
-#endif
+DeclContext *Decl::getNonClosureContext() {
+  DeclContext *DC = getDeclContext();
+
+  // This is basically "while (DC->isClosure()) DC = DC->getParent();"
+  // except that it's significantly more efficient to cast to a known
+  // decl type and call getDeclContext() than to call getParent().
+  do {
+    if (isa<BlockDecl>(DC)) {
+      DC = cast<BlockDecl>(DC)->getDeclContext();
+      continue;
+    }
+  } while (false);
+
+  assert(!DC->isClosure());
+  return DC;
+}
 
 //===----------------------------------------------------------------------===//
 // DeclContext Implementation
@@ -524,8 +553,6 @@ bool DeclContext::isTransparentContext() const {
     return !cast<EnumDecl>(this)->isScoped();
   else if (DeclKind == Decl::LinkageSpec)
     return true;
-  else if (DeclKind >= Decl::firstRecord && DeclKind <= Decl::lastRecord)
-    return cast<RecordDecl>(this)->isAnonymousStructOrUnion();
 
   return false;
 }
@@ -930,7 +957,7 @@ void DeclContext::makeDeclVisibleInContext(NamedDecl *D, bool Recoverable) {
   // FIXME: This feels like a hack. Should DeclarationName support
   // template-ids, or is there a better way to keep specializations
   // from being visible?
-  if (isa<ClassTemplateSpecializationDecl>(D))
+  if (isa<ClassTemplateSpecializationDecl>(D) || D->isTemplateParameter())
     return;
   if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
     if (FD->isFunctionTemplateSpecialization())
@@ -969,7 +996,7 @@ void DeclContext::makeDeclVisibleInContextImpl(NamedDecl *D) {
   // FIXME: This feels like a hack. Should DeclarationName support
   // template-ids, or is there a better way to keep specializations
   // from being visible?
-  if (isa<ClassTemplateSpecializationDecl>(D))
+  if (isa<ClassTemplateSpecializationDecl>(D) || D->isTemplateParameter())
     return;
 
   ASTContext *C = 0;

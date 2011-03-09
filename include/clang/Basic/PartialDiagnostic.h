@@ -18,7 +18,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include <cassert>
 
 namespace clang {
@@ -75,7 +75,7 @@ public:
   /// \brief An allocator for Storage objects, which uses a small cache to 
   /// objects, used to reduce malloc()/free() traffic for partial diagnostics.
   class StorageAllocator {
-    static const unsigned NumCached = 4;
+    static const unsigned NumCached = 16;
     Storage Cached[NumCached];
     Storage *FreeList[NumCached];
     unsigned NumFreeListEntries;

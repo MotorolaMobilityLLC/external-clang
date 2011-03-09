@@ -22,7 +22,7 @@
 #include "CGRecordLayout.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
-#include "Mangle.h"
+#include <clang/AST/Mangle.h>
 #include <clang/AST/Type.h>
 #include <llvm/Target/TargetData.h>
 #include <llvm/Value.h>
@@ -35,7 +35,6 @@ class ItaniumCXXABI : public CodeGen::CGCXXABI {
 private:
   const llvm::IntegerType *PtrDiffTy;
 protected:
-  CodeGen::MangleContext MangleCtx;
   bool IsARM;
 
   // It's a little silly for us to cache this.
@@ -48,16 +47,13 @@ protected:
     return PtrDiffTy;
   }
 
-  bool NeedsArrayCookie(QualType ElementType);
+  bool NeedsArrayCookie(const CXXNewExpr *expr);
+  bool NeedsArrayCookie(const CXXDeleteExpr *expr,
+                        QualType elementType);
 
 public:
   ItaniumCXXABI(CodeGen::CodeGenModule &CGM, bool IsARM = false) :
-    CGCXXABI(CGM), PtrDiffTy(0), MangleCtx(getContext(), CGM.getDiags()),
-    IsARM(IsARM) { }
-
-  CodeGen::MangleContext &getMangleContext() {
-    return MangleCtx;
-  }
+    CGCXXABI(CGM), PtrDiffTy(0), IsARM(IsARM) { }
 
   bool isZeroInitializable(const MemberPointerType *MPT);
 
@@ -83,7 +79,8 @@ public:
   llvm::Constant *EmitNullMemberPointer(const MemberPointerType *MPT);
 
   llvm::Constant *EmitMemberPointer(const CXXMethodDecl *MD);
-  llvm::Constant *EmitMemberPointer(const FieldDecl *FD);
+  llvm::Constant *EmitMemberDataPointer(const MemberPointerType *MPT,
+                                        CharUnits offset);
 
   llvm::Value *EmitMemberPointerComparison(CodeGenFunction &CGF,
                                            llvm::Value *L,
@@ -111,12 +108,14 @@ public:
 
   void EmitInstanceFunctionProlog(CodeGenFunction &CGF);
 
-  CharUnits GetArrayCookieSize(QualType ElementType);
+  CharUnits GetArrayCookieSize(const CXXNewExpr *expr);
   llvm::Value *InitializeArrayCookie(CodeGenFunction &CGF,
                                      llvm::Value *NewPtr,
                                      llvm::Value *NumElements,
+                                     const CXXNewExpr *expr,
                                      QualType ElementType);
   void ReadArrayCookie(CodeGenFunction &CGF, llvm::Value *Ptr,
+                       const CXXDeleteExpr *expr,
                        QualType ElementType, llvm::Value *&NumElements,
                        llvm::Value *&AllocPtr, CharUnits &CookieSize);
 
@@ -146,12 +145,14 @@ public:
 
   void EmitReturnFromThunk(CodeGenFunction &CGF, RValue RV, QualType ResTy);
 
-  CharUnits GetArrayCookieSize(QualType ElementType);
+  CharUnits GetArrayCookieSize(const CXXNewExpr *expr);
   llvm::Value *InitializeArrayCookie(CodeGenFunction &CGF,
                                      llvm::Value *NewPtr,
                                      llvm::Value *NumElements,
+                                     const CXXNewExpr *expr,
                                      QualType ElementType);
   void ReadArrayCookie(CodeGenFunction &CGF, llvm::Value *Ptr,
+                       const CXXDeleteExpr *expr,
                        QualType ElementType, llvm::Value *&NumElements,
                        llvm::Value *&AllocPtr, CharUnits &CookieSize);
 
@@ -355,11 +356,11 @@ ItaniumCXXABI::EmitMemberPointerConversion(CodeGenFunction &CGF,
   bool DerivedToBase =
     E->getCastKind() == CK_DerivedToBaseMemberPointer;
 
-  const CXXRecordDecl *BaseDecl, *DerivedDecl;
+  const CXXRecordDecl *DerivedDecl;
   if (DerivedToBase)
-    DerivedDecl = SrcDecl, BaseDecl = DestDecl;
+    DerivedDecl = SrcDecl;
   else
-    BaseDecl = SrcDecl, DerivedDecl = DestDecl;
+    DerivedDecl = DestDecl;
 
   llvm::Constant *Adj = 
     CGF.CGM.GetNonVirtualBaseClassOffset(DerivedDecl,
@@ -493,21 +494,13 @@ ItaniumCXXABI::EmitNullMemberPointer(const MemberPointerType *MPT) {
                                    /*Packed=*/false);
 }
 
-llvm::Constant *ItaniumCXXABI::EmitMemberPointer(const FieldDecl *FD) {
+llvm::Constant *
+ItaniumCXXABI::EmitMemberDataPointer(const MemberPointerType *MPT,
+                                     CharUnits offset) {
   // Itanium C++ ABI 2.3:
   //   A pointer to data member is an offset from the base address of
   //   the class object containing it, represented as a ptrdiff_t
-
-  QualType ClassType = getContext().getTypeDeclType(FD->getParent());
-  const llvm::StructType *ClassLTy =
-    cast<llvm::StructType>(CGM.getTypes().ConvertType(ClassType));
-
-  const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(FD->getParent());
-  unsigned FieldNo = RL.getLLVMFieldNo(FD);
-  uint64_t Offset = 
-    CGM.getTargetData().getStructLayout(ClassLTy)->getElementOffset(FieldNo);
-
-  return llvm::ConstantInt::get(getPtrDiffTy(), Offset);
+  return llvm::ConstantInt::get(getPtrDiffTy(), offset.getQuantity());
 }
 
 llvm::Constant *ItaniumCXXABI::EmitMemberPointer(const CXXMethodDecl *MD) {
@@ -802,67 +795,49 @@ void ARMCXXABI::EmitReturnFromThunk(CodeGenFunction &CGF,
 
 /************************** Array allocation cookies **************************/
 
-bool ItaniumCXXABI::NeedsArrayCookie(QualType ElementType) {
-  ElementType = getContext().getBaseElementType(ElementType);
-  const RecordType *RT = ElementType->getAs<RecordType>();
-  if (!RT) return false;
-  
-  const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-
-  // If the class has a non-trivial destructor, it always needs a cookie.
-  if (!RD->hasTrivialDestructor()) return true;
-
+bool ItaniumCXXABI::NeedsArrayCookie(const CXXNewExpr *expr) {
   // If the class's usual deallocation function takes two arguments,
-  // it needs a cookie.  Otherwise we don't need a cookie.
-  const CXXMethodDecl *UsualDeallocationFunction = 0;
+  // it needs a cookie.
+  if (expr->doesUsualArrayDeleteWantSize())
+    return true;
 
-  // Usual deallocation functions of this form are always found on the
-  // class.
-  //
-  // FIXME: what exactly is this code supposed to do if there's an
-  // ambiguity?  That's possible with using declarations.
-  DeclarationName OpName =
-    getContext().DeclarationNames.getCXXOperatorName(OO_Array_Delete);
-  DeclContext::lookup_const_iterator Op, OpEnd;
-  for (llvm::tie(Op, OpEnd) = RD->lookup(OpName); Op != OpEnd; ++Op) {
-    const CXXMethodDecl *Delete =
-      cast<CXXMethodDecl>((*Op)->getUnderlyingDecl());
-
-    if (Delete->isUsualDeallocationFunction()) {
-      UsualDeallocationFunction = Delete;
-      break;
-    }
-  }
-    
-  // No usual deallocation function, we don't need a cookie.
-  if (!UsualDeallocationFunction)
-    return false;
-    
-  // The usual deallocation function doesn't take a size_t argument,
-  // so we don't need a cookie.
-  if (UsualDeallocationFunction->getNumParams() == 1)
-    return false;
-        
-  assert(UsualDeallocationFunction->getNumParams() == 2 && 
-         "Unexpected deallocation function type!");
-  return true;
+  // Otherwise, if the class has a non-trivial destructor, it always
+  // needs a cookie.
+  const CXXRecordDecl *record =
+    expr->getAllocatedType()->getBaseElementTypeUnsafe()->getAsCXXRecordDecl();
+  return (record && !record->hasTrivialDestructor());
 }
 
-CharUnits ItaniumCXXABI::GetArrayCookieSize(QualType ElementType) {
-  if (!NeedsArrayCookie(ElementType))
+bool ItaniumCXXABI::NeedsArrayCookie(const CXXDeleteExpr *expr,
+                                     QualType elementType) {
+  // If the class's usual deallocation function takes two arguments,
+  // it needs a cookie.
+  if (expr->doesUsualArrayDeleteWantSize())
+    return true;
+
+  // Otherwise, if the class has a non-trivial destructor, it always
+  // needs a cookie.
+  const CXXRecordDecl *record =
+    elementType->getBaseElementTypeUnsafe()->getAsCXXRecordDecl();
+  return (record && !record->hasTrivialDestructor());
+}
+
+CharUnits ItaniumCXXABI::GetArrayCookieSize(const CXXNewExpr *expr) {
+  if (!NeedsArrayCookie(expr))
     return CharUnits::Zero();
   
-  // Padding is the maximum of sizeof(size_t) and alignof(ElementType)
+  // Padding is the maximum of sizeof(size_t) and alignof(elementType)
   ASTContext &Ctx = getContext();
   return std::max(Ctx.getTypeSizeInChars(Ctx.getSizeType()),
-                  Ctx.getTypeAlignInChars(ElementType));
+                  Ctx.getTypeAlignInChars(expr->getAllocatedType()));
 }
 
 llvm::Value *ItaniumCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
                                                   llvm::Value *NewPtr,
                                                   llvm::Value *NumElements,
+                                                  const CXXNewExpr *expr,
                                                   QualType ElementType) {
-  assert(NeedsArrayCookie(ElementType));
+  assert(NeedsArrayCookie(expr));
 
   unsigned AS = cast<llvm::PointerType>(NewPtr->getType())->getAddressSpace();
 
@@ -895,6 +870,7 @@ llvm::Value *ItaniumCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
 
 void ItaniumCXXABI::ReadArrayCookie(CodeGenFunction &CGF,
                                     llvm::Value *Ptr,
+                                    const CXXDeleteExpr *expr,
                                     QualType ElementType,
                                     llvm::Value *&NumElements,
                                     llvm::Value *&AllocPtr,
@@ -904,7 +880,7 @@ void ItaniumCXXABI::ReadArrayCookie(CodeGenFunction &CGF,
   const llvm::Type *CharPtrTy = CGF.Builder.getInt8Ty()->getPointerTo(AS);
 
   // If we don't need an array cookie, bail out early.
-  if (!NeedsArrayCookie(ElementType)) {
+  if (!NeedsArrayCookie(expr, ElementType)) {
     AllocPtr = CGF.Builder.CreateBitCast(Ptr, CharPtrTy);
     NumElements = 0;
     CookieSize = CharUnits::Zero();
@@ -935,8 +911,8 @@ void ItaniumCXXABI::ReadArrayCookie(CodeGenFunction &CGF,
   NumElements = CGF.Builder.CreateLoad(NumElementsPtr);
 }
 
-CharUnits ARMCXXABI::GetArrayCookieSize(QualType ElementType) {
-  if (!NeedsArrayCookie(ElementType))
+CharUnits ARMCXXABI::GetArrayCookieSize(const CXXNewExpr *expr) {
+  if (!NeedsArrayCookie(expr))
     return CharUnits::Zero();
 
   // On ARM, the cookie is always:
@@ -952,8 +928,9 @@ CharUnits ARMCXXABI::GetArrayCookieSize(QualType ElementType) {
 llvm::Value *ARMCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
                                               llvm::Value *NewPtr,
                                               llvm::Value *NumElements,
+                                              const CXXNewExpr *expr,
                                               QualType ElementType) {
-  assert(NeedsArrayCookie(ElementType));
+  assert(NeedsArrayCookie(expr));
 
   // NewPtr is a char*.
 
@@ -986,6 +963,7 @@ llvm::Value *ARMCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
 
 void ARMCXXABI::ReadArrayCookie(CodeGenFunction &CGF,
                                 llvm::Value *Ptr,
+                                const CXXDeleteExpr *expr,
                                 QualType ElementType,
                                 llvm::Value *&NumElements,
                                 llvm::Value *&AllocPtr,
@@ -995,7 +973,7 @@ void ARMCXXABI::ReadArrayCookie(CodeGenFunction &CGF,
   const llvm::Type *CharPtrTy = CGF.Builder.getInt8Ty()->getPointerTo(AS);
 
   // If we don't need an array cookie, bail out early.
-  if (!NeedsArrayCookie(ElementType)) {
+  if (!NeedsArrayCookie(expr, ElementType)) {
     AllocPtr = CGF.Builder.CreateBitCast(Ptr, CharPtrTy);
     NumElements = 0;
     CookieSize = CharUnits::Zero();
@@ -1008,7 +986,6 @@ void ARMCXXABI::ReadArrayCookie(CodeGenFunction &CGF,
   
   // The cookie size is always 2 * sizeof(size_t).
   CookieSize = 2 * SizeSize;
-  CharUnits NumElementsOffset = CookieSize - SizeSize;
 
   // The allocated pointer is the input ptr, minus that amount.
   AllocPtr = CGF.Builder.CreateBitCast(Ptr, CharPtrTy);
@@ -1095,7 +1072,9 @@ void ItaniumCXXABI::EmitGuardedInit(CodeGenFunction &CGF,
 
   // Create the guard variable.
   llvm::SmallString<256> GuardVName;
-  getMangleContext().mangleItaniumGuardVariable(&D, GuardVName);
+  llvm::raw_svector_ostream Out(GuardVName);
+  getMangleContext().mangleItaniumGuardVariable(&D, Out);
+  Out.flush();
 
   // Just absorb linkage and visibility from the variable.
   llvm::GlobalVariable *GuardVariable =

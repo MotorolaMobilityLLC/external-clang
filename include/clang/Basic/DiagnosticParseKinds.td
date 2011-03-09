@@ -28,6 +28,10 @@ def ext_extra_struct_semi : Extension<
 def ext_extra_ivar_semi : Extension<
   "extra ';' inside instance variable list">;
 
+def auto_storage_class : ExtWarn<
+  "'auto' storage class specifier is redundant and will be "
+  "removed in future releases">;
+
 def ext_duplicate_declspec : Extension<"duplicate '%0' declaration specifier">;
 def ext_plain_complex : ExtWarn<
   "plain '_Complex' requires a type specifier; assuming '_Complex double'">;
@@ -57,11 +61,18 @@ def ext_enumerator_list_comma : Extension<
   "feature">;
 def err_enumerator_list_missing_comma : Error<
   "missing ',' between enumerators">;
+def err_enumerator_unnamed_no_def : Error<
+  "unnamed enumeration must be a definition">;
+def ext_ms_enum_fixed_underlying_type : Extension<
+  "enumeration types with a fixed underlying type are a Microsoft extension">, 
+  InGroup<Microsoft>;
 
 def ext_gnu_indirect_goto : Extension<
   "use of GNU indirect-goto extension">, InGroup<GNU>;
 def ext_gnu_address_of_label : Extension<
   "use of GNU address-of-label extension">, InGroup<GNU>;
+def ext_gnu_local_label : Extension<
+  "use of GNU locally declared label extension">, InGroup<GNU>;
 def ext_gnu_statement_expr : Extension<
   "use of GNU statement expression extension">, InGroup<GNU>;
 def ext_gnu_conditional_expr : Extension<
@@ -95,6 +106,7 @@ def err_expected_lsquare : Error<"expected '['">;
 def err_expected_rsquare : Error<"expected ']'">;
 def err_expected_rbrace : Error<"expected '}'">;
 def err_expected_greater : Error<"expected '>'">;
+def err_expected_ggg : Error<"expected '>>>'">;
 def err_expected_semi_declaration : Error<
   "expected ';' at end of declaration">;
 def err_expected_semi_decl_list : Error<
@@ -145,6 +157,8 @@ def err_expected_semi_for : Error<"expected ';' in 'for' statement specifier">;
 def err_expected_colon_after : Error<"expected ':' after %0">;
 def err_label_end_of_compound_statement : Error<
   "label at end of compound statement: expected statement">;
+def err_address_of_label_outside_fn : Error<
+  "use of address-of-label extension outside of a function body">;
 def err_expected_string_literal : Error<"expected string literal">;
 def err_expected_asm_operand : Error<
   "expected string literal or '[' for asm operand">, CatInlineAsm;
@@ -158,10 +172,12 @@ def err_invalid_reference_qualifier_application : Error<
   "'%0' qualifier may not be applied to a reference">;
 def err_illegal_decl_reference_to_reference : Error<
   "%0 declared as a reference to a reference">;
-def err_rvalue_reference : Error<
-  "rvalue references are only allowed in C++0x">;
-def ext_inline_namespace : Extension<
-  "inline namespaces are a C++0x feature">;
+def ext_rvalue_reference : ExtWarn<
+  "rvalue references are a C++0x extension">, InGroup<CXX0x>;
+def ext_ref_qualifier : ExtWarn<
+  "reference qualifiers on functions are a C++0x extension">, InGroup<CXX0x>;
+def ext_inline_namespace : ExtWarn<
+  "inline namespaces are a C++0x feature">, InGroup<CXX0x>;
 def err_argument_required_after_attribute : Error<
   "argument required after attribute">;
 def err_missing_param : Error<"expected parameter declarator">;
@@ -208,6 +224,8 @@ def err_expected_ident_in_using : Error<
   "expected an identifier in using directive">;
 def err_unexected_colon_in_nested_name_spec : Error<
   "unexpected ':' in nested name specifier">;
+def err_bool_redeclaration : Error<
+  "redeclaration of C++ built-in type 'bool'">;
 
 /// Objective-C parser diagnostics
 def err_expected_minus_or_plus : Error<
@@ -234,7 +252,7 @@ def err_objc_property_requires_field_name : Error<
   "property requires fields to be named">;
 def err_objc_property_bitfield : Error<"property name cannot be a bitfield">;
 def err_objc_expected_property_attr : Error<"unknown property attribute %0">;
-def err_objc_propertoes_require_objc2 : Error<
+def err_objc_properties_require_objc2 : Error<
   "properties are an Objective-C 2 feature">;
 def err_objc_unexpected_attr : Error<
   "prefix attribute must be followed by an interface or protocol">;
@@ -282,6 +300,8 @@ def err_expected_lbrace_after_base_specifiers : Error<
   "expected '{' after base class list">;
 def ext_ellipsis_exception_spec : Extension<
   "exception specification of '...' is a Microsoft extension">;
+def err_dynamic_and_noexcept_specification : Error<
+  "cannot have both throw() and noexcept() clause on the same function">;
 def err_expected_catch : Error<"expected catch">;
 def err_expected_lbrace_or_comma : Error<"expected '{' or ','">;
 def err_using_namespace_in_class : Error<
@@ -346,6 +366,10 @@ def err_enum_template : Error<"enumeration cannot be a template">;
 def err_missing_dependent_template_keyword : Error<
   "use 'template' keyword to treat '%0' as a dependent template name">;
 
+def warn_static_inline_explicit_inst_ignored : Warning<
+  "ignoring '%select{static|inline}0' keyword on explicit template "
+  "instantiation">;
+  
 // Constructor template diagnostics.
 def err_out_of_line_constructor_template_id : Error<
   "out-of-line constructor for %0 cannot have template arguments">;
@@ -368,9 +392,6 @@ def err_expected_type_name_after_typename : Error<
 def err_explicit_spec_non_template : Error<
   "explicit %select{specialization|instantiation}0 of non-template "
   "%select{class|struct|union}1 %2">;
-
-def err_variadic_templates : Error<
-  "variadic templates are only allowed in C++0x">;
   
 def err_default_template_template_parameter_not_template : Error<
   "default template argument for a template template parameter must be a class "
@@ -386,8 +407,26 @@ def err_friend_decl_defines_class : Error<
 def warn_deleted_function_accepted_as_extension: ExtWarn<
   "deleted function definition accepted as a C++0x extension">, InGroup<CXX0x>;
 
+// C++0x override control
+def ext_override_control_keyword : Extension<
+  "'%0' keyword accepted as a C++0x extension">, InGroup<CXX0x>;
+def ext_override_inline: Extension<
+  "'%0' keyword only allowed in declarations, allowed as an extension">;
+
+def err_duplicate_virt_specifier : Error<
+  "class member already marked '%0'">;
+def err_duplicate_class_virt_specifier : Error<
+  "class already marked '%0'">;
+
 def err_scoped_enum_missing_identifier : Error<
   "scoped enumeration requires a name">;
+
+def err_expected_parameter_pack : Error<
+  "expected the name of a parameter pack">;
+def err_paren_sizeof_parameter_pack : Error<
+  "missing parentheses around the size of parameter pack %0">;
+def err_sizeof_parameter_pack : Error<
+  "expected parenthesized parameter pack name in 'sizeof...' expression">;
 
 // Language specific pragmas
 // - Generic warnings
@@ -418,6 +457,18 @@ def warn_pragma_unused_expected_var : Warning<
   "expected '#pragma unused' argument to be a variable name">;
 def warn_pragma_unused_expected_punc : Warning<
   "expected ')' or ',' in '#pragma unused'">;
+
+// OpenCL Section 6.8.g
+def err_not_opencl_storage_class_specifier : Error<
+  "OpenCL does not support the '%0' storage class specifier">;
+
+// OpenCL EXTENSION pragma (OpenCL 1.1 [9.1])
+def warn_pragma_expected_colon : Warning<
+  "missing ':' after %0 - ignoring">;
+def warn_pragma_expected_enable_disable : Warning<
+  "expected 'enable' or 'disable' - ignoring">;
+def warn_pragma_unknown_extension : Warning<
+  "unknown OpenCL extension %0 - ignoring">;
 
 } // end of Parse Issue category.
 } // end of Parser diagnostics

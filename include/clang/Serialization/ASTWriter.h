@@ -23,6 +23,7 @@
 #include "clang/Sema/SemaConsumer.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Bitcode/BitstreamWriter.h"
 #include <map>
 #include <queue>
@@ -37,13 +38,19 @@ namespace llvm {
 namespace clang {
 
 class ASTContext;
+class ASTSerializationListener;
 class NestedNameSpecifier;
 class CXXBaseSpecifier;
-class CXXBaseOrMemberInitializer;
-class LabelStmt;
+class CXXCtorInitializer;
+class FPOptions;
+class HeaderSearch;
 class MacroDefinition;
 class MemorizeStatCalls;
+class OpaqueValueExpr;
+class OpenCLOptions;
 class ASTReader;
+class PreprocessedEntity;
+class PreprocessingRecord;
 class Preprocessor;
 class Sema;
 class SourceManager;
@@ -70,6 +77,10 @@ private:
   /// \brief The reader of existing AST files, if we're chaining.
   ASTReader *Chain;
 
+  /// \brief A listener object that receives notifications when certain 
+  /// entities are serialized.                    
+  ASTSerializationListener *SerializationListener;
+                    
   /// \brief Stores a declaration or a type to be written to the AST file.
   class DeclOrType {
   public:
@@ -175,6 +186,9 @@ private:
   /// defined.
   llvm::DenseMap<const IdentifierInfo *, uint64_t> MacroOffsets;
 
+  /// \brief The set of identifiers that had macro definitions at some point.
+  std::vector<const IdentifierInfo *> DeserializedMacroNames;
+                    
   /// \brief The first ID number we can use for our own macro definitions.
   serialization::MacroID FirstMacroID;
   
@@ -247,8 +261,8 @@ private:
   /// \brief Mapping from SwitchCase statements to IDs.
   std::map<SwitchCase *, unsigned> SwitchCaseIDs;
 
-  /// \brief Mapping from LabelStmt statements to IDs.
-  std::map<LabelStmt *, unsigned> LabelIDs;
+  /// \brief Mapping from OpaqueValueExpr expressions to IDs.
+  llvm::DenseMap<OpaqueValueExpr *, unsigned> OpaqueValues;
 
   /// \brief The number of statements written to the AST file.
   unsigned NumStatements;
@@ -297,14 +311,17 @@ private:
   void WriteSubStmt(Stmt *S);
 
   void WriteBlockInfoBlock();
-  void WriteMetadata(ASTContext &Context, const char *isysroot);
+  void WriteMetadata(ASTContext &Context, const char *isysroot,
+                     const std::string &OutputFile);
   void WriteLanguageOptions(const LangOptions &LangOpts);
   void WriteStatCache(MemorizeStatCalls &StatCalls);
   void WriteSourceManagerBlock(SourceManager &SourceMgr,
                                const Preprocessor &PP,
                                const char* isysroot);
   void WritePreprocessor(const Preprocessor &PP);
-  void WriteUserDiagnosticMappings(const Diagnostic &Diag);
+  void WriteHeaderSearch(HeaderSearch &HS, const char* isysroot);
+  void WritePreprocessorDetail(PreprocessingRecord &PPRec);
+  void WritePragmaDiagnosticMappings(const Diagnostic &Diag);
   void WriteType(QualType T);
   uint64_t WriteDeclContextLexicalBlock(ASTContext &Context, DeclContext *DC);
   uint64_t WriteDeclContextVisibleBlock(ASTContext &Context, DeclContext *DC);
@@ -316,6 +333,8 @@ private:
   void WriteDeclUpdatesBlocks();
   void WriteDeclReplacementsBlock();
   void WriteDeclContextVisibleUpdate(const DeclContext *DC);
+  void WriteFPPragmaOptions(const FPOptions &Opts);
+  void WriteOpenCLExtensions(Sema &SemaRef);
 
   unsigned ParmVarDeclAbbrev;
   unsigned DeclContextLexicalAbbrev;
@@ -325,7 +344,7 @@ private:
   void WriteDecl(ASTContext &Context, Decl *D);
 
   void WriteASTCore(Sema &SemaRef, MemorizeStatCalls *StatCalls,
-                    const char* isysroot);
+                    const char* isysroot, const std::string &OutputFile);
   void WriteASTChain(Sema &SemaRef, MemorizeStatCalls *StatCalls,
                      const char* isysroot);
   
@@ -334,6 +353,12 @@ public:
   /// the given bitstream.
   ASTWriter(llvm::BitstreamWriter &Stream);
 
+  /// \brief Set the listener that will receive notification of serialization
+  /// events.
+  void SetSerializationListener(ASTSerializationListener *Listener) {
+    SerializationListener = Listener;
+  }
+                    
   /// \brief Write a precompiled header for the given semantic analysis.
   ///
   /// \param SemaRef a reference to the semantic analysis object that processed
@@ -348,6 +373,7 @@ public:
   /// \param PPRec Record of the preprocessing actions that occurred while
   /// preprocessing this file, e.g., macro instantiations
   void WriteAST(Sema &SemaRef, MemorizeStatCalls *StatCalls,
+                const std::string &OutputFile,
                 const char* isysroot);
 
   /// \brief Emit a source location.
@@ -417,6 +443,9 @@ public:
   /// \brief Emits a reference to a declarator info.
   void AddTypeSourceInfo(TypeSourceInfo *TInfo, RecordDataImpl &Record);
 
+  /// \brief Emits a type with source-location information.
+  void AddTypeLoc(TypeLoc TL, RecordDataImpl &Record);
+
   /// \brief Emits a template argument location info.
   void AddTemplateArgumentLocInfo(TemplateArgument::ArgKind Kind,
                                   const TemplateArgumentLocInfo &Arg,
@@ -448,6 +477,10 @@ public:
 
   /// \brief Emit a nested name specifier.
   void AddNestedNameSpecifier(NestedNameSpecifier *NNS, RecordDataImpl &Record);
+
+  /// \brief Emit a nested name specifier with source-location information.
+  void AddNestedNameSpecifierLoc(NestedNameSpecifierLoc NNS, 
+                                 RecordDataImpl &Record);
   
   /// \brief Emit a template name.
   void AddTemplateName(TemplateName Name, RecordDataImpl &Record);
@@ -469,10 +502,11 @@ public:
   /// \brief Emit a C++ base specifier.
   void AddCXXBaseSpecifier(const CXXBaseSpecifier &Base, RecordDataImpl &Record);
 
-  /// \brief Emit a CXXBaseOrMemberInitializer array.
-  void AddCXXBaseOrMemberInitializers(
-                        const CXXBaseOrMemberInitializer * const *BaseOrMembers,
-                        unsigned NumBaseOrMembers, RecordDataImpl &Record);
+  /// \brief Emit a CXXCtorInitializer array.
+  void AddCXXCtorInitializers(
+                             const CXXCtorInitializer * const *CtorInitializers,
+                             unsigned NumCtorInitializers,
+                             RecordDataImpl &Record);
 
   void AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Record);
 
@@ -526,9 +560,8 @@ public:
 
   void ClearSwitchCaseIDs();
 
-  /// \brief Retrieve the ID for the given label statement, which may
-  /// or may not have been emitted yet.
-  unsigned GetLabelID(LabelStmt *S);
+  /// \brief Retrieve the ID for the given opaque value expression.
+  unsigned getOpaqueValueID(OpaqueValueExpr *e);
 
   unsigned getParmVarDeclAbbrev() const { return ParmVarDeclAbbrev; }
 
@@ -554,6 +587,7 @@ public:
 /// precompiled header from the parsed source code.
 class PCHGenerator : public SemaConsumer {
   const Preprocessor &PP;
+  std::string OutputFile;
   const char *isysroot;
   llvm::raw_ostream *Out;
   Sema *SemaPtr;
@@ -568,11 +602,12 @@ protected:
   const ASTWriter &getWriter() const { return Writer; }
 
 public:
-  PCHGenerator(const Preprocessor &PP, bool Chaining,
+  PCHGenerator(const Preprocessor &PP, const std::string &OutputFile, bool Chaining,
                const char *isysroot, llvm::raw_ostream *Out);
   virtual void InitializeSema(Sema &S) { SemaPtr = &S; }
   virtual void HandleTranslationUnit(ASTContext &Ctx);
   virtual ASTMutationListener *GetASTMutationListener();
+  virtual ASTSerializationListener *GetASTSerializationListener();
   virtual ASTDeserializationListener *GetASTDeserializationListener();
 };
 

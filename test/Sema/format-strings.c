@@ -174,6 +174,7 @@ void test10(int x, float f, int i, long long lli) {
   printf("%.0Lf", (long double) 1.0); // no-warning
   printf("%c\n", "x"); // expected-warning{{conversion specifies type 'int' but the argument has type 'char *'}}
   printf("%c\n", 1.23); // expected-warning{{conversion specifies type 'int' but the argument has type 'double'}}
+  printf("Format %d, is %! %f", 1, 2, 4.4); // expected-warning{{invalid conversion specifier '!'}}
 }
 
 typedef unsigned char uint8_t;
@@ -323,5 +324,37 @@ extern void rdar8332221_vprintf_scanf(const char *, va_list, const char *, ...)
      
 void rdar8332221(va_list ap, int *x, long *y) {
   rdar8332221_vprintf_scanf("%", ap, "%d", x); // expected-warning{{incomplete format specifier}}
+}
+
+// PR8641
+void pr8641() {
+  printf("%#x\n", 10);
+  printf("%#X\n", 10);
+}
+
+void posix_extensions() {
+  // Test %'d, "thousands grouping".
+  // <rdar://problem/8816343>
+  printf("%'d\n", 123456789); // no-warning
+  printf("%'i\n", 123456789); // no-warning
+  printf("%'f\n", (float) 1.0); // no-warning
+  printf("%'p\n", (void*) 0); // expected-warning{{results in undefined behavior with 'p' conversion specifier}}
+}
+
+// PR8486
+//
+// Test what happens when -Wformat is on, but -Wformat-security is off.
+#pragma GCC diagnostic warning "-Wformat"
+#pragma GCC diagnostic ignored "-Wformat-security"
+
+void pr8486() {
+  printf("%s", 1); // expected-warning{{conversion specifies type 'char *' but the argument has type 'int'}}
+}
+
+// PR9314
+// Don't warn about string literals that are PreDefinedExprs, e.g. __func__.
+void pr9314() {
+  printf(__PRETTY_FUNCTION__); // no-warning
+  printf(__func__); // no-warning
 }
 

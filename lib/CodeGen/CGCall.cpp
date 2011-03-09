@@ -755,10 +755,10 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
   if (RetAttrs)
     PAL.push_back(llvm::AttributeWithIndex::get(0, RetAttrs));
 
-  // FIXME: we need to honor command line settings also.
-  // FIXME: RegParm should be reduced in case of nested functions and/or global
-  // register variable.
+  // FIXME: RegParm should be reduced in case of global register variable.
   signed RegParm = FI.getRegParm();
+  if (!RegParm)
+    RegParm = CodeGenOpts.NumRegisterParameters;
 
   unsigned PointerWidth = getContext().Target.getPointerWidth(0);
   for (CGFunctionInfo::const_arg_iterator it = FI.arg_begin(),
@@ -769,7 +769,7 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
 
     // 'restrict' -> 'noalias' is done in EmitFunctionProlog when we
     // have the corresponding parameter variable.  It doesn't make
-    // sense to do it here because parameters are so fucked up.
+    // sense to do it here because parameters are so messed up.
     switch (AI.getKind()) {
     case ABIArgInfo::Extend:
       if (ParamType->isSignedIntegerType())
@@ -856,9 +856,10 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 
   assert(FI.arg_size() == Args.size() &&
          "Mismatch between function signature & arguments.");
+  unsigned ArgNo = 1;
   CGFunctionInfo::const_arg_iterator info_it = FI.arg_begin();
-  for (FunctionArgList::const_iterator i = Args.begin(), e = Args.end();
-       i != e; ++i, ++info_it) {
+  for (FunctionArgList::const_iterator i = Args.begin(), e = Args.end(); 
+       i != e; ++i, ++info_it, ++ArgNo) {
     const VarDecl *Arg = i->first;
     QualType Ty = info_it->type;
     const ABIArgInfo &ArgI = info_it->info;
@@ -878,28 +879,27 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
           //
           // FIXME: We should have a common utility for generating an aggregate
           // copy.
-          const llvm::Type *I8PtrTy = llvm::Type::getInt8PtrTy(VMContext, 0);
-          unsigned Size = getContext().getTypeSize(Ty) / 8;
-          Builder.CreateCall5(CGM.getMemCpyFn(I8PtrTy, I8PtrTy, IntPtrTy),
-                              Builder.CreateBitCast(AlignedTemp, I8PtrTy),
-                              Builder.CreateBitCast(V, I8PtrTy),
-                              llvm::ConstantInt::get(IntPtrTy, Size),
-                              Builder.getInt32(ArgI.getIndirectAlign()),
-                              /*Volatile=*/Builder.getInt1(false));
-
+          const llvm::Type *I8PtrTy = Builder.getInt8PtrTy();
+          CharUnits Size = getContext().getTypeSizeInChars(Ty);
+          Builder.CreateMemCpy(Builder.CreateBitCast(AlignedTemp, I8PtrTy),
+                               Builder.CreateBitCast(V, I8PtrTy),
+                               llvm::ConstantInt::get(IntPtrTy, 
+                                                      Size.getQuantity()),
+                               ArgI.getIndirectAlign(),
+                               false);
           V = AlignedTemp;
         }
       } else {
         // Load scalar value from indirect argument.
-        unsigned Alignment = getContext().getTypeAlignInChars(Ty).getQuantity();
-        V = EmitLoadOfScalar(V, false, Alignment, Ty);
+        CharUnits Alignment = getContext().getTypeAlignInChars(Ty);
+        V = EmitLoadOfScalar(V, false, Alignment.getQuantity(), Ty);
         if (!getContext().typesAreCompatible(Ty, Arg->getType())) {
           // This must be a promotion, for something like
           // "void a(x) short x; {..."
           V = EmitScalarConversion(V, Ty, Arg->getType());
         }
       }
-      EmitParmDecl(*Arg, V);
+      EmitParmDecl(*Arg, V, ArgNo);
       break;
     }
 
@@ -920,7 +920,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
           // "void a(x) short x; {..."
           V = EmitScalarConversion(V, Ty, Arg->getType());
         }
-        EmitParmDecl(*Arg, V);
+        EmitParmDecl(*Arg, V, ArgNo);
         break;
       }
 
@@ -929,7 +929,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       // The alignment we need to use is the max of the requested alignment for
       // the argument plus the alignment required by our access code below.
       unsigned AlignmentToUse =
-        CGF.CGM.getTargetData().getABITypeAlignment(ArgI.getCoerceToType());
+        CGM.getTargetData().getABITypeAlignment(ArgI.getCoerceToType());
       AlignmentToUse = std::max(AlignmentToUse,
                         (unsigned)getContext().getDeclAlign(Arg).getQuantity());
 
@@ -975,7 +975,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
           V = EmitScalarConversion(V, Ty, Arg->getType());
         }
       }
-      EmitParmDecl(*Arg, V);
+      EmitParmDecl(*Arg, V, ArgNo);
       continue;  // Skip ++AI increment, already done.
     }
 
@@ -986,7 +986,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       llvm::Value *Temp = CreateMemTemp(Ty, Arg->getName() + ".addr");
       llvm::Function::arg_iterator End =
         ExpandTypeFromArgs(Ty, MakeAddrLValue(Temp, Ty), AI);
-      EmitParmDecl(*Arg, Temp);
+      EmitParmDecl(*Arg, Temp, ArgNo);
 
       // Name the arguments used in expansion and increment AI.
       unsigned Index = 0;
@@ -998,9 +998,10 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
     case ABIArgInfo::Ignore:
       // Initialize the local variable appropriately.
       if (hasAggregateLLVMType(Ty))
-        EmitParmDecl(*Arg, CreateMemTemp(Ty));
+        EmitParmDecl(*Arg, CreateMemTemp(Ty), ArgNo);
       else
-        EmitParmDecl(*Arg, llvm::UndefValue::get(ConvertType(Arg->getType())));
+        EmitParmDecl(*Arg, llvm::UndefValue::get(ConvertType(Arg->getType())),
+                     ArgNo);
 
       // Skip increment, no matching LLVM parameter.
       continue;
@@ -1276,7 +1277,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       if (CE->getOpcode() == llvm::Instruction::BitCast &&
           ActualFT->getReturnType() == CurFT->getReturnType() &&
           ActualFT->getNumParams() == CurFT->getNumParams() &&
-          ActualFT->getNumParams() == Args.size()) {
+          ActualFT->getNumParams() == Args.size() &&
+          (CurFT->isVarArg() || !ActualFT->isVarArg())) {
         bool ArgsMatch = true;
         for (unsigned i = 0, e = ActualFT->getNumParams(); i != e; ++i)
           if (ActualFT->getParamType(i) != CurFT->getParamType(i)) {

@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 %s -triple=x86_64-apple-darwin10 -emit-llvm -o - -fexceptions | FileCheck %s
+// RUN: %clang_cc1 %s -triple=x86_64-apple-darwin10 -emit-llvm -o - -fcxx-exceptions -fexceptions | FileCheck %s
 
 typedef typeof(sizeof(0)) size_t;
 
@@ -196,10 +196,10 @@ namespace test3 {
     // CHECK-NEXT: [[CLEANUPACTIVE:%.*]] = alloca i1
     // CHECK-NEXT: [[TMP:%.*]] = alloca [[A]], align 8
     // CHECK:      [[TMPACTIVE:%.*]] = alloca i1
-    // CHECK-NEXT: store i1 false, i1* [[TMPACTIVE]]
     // CHECK-NEXT: store i1 false, i1* [[CLEANUPACTIVE]]
 
     // CHECK:      [[COND:%.*]] = trunc i8 {{.*}} to i1
+    // CHECK-NEXT: store i1 false, i1* [[TMPACTIVE]]
     // CHECK-NEXT: br i1 [[COND]]
     return (cond ?
 
@@ -257,5 +257,51 @@ namespace test4 {
     extern void *foo(), *bar();
 
     return new(foo(),bar()) A(5);
+  }
+}
+
+// PR7908
+namespace test5 {
+  struct T { T(); ~T(); };
+
+  struct A {
+    A(const A &x, const T &t = T());
+    ~A();
+  };
+
+  void foo();
+
+  // CHECK:    define void @_ZN5test54testEv()
+  // CHECK:      [[EXNSLOT:%.*]] = alloca i8*
+  // CHECK-NEXT: [[A:%.*]] = alloca [[A_T:%.*]], align 1
+  // CHECK-NEXT: [[T:%.*]] = alloca [[T_T:%.*]], align 1
+  // CHECK-NEXT: alloca i32
+  // CHECK-NEXT: invoke void @_ZN5test53fooEv()
+  // CHECK:      [[EXN:%.*]] = load i8** [[EXNSLOT]]
+  // CHECK-NEXT: [[ADJ:%.*]] = call i8* @__cxa_get_exception_ptr(i8* [[EXN]])
+  // CHECK-NEXT: [[SRC:%.*]] = bitcast i8* [[ADJ]] to [[A_T]]*
+  // CHECK-NEXT: invoke void @_ZN5test51TC1Ev([[T_T]]* [[T]])
+  // CHECK:      invoke void @_ZN5test51AC1ERKS0_RKNS_1TE([[A_T]]* [[A]], [[A_T]]* [[SRC]], [[T_T]]* [[T]])
+  // CHECK:      invoke void @_ZN5test51TD1Ev([[T_T]]* [[T]])
+  // CHECK:      call i8* @__cxa_begin_catch(i8* [[EXN]]) nounwind
+  // CHECK-NEXT: invoke void @_ZN5test51AD1Ev([[A_T]]* [[A]])
+  // CHECK:      call void @__cxa_end_catch()
+  void test() {
+    try {
+      foo();
+    } catch (A a) {
+    }
+  }
+}
+
+// PR9303: invalid assert on this
+namespace test6 {
+  bool cond();
+  void test() {
+    try {
+    lbl:
+      if (cond()) goto lbl;
+    } catch (...) {
+    }
   }
 }

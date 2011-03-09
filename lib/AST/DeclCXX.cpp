@@ -36,8 +36,8 @@ CXXRecordDecl::DefinitionData::DefinitionData(CXXRecordDecl *D)
     HasTrivialDestructor(true), ComputedVisibleConversions(false),
     DeclaredDefaultConstructor(false), DeclaredCopyConstructor(false), 
     DeclaredCopyAssignment(false), DeclaredDestructor(false),
-    NumBases(0), NumVBases(0), Bases(), VBases(), 
-    Definition(D), FirstFriend(0) {
+    NumBases(0), NumVBases(0), Bases(), VBases(),
+  Definition(D), FirstFriend(0) {
 }
 
 CXXRecordDecl::CXXRecordDecl(Kind K, TagKind TK, DeclContext *DC,
@@ -48,9 +48,9 @@ CXXRecordDecl::CXXRecordDecl(Kind K, TagKind TK, DeclContext *DC,
     DefinitionData(PrevDecl ? PrevDecl->DefinitionData : 0),
     TemplateOrInstantiation() { }
 
-CXXRecordDecl *CXXRecordDecl::Create(ASTContext &C, TagKind TK, DeclContext *DC,
-                                     SourceLocation L, IdentifierInfo *Id,
-                                     SourceLocation TKL,
+CXXRecordDecl *CXXRecordDecl::Create(const ASTContext &C, TagKind TK,
+                                     DeclContext *DC, SourceLocation L,
+                                     IdentifierInfo *Id, SourceLocation TKL,
                                      CXXRecordDecl* PrevDecl,
                                      bool DelayTypeCreation) {
   CXXRecordDecl* R = new (C) CXXRecordDecl(CXXRecord, TK, DC, L, Id,
@@ -62,7 +62,7 @@ CXXRecordDecl *CXXRecordDecl::Create(ASTContext &C, TagKind TK, DeclContext *DC,
   return R;
 }
 
-CXXRecordDecl *CXXRecordDecl::Create(ASTContext &C, EmptyShell Empty) {
+CXXRecordDecl *CXXRecordDecl::Create(const ASTContext &C, EmptyShell Empty) {
   return new (C) CXXRecordDecl(CXXRecord, TTK_Struct, 0, SourceLocation(), 0, 0,
                                SourceLocation());
 }
@@ -196,7 +196,8 @@ CXXRecordDecl::setBases(CXXBaseSpecifier const * const *Bases,
     data().getVBases()[I] =
       CXXBaseSpecifier(VBaseClassDecl->getSourceRange(), true,
                        VBaseClassDecl->getTagKind() == TTK_Class,
-                       VBases[I]->getAccessSpecifier(), VBaseTypeInfo);
+                       VBases[I]->getAccessSpecifier(), VBaseTypeInfo,
+                       SourceLocation());
   }
 }
 
@@ -213,7 +214,7 @@ bool CXXRecordDecl::hasAnyDependentBases() const {
   return !forallBases(SawBase, 0);
 }
 
-bool CXXRecordDecl::hasConstCopyConstructor(ASTContext &Context) const {
+bool CXXRecordDecl::hasConstCopyConstructor(const ASTContext &Context) const {
   return getCopyConstructor(Context, Qualifiers::Const) != 0;
 }
 
@@ -240,7 +241,7 @@ GetBestOverloadCandidateSimple(
   return Cands[Best].first;
 }
 
-CXXConstructorDecl *CXXRecordDecl::getCopyConstructor(ASTContext &Context,
+CXXConstructorDecl *CXXRecordDecl::getCopyConstructor(const ASTContext &Context,
                                                       unsigned TypeQuals) const{
   QualType ClassType
     = Context.getTypeDeclType(const_cast<CXXRecordDecl*>(this));
@@ -726,20 +727,6 @@ const UnresolvedSetImpl *CXXRecordDecl::getVisibleConversionFunctions() {
   return &data().VisibleConversions;
 }
 
-#ifndef NDEBUG
-void CXXRecordDecl::CheckConversionFunction(NamedDecl *ConvDecl) {
-  assert(ConvDecl->getDeclContext() == this &&
-         "conversion function does not belong to this record");
-
-  ConvDecl = ConvDecl->getUnderlyingDecl();
-  if (FunctionTemplateDecl *Temp = dyn_cast<FunctionTemplateDecl>(ConvDecl)) {
-    assert(isa<CXXConversionDecl>(Temp->getTemplatedDecl()));
-  } else {
-    assert(isa<CXXConversionDecl>(ConvDecl));
-  }
-}
-#endif
-
 void CXXRecordDecl::removeConversion(const NamedDecl *ConvDecl) {
   // This operation is O(N) but extremely rare.  Sema only uses it to
   // remove UsingShadowDecls in a class that were followed by a direct
@@ -1012,85 +999,100 @@ bool CXXMethodDecl::hasInlineBody() const {
   return CheckFn->hasBody(fn) && !fn->isOutOfLine();
 }
 
-CXXBaseOrMemberInitializer::
-CXXBaseOrMemberInitializer(ASTContext &Context,
-                           TypeSourceInfo *TInfo, bool IsVirtual,
-                           SourceLocation L, Expr *Init, SourceLocation R)
-  : BaseOrMember(TInfo), Init(Init), AnonUnionMember(0),
+CXXCtorInitializer::CXXCtorInitializer(ASTContext &Context,
+                                       TypeSourceInfo *TInfo, bool IsVirtual,
+                                       SourceLocation L, Expr *Init,
+                                       SourceLocation R,
+                                       SourceLocation EllipsisLoc)
+  : Initializee(TInfo), MemberOrEllipsisLocation(EllipsisLoc), Init(Init), 
     LParenLoc(L), RParenLoc(R), IsVirtual(IsVirtual), IsWritten(false),
     SourceOrderOrNumArrayIndices(0)
 {
 }
 
-CXXBaseOrMemberInitializer::
-CXXBaseOrMemberInitializer(ASTContext &Context,
-                           FieldDecl *Member, SourceLocation MemberLoc,
-                           SourceLocation L, Expr *Init, SourceLocation R)
-  : BaseOrMember(Member), MemberLocation(MemberLoc), Init(Init),
-    AnonUnionMember(0), LParenLoc(L), RParenLoc(R), IsVirtual(false),
+CXXCtorInitializer::CXXCtorInitializer(ASTContext &Context,
+                                       FieldDecl *Member,
+                                       SourceLocation MemberLoc,
+                                       SourceLocation L, Expr *Init,
+                                       SourceLocation R)
+  : Initializee(Member), MemberOrEllipsisLocation(MemberLoc), Init(Init),
+    LParenLoc(L), RParenLoc(R), IsVirtual(false),
     IsWritten(false), SourceOrderOrNumArrayIndices(0)
 {
 }
 
-CXXBaseOrMemberInitializer::
-CXXBaseOrMemberInitializer(ASTContext &Context,
-                           FieldDecl *Member, SourceLocation MemberLoc,
-                           SourceLocation L, Expr *Init, SourceLocation R,
-                           VarDecl **Indices,
-                           unsigned NumIndices)
-  : BaseOrMember(Member), MemberLocation(MemberLoc), Init(Init), 
-    AnonUnionMember(0), LParenLoc(L), RParenLoc(R), IsVirtual(false),
+CXXCtorInitializer::CXXCtorInitializer(ASTContext &Context,
+                                       IndirectFieldDecl *Member,
+                                       SourceLocation MemberLoc,
+                                       SourceLocation L, Expr *Init,
+                                       SourceLocation R)
+  : Initializee(Member), MemberOrEllipsisLocation(MemberLoc), Init(Init),
+    LParenLoc(L), RParenLoc(R), IsVirtual(false),
+    IsWritten(false), SourceOrderOrNumArrayIndices(0)
+{
+}
+
+CXXCtorInitializer::CXXCtorInitializer(ASTContext &Context,
+                                       SourceLocation D, SourceLocation L,
+                                       CXXConstructorDecl *Target, Expr *Init,
+                                       SourceLocation R)
+  : Initializee(Target), MemberOrEllipsisLocation(D), Init(Init),
+    LParenLoc(L), RParenLoc(R), IsVirtual(false),
+    IsWritten(false), SourceOrderOrNumArrayIndices(0)
+{
+}
+
+CXXCtorInitializer::CXXCtorInitializer(ASTContext &Context,
+                                       FieldDecl *Member,
+                                       SourceLocation MemberLoc,
+                                       SourceLocation L, Expr *Init,
+                                       SourceLocation R,
+                                       VarDecl **Indices,
+                                       unsigned NumIndices)
+  : Initializee(Member), MemberOrEllipsisLocation(MemberLoc), Init(Init), 
+    LParenLoc(L), RParenLoc(R), IsVirtual(false),
     IsWritten(false), SourceOrderOrNumArrayIndices(NumIndices)
 {
   VarDecl **MyIndices = reinterpret_cast<VarDecl **> (this + 1);
   memcpy(MyIndices, Indices, NumIndices * sizeof(VarDecl *));
 }
 
-CXXBaseOrMemberInitializer *
-CXXBaseOrMemberInitializer::Create(ASTContext &Context,
-                                   FieldDecl *Member, 
-                                   SourceLocation MemberLoc,
-                                   SourceLocation L,
-                                   Expr *Init,
-                                   SourceLocation R,
-                                   VarDecl **Indices,
-                                   unsigned NumIndices) {
-  void *Mem = Context.Allocate(sizeof(CXXBaseOrMemberInitializer) +
+CXXCtorInitializer *CXXCtorInitializer::Create(ASTContext &Context,
+                                               FieldDecl *Member, 
+                                               SourceLocation MemberLoc,
+                                               SourceLocation L, Expr *Init,
+                                               SourceLocation R,
+                                               VarDecl **Indices,
+                                               unsigned NumIndices) {
+  void *Mem = Context.Allocate(sizeof(CXXCtorInitializer) +
                                sizeof(VarDecl *) * NumIndices,
-                               llvm::alignOf<CXXBaseOrMemberInitializer>());
-  return new (Mem) CXXBaseOrMemberInitializer(Context, Member, MemberLoc,
-                                              L, Init, R, Indices, NumIndices);
+                               llvm::alignOf<CXXCtorInitializer>());
+  return new (Mem) CXXCtorInitializer(Context, Member, MemberLoc, L, Init, R,
+                                      Indices, NumIndices);
 }
 
-TypeLoc CXXBaseOrMemberInitializer::getBaseClassLoc() const {
+TypeLoc CXXCtorInitializer::getBaseClassLoc() const {
   if (isBaseInitializer())
-    return BaseOrMember.get<TypeSourceInfo*>()->getTypeLoc();
+    return Initializee.get<TypeSourceInfo*>()->getTypeLoc();
   else
     return TypeLoc();
 }
 
-Type *CXXBaseOrMemberInitializer::getBaseClass() {
+const Type *CXXCtorInitializer::getBaseClass() const {
   if (isBaseInitializer())
-    return BaseOrMember.get<TypeSourceInfo*>()->getType().getTypePtr();
+    return Initializee.get<TypeSourceInfo*>()->getType().getTypePtr();
   else
     return 0;
 }
 
-const Type *CXXBaseOrMemberInitializer::getBaseClass() const {
-  if (isBaseInitializer())
-    return BaseOrMember.get<TypeSourceInfo*>()->getType().getTypePtr();
-  else
-    return 0;
-}
-
-SourceLocation CXXBaseOrMemberInitializer::getSourceLocation() const {
-  if (isMemberInitializer())
+SourceLocation CXXCtorInitializer::getSourceLocation() const {
+  if (isAnyMemberInitializer() || isDelegatingInitializer())
     return getMemberLocation();
   
   return getBaseClassLoc().getLocalSourceRange().getBegin();
 }
 
-SourceRange CXXBaseOrMemberInitializer::getSourceRange() const {
+SourceRange CXXCtorInitializer::getSourceRange() const {
   return SourceRange(getSourceLocation(), getRParenLoc());
 }
 
@@ -1124,25 +1126,40 @@ bool CXXConstructorDecl::isDefaultConstructor() const {
 
 bool
 CXXConstructorDecl::isCopyConstructor(unsigned &TypeQuals) const {
+  return isCopyOrMoveConstructor(TypeQuals) &&
+         getParamDecl(0)->getType()->isLValueReferenceType();
+}
+
+bool CXXConstructorDecl::isMoveConstructor(unsigned &TypeQuals) const {
+  return isCopyOrMoveConstructor(TypeQuals) &&
+    getParamDecl(0)->getType()->isRValueReferenceType();
+}
+
+/// \brief Determine whether this is a copy or move constructor.
+bool CXXConstructorDecl::isCopyOrMoveConstructor(unsigned &TypeQuals) const {
   // C++ [class.copy]p2:
   //   A non-template constructor for class X is a copy constructor
   //   if its first parameter is of type X&, const X&, volatile X& or
   //   const volatile X&, and either there are no other parameters
   //   or else all other parameters have default arguments (8.3.6).
+  // C++0x [class.copy]p3:
+  //   A non-template constructor for class X is a move constructor if its
+  //   first parameter is of type X&&, const X&&, volatile X&&, or 
+  //   const volatile X&&, and either there are no other parameters or else 
+  //   all other parameters have default arguments.
   if ((getNumParams() < 1) ||
       (getNumParams() > 1 && !getParamDecl(1)->hasDefaultArg()) ||
       (getPrimaryTemplate() != 0) ||
       (getDescribedFunctionTemplate() != 0))
     return false;
-
+  
   const ParmVarDecl *Param = getParamDecl(0);
-
-  // Do we have a reference type? Rvalue references don't count.
-  const LValueReferenceType *ParamRefType =
-    Param->getType()->getAs<LValueReferenceType>();
+  
+  // Do we have a reference type? 
+  const ReferenceType *ParamRefType = Param->getType()->getAs<ReferenceType>();
   if (!ParamRefType)
     return false;
-
+  
   // Is it a reference to our class type?
   ASTContext &Context = getASTContext();
   
@@ -1152,12 +1169,12 @@ CXXConstructorDecl::isCopyConstructor(unsigned &TypeQuals) const {
     = Context.getCanonicalType(Context.getTagDeclType(getParent()));
   if (PointeeType.getUnqualifiedType() != ClassTy)
     return false;
-
+  
   // FIXME: other qualifiers?
-
-  // We have a copy constructor.
+  
+  // We have a copy or move constructor.
   TypeQuals = PointeeType.getCVRQualifiers();
-  return true;
+  return true;  
 }
 
 bool CXXConstructorDecl::isConvertingConstructor(bool AllowExplicit) const {
@@ -1195,6 +1212,22 @@ bool CXXConstructorDecl::isSpecializationCopyingObject() const {
     return false;
   
   return true;  
+}
+
+const CXXConstructorDecl *CXXConstructorDecl::getInheritedConstructor() const {
+  // Hack: we store the inherited constructor in the overridden method table
+  method_iterator It = begin_overridden_methods();
+  if (It == end_overridden_methods())
+    return 0;
+
+  return cast<CXXConstructorDecl>(*It);
+}
+
+void
+CXXConstructorDecl::setInheritedConstructor(const CXXConstructorDecl *BaseCtor){
+  // Hack: we store the inherited constructor in the overridden method table
+  assert(size_overridden_methods() == 0 && "Base ctor already set.");
+  addOverriddenMethod(BaseCtor);
 }
 
 CXXDestructorDecl *
@@ -1237,22 +1270,22 @@ CXXConversionDecl::Create(ASTContext &C, CXXRecordDecl *RD,
 LinkageSpecDecl *LinkageSpecDecl::Create(ASTContext &C,
                                          DeclContext *DC,
                                          SourceLocation L,
-                                         LanguageIDs Lang, bool Braces) {
-  return new (C) LinkageSpecDecl(DC, L, Lang, Braces);
+                                         LanguageIDs Lang,
+                                         SourceLocation RBraceLoc) {
+  return new (C) LinkageSpecDecl(DC, L, Lang, RBraceLoc);
 }
 
 UsingDirectiveDecl *UsingDirectiveDecl::Create(ASTContext &C, DeclContext *DC,
                                                SourceLocation L,
                                                SourceLocation NamespaceLoc,
-                                               SourceRange QualifierRange,
-                                               NestedNameSpecifier *Qualifier,
+                                           NestedNameSpecifierLoc QualifierLoc,
                                                SourceLocation IdentLoc,
                                                NamedDecl *Used,
                                                DeclContext *CommonAncestor) {
   if (NamespaceDecl *NS = dyn_cast_or_null<NamespaceDecl>(Used))
     Used = NS->getOriginalNamespace();
-  return new (C) UsingDirectiveDecl(DC, L, NamespaceLoc, QualifierRange,
-                                    Qualifier, IdentLoc, Used, CommonAncestor);
+  return new (C) UsingDirectiveDecl(DC, L, NamespaceLoc, QualifierLoc,
+                                    IdentLoc, Used, CommonAncestor);
 }
 
 NamespaceDecl *UsingDirectiveDecl::getNominatedNamespace() {
@@ -1266,14 +1299,13 @@ NamespaceAliasDecl *NamespaceAliasDecl::Create(ASTContext &C, DeclContext *DC,
                                                SourceLocation UsingLoc,
                                                SourceLocation AliasLoc,
                                                IdentifierInfo *Alias,
-                                               SourceRange QualifierRange,
-                                               NestedNameSpecifier *Qualifier,
+                                           NestedNameSpecifierLoc QualifierLoc,
                                                SourceLocation IdentLoc,
                                                NamedDecl *Namespace) {
   if (NamespaceDecl *NS = dyn_cast_or_null<NamespaceDecl>(Namespace))
     Namespace = NS->getOriginalNamespace();
-  return new (C) NamespaceAliasDecl(DC, UsingLoc, AliasLoc, Alias, QualifierRange,
-                                    Qualifier, IdentLoc, Namespace);
+  return new (C) NamespaceAliasDecl(DC, UsingLoc, AliasLoc, Alias, 
+                                    QualifierLoc, IdentLoc, Namespace);
 }
 
 UsingDecl *UsingShadowDecl::getUsingDecl() const {
@@ -1314,35 +1346,31 @@ void UsingDecl::removeShadowDecl(UsingShadowDecl *S) {
   S->UsingOrNextShadow = this;
 }
 
-UsingDecl *UsingDecl::Create(ASTContext &C, DeclContext *DC,
-                             SourceRange NNR, SourceLocation UL,
-                             NestedNameSpecifier* TargetNNS,
+UsingDecl *UsingDecl::Create(ASTContext &C, DeclContext *DC, SourceLocation UL,
+                             NestedNameSpecifierLoc QualifierLoc,
                              const DeclarationNameInfo &NameInfo,
                              bool IsTypeNameArg) {
-  return new (C) UsingDecl(DC, NNR, UL, TargetNNS, NameInfo, IsTypeNameArg);
+  return new (C) UsingDecl(DC, UL, QualifierLoc, NameInfo, IsTypeNameArg);
 }
 
 UnresolvedUsingValueDecl *
 UnresolvedUsingValueDecl::Create(ASTContext &C, DeclContext *DC,
                                  SourceLocation UsingLoc,
-                                 SourceRange TargetNNR,
-                                 NestedNameSpecifier *TargetNNS,
+                                 NestedNameSpecifierLoc QualifierLoc,
                                  const DeclarationNameInfo &NameInfo) {
   return new (C) UnresolvedUsingValueDecl(DC, C.DependentTy, UsingLoc,
-                                          TargetNNR, TargetNNS, NameInfo);
+                                          QualifierLoc, NameInfo);
 }
 
 UnresolvedUsingTypenameDecl *
 UnresolvedUsingTypenameDecl::Create(ASTContext &C, DeclContext *DC,
                                     SourceLocation UsingLoc,
                                     SourceLocation TypenameLoc,
-                                    SourceRange TargetNNR,
-                                    NestedNameSpecifier *TargetNNS,
+                                    NestedNameSpecifierLoc QualifierLoc,
                                     SourceLocation TargetNameLoc,
                                     DeclarationName TargetName) {
   return new (C) UnresolvedUsingTypenameDecl(DC, UsingLoc, TypenameLoc,
-                                             TargetNNR, TargetNNS,
-                                             TargetNameLoc,
+                                             QualifierLoc, TargetNameLoc,
                                              TargetName.getAsIdentifierInfo());
 }
 

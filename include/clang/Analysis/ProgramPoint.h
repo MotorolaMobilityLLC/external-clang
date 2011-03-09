@@ -17,7 +17,7 @@
 
 #include "clang/Analysis/AnalysisContext.h"
 #include "clang/Analysis/CFG.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/Support/Casting.h"
@@ -71,10 +71,11 @@ protected:
 protected:
   const void* getData1() const { return Data.first; }
   const void* getData2() const { return Data.second; }
-  const void *getTag() const { return Tag; }
 
 public:
   Kind getKind() const { return K; }
+
+  const void *getTag() const { return Tag; }
 
   const LocationContext *getLocationContext() const { return L; }
 
@@ -117,6 +118,12 @@ public:
   const CFGElement getFirstElement() const {
     const CFGBlock* B = getBlock();
     return B->empty() ? CFGElement() : B->front();
+  }
+  
+  /// Create a new BlockEntrance object that is the same as the original
+  /// except for using the specified tag value.
+  BlockEntrance withTag(const void *tag) {
+    return BlockEntrance(getBlock(), getLocationContext(), tag);
   }
   
   static bool classof(const ProgramPoint* Location) {
@@ -175,14 +182,15 @@ public:
 
 class PostStmt : public StmtPoint {
 protected:
-  PostStmt(const Stmt* S, Kind k, const LocationContext *L, const void *tag = 0)
-    : StmtPoint(S, NULL, k, L, tag) {}
-
   PostStmt(const Stmt* S, const void* data, Kind k, const LocationContext *L,
            const void *tag =0)
     : StmtPoint(S, data, k, L, tag) {}
 
 public:
+  explicit PostStmt(const Stmt* S, Kind k, 
+                    const LocationContext *L, const void *tag = 0)
+    : StmtPoint(S, NULL, k, L, tag) {}
+
   explicit PostStmt(const Stmt* S, const LocationContext *L,const void *tag = 0)
     : StmtPoint(S, NULL, PostStmtKind, L, tag) {}
 
@@ -307,7 +315,7 @@ public:
 
 class PostInitializer : public ProgramPoint {
 public:
-  PostInitializer(const CXXBaseOrMemberInitializer *I, 
+  PostInitializer(const CXXCtorInitializer *I, 
                   const LocationContext *L)
     : ProgramPoint(I, PostInitializerKind, L) {}
 
@@ -318,17 +326,16 @@ public:
 
 class CallEnter : public StmtPoint {
 public:
-  // L is caller's location context. AC is callee's AnalysisContext.
-  CallEnter(const Stmt *S, const AnalysisContext *AC, const LocationContext *L)
-    : StmtPoint(S, AC, CallEnterKind, L, 0) {}
+  CallEnter(const Stmt *stmt, const StackFrameContext *calleeCtx, 
+            const LocationContext *callerCtx)
+    : StmtPoint(stmt, calleeCtx, CallEnterKind, callerCtx, 0) {}
 
   const Stmt *getCallExpr() const {
     return static_cast<const Stmt *>(getData1());
   }
 
-  AnalysisContext *getCalleeContext() const {
-    return const_cast<AnalysisContext *>(
-                              static_cast<const AnalysisContext *>(getData2()));
+  const StackFrameContext *getCalleeContext() const {
+    return static_cast<const StackFrameContext *>(getData2());
   }
 
   static bool classof(const ProgramPoint *Location) {

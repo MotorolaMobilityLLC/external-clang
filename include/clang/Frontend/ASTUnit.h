@@ -27,7 +27,7 @@
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Path.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -53,6 +53,14 @@ class SourceManager;
 class TargetInfo;
 
 using namespace idx;
+  
+/// \brief Allocator for a cached set of global code completions.
+class GlobalCodeCompletionAllocator 
+  : public CodeCompletionAllocator,
+    public llvm::RefCountedBase<GlobalCodeCompletionAllocator> 
+{
+
+};
   
 /// \brief Utility class for loading a ASTContext from an AST file.
 ///
@@ -84,6 +92,13 @@ private:
   /// LoadFromCommandLine available.
   llvm::OwningPtr<CompilerInvocation> Invocation;
   
+  /// \brief The set of target features.
+  ///
+  /// FIXME: each time we reparse, we need to restore the set of target
+  /// features from this vector, because TargetInfo::CreateTargetInfo()
+  /// mangles the target options in place. Yuck!
+  std::vector<std::string> TargetFeatures;
+  
   // OnlyLocalDecls - when true, walking this AST should only visit declarations
   // that come from the AST itself, not from included precompiled headers.
   // FIXME: This is temporary; eventually, CIndex will always do this.
@@ -100,6 +115,9 @@ private:
 
   /// \brief Whether we should time each operation.
   bool WantTiming;
+
+  /// \brief Whether the ASTUnit should delete the remapped buffers.
+  bool OwnsRemappedFileBuffers;
   
   /// Track the top-level decls which appeared in an ASTUnit which was loaded
   /// from a source file.
@@ -110,6 +128,14 @@ private:
   // more scalable search mechanisms.
   std::vector<Decl*> TopLevelDecls;
 
+  /// \brief The list of preprocessed entities which appeared when the ASTUnit
+  /// was loaded.
+  ///
+  /// FIXME: This is just an optimization hack to avoid deserializing large
+  /// parts of a PCH file while performing a walk or search. In the long term,
+  /// we should provide more scalable search mechanisms.
+  std::vector<PreprocessedEntity *> PreprocessedEntities;
+  
   /// The name of the original source file used to generate this ASTUnit.
   std::string OriginalSourceFile;
 
@@ -215,10 +241,15 @@ private:
   /// declarations parsed within the precompiled preamble.
   std::vector<serialization::DeclID> TopLevelDeclsInPreamble;
 
+  /// \brief A list of the offsets into the precompiled preamble which
+  /// correspond to preprocessed entities.
+  std::vector<uint64_t> PreprocessedEntitiesInPreamble;
+  
   /// \brief Whether we should be caching code-completion results.
   bool ShouldCacheCodeCompletionResults;
   
   static void ConfigureDiags(llvm::IntrusiveRefCntPtr<Diagnostic> &Diags,
+                             const char **ArgBegin, const char **ArgEnd,
                              ASTUnit &AST, bool CaptureDiagnostics);
 
 public:
@@ -267,7 +298,17 @@ public:
     return CachedCompletionTypes; 
   }
   
+  /// \brief Retrieve the allocator used to cache global code completions.
+  llvm::IntrusiveRefCntPtr<GlobalCodeCompletionAllocator> 
+  getCachedCompletionAllocator() {
+    return CachedCompletionAllocator;
+  }
+  
 private:
+  /// \brief Allocator used to store cached code completions.
+  llvm::IntrusiveRefCntPtr<GlobalCodeCompletionAllocator>
+    CachedCompletionAllocator;
+
   /// \brief The set of cached code-completion results.
   std::vector<CachedCodeCompletionResult> CachedCompletionResults;
   
@@ -275,20 +316,24 @@ private:
   /// type, which is used for type equality comparisons.
   llvm::StringMap<unsigned> CachedCompletionTypes;
   
-  /// \brief The number of top-level declarations present the last time we
-  /// cached code-completion results.
+  /// \brief A string hash of the top-level declaration and macro definition 
+  /// names processed the last time that we reparsed the file.
   ///
-  /// The value is used to help detect when we should repopulate the global
-  /// completion cache.
-  unsigned NumTopLevelDeclsAtLastCompletionCache;
+  /// This hash value is used to determine when we need to refresh the 
+  /// global code-completion cache.
+  unsigned CompletionCacheTopLevelHashValue;
 
-  /// \brief The number of reparses left until we'll consider updating the
-  /// code-completion cache.
+  /// \brief A string hash of the top-level declaration and macro definition 
+  /// names processed the last time that we reparsed the precompiled preamble.
   ///
-  /// This is meant to avoid thrashing during reparsing, by not allowing the
-  /// code-completion cache to be updated on every reparse.
-  unsigned CacheCodeCompletionCoolDown;
+  /// This hash value is used to determine when we need to refresh the 
+  /// global code-completion cache after a rebuild of the precompiled preamble.
+  unsigned PreambleTopLevelHashValue;
 
+  /// \brief The current hash value for the top-level declaration and macro
+  /// definition names
+  unsigned CurrentTopLevelHashValue;
+  
   /// \brief Bit used by CIndex to mark when a translation unit may be in an
   /// inconsistent state, and is not safe to free.
   unsigned UnsafeToFree : 1;
@@ -317,7 +362,8 @@ private:
                                                      bool AllowRebuild = true,
                                                         unsigned MaxLines = 0);
   void RealizeTopLevelDeclsFromPreamble();
-
+  void RealizePreprocessedEntitiesFromPreamble();
+  
 public:
   class ConcurrencyCheck {
     volatile ASTUnit &Self;
@@ -379,6 +425,9 @@ public:
                         
   bool getOnlyLocalDecls() const { return OnlyLocalDecls; }
 
+  bool getOwnsRemappedFileBuffers() const { return OwnsRemappedFileBuffers; }
+  void setOwnsRemappedFileBuffers(bool val) { OwnsRemappedFileBuffers = val; }
+
   /// \brief Retrieve the maximum PCH level of declarations that a
   /// traversal of the translation unit should consider.
   unsigned getMaxPCHLevel() const;
@@ -426,6 +475,22 @@ public:
     TopLevelDeclsInPreamble.push_back(D);
   }
 
+  /// \brief Retrieve a reference to the current top-level name hash value.
+  ///
+  /// Note: This is used internally by the top-level tracking action
+  unsigned &getCurrentTopLevelHashValue() { return CurrentTopLevelHashValue; }
+  
+  typedef std::vector<PreprocessedEntity *>::iterator pp_entity_iterator;
+  
+  pp_entity_iterator pp_entity_begin();
+  pp_entity_iterator pp_entity_end();
+  
+  /// \brief Add a new preprocessed entity that's stored at the given offset
+  /// in the precompiled preamble.
+  void addPreprocessedEntityFromPreamble(uint64_t Offset) {
+    PreprocessedEntitiesInPreamble.push_back(Offset);
+  }
+  
   /// \brief Retrieve the mapping from File IDs to the preprocessed entities
   /// within that file.
   PreprocessedEntitiesByFileMap &getPreprocessedEntitiesByFile() {
@@ -462,9 +527,7 @@ public:
   }
 
   llvm::MemoryBuffer *getBufferForFile(llvm::StringRef Filename,
-                                       std::string *ErrorStr = 0,
-                                       int64_t FileSize = -1,
-                                       struct stat *FileInfo = 0);
+                                       std::string *ErrorStr = 0);
 
   /// \brief Whether this AST represents a complete translation unit.
   ///
@@ -472,9 +535,11 @@ public:
   /// that might still be used as a precompiled header or preamble.
   bool isCompleteTranslationUnit() const { return CompleteTranslationUnit; }
 
+  typedef llvm::PointerUnion<const char *, const llvm::MemoryBuffer *>
+      FilenameOrMemBuf;
   /// \brief A mapping from a file name to the memory buffer that stores the
   /// remapped contents of that file.
-  typedef std::pair<std::string, const llvm::MemoryBuffer *> RemappedFile;
+  typedef std::pair<std::string, FilenameOrMemBuf> RemappedFile;
   
   /// \brief Create a ASTUnit from an AST file.
   ///

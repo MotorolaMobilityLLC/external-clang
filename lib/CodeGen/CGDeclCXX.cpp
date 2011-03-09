@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CodeGenFunction.h"
+#include "CGObjCRuntime.h"
 #include "CGCXXABI.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/Intrinsics.h"
@@ -34,7 +35,15 @@ static void EmitDeclInit(CodeGenFunction &CGF, const VarDecl &D,
   unsigned Alignment = Context.getDeclAlign(&D).getQuantity();
   if (!CGF.hasAggregateLLVMType(T)) {
     llvm::Value *V = CGF.EmitScalarExpr(Init);
-    CGF.EmitStoreOfScalar(V, DeclPtr, isVolatile, Alignment, T);
+    CodeGenModule &CGM = CGF.CGM;
+    Qualifiers::GC GCAttr = CGM.getContext().getObjCGCAttrKind(T);
+    if (GCAttr == Qualifiers::Strong)
+      CGM.getObjCRuntime().EmitObjCGlobalAssign(CGF, V, DeclPtr,
+                                                D.isThreadSpecified());
+    else if (GCAttr == Qualifiers::Weak)
+      CGM.getObjCRuntime().EmitObjCWeakAssign(CGF, V, DeclPtr);
+    else
+      CGF.EmitStoreOfScalar(V, DeclPtr, isVolatile, Alignment, T);
   } else if (T->isAnyComplexType()) {
     CGF.EmitComplexExprIntoAddr(Init, DeclPtr, isVolatile);
   } else {
@@ -108,15 +117,13 @@ CodeGenFunction::EmitCXXGlobalDtorRegistration(llvm::Constant *DtorFn,
     return;
   }
 
-  const llvm::Type *Int8PtrTy = 
-    llvm::Type::getInt8Ty(VMContext)->getPointerTo();
-
   std::vector<const llvm::Type *> Params;
   Params.push_back(Int8PtrTy);
 
   // Get the destructor function type
   const llvm::Type *DtorFnTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Params, false);
+    llvm::FunctionType::get(llvm::Type::getVoidTy(getLLVMContext()),
+                            Params, false);
   DtorFnTy = llvm::PointerType::getUnqual(DtorFnTy);
 
   Params.clear();
@@ -152,11 +159,12 @@ CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
   llvm::Function *Fn =
     llvm::Function::Create(FTy, llvm::GlobalValue::InternalLinkage,
                            Name, &CGM.getModule());
-
-  // Set the section if needed.
-  if (const char *Section = 
-        CGM.getContext().Target.getStaticInitSectionSpecifier())
-    Fn->setSection(Section);
+  if (!CGM.getContext().getLangOptions().AppleKext) {
+    // Set the section if needed.
+    if (const char *Section = 
+          CGM.getContext().Target.getStaticInitSectionSpecifier())
+      Fn->setSection(Section);
+  }
 
   if (!CGM.getLangOptions().Exceptions)
     Fn->setDoesNotThrow();

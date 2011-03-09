@@ -8,15 +8,32 @@ void f(void *ptr) {
   void *xx = ptr ? : &x;
   const char * hello = "Hello";
 }
-
+enum Color { Red, Green, Blue };
 typedef int Int;
-void g(int i, ...) {
+enum Color g(int i, ...) {
   __builtin_va_list va;
   (void)__builtin_va_arg(va, Int);
   (void)__builtin_types_compatible_p(Int, Int);
+
+  struct X x = { 0, 0 };
+  do {
+    x.a++;
+  } while (x.a < 10);
+  
+  enum Color c;
+  switch (c) {
+  case Red:
+    return Green;
+
+  case Green:
+    return Blue;
+
+  case Blue:
+    return Red;
+  }
 }
 
-// RUN: c-index-test -test-annotate-tokens=%s:4:1:17:1 %s | FileCheck %s
+// RUN: c-index-test -test-annotate-tokens=%s:4:1:34:1 %s | FileCheck %s
 // CHECK: Identifier: "T" [4:3 - 4:4] TypeRef=T:1:13
 // CHECK: Punctuation: "*" [4:4 - 4:5] VarDecl=t_ptr:4:6 (Definition)
 // CHECK: Identifier: "t_ptr" [4:6 - 4:11] VarDecl=t_ptr:4:6 (Definition)
@@ -74,5 +91,49 @@ void g(int i, ...) {
 // CHECK: Identifier: "Int" [16:38 - 16:41] TypeRef=Int:12:13
 // CHECK: Punctuation: "," [16:41 - 16:42] UnexposedExpr=
 // CHECK: Identifier: "Int" [16:43 - 16:46] TypeRef=Int:12:13
+// CHECK: Keyword: "struct" [18:3 - 18:9] UnexposedStmt=
+// CHECK: Identifier: "X" [18:10 - 18:11] TypeRef=struct X:2:8
+// CHECK: Identifier: "x" [18:12 - 18:13] VarDecl=x:18:12 (Definition)
+// CHECK: Keyword: "do" [19:3 - 19:5] UnexposedStmt=
+// CHECK: Identifier: "x" [20:5 - 20:6] DeclRefExpr=x:18:12
+// CHECK: Punctuation: "." [20:6 - 20:7] MemberRefExpr=a:2:16
+// CHECK: Identifier: "a" [20:7 - 20:8] MemberRefExpr=a:2:16
+// CHECK: Punctuation: "++" [20:8 - 20:10] UnexposedExpr=
+// CHECK: Punctuation: ";" [20:10 - 20:11] UnexposedStmt=
+// CHECK: Punctuation: "}" [21:3 - 21:4] UnexposedStmt=
+// CHECK: Keyword: "while" [21:5 - 21:10] UnexposedStmt=
+// CHECK: Punctuation: "(" [21:11 - 21:12] UnexposedStmt=
+// CHECK: Identifier: "x" [21:12 - 21:13] DeclRefExpr=x:18:12
+// CHECK: Punctuation: "." [21:13 - 21:14] MemberRefExpr=a:2:16
+// CHECK: Identifier: "a" [21:14 - 21:15] MemberRefExpr=a:2:16
+
+// CHECK: Keyword: "enum" [23:3 - 23:7] UnexposedStmt=
+// CHECK: Identifier: "Color" [23:8 - 23:13] TypeRef=enum Color:11:6
+// CHECK: Identifier: "c" [23:14 - 23:15] VarDecl=c:23:14 (Definition)
+// CHECK: Punctuation: ";" [23:15 - 23:16] UnexposedStmt=
+// CHECK: Keyword: "switch" [24:3 - 24:9] UnexposedStmt=
+// CHECK: Punctuation: "(" [24:10 - 24:11] UnexposedStmt=
+// CHECK: Identifier: "c" [24:11 - 24:12] DeclRefExpr=c:23:14
+// CHECK: Punctuation: ")" [24:12 - 24:13] UnexposedStmt=
+// CHECK: Punctuation: "{" [24:14 - 24:15] UnexposedStmt=
+// CHECK: Keyword: "case" [25:3 - 25:7] UnexposedStmt=
+// CHECK: Identifier: "Red" [25:8 - 25:11] DeclRefExpr=Red:11:14
+// CHECK: Punctuation: ":" [25:11 - 25:12] UnexposedStmt=
+// CHECK: Keyword: "return" [26:5 - 26:11] UnexposedStmt=
+// CHECK: Identifier: "Green" [26:12 - 26:17] DeclRefExpr=Green:11:19
+// CHECK: Punctuation: ";" [26:17 - 26:18] UnexposedStmt=
+// CHECK: Keyword: "case" [28:3 - 28:7] UnexposedStmt=
+// CHECK: Identifier: "Green" [28:8 - 28:13] DeclRefExpr=Green:11:19
+// CHECK: Punctuation: ":" [28:13 - 28:14] UnexposedStmt=
+// CHECK: Keyword: "return" [29:5 - 29:11] UnexposedStmt=
+// CHECK: Identifier: "Blue" [29:12 - 29:16] DeclRefExpr=Blue:11:26
+// CHECK: Punctuation: ";" [29:16 - 29:17] UnexposedStmt=
+// CHECK: Keyword: "case" [31:3 - 31:7] UnexposedStmt=
+// CHECK: Identifier: "Blue" [31:8 - 31:12] DeclRefExpr=Blue:11:26
+// CHECK: Punctuation: ":" [31:12 - 31:13] UnexposedStmt=
+// CHECK: Keyword: "return" [32:5 - 32:11] UnexposedStmt=
+// CHECK: Identifier: "Red" [32:12 - 32:15] DeclRefExpr=Red:11:14
+// CHECK: Punctuation: ";" [32:15 - 32:16] UnexposedStmt=
+
 // RUN: c-index-test -test-annotate-tokens=%s:4:1:165:32 %s | FileCheck %s
 // RUN: c-index-test -test-annotate-tokens=%s:4:1:165:38 %s | FileCheck %s

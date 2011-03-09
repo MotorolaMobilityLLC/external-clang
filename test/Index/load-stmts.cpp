@@ -113,8 +113,12 @@ void considered_harmful(int x) {
     goto start_over;
 }
 
+void casts(int *ip) {
+  (void)reinterpret_cast<float *>(ip);
+}
+
 // RUN: c-index-test -test-load-source all %s | FileCheck %s
-// CHECK: load-stmts.cpp:1:13: TypedefDecl=T:1:13 (Definition) Extent=[1:13 - 1:14]
+// CHECK: load-stmts.cpp:1:13: TypedefDecl=T:1:13 (Definition) Extent=[1:1 - 1:14]
 // CHECK: load-stmts.cpp:2:8: StructDecl=X:2:8 (Definition) Extent=[2:1 - 2:23]
 // CHECK: load-stmts.cpp:2:16: FieldDecl=a:2:16 (Definition) Extent=[2:16 - 2:17]
 // CHECK: load-stmts.cpp:2:19: FieldDecl=b:2:19 (Definition) Extent=[2:19 - 2:20]
@@ -170,7 +174,7 @@ void considered_harmful(int x) {
 // CHECK: load-stmts.cpp:51:3: CallExpr= Extent=[51:3 - 51:10]
 // CHECK: load-stmts.cpp:51:3: NamespaceRef=N:41:11 Extent=[51:3 - 51:4]
 // CHECK: load-stmts.cpp:51:8: DeclRefExpr=t:50:29 Extent=[51:8 - 51:9]
-// CHECK: load-stmts.cpp:52:13: TypedefDecl=type:52:13 (Definition) Extent=[52:13 - 52:17]
+// CHECK: load-stmts.cpp:52:13: TypedefDecl=type:52:13 (Definition) Extent=[52:3 - 52:17]
 // CHECK: load-stmts.cpp:53:3: CallExpr= Extent=[53:3 - 53:16]
 // CHECK: load-stmts.cpp:53:3: NamespaceRef=N:41:11 Extent=[53:3 - 53:4]
 // CHECK: load-stmts.cpp:53:8: TypeRef=type:52:13 Extent=[53:8 - 53:12]
@@ -221,3 +225,5 @@ void considered_harmful(int x) {
 // CHECK: load-stmts.cpp:108:2: LabelStmt=start_over Extent=[108:2 - 109:28]
 // CHECK: load-stmts.cpp:109:17: LabelRef=start_over:108:2 Extent=[109:17 - 109:27]
 // CHECK: load-stmts.cpp:113:10: LabelRef=start_over:108:2 Extent=[113:10 - 113:20]
+// CHECK: load-stmts.cpp:117:9: UnexposedExpr=ip:116:17 Extent=[117:9 - 117:38]
+

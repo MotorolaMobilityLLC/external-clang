@@ -16,7 +16,8 @@
 #include "CGRecordLayout.h"
 #include "CodeGenModule.h"
 #include "CodeGenFunction.h"
-#include "CGException.h"
+#include "CGBlocks.h"
+#include "CGCleanup.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
@@ -44,6 +45,15 @@ using namespace CodeGen;
 // Common CGObjCRuntime functions, these don't belong here, but they
 // don't belong in CGObjCRuntime either so we will live with it for
 // now.
+
+static void EmitNullReturnInitialization(CodeGenFunction &CGF,
+                                         ReturnValueSlot &returnSlot,
+                                         QualType resultType) {
+  // Force the return slot to exist.
+  if (!returnSlot.getValue())
+    returnSlot = ReturnValueSlot(CGF.CreateMemTemp(resultType), false);
+  CGF.EmitNullInitialization(returnSlot.getValue(), resultType);
+}
 
 static uint64_t LookupFieldBitOffset(CodeGen::CodeGenModule &CGM,
                                      const ObjCInterfaceDecl *OID,
@@ -105,7 +115,7 @@ LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
   QualType IvarTy = Ivar->getType();
   const llvm::Type *LTy = CGF.CGM.getTypes().ConvertTypeForMem(IvarTy);
   llvm::Value *V = CGF.Builder.CreateBitCast(BaseValue, I8Ptr);
-  V = CGF.Builder.CreateGEP(V, Offset, "add.ptr");
+  V = CGF.Builder.CreateInBoundsGEP(V, Offset, "add.ptr");
   V = CGF.Builder.CreateBitCast(V, llvm::PointerType::getUnqual(LTy));
 
   if (!Ivar->isBitField()) {
@@ -130,7 +140,7 @@ LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
   // a synthesized ivar can never be a bit-field, so this is safe.
   const ASTRecordLayout &RL =
     CGF.CGM.getContext().getASTObjCInterfaceLayout(OID);
-  uint64_t TypeSizeInBits = RL.getSize();
+  uint64_t TypeSizeInBits = CGF.CGM.getContext().toBits(RL.getSize());
   uint64_t FieldBitOffset = LookupFieldBitOffset(CGF.CGM, OID, 0, Ivar);
   uint64_t BitOffset = FieldBitOffset % 8;
   uint64_t ContainingTypeAlign = 8;
@@ -1000,8 +1010,8 @@ public:
   /// forward references will be filled in with empty bodies if no
   /// definition is seen. The return value has type ProtocolPtrTy.
   virtual llvm::Constant *GetOrEmitProtocolRef(const ObjCProtocolDecl *PD)=0;
-  virtual llvm::Constant *GCBlockLayout(CodeGen::CodeGenFunction &CGF,
-                      const llvm::SmallVectorImpl<const Expr *> &);
+  virtual llvm::Constant *BuildGCBlockLayout(CodeGen::CodeGenModule &CGM,
+                                             const CGBlockInfo &blockInfo);
   
 };
 
@@ -1157,7 +1167,8 @@ public:
 
   virtual llvm::Constant *GetPropertyGetFunction();
   virtual llvm::Constant *GetPropertySetFunction();
-  virtual llvm::Constant *GetCopyStructFunction();
+  virtual llvm::Constant *GetGetStructFunction();
+  virtual llvm::Constant *GetSetStructFunction();
   virtual llvm::Constant *EnumerationMutationFunction();
 
   virtual void EmitTryStmt(CodeGen::CodeGenFunction &CGF,
@@ -1283,7 +1294,8 @@ private:
                                   llvm::Value *Receiver,
                                   QualType Arg0Ty,
                                   bool IsSuper,
-                                  const CallArgList &CallArgs);
+                                  const CallArgList &CallArgs,
+                                  const ObjCMethodDecl *Method);
 
   /// GetClassGlobal - Return the global variable for the Objective-C
   /// class of the given name.
@@ -1402,7 +1414,10 @@ public:
     return ObjCTypes.getSetPropertyFn();
   }
   
-  virtual llvm::Constant *GetCopyStructFunction() {
+  virtual llvm::Constant *GetSetStructFunction() {
+    return ObjCTypes.getCopyStructFn();
+  }
+  virtual llvm::Constant *GetGetStructFunction() {
     return ObjCTypes.getCopyStructFn();
   }
   
@@ -1541,7 +1556,7 @@ CGObjCMac::GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
   // Create and init a super structure; this is a (receiver, class)
   // pair we will pass to objc_msgSendSuper.
   llvm::Value *ObjCSuper =
-    CGF.Builder.CreateAlloca(ObjCTypes.SuperTy, 0, "objc_super");
+    CGF.CreateTempAlloca(ObjCTypes.SuperTy, "objc_super");
   llvm::Value *ReceiverAsObject =
     CGF.Builder.CreateBitCast(Receiver, ObjCTypes.ObjectPtrTy);
   CGF.Builder.CreateStore(ReceiverAsObject,
@@ -1634,6 +1649,7 @@ CGObjCCommonMac::EmitLegacyMessageSend(CodeGen::CodeGenFunction &CGF,
 
   llvm::Constant *Fn = NULL;
   if (CGM.ReturnTypeUsesSRet(FnInfo)) {
+    EmitNullReturnInitialization(CGF, Return, ResultType);
     Fn = (ObjCABI == 2) ?  ObjCTypes.getSendStretFn2(IsSuper)
       : ObjCTypes.getSendStretFn(IsSuper);
   } else if (CGM.ReturnTypeUsesFPRet(ResultType)) {
@@ -1663,12 +1679,14 @@ static Qualifiers::GC GetGCAttrTypeForType(ASTContext &Ctx, QualType FQT) {
   return Qualifiers::GCNone;
 }
 
-llvm::Constant *CGObjCCommonMac::GCBlockLayout(CodeGen::CodeGenFunction &CGF,
-              const llvm::SmallVectorImpl<const Expr *> &BlockLayout) {
-  llvm::Constant *NullPtr = 
+llvm::Constant *CGObjCCommonMac::BuildGCBlockLayout(CodeGenModule &CGM,
+                                                const CGBlockInfo &blockInfo) {
+  llvm::Constant *nullPtr = 
     llvm::Constant::getNullValue(llvm::Type::getInt8PtrTy(VMContext));
+
   if (CGM.getLangOptions().getGCMode() == LangOptions::NonGC)
-    return NullPtr;
+    return nullPtr;
+
   bool hasUnion = false;
   SkipIvars.clear();
   IvarsInfo.clear();
@@ -1678,47 +1696,59 @@ llvm::Constant *CGObjCCommonMac::GCBlockLayout(CodeGen::CodeGenFunction &CGF,
   // __isa is the first field in block descriptor and must assume by runtime's
   // convention that it is GC'able.
   IvarsInfo.push_back(GC_IVAR(0, 1));
-  for (size_t i = 0; i < BlockLayout.size(); ++i) {
-    const Expr *E = BlockLayout[i];
-    const BlockDeclRefExpr *BDRE = dyn_cast<BlockDeclRefExpr>(E);
-    if (!BDRE)
+
+  const BlockDecl *blockDecl = blockInfo.getBlockDecl();
+
+  // Calculate the basic layout of the block structure.
+  const llvm::StructLayout *layout =
+    CGM.getTargetData().getStructLayout(blockInfo.StructureType);
+
+  // Ignore the optional 'this' capture: C++ objects are not assumed
+  // to be GC'ed.
+
+  // Walk the captured variables.
+  for (BlockDecl::capture_const_iterator ci = blockDecl->capture_begin(),
+         ce = blockDecl->capture_end(); ci != ce; ++ci) {
+    const VarDecl *variable = ci->getVariable();
+    QualType type = variable->getType();
+
+    const CGBlockInfo::Capture &capture = blockInfo.getCapture(variable);
+
+    // Ignore constant captures.
+    if (capture.isConstant()) continue;
+
+    uint64_t fieldOffset = layout->getElementOffset(capture.getIndex());
+
+    // __block variables are passed by their descriptor address.
+    if (ci->isByRef()) {
+      IvarsInfo.push_back(GC_IVAR(fieldOffset, /*size in words*/ 1));
       continue;
-    const ValueDecl *VD = BDRE->getDecl();
-    CharUnits Offset = CGF.BlockDecls[VD];
-    uint64_t FieldOffset = Offset.getQuantity();
-    QualType Ty = VD->getType();
-    assert(!Ty->isArrayType() && 
-           "Array block variable should have been caught");
-    if ((Ty->isRecordType() || Ty->isUnionType()) && !BDRE->isByRef()) {
-      BuildAggrIvarRecordLayout(Ty->getAs<RecordType>(),
-                                FieldOffset,
-                                true,
-                                hasUnion);
+    }
+
+    assert(!type->isArrayType() && "array variable should not be caught");
+    if (const RecordType *record = type->getAs<RecordType>()) {
+      BuildAggrIvarRecordLayout(record, fieldOffset, true, hasUnion);
       continue;
     }
       
-    Qualifiers::GC GCAttr = GetGCAttrTypeForType(CGM.getContext(), Ty);
-    unsigned FieldSize = CGM.getContext().getTypeSize(Ty);
-    // __block variables are passed by their descriptior address. So, size
-    // must reflect this.
-    if (BDRE->isByRef())
-      FieldSize = WordSizeInBits;
-    if (GCAttr == Qualifiers::Strong || BDRE->isByRef())
-      IvarsInfo.push_back(GC_IVAR(FieldOffset,
-                                  FieldSize / WordSizeInBits));
+    Qualifiers::GC GCAttr = GetGCAttrTypeForType(CGM.getContext(), type);
+    unsigned fieldSize = CGM.getContext().getTypeSize(type);
+
+    if (GCAttr == Qualifiers::Strong)
+      IvarsInfo.push_back(GC_IVAR(fieldOffset,
+                                  fieldSize / WordSizeInBits));
     else if (GCAttr == Qualifiers::GCNone || GCAttr == Qualifiers::Weak)
-      SkipIvars.push_back(GC_IVAR(FieldOffset,
-                                  FieldSize / ByteSizeInBits));
+      SkipIvars.push_back(GC_IVAR(fieldOffset,
+                                  fieldSize / ByteSizeInBits));
   }
   
   if (IvarsInfo.empty())
-    return NullPtr;
-  // Sort on byte position in case we encounterred a union nested in
-  // block variable type's aggregate type.
-  if (hasUnion && !IvarsInfo.empty())
-    std::sort(IvarsInfo.begin(), IvarsInfo.end());
-  if (hasUnion && !SkipIvars.empty())
-    std::sort(SkipIvars.begin(), SkipIvars.end());
+    return nullPtr;
+
+  // Sort on byte position; captures might not be allocated in order,
+  // and unions can do funny things.
+  llvm::array_pod_sort(IvarsInfo.begin(), IvarsInfo.end());
+  llvm::array_pod_sort(SkipIvars.begin(), SkipIvars.end());
   
   std::string BitMap;
   llvm::Constant *C = BuildIvarLayoutBitmap(BitMap);
@@ -2195,7 +2225,7 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
   if (ID->getNumIvarInitializers())
     Flags |= eClassFlags_HasCXXStructors;
   unsigned Size =
-    CGM.getContext().getASTObjCImplementationLayout(ID).getSize() / 8;
+    CGM.getContext().getASTObjCImplementationLayout(ID).getSize().getQuantity();
 
   // FIXME: Set CXX-structors flag.
   if (ID->getClassInterface()->getVisibility() == HiddenVisibility)
@@ -2584,7 +2614,10 @@ llvm::Constant *CGObjCMac::GetPropertySetFunction() {
   return ObjCTypes.getSetPropertyFn();
 }
 
-llvm::Constant *CGObjCMac::GetCopyStructFunction() {
+llvm::Constant *CGObjCMac::GetGetStructFunction() {
+  return ObjCTypes.getCopyStructFn();
+}
+llvm::Constant *CGObjCMac::GetSetStructFunction() {
   return ObjCTypes.getCopyStructFn();
 }
 
@@ -3674,7 +3707,7 @@ void CGObjCCommonMac::BuildAggrIvarLayout(const ObjCImplementationDecl *OI,
 
       assert(!FQT->isUnionType() &&
              "layout for array of unions not supported");
-      if (FQT->isRecordType()) {
+      if (FQT->isRecordType() && ElCount) {
         int OldIndex = IvarsInfo.size() - 1;
         int OldSkIndex = SkipIvars.size() -1;
 
@@ -4928,7 +4961,7 @@ void CGObjCNonFragileABIMac::GetClassSizeInfo(const ObjCImplementationDecl *OID,
     CGM.getContext().getASTObjCImplementationLayout(OID);
 
   // InstanceSize is really instance end.
-  InstanceSize = llvm::RoundUpToAlignment(RL.getDataSize(), 8) / 8;
+  InstanceSize = RL.getDataSize().getQuantity();
 
   // If there are no fields, the start is the same as the end.
   if (!RL.getFieldCount())
@@ -5590,7 +5623,8 @@ CodeGen::RValue CGObjCNonFragileABIMac::EmitMessageSend(
   llvm::Value *Receiver,
   QualType Arg0Ty,
   bool IsSuper,
-  const CallArgList &CallArgs) {
+  const CallArgList &CallArgs,
+  const ObjCMethodDecl *Method) {
   // FIXME. Even though IsSuper is passes. This function doese not handle calls
   // to 'super' receivers.
   CodeGenTypes &Types = CGM.getTypes();
@@ -5607,6 +5641,7 @@ CodeGen::RValue CGObjCNonFragileABIMac::EmitMessageSend(
   llvm::Constant *Fn = 0;
   std::string Name("\01l_");
   if (CGM.ReturnTypeUsesSRet(FnInfo)) {
+    EmitNullReturnInitialization(CGF, Return, ResultType);
     if (IsSuper) {
       Fn = ObjCTypes.getMessageSendSuper2StretFixupFn();
       Name += "objc_msgSendSuper2_stret_fixup";
@@ -5660,7 +5695,8 @@ CodeGen::RValue CGObjCNonFragileABIMac::EmitMessageSend(
                                                       FunctionType::ExtInfo());
   llvm::Value *Callee = CGF.Builder.CreateStructGEP(Arg1, 0);
   Callee = CGF.Builder.CreateLoad(Callee);
-  const llvm::FunctionType *FTy = Types.GetFunctionType(FnInfo1, true);
+  const llvm::FunctionType *FTy = 
+    Types.GetFunctionType(FnInfo1, Method ? Method->isVariadic() : false);
   Callee = CGF.Builder.CreateBitCast(Callee,
                                      llvm::PointerType::getUnqual(FTy));
   return CGF.EmitCall(FnInfo1, Callee, Return, ActualArgs);
@@ -5683,7 +5719,7 @@ CGObjCNonFragileABIMac::GenerateMessageSend(CodeGen::CodeGenFunction &CGF,
                             false, CallArgs, Method, ObjCTypes)
     : EmitMessageSend(CGF, Return, ResultType, Sel,
                       Receiver, CGF.getContext().getObjCIdType(),
-                      false, CallArgs);
+                      false, CallArgs, Method);
 }
 
 llvm::GlobalVariable *
@@ -5801,7 +5837,7 @@ CGObjCNonFragileABIMac::GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
   // Create and init a super structure; this is a (receiver, class)
   // pair we will pass to objc_msgSendSuper.
   llvm::Value *ObjCSuper =
-    CGF.Builder.CreateAlloca(ObjCTypes.SuperTy, 0, "objc_super");
+    CGF.CreateTempAlloca(ObjCTypes.SuperTy, "objc_super");
 
   llvm::Value *ReceiverAsObject =
     CGF.Builder.CreateBitCast(Receiver, ObjCTypes.ObjectPtrTy);
@@ -5837,7 +5873,7 @@ CGObjCNonFragileABIMac::GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
                             true, CallArgs, Method, ObjCTypes)
     : EmitMessageSend(CGF, Return, ResultType, Sel,
                       ObjCSuper, ObjCTypes.SuperPtrCTy,
-                      true, CallArgs);
+                      true, CallArgs, Method);
 }
 
 llvm::Value *CGObjCNonFragileABIMac::EmitSelector(CGBuilderTy &Builder,

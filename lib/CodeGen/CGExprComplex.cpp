@@ -60,20 +60,30 @@ public:
   /// value l-value, this method emits the address of the l-value, then loads
   /// and returns the result.
   ComplexPairTy EmitLoadOfLValue(const Expr *E) {
-    LValue LV = CGF.EmitLValue(E);
+    return EmitLoadOfLValue(CGF.EmitLValue(E));
+  }
+
+  ComplexPairTy EmitLoadOfLValue(LValue LV) {
     if (LV.isSimple())
       return EmitLoadOfComplex(LV.getAddress(), LV.isVolatileQualified());
 
-    if (LV.isPropertyRef())
-      return CGF.EmitObjCPropertyGet(LV.getPropertyRefExpr()).getComplexVal();
-
-    assert(LV.isKVCRef() && "Unknown LValue type!");
-    return CGF.EmitObjCPropertyGet(LV.getKVCRefExpr()).getComplexVal();
+    assert(LV.isPropertyRef() && "Unknown LValue type!");
+    return CGF.EmitLoadOfPropertyRefLValue(LV).getComplexVal();
   }
 
   /// EmitLoadOfComplex - Given a pointer to a complex value, emit code to load
   /// the real and imaginary pieces.
   ComplexPairTy EmitLoadOfComplex(llvm::Value *SrcPtr, bool isVolatile);
+
+  /// EmitStoreThroughLValue - Given an l-value of complex type, store
+  /// a complex number into it.
+  void EmitStoreThroughLValue(ComplexPairTy Val, LValue LV) {
+    if (LV.isSimple())
+      return EmitStoreOfComplex(Val, LV.getAddress(), LV.isVolatileQualified());
+
+    assert(LV.isPropertyRef() && "Unknown LValue type!");
+    CGF.EmitStoreThroughPropertyRefLValue(RValue::getComplex(Val), LV);
+  }
 
   /// EmitStoreOfComplex - Store the specified real/imag parts into the
   /// specified value pointer.
@@ -88,12 +98,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   ComplexPairTy Visit(Expr *E) {
-    llvm::DenseMap<const Expr *, ComplexPairTy>::iterator I = 
-      CGF.ConditionalSaveComplexExprs.find(E);
-    if (I != CGF.ConditionalSaveComplexExprs.end())
-      return I->second;
-      
-      return StmtVisitor<ComplexExprEmitter, ComplexPairTy>::Visit(E);
+    return StmtVisitor<ComplexExprEmitter, ComplexPairTy>::Visit(E);
   }
     
   ComplexPairTy VisitStmt(Stmt *S) {
@@ -111,10 +116,7 @@ public:
     return EmitLoadOfLValue(E);
   }
   ComplexPairTy VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *E) {
-    return EmitLoadOfLValue(E);
-  }
-  ComplexPairTy VisitObjCImplicitSetterGetterRefExpr(
-                               ObjCImplicitSetterGetterRefExpr *E) {
+    assert(E->getObjectKind() == OK_Ordinary);
     return EmitLoadOfLValue(E);
   }
   ComplexPairTy VisitObjCMessageExpr(ObjCMessageExpr *E) {
@@ -122,6 +124,11 @@ public:
   }
   ComplexPairTy VisitArraySubscriptExpr(Expr *E) { return EmitLoadOfLValue(E); }
   ComplexPairTy VisitMemberExpr(const Expr *E) { return EmitLoadOfLValue(E); }
+  ComplexPairTy VisitOpaqueValueExpr(OpaqueValueExpr *E) {
+    if (E->isGLValue())
+      return EmitLoadOfLValue(CGF.getOpaqueLValueMapping(E));
+    return CGF.getOpaqueRValueMapping(E).getComplexVal();
+  }
 
   // FIXME: CompoundLiteralExpr
 
@@ -170,8 +177,8 @@ public:
   ComplexPairTy VisitCXXDefaultArgExpr(CXXDefaultArgExpr *DAE) {
     return Visit(DAE->getExpr());
   }
-  ComplexPairTy VisitCXXExprWithTemporaries(CXXExprWithTemporaries *E) {
-    return CGF.EmitCXXExprWithTemporaries(E).getComplexVal();
+  ComplexPairTy VisitExprWithCleanups(ExprWithCleanups *E) {
+    return CGF.EmitExprWithCleanups(E).getComplexVal();
   }
   ComplexPairTy VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *E) {
     assert(E->getType()->isAnyComplexType() && "Expected complex type!");
@@ -245,7 +252,8 @@ public:
   ComplexPairTy VisitBinComma      (const BinaryOperator *E);
 
 
-  ComplexPairTy VisitConditionalOperator(const ConditionalOperator *CO);
+  ComplexPairTy
+  VisitAbstractConditionalOperator(const AbstractConditionalOperator *CO);
   ComplexPairTy VisitChooseExpr(ChooseExpr *CE);
 
   ComplexPairTy VisitInitListExpr(InitListExpr *E);
@@ -306,8 +314,7 @@ ComplexPairTy ComplexExprEmitter::VisitExpr(Expr *E) {
 ComplexPairTy ComplexExprEmitter::
 VisitImaginaryLiteral(const ImaginaryLiteral *IL) {
   llvm::Value *Imag = CGF.EmitScalarExpr(IL->getSubExpr());
-  return
-        ComplexPairTy(llvm::Constant::getNullValue(Imag->getType()), Imag);
+  return ComplexPairTy(llvm::Constant::getNullValue(Imag->getType()), Imag);
 }
 
 
@@ -319,6 +326,7 @@ ComplexPairTy ComplexExprEmitter::VisitCallExpr(const CallExpr *E) {
 }
 
 ComplexPairTy ComplexExprEmitter::VisitStmtExpr(const StmtExpr *E) {
+  CodeGenFunction::StmtExprEvaluation eval(CGF);
   return CGF.EmitCompoundStmt(*E->getSubStmt(), true).getComplexVal();
 }
 
@@ -340,7 +348,21 @@ ComplexPairTy ComplexExprEmitter::EmitComplexToComplexCast(ComplexPairTy Val,
 
 ComplexPairTy ComplexExprEmitter::EmitCast(CastExpr::CastKind CK, Expr *Op, 
                                            QualType DestTy) {
-  // FIXME: this should be based off of the CastKind.
+  switch (CK) {
+  case CK_GetObjCProperty: {
+    LValue LV = CGF.EmitLValue(Op);
+    assert(LV.isPropertyRef() && "Unknown LValue type!");
+    return CGF.EmitLoadOfPropertyRefLValue(LV).getComplexVal();
+  }
+
+  case CK_NoOp:
+  case CK_LValueToRValue:
+    return Visit(Op);
+
+  // TODO: do all of these
+  default:
+    break;
+  }
 
   // Two cases here: cast from (complex to complex) and (scalar to complex).
   if (Op->getType()->isAnyComplexType())
@@ -516,7 +538,7 @@ EmitCompoundAssignLValue(const CompoundAssignOperator *E,
                          ComplexPairTy &Val) {
   TestAndClearIgnoreReal();
   TestAndClearIgnoreImag();
-  QualType LHSTy = E->getLHS()->getType(), RHSTy = E->getRHS()->getType();
+  QualType LHSTy = E->getLHS()->getType();
 
   BinOpInfo OpInfo;
 
@@ -532,17 +554,9 @@ EmitCompoundAssignLValue(const CompoundAssignOperator *E,
   OpInfo.RHS = Visit(E->getRHS());
   
   LValue LHS = CGF.EmitLValue(E->getLHS());
-  // We know the LHS is a complex lvalue.
-  ComplexPairTy LHSComplexPair;
-  if (LHS.isPropertyRef())
-    LHSComplexPair =
-      CGF.EmitObjCPropertyGet(LHS.getPropertyRefExpr()).getComplexVal();
-  else if (LHS.isKVCRef())
-    LHSComplexPair =
-      CGF.EmitObjCPropertyGet(LHS.getKVCRefExpr()).getComplexVal();
-  else
-    LHSComplexPair = EmitLoadOfComplex(LHS.getAddress(),
-                                       LHS.isVolatileQualified());
+
+  // Load from the l-value.
+  ComplexPairTy LHSComplexPair = EmitLoadOfLValue(LHS);
   
   OpInfo.LHS = EmitComplexToComplexCast(LHSComplexPair, LHSTy, OpInfo.Ty);
 
@@ -554,13 +568,7 @@ EmitCompoundAssignLValue(const CompoundAssignOperator *E,
   Val = Result;
 
   // Store the result value into the LHS lvalue.
-  if (LHS.isPropertyRef())
-    CGF.EmitObjCPropertySet(LHS.getPropertyRefExpr(),
-                            RValue::getComplex(Result));
-  else if (LHS.isKVCRef())
-    CGF.EmitObjCPropertySet(LHS.getKVCRefExpr(), RValue::getComplex(Result));
-  else
-    EmitStoreOfComplex(Result, LHS.getAddress(), LHS.isVolatileQualified());
+  EmitStoreThroughLValue(Result, LHS);
 
   return LHS;
 }
@@ -577,7 +585,7 @@ EmitCompoundAssign(const CompoundAssignOperator *E,
     return Val;
 
   // Objective-C property assignment never reloads the value following a store.
-  if (LV.isPropertyRef() || LV.isKVCRef())
+  if (LV.isPropertyRef())
     return Val;
 
   // If the lvalue is non-volatile, return the computed value of the assignment.
@@ -595,19 +603,14 @@ LValue ComplexExprEmitter::EmitBinAssignLValue(const BinaryOperator *E,
   TestAndClearIgnoreReal();
   TestAndClearIgnoreImag();
 
-  // Emit the RHS.
+  // Emit the RHS.  __block variables need the RHS evaluated first.
   Val = Visit(E->getRHS());
 
   // Compute the address to store into.
   LValue LHS = CGF.EmitLValue(E->getLHS());
 
   // Store the result value into the LHS lvalue.
-  if (LHS.isPropertyRef())
-    CGF.EmitObjCPropertySet(LHS.getPropertyRefExpr(), RValue::getComplex(Val));
-  else if (LHS.isKVCRef())
-    CGF.EmitObjCPropertySet(LHS.getKVCRefExpr(), RValue::getComplex(Val));
-  else
-    EmitStoreOfComplex(Val, LHS.getAddress(), LHS.isVolatileQualified());
+  EmitStoreThroughLValue(Val, LHS);
 
   return LHS;
 }
@@ -621,7 +624,7 @@ ComplexPairTy ComplexExprEmitter::VisitBinAssign(const BinaryOperator *E) {
     return Val;
 
   // Objective-C property assignment never reloads the value following a store.
-  if (LV.isPropertyRef() || LV.isKVCRef())
+  if (LV.isPropertyRef())
     return Val;
 
   // If the lvalue is non-volatile, return the computed value of the assignment.
@@ -632,42 +635,37 @@ ComplexPairTy ComplexExprEmitter::VisitBinAssign(const BinaryOperator *E) {
 }
 
 ComplexPairTy ComplexExprEmitter::VisitBinComma(const BinaryOperator *E) {
-  CGF.EmitStmt(E->getLHS());
-  CGF.EnsureInsertPoint();
+  CGF.EmitIgnoredExpr(E->getLHS());
   return Visit(E->getRHS());
 }
 
 ComplexPairTy ComplexExprEmitter::
-VisitConditionalOperator(const ConditionalOperator *E) {
+VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
   TestAndClearIgnoreReal();
   TestAndClearIgnoreImag();
   llvm::BasicBlock *LHSBlock = CGF.createBasicBlock("cond.true");
   llvm::BasicBlock *RHSBlock = CGF.createBasicBlock("cond.false");
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("cond.end");
 
-  if (E->getLHS())
-    CGF.EmitBranchOnBoolExpr(E->getCond(), LHSBlock, RHSBlock);
-  else {
-    Expr *save = E->getSAVE();
-    assert(save && "VisitConditionalOperator - save is null");
-    // Intentianlly not doing direct assignment to ConditionalSaveExprs[save] !!
-    ComplexPairTy SaveVal = Visit(save);
-    CGF.ConditionalSaveComplexExprs[save] = SaveVal;
-    CGF.EmitBranchOnBoolExpr(E->getCond(), LHSBlock, RHSBlock);
-  }
+  // Bind the common expression if necessary.
+  CodeGenFunction::OpaqueValueMapping binding(CGF, E);
 
+  CodeGenFunction::ConditionalEvaluation eval(CGF);
+  CGF.EmitBranchOnBoolExpr(E->getCond(), LHSBlock, RHSBlock);
+
+  eval.begin(CGF);
   CGF.EmitBlock(LHSBlock);
   ComplexPairTy LHS = Visit(E->getTrueExpr());
   LHSBlock = Builder.GetInsertBlock();
   CGF.EmitBranch(ContBlock);
+  eval.end(CGF);
 
+  eval.begin(CGF);
   CGF.EmitBlock(RHSBlock);
-
-  ComplexPairTy RHS = Visit(E->getRHS());
+  ComplexPairTy RHS = Visit(E->getFalseExpr());
   RHSBlock = Builder.GetInsertBlock();
-  CGF.EmitBranch(ContBlock);
-
   CGF.EmitBlock(ContBlock);
+  eval.end(CGF);
 
   // Create a PHI node for the real part.
   llvm::PHINode *RealPN = Builder.CreatePHI(LHS.first->getType(), "cond.r");
@@ -759,4 +757,28 @@ void CodeGenFunction::StoreComplexToAddr(ComplexPairTy V,
 ComplexPairTy CodeGenFunction::LoadComplexFromAddr(llvm::Value *SrcAddr,
                                                    bool SrcIsVolatile) {
   return ComplexExprEmitter(*this).EmitLoadOfComplex(SrcAddr, SrcIsVolatile);
+}
+
+LValue CodeGenFunction::EmitComplexAssignmentLValue(const BinaryOperator *E) {
+  assert(E->getOpcode() == BO_Assign);
+  ComplexPairTy Val; // ignored
+  return ComplexExprEmitter(*this).EmitBinAssignLValue(E, Val);
+}
+
+LValue CodeGenFunction::
+EmitComplexCompoundAssignmentLValue(const CompoundAssignOperator *E) {
+  ComplexPairTy(ComplexExprEmitter::*Op)(const ComplexExprEmitter::BinOpInfo &);
+  switch (E->getOpcode()) {
+  case BO_MulAssign: Op = &ComplexExprEmitter::EmitBinMul; break;
+  case BO_DivAssign: Op = &ComplexExprEmitter::EmitBinDiv; break;
+  case BO_SubAssign: Op = &ComplexExprEmitter::EmitBinSub; break;
+  case BO_AddAssign: Op = &ComplexExprEmitter::EmitBinAdd; break;
+
+  default:
+    llvm_unreachable("unexpected complex compound assignment");
+    Op = 0;
+  }
+
+  ComplexPairTy Val; // ignored
+  return ComplexExprEmitter(*this).EmitCompoundAssignLValue(E, Op, Val);
 }

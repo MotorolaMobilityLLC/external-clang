@@ -96,3 +96,16 @@ enum Redeclare6 : short; // expected-error{{redeclared with different underlying
 enum class Redeclare7; // expected-note{{previous use is here}} expected-note{{previous use is here}}
 enum class Redeclare7 : short; // expected-error{{redeclared with different underlying type}}
 enum class Redeclare7 : short; // expected-error{{redeclared with different underlying type}}
+
+enum : long {
+  long_enum_val = 10000
+};
+
+enum : long x; // expected-error{{unnamed enumeration must be a definition}} \
+// expected-warning{{declaration does not declare anything}}
+
+void PR9333() {
+  enum class scoped_enum { yes, no, maybe };
+  scoped_enum e = scoped_enum::yes;
+  if (e == scoped_enum::no) { }
+}

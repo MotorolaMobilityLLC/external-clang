@@ -196,6 +196,7 @@ def allowable__client : Separate<"-allowable_client">;
 def ansi : Flag<"-ansi">, Group<a_Group>;
 def arch__errors__fatal : Flag<"-arch_errors_fatal">;
 def arch : Separate<"-arch">, Flags<[DriverOption]>;
+def arch__only : Separate<"-arch_only">;
 def a : Joined<"-a">, Group<a_Group>;
 def bind__at__load : Flag<"-bind_at_load">;
 def bundle__loader : Separate<"-bundle_loader">;
@@ -207,6 +208,7 @@ def compatibility__version : JoinedOrSeparate<"-compatibility_version">;
 def coverage : Flag<"-coverage">;
 def cpp_precomp : Flag<"-cpp-precomp">;
 def current__version : JoinedOrSeparate<"-current_version">;
+def cxx_isystem : JoinedOrSeparate<"-cxx-isystem">, Group<clang_i_Group>;
 def c : Flag<"-c">, Flags<[DriverOption]>,
   HelpText<"Only run preprocess, compile, and assemble steps">;
 def dA : Flag<"-dA">, Group<d_Group>;
@@ -262,6 +264,7 @@ def fcompile_resource_EQ : Joined<"-fcompile-resource=">, Group<f_Group>;
 def fconstant_cfstrings : Flag<"-fconstant-cfstrings">, Group<f_Group>;
 def fconstant_string_class_EQ : Joined<"-fconstant-string-class=">, Group<f_Group>;
 def fcreate_profile : Flag<"-fcreate-profile">, Group<f_Group>;
+def fcxx_exceptions: Flag<"-fcxx-exceptions">, Group<f_Group>;
 def fdebug_pass_arguments : Flag<"-fdebug-pass-arguments">, Group<f_Group>;
 def fdebug_pass_structure : Flag<"-fdebug-pass-structure">, Group<f_Group>;
 def fdiagnostics_fixit_info : Flag<"-fdiagnostics-fixit-info">, Group<f_Group>;
@@ -270,6 +273,7 @@ def fdiagnostics_parseable_fixits : Flag<"-fdiagnostics-parseable-fixits">, Grou
 def fdiagnostics_show_option : Flag<"-fdiagnostics-show-option">, Group<f_Group>;
 def fdiagnostics_show_category_EQ : Joined<"-fdiagnostics-show-category=">, Group<f_Group>;
 def fdollars_in_identifiers : Flag<"-fdollars-in-identifiers">, Group<f_Group>;
+def felide_constructors : Flag<"-felide-constructors">, Group<f_Group>;
 def feliminate_unused_debug_symbols : Flag<"-feliminate-unused-debug-symbols">, Group<f_Group>;
 def femit_all_decls : Flag<"-femit-all-decls">, Group<f_Group>;
 def fencoding_EQ : Joined<"-fencoding=">, Group<f_Group>;
@@ -322,9 +326,11 @@ def fno_caret_diagnostics : Flag<"-fno-caret-diagnostics">, Group<f_Group>;
 def fno_color_diagnostics : Flag<"-fno-color-diagnostics">, Group<f_Group>;
 def fno_common : Flag<"-fno-common">, Group<f_Group>;
 def fno_constant_cfstrings : Flag<"-fno-constant-cfstrings">, Group<f_Group>;
+def fno_cxx_exceptions: Flag<"-fno-cxx-exceptions">, Group<f_Group>;
 def fno_diagnostics_fixit_info : Flag<"-fno-diagnostics-fixit-info">, Group<f_Group>;
 def fno_diagnostics_show_option : Flag<"-fno-diagnostics-show-option">, Group<f_Group>;
 def fno_dollars_in_identifiers : Flag<"-fno-dollars-in-identifiers">, Group<f_Group>;
+def fno_elide_constructors : Flag<"-fno-elide-constructors">, Group<f_Group>;
 def fno_eliminate_unused_debug_symbols : Flag<"-fno-eliminate-unused-debug-symbols">, Group<f_Group>;
 def fno_exceptions : Flag<"-fno-exceptions">, Group<f_Group>;
 def fno_finite_math_only : Flag<"-fno-finite-math-only">, Group<clang_ignored_f_Group>;
@@ -336,6 +342,9 @@ def fno_lax_vector_conversions : Flag<"-fno-lax-vector-conversions">, Group<f_Gr
 def fno_math_errno : Flag<"-fno-math-errno">, Group<f_Group>;
 def fno_merge_all_constants : Flag<"-fno-merge-all-constants">, Group<f_Group>;
 def fno_ms_extensions : Flag<"-fno-ms-extensions">, Group<f_Group>;
+def fno_objc_default_synthesize_properties 
+  : Flag<"-fno-objc-default-synthesize-properties">, Group<f_Group>;
+def fno_objc_exceptions: Flag<"-fno-objc-exceptions">, Group<f_Group>;
 def fno_objc_legacy_dispatch : Flag<"-fno-objc-legacy-dispatch">, Group<f_Group>;
 def fno_omit_frame_pointer : Flag<"-fno-omit-frame-pointer">, Group<f_Group>;
 def fno_pascal_strings : Flag<"-fno-pascal-strings">, Group<f_Group>;
@@ -355,6 +364,10 @@ def fno_working_directory : Flag<"-fno-working-directory">, Group<f_Group>;
 def fno_zero_initialized_in_bss : Flag<"-fno-zero-initialized-in-bss">, Group<f_Group>;
 def fobjc_atdefs : Flag<"-fobjc-atdefs">, Group<clang_ignored_f_Group>;
 def fobjc_call_cxx_cdtors : Flag<"-fobjc-call-cxx-cdtors">, Group<clang_ignored_f_Group>;
+def fobjc_default_synthesize_properties : 
+  Flag<"-fobjc-default-synthesize-properties">, Group<f_Group>;
+def fobjc_exceptions: Flag<"-fobjc-exceptions">, Group<f_Group>;
+
 def fobjc_gc_only : Flag<"-fobjc-gc-only">, Group<f_Group>;
 def fobjc_gc : Flag<"-fobjc-gc">, Group<f_Group>;
 def fobjc_legacy_dispatch : Flag<"-fobjc-legacy-dispatch">, Group<f_Group>;
@@ -401,6 +414,8 @@ def ferror_limit_EQ : Joined<"-ferror-limit=">, Group<f_Group>;
 def ftemplate_depth_ : Joined<"-ftemplate-depth-">, Group<f_Group>;
 def ftemplate_backtrace_limit_EQ : Joined<"-ftemplate-backtrace-limit=">,
                                    Group<f_Group>;
+def Wlarge_by_value_copy_def : Flag<"-Wlarge-by-value-copy">;
+def Wlarge_by_value_copy_EQ : Joined<"-Wlarge-by-value-copy=">;
 def fterminated_vtables : Flag<"-fterminated-vtables">, Group<f_Group>;
 def fthreadsafe_statics : Flag<"-fthreadsafe-statics">, Group<f_Group>;
 def ftime_report : Flag<"-ftime-report">, Group<f_Group>;
@@ -468,6 +483,7 @@ def mkernel : Flag<"-mkernel">, Group<m_Group>;
 def mlinker_version_EQ : Joined<"-mlinker-version=">, Flags<[NoForward]>;
 def mllvm : Separate<"-mllvm">;
 def mmacosx_version_min_EQ : Joined<"-mmacosx-version-min=">, Group<m_Group>;
+def mms_bitfields : Flag<"-mms-bitfields">, Group<m_Group>;
 def mmmx : Flag<"-mmmx">, Group<m_x86_Features_Group>;
 def mno_3dnowa : Flag<"-mno-3dnowa">, Group<m_x86_Features_Group>;
 def mno_3dnow : Flag<"-mno-3dnow">, Group<m_x86_Features_Group>;
@@ -476,6 +492,7 @@ def mno_mmx : Flag<"-mno-mmx">, Group<m_x86_Features_Group>;
 def mno_pascal_strings : Flag<"-mno-pascal-strings">, Group<m_Group>;
 def mno_red_zone : Flag<"-mno-red-zone">, Group<m_Group>;
 def mno_relax_all : Flag<"-mno-relax-all">, Group<m_Group>;
+def mno_rtd: Flag<"-mno-rtd">, Group<m_Group>;
 def mno_soft_float : Flag<"-mno-soft-float">, Group<m_Group>;
 def mno_sse2 : Flag<"-mno-sse2">, Group<m_x86_Features_Group>;
 def mno_sse3 : Flag<"-mno-sse3">, Group<m_x86_Features_Group>;
@@ -496,7 +513,9 @@ def mno_omit_leaf_frame_pointer : Flag<"-mno-omit-leaf-frame-pointer">, Group<f_
 def momit_leaf_frame_pointer : Flag<"-momit-leaf-frame-pointer">, Group<f_Group>;
 def mpascal_strings : Flag<"-mpascal-strings">, Group<m_Group>;
 def mred_zone : Flag<"-mred-zone">, Group<m_Group>;
+def mregparm_EQ : Joined<"-mregparm=">, Group<m_Group>;
 def mrelax_all : Flag<"-mrelax-all">, Group<m_Group>;
+def mrtd: Flag<"-mrtd">, Group<m_Group>;
 def msoft_float : Flag<"-msoft-float">, Group<m_Group>;
 def msse2 : Flag<"-msse2">, Group<m_x86_Features_Group>;
 def msse3 : Flag<"-msse3">, Group<m_x86_Features_Group>;
@@ -562,6 +581,7 @@ def private__bundle : Flag<"-private_bundle">;
 def pthreads : Flag<"-pthreads">;
 def pthread : Flag<"-pthread">;
 def p : Flag<"-p">;
+def pie : Flag<"-pie">;
 def read__only__relocs : Separate<"-read_only_relocs">;
 def remap : Flag<"-remap">;
 def rewrite_objc : Flag<"-rewrite-objc">, Flags<[DriverOption]>,
@@ -767,7 +787,12 @@ def _write_user_dependencies : Flag<"--write-user-dependencies">, Alias<MMD>;
 def _ : Joined<"--">, Flags<[Unsupported]>;
 
 // Special internal option to handle -Xlinker --no-demangle.
-def Z_Xlinker__no_demangle : Flag<"-Z-Xlinker-no-demangle">, Flags<[Unsupported, NoArgumentUnused]>;
+def Z_Xlinker__no_demangle : Flag<"-Z-Xlinker-no-demangle">,
+    Flags<[Unsupported, NoArgumentUnused]>;
+
+// Special internal option to allow forwarding arbitrary arguments to linker.
+def Zlinker_input : Separate<"-Zlinker-input">,
+    Flags<[Unsupported, NoArgumentUnused]>;
 
 // Reserved library options.
 def Z_reserved_lib_stdcxx : Flag<"-Z-reserved-lib-stdc++">,

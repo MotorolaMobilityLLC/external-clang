@@ -19,6 +19,7 @@
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Analysis/DebugInfo.h"
+#include "llvm/Analysis/DIBuilder.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Support/Allocator.h"
 
@@ -36,13 +37,14 @@ namespace CodeGen {
   class CodeGenModule;
   class CodeGenFunction;
   class GlobalDecl;
+  class CGBlockInfo;
 
 /// CGDebugInfo - This class gathers all debug information during compilation
 /// and is responsible for emitting to llvm globals or pass directly to
 /// the backend.
 class CGDebugInfo {
   CodeGenModule &CGM;
-  llvm::DIFactory DebugFactory;
+  llvm::DIBuilder DBuilder;
   llvm::DICompileUnit TheCU;
   SourceLocation CurLoc, PrevLoc;
   llvm::DIType VTablePtrType;
@@ -75,7 +77,7 @@ class CGDebugInfo {
 
   /// Helper functions for getOrCreateType.
   llvm::DIType CreateType(const BuiltinType *Ty);
-  llvm::DIType CreateType(const ComplexType *Ty, llvm::DIFile F);
+  llvm::DIType CreateType(const ComplexType *Ty);
   llvm::DIType CreateQualifiedType(QualType Ty, llvm::DIFile F);
   llvm::DIType CreateType(const TypedefType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const ObjCObjectPointerType *Ty,
@@ -83,21 +85,20 @@ class CGDebugInfo {
   llvm::DIType CreateType(const PointerType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const BlockPointerType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const FunctionType *Ty, llvm::DIFile F);
-  llvm::DIType CreateType(const TagType *Ty, llvm::DIFile F);
-  llvm::DIType CreateType(const RecordType *Ty, llvm::DIFile F);
+  llvm::DIType CreateType(const TagType *Ty);
+  llvm::DIType CreateType(const RecordType *Ty);
   llvm::DIType CreateType(const ObjCInterfaceType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const ObjCObjectType *Ty, llvm::DIFile F);
-  llvm::DIType CreateType(const EnumType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const VectorType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const ArrayType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const LValueReferenceType *Ty, llvm::DIFile F);
+  llvm::DIType CreateType(const RValueReferenceType *Ty, llvm::DIFile Unit);
   llvm::DIType CreateType(const MemberPointerType *Ty, llvm::DIFile F);
-  llvm::DIType CreateEnumType(const EnumDecl *ED, llvm::DIFile Unit);
+  llvm::DIType CreateEnumType(const EnumDecl *ED);
   llvm::DIType getOrCreateMethodType(const CXXMethodDecl *Method,
                                      llvm::DIFile F);
   llvm::DIType getOrCreateVTablePtrType(llvm::DIFile F);
-  llvm::DINameSpace getOrCreateNameSpace(const NamespaceDecl *N, 
-                                         llvm::DIDescriptor Unit);
+  llvm::DINameSpace getOrCreateNameSpace(const NamespaceDecl *N);
   llvm::DIType CreatePointeeType(QualType PointeeTy, llvm::DIFile F);
   llvm::DIType CreatePointerLikeType(unsigned Tag,
                                      const Type *Ty, QualType PointeeTy,
@@ -109,26 +110,29 @@ class CGDebugInfo {
   
   void CollectCXXMemberFunctions(const CXXRecordDecl *Decl,
                                  llvm::DIFile F,
-                                 llvm::SmallVectorImpl<llvm::DIDescriptor> &E,
+                                 llvm::SmallVectorImpl<llvm::Value *> &E,
                                  llvm::DIType T);
 
   void CollectCXXFriends(const CXXRecordDecl *Decl,
                        llvm::DIFile F,
-                       llvm::SmallVectorImpl<llvm::DIDescriptor> &EltTys,
+                       llvm::SmallVectorImpl<llvm::Value *> &EltTys,
                        llvm::DIType RecordTy);
 
   void CollectCXXBases(const CXXRecordDecl *Decl,
                        llvm::DIFile F,
-                       llvm::SmallVectorImpl<llvm::DIDescriptor> &EltTys,
+                       llvm::SmallVectorImpl<llvm::Value *> &EltTys,
                        llvm::DIType RecordTy);
 
-
+  llvm::DIType createFieldType(llvm::StringRef name, QualType type,
+                               Expr *bitWidth, SourceLocation loc,
+                               AccessSpecifier AS, uint64_t offsetInBits,
+                               llvm::DIFile tunit);
   void CollectRecordFields(const RecordDecl *Decl, llvm::DIFile F,
-                           llvm::SmallVectorImpl<llvm::DIDescriptor> &E);
+                           llvm::SmallVectorImpl<llvm::Value *> &E);
 
   void CollectVTableInfo(const CXXRecordDecl *Decl,
                          llvm::DIFile F,
-                         llvm::SmallVectorImpl<llvm::DIDescriptor> &EltTys);
+                         llvm::SmallVectorImpl<llvm::Value *> &EltTys);
 
 public:
   CGDebugInfo(CodeGenModule &CGM);
@@ -169,15 +173,22 @@ public:
 
   /// EmitDeclareOfBlockDeclRefVariable - Emit call to llvm.dbg.declare for an
   /// imported variable declaration in a block.
-  void EmitDeclareOfBlockDeclRefVariable(const BlockDeclRefExpr *BDRE,
-                                         llvm::Value *AI,
+  void EmitDeclareOfBlockDeclRefVariable(const VarDecl *variable,
+                                         llvm::Value *storage,
                                          CGBuilderTy &Builder,
-                                         CodeGenFunction *CGF);
+                                         const CGBlockInfo &blockInfo);
 
   /// EmitDeclareOfArgVariable - Emit call to llvm.dbg.declare for an argument
   /// variable declaration.
   void EmitDeclareOfArgVariable(const VarDecl *Decl, llvm::Value *AI,
-                                CGBuilderTy &Builder);
+                                unsigned ArgNo, CGBuilderTy &Builder);
+
+  /// EmitDeclareOfBlockLiteralArgVariable - Emit call to
+  /// llvm.dbg.declare for the block-literal argument to a block
+  /// invocation function.
+  void EmitDeclareOfBlockLiteralArgVariable(const CGBlockInfo &block,
+                                            llvm::Value *addr,
+                                            CGBuilderTy &Builder);
 
   /// EmitGlobalVariable - Emit information about a global variable.
   void EmitGlobalVariable(llvm::GlobalVariable *GV, const VarDecl *Decl);
@@ -193,11 +204,12 @@ public:
 private:
   /// EmitDeclare - Emit call to llvm.dbg.declare for a variable declaration.
   void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,
-                   CGBuilderTy &Builder);
+                   unsigned ArgNo, CGBuilderTy &Builder);
 
-  /// EmitDeclare - Emit call to llvm.dbg.declare for a variable declaration.
-  void EmitDeclare(const BlockDeclRefExpr *BDRE, unsigned Tag, llvm::Value *AI,
-                   CGBuilderTy &Builder, CodeGenFunction *CGF);
+  /// EmitDeclare - Emit call to llvm.dbg.declare for a variable
+  /// declaration from an enclosing block.
+  void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,
+                   CGBuilderTy &Builder, const CGBlockInfo &blockInfo);
 
   // EmitTypeForVarWithBlocksAttr - Build up structure info for the byref.  
   // See BuildByRefType.
@@ -205,8 +217,7 @@ private:
                                             uint64_t *OffSet);
 
   /// getContextDescriptor - Get context info for the decl.
-  llvm::DIDescriptor getContextDescriptor(const Decl *Decl,
-                                          llvm::DIDescriptor &CU);
+  llvm::DIDescriptor getContextDescriptor(const Decl *Decl);
 
   /// getCurrentDirname - Return current directory name.
   llvm::StringRef getCurrentDirname();

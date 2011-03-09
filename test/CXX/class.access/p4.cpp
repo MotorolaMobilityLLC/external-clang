@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -verify %s
+// RUN: %clang_cc1 -fcxx-exceptions -fexceptions -fsyntax-only -verify %s
 
 // C++0x [class.access]p4:
 
@@ -487,4 +487,24 @@ namespace test21 {
   void test() {
     A<int>::Inner i; // expected-error {{'Inner' is a private member}}
   }
+}
+
+namespace rdar8876150 {
+  struct A { operator bool(); };
+  struct B : private A { using A::operator bool; };
+
+  bool f() {
+    B b;
+    return !b;
+  }
+}
+
+namespace test23 {
+  template <typename T> class A {
+    A();
+    static A instance;
+  };
+
+  template <typename T> A<T> A<T>::instance;
+  template class A<int>;
 }

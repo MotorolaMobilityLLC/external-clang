@@ -97,7 +97,8 @@ bptr foo5(int j) {
 }
 
 int (*funcptr3[5])(long);
-int sz8 = sizeof(^int (*[5])(long) {return funcptr3;}); // expected-error {{block declared as returning an array}}
+int sz8 = sizeof(^int (*[5])(long) {return funcptr3;}); // expected-error {{block cannot return array type}} expected-warning {{incompatible pointer to integer conversion}}
+int sz9 = sizeof(^int(*())()[3]{ }); // expected-error {{function cannot return array type}}
 
 void foo6() {
   int (^b)(int) __attribute__((noreturn));
@@ -109,7 +110,7 @@ void foo6() {
 
 void foo7()
 {
- const int (^BB) (void) = ^{ const int i = 1; return i; }; // expected-error{{incompatible block pointer types initializing 'const int (^)(void)' with an expression of type 'int (^)(void)'}}
+ const int (^BB) (void) = ^{ const int i = 1; return i; }; // OK - initializing 'const int (^)(void)' with an expression of type 'int (^)(void)'
 
  const int (^CC) (void)  = ^const int{ const int i = 1; return i; };
 

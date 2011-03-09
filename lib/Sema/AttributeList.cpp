@@ -21,10 +21,10 @@ AttributeList::AttributeList(llvm::BumpPtrAllocator &Alloc,
                              IdentifierInfo *sName, SourceLocation sLoc,
                              IdentifierInfo *pName, SourceLocation pLoc,
                              Expr **ExprList, unsigned numArgs,
-                             AttributeList *n, bool declspec, bool cxx0x)
+                             bool declspec, bool cxx0x)
   : AttrName(aName), AttrLoc(aLoc), ScopeName(sName),
     ScopeLoc(sLoc),
-    ParmName(pName), ParmLoc(pLoc), NumArgs(numArgs), Next(n),
+    ParmName(pName), ParmLoc(pLoc), NumArgs(numArgs), Next(0),
     DeclspecAttribute(declspec), CXX0XAttribute(cxx0x), Invalid(false) {
 
   if (numArgs == 0)
@@ -51,13 +51,11 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("used", AT_used)
     .Case("alias", AT_alias)
     .Case("align", AT_aligned)
-    .Case("final", AT_final)
     .Case("cdecl", AT_cdecl)
     .Case("const", AT_const)
     .Case("__const", AT_const) // some GCC headers do contain this spelling
     .Case("blocks", AT_blocks)
     .Case("format", AT_format)
-    .Case("hiding", AT_hiding)
     .Case("malloc", AT_malloc)
     .Case("packed", AT_packed)
     .Case("unused", AT_unused)
@@ -78,12 +76,11 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("iboutletcollection", AT_IBOutletCollection)
     .Case("noreturn", AT_noreturn)
     .Case("noinline", AT_noinline)
-    .Case("override", AT_override)
     .Case("sentinel", AT_sentinel)
     .Case("NSObject", AT_nsobject)
     .Case("dllimport", AT_dllimport)
     .Case("dllexport", AT_dllexport)
-    .Case("may_alias", IgnoredAttribute) // FIXME: TBAA
+    .Case("may_alias", AT_may_alias)
     .Case("base_check", AT_base_check)
     .Case("deprecated", AT_deprecated)
     .Case("visibility", AT_visibility)
@@ -101,6 +98,7 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("returns_twice", IgnoredAttribute)
     .Case("vec_type_hint", IgnoredAttribute)
     .Case("objc_exception", AT_objc_exception)
+    .Case("objc_method_family", AT_objc_method_family)
     .Case("ext_vector_type", AT_ext_vector_type)
     .Case("neon_vector_type", AT_neon_vector_type)
     .Case("neon_polyvector_type", AT_neon_polyvector_type)
@@ -108,8 +106,12 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("analyzer_noreturn", AT_analyzer_noreturn)
     .Case("warn_unused_result", AT_warn_unused_result)
     .Case("carries_dependency", AT_carries_dependency)
+    .Case("ns_consumed", AT_ns_consumed)
+    .Case("ns_consumes_self", AT_ns_consumes_self)
+    .Case("ns_returns_autoreleased", AT_ns_returns_autoreleased)
     .Case("ns_returns_not_retained", AT_ns_returns_not_retained)
     .Case("ns_returns_retained", AT_ns_returns_retained)
+    .Case("cf_consumed", AT_cf_consumed)
     .Case("cf_returns_not_retained", AT_cf_returns_not_retained)
     .Case("cf_returns_retained", AT_cf_returns_retained)
     .Case("ownership_returns", AT_ownership_returns)
@@ -119,11 +121,22 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
     .Case("init_priority", AT_init_priority)
     .Case("no_instrument_function", AT_no_instrument_function)
     .Case("thiscall", AT_thiscall)
+    .Case("bounded", IgnoredAttribute)       // OpenBSD
     .Case("pascal", AT_pascal)
     .Case("__cdecl", AT_cdecl)
     .Case("__stdcall", AT_stdcall)
     .Case("__fastcall", AT_fastcall)
     .Case("__thiscall", AT_thiscall)
     .Case("__pascal", AT_pascal)
+    .Case("constant", AT_constant)
+    .Case("device", AT_device)
+    .Case("global", AT_global)
+    .Case("host", AT_host)
+    .Case("shared", AT_shared)
+    .Case("launch_bounds", AT_launch_bounds)
+    .Case("common", AT_common)
+    .Case("nocommon", AT_nocommon)
+    .Case("opencl_kernel_function", AT_opencl_kernel_function)
+    .Case("uuid", AT_uuid)
     .Default(UnknownAttribute);
 }

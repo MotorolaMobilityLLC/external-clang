@@ -17,7 +17,7 @@
 #include "CGObjCRuntime.h"
 #include "CodeGenModule.h"
 #include "CodeGenFunction.h"
-#include "CGException.h"
+#include "CGCleanup.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -62,7 +62,10 @@ private:
   const llvm::IntegerType *IntTy;
   const llvm::PointerType *PtrTy;
   const llvm::IntegerType *LongTy;
+  const llvm::IntegerType *SizeTy;
+  const llvm::IntegerType *PtrDiffTy;
   const llvm::PointerType *PtrToIntTy;
+  const llvm::Type *BoolTy;
   llvm::GlobalAlias *ClassPtrAlias;
   llvm::GlobalAlias *MetaClassPtrAlias;
   std::vector<llvm::Constant*> Classes;
@@ -179,7 +182,8 @@ public:
   virtual llvm::Function *ModuleInitFunction();
   virtual llvm::Function *GetPropertyGetFunction();
   virtual llvm::Function *GetPropertySetFunction();
-  virtual llvm::Function *GetCopyStructFunction();
+  virtual llvm::Function *GetSetStructFunction();
+  virtual llvm::Function *GetGetStructFunction();
   virtual llvm::Constant *EnumerationMutationFunction();
 
   virtual void EmitTryStmt(CodeGen::CodeGenFunction &CGF,
@@ -212,8 +216,8 @@ public:
   virtual llvm::Value *EmitIvarOffset(CodeGen::CodeGenFunction &CGF,
                                       const ObjCInterfaceDecl *Interface,
                                       const ObjCIvarDecl *Ivar);
-  virtual llvm::Constant *GCBlockLayout(CodeGen::CodeGenFunction &CGF,
-              const llvm::SmallVectorImpl<const Expr *> &) {
+  virtual llvm::Constant *BuildGCBlockLayout(CodeGen::CodeGenModule &CGM,
+                                             const CGBlockInfo &blockInfo) {
     return NULLPtr;
   }
 };
@@ -273,6 +277,11 @@ CGObjCGNU::CGObjCGNU(CodeGen::CodeGenModule &cgm)
       CGM.getTypes().ConvertType(CGM.getContext().IntTy));
   LongTy = cast<llvm::IntegerType>(
       CGM.getTypes().ConvertType(CGM.getContext().LongTy));
+  SizeTy = cast<llvm::IntegerType>(
+      CGM.getTypes().ConvertType(CGM.getContext().getSizeType()));
+  PtrDiffTy = cast<llvm::IntegerType>(
+      CGM.getTypes().ConvertType(CGM.getContext().getPointerDiffType()));
+  BoolTy = CGM.getTypes().ConvertType(CGM.getContext().BoolTy);
 
   Int8Ty = llvm::Type::getInt8Ty(VMContext);
   // C string type.  Used in lots of places.
@@ -318,8 +327,7 @@ CGObjCGNU::CGObjCGNU(CodeGen::CodeGenModule &cgm)
     // id objc_assign_ivar(id, id, ptrdiff_t);
     std::vector<const llvm::Type*> Args(1, IdTy);
     Args.push_back(PtrToIdTy);
-    // FIXME: ptrdiff_t
-    Args.push_back(LongTy);
+    Args.push_back(PtrDiffTy);
     llvm::FunctionType *FTy = llvm::FunctionType::get(IdTy, Args, false);
     IvarAssignFn = CGM.CreateRuntimeFunction(FTy, "objc_assign_ivar");
     // id objc_assign_strongCast (id, id*)
@@ -342,8 +350,7 @@ CGObjCGNU::CGObjCGNU(CodeGen::CodeGenModule &cgm)
     Args.clear();
     Args.push_back(PtrToInt8Ty);
     Args.push_back(PtrToInt8Ty);
-    // FIXME: size_t
-    Args.push_back(LongTy);
+    Args.push_back(SizeTy);
     FTy = llvm::FunctionType::get(IdTy, Args, false);
     MemMoveFn = CGM.CreateRuntimeFunction(FTy, "objc_memmove_collectable");
   }
@@ -942,7 +949,12 @@ llvm::Constant *CGObjCGNU::GenerateClassStructure(
   Elements.push_back(MakeConstantString(Name, ".class_name"));
   Elements.push_back(Zero);
   Elements.push_back(llvm::ConstantInt::get(LongTy, info));
-  Elements.push_back(InstanceSize);
+  if (isMeta) {
+    llvm::TargetData td(&TheModule);
+    Elements.push_back(llvm::ConstantInt::get(LongTy,
+                     td.getTypeSizeInBits(ClassTy)/8));
+  } else
+    Elements.push_back(InstanceSize);
   Elements.push_back(IVars);
   Elements.push_back(Methods);
   Elements.push_back(NULLPtr);
@@ -995,7 +1007,7 @@ llvm::Constant *CGObjCGNU::GenerateProtocolList(
       Protocols.size());
   llvm::StructType *ProtocolListTy = llvm::StructType::get(VMContext,
       PtrTy, //Should be a recurisve pointer, but it's always NULL here.
-      LongTy,//FIXME: Should be size_t
+      SizeTy,
       ProtocolArrayTy,
       NULL);
   std::vector<llvm::Constant*> Elements;
@@ -1250,7 +1262,7 @@ void CGObjCGNU::GenerateProtocolHolderCategory(void) {
       ExistingProtocols.size());
   llvm::StructType *ProtocolListTy = llvm::StructType::get(VMContext,
       PtrTy, //Should be a recurisve pointer, but it's always NULL here.
-      LongTy,//FIXME: Should be size_t
+      SizeTy,
       ProtocolArrayTy,
       NULL);
   std::vector<llvm::Constant*> ProtocolElements;
@@ -1430,7 +1442,8 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   }
 
   // Get the size of instances.
-  int instanceSize = Context.getASTObjCImplementationLayout(OID).getSize() / 8;
+  int instanceSize = 
+    Context.getASTObjCImplementationLayout(OID).getSize().getQuantity();
 
   // Collect information about instance variables.
   llvm::SmallVector<llvm::Constant*, 16> IvarNames;
@@ -1440,7 +1453,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
   std::vector<llvm::Constant*> IvarOffsetValues;
 
   int superInstanceSize = !SuperClassDecl ? 0 :
-    Context.getASTObjCInterfaceLayout(SuperClassDecl).getSize() / 8;
+    Context.getASTObjCInterfaceLayout(SuperClassDecl).getSize().getQuantity();
   // For non-fragile ivars, set the instance size to 0 - {the size of just this
   // class}.  The runtime will then set this to the correct value on load.
   if (CGM.getContext().getLangOptions().ObjCNonFragileABI) {
@@ -1821,13 +1834,11 @@ llvm::Function *CGObjCGNU::GenerateMethod(const ObjCMethodDecl *OMD,
 
 llvm::Function *CGObjCGNU::GetPropertyGetFunction() {
   std::vector<const llvm::Type*> Params;
-  const llvm::Type *BoolTy =
-    CGM.getTypes().ConvertType(CGM.getContext().BoolTy);
   Params.push_back(IdTy);
   Params.push_back(SelectorTy);
-  Params.push_back(IntTy);
+  Params.push_back(SizeTy);
   Params.push_back(BoolTy);
-  // void objc_getProperty (id, SEL, int, bool)
+  // void objc_getProperty (id, SEL, ptrdiff_t, bool)
   const llvm::FunctionType *FTy =
     llvm::FunctionType::get(IdTy, Params, false);
   return cast<llvm::Function>(CGM.CreateRuntimeFunction(FTy,
@@ -1836,24 +1847,44 @@ llvm::Function *CGObjCGNU::GetPropertyGetFunction() {
 
 llvm::Function *CGObjCGNU::GetPropertySetFunction() {
   std::vector<const llvm::Type*> Params;
-  const llvm::Type *BoolTy =
-    CGM.getTypes().ConvertType(CGM.getContext().BoolTy);
   Params.push_back(IdTy);
   Params.push_back(SelectorTy);
-  Params.push_back(IntTy);
+  Params.push_back(SizeTy);
   Params.push_back(IdTy);
   Params.push_back(BoolTy);
   Params.push_back(BoolTy);
-  // void objc_setProperty (id, SEL, int, id, bool, bool)
+  // void objc_setProperty (id, SEL, ptrdiff_t, id, bool, bool)
   const llvm::FunctionType *FTy =
     llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Params, false);
   return cast<llvm::Function>(CGM.CreateRuntimeFunction(FTy,
                                                         "objc_setProperty"));
 }
 
-// FIXME. Implement this.
-llvm::Function *CGObjCGNU::GetCopyStructFunction() {
-  return 0;
+llvm::Function *CGObjCGNU::GetGetStructFunction() {
+  std::vector<const llvm::Type*> Params;
+  Params.push_back(PtrTy);
+  Params.push_back(PtrTy);
+  Params.push_back(PtrDiffTy);
+  Params.push_back(BoolTy);
+  Params.push_back(BoolTy);
+  // objc_setPropertyStruct (void*, void*, ptrdiff_t, BOOL, BOOL)
+  const llvm::FunctionType *FTy =
+    llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Params, false);
+  return cast<llvm::Function>(CGM.CreateRuntimeFunction(FTy, 
+                                                    "objc_getPropertyStruct"));
+}
+llvm::Function *CGObjCGNU::GetSetStructFunction() {
+  std::vector<const llvm::Type*> Params;
+  Params.push_back(PtrTy);
+  Params.push_back(PtrTy);
+  Params.push_back(PtrDiffTy);
+  Params.push_back(BoolTy);
+  Params.push_back(BoolTy);
+  // objc_setPropertyStruct (void*, void*, ptrdiff_t, BOOL, BOOL)
+  const llvm::FunctionType *FTy =
+    llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Params, false);
+  return cast<llvm::Function>(CGM.CreateRuntimeFunction(FTy, 
+                                                    "objc_setPropertyStruct"));
 }
 
 llvm::Constant *CGObjCGNU::EnumerationMutationFunction() {

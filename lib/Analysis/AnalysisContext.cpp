@@ -19,8 +19,10 @@
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Analysis/Analyses/LiveVariables.h"
 #include "clang/Analysis/Analyses/PseudoConstantAnalysis.h"
+#include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
 #include "clang/Analysis/AnalysisContext.h"
 #include "clang/Analysis/CFG.h"
+#include "clang/Analysis/CFGStmtMap.h"
 #include "clang/Analysis/Support/BumpVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -84,6 +86,34 @@ CFG *AnalysisContext::getUnoptimizedCFG() {
     builtCompleteCFG = true;
   }
   return completeCFG;
+}
+
+CFGStmtMap *AnalysisContext::getCFGStmtMap() {
+  if (cfgStmtMap)
+    return cfgStmtMap;
+  
+  if (CFG *c = getCFG()) {
+    cfgStmtMap = CFGStmtMap::Build(c, &getParentMap());
+    return cfgStmtMap;
+  }
+    
+  return 0;
+}
+
+CFGReachabilityAnalysis *AnalysisContext::getCFGReachablityAnalysis() {
+  if (CFA)
+    return CFA;
+  
+  if (CFG *c = getCFG()) {
+    CFA = new CFGReachabilityAnalysis(*c);
+    return CFA;
+  }
+  
+  return 0;
+}
+
+void AnalysisContext::dumpCFG() {
+    getCFG()->dump(getASTContext().getLangOptions());
 }
 
 ParentMap &AnalysisContext::getParentMap() {
@@ -188,8 +218,8 @@ LocationContextManager::getLocationContext(AnalysisContext *ctx,
 const StackFrameContext*
 LocationContextManager::getStackFrame(AnalysisContext *ctx,
                                       const LocationContext *parent,
-                                      const Stmt *s, const CFGBlock *blk,
-                                      unsigned idx) {
+                                      const Stmt *s,
+                                      const CFGBlock *blk, unsigned idx) {
   llvm::FoldingSetNodeID ID;
   StackFrameContext::Profile(ID, ctx, parent, s, blk, idx);
   void *InsertPos;
@@ -269,7 +299,7 @@ public:
   }
 
   void VisitStmt(Stmt *S) {
-    for (Stmt::child_iterator I = S->child_begin(), E = S->child_end();I!=E;++I)
+    for (Stmt::child_range I = S->children(); I; ++I)
       if (Stmt *child = *I)
         Visit(child);
   }
@@ -342,10 +372,12 @@ AnalysisContext::getReferencedBlockVars(const BlockDecl *BD) {
 AnalysisContext::~AnalysisContext() {
   delete cfg;
   delete completeCFG;
+  delete cfgStmtMap;
   delete liveness;
   delete relaxedLiveness;
   delete PM;
   delete PCA;
+  delete CFA;
   delete ReferencedBlockVars;
 }
 

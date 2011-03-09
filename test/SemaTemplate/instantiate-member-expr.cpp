@@ -6,10 +6,10 @@ struct S {
 
 template<typename T>
 struct vector {
-  void push_back(const T&) { int a[sizeof(T) ? -1: -1]; } // expected-error {{array size is negative}}
+  void push_back(const T&) { int a[sizeof(T) ? -1: -1]; } // expected-error {{array with a negative size}}
 };
 
-class GRExprEngine {
+class ExprEngine {
 public:
  typedef vector<S<void *> >CheckersOrdered;
  CheckersOrdered Checkers;
@@ -22,8 +22,8 @@ public:
 
 class RetainReleaseChecker { };
 
-void f(GRExprEngine& Eng) {
-   Eng.registerCheck(new RetainReleaseChecker); // expected-note {{in instantiation of function template specialization 'GRExprEngine::registerCheck<RetainReleaseChecker>' requested here}}
+void f(ExprEngine& Eng) {
+   Eng.registerCheck(new RetainReleaseChecker); // expected-note {{in instantiation of function template specialization 'ExprEngine::registerCheck<RetainReleaseChecker>' requested here}}
 }
 
 // PR 5838

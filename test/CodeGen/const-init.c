@@ -4,6 +4,10 @@
 
 // Brace-enclosed string array initializers
 char a[] = { "asdf" };
+// CHECK: @a = global [5 x i8] c"asdf\00"
+
+char a2[2][5] = { "asdf" };
+// CHECK: @a2 = global [2 x [5 x i8]] {{\[}}[5 x i8] c"asdf\00", [5 x i8] zeroinitializer]
 
 // Double-implicit-conversions of array/functions (not legal C, but
 // clang accepts it for gcc compat).
@@ -118,7 +122,7 @@ struct g23 {char a; short b; char c; struct g22 d;};
 struct g23 g24 = {1,2,3,4};
 
 // CHECK: @g25.g26 = internal global i8* getelementptr inbounds ([4 x i8]* @__func__.g25, i32 0, i32 0)
-// CHECK: @__func__.g25 = private constant [4 x i8] c"g25\00"
+// CHECK: @__func__.g25 = private unnamed_addr constant [4 x i8] c"g25\00"
 int g25() {
   static const char *g26 = __func__;
   return *g26;

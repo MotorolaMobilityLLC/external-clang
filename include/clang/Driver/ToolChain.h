@@ -14,7 +14,7 @@
 #include "clang/Driver/Types.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Path.h"
 #include <string>
 
 namespace clang {
@@ -113,6 +113,14 @@ public:
   /// by default.
   virtual bool IsIntegratedAssemblerDefault() const { return false; }
 
+  /// IsStrictAliasingDefault - Does this tool chain use -fstrict-aliasing by
+  /// default.
+  virtual bool IsStrictAliasingDefault() const { return true; }
+
+  /// IsObjCDefaultSynthPropertiesDefault - Does this tool chain enable
+  /// -fobjc-default-synthesize-properties by default.
+  virtual bool IsObjCDefaultSynthPropertiesDefault() const { return false; }
+
   /// IsObjCNonFragileABIDefault - Does this tool chain set
   /// -fobjc-nonfragile-abi by default.
   virtual bool IsObjCNonFragileABIDefault() const { return false; }
@@ -142,6 +150,9 @@ public:
   /// for this tool chain, or 0 if this tool chain does not force a
   /// particular PIC mode.
   virtual const char *GetForcedPicModel() const = 0;
+
+  /// SupportsProfiling - Does this tool chain support -pg.
+  virtual bool SupportsProfiling() const { return true; }
 
   /// Does this tool chain support Objective-C garbage collection.
   virtual bool SupportsObjCGC() const { return false; }

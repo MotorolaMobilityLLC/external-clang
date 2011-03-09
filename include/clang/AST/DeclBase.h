@@ -198,7 +198,7 @@ private:
     return DeclCtx.get<DeclContext*>();
   }
 
-  /// Loc - The location that this decl.
+  /// Loc - The location of this decl.
   SourceLocation Loc;
 
   /// DeclKind - This indicates which class this is.
@@ -231,14 +231,21 @@ protected:
   unsigned ChangedAfterLoad : 1;
 
   /// IdentifierNamespace - This specifies what IDNS_* namespace this lives in.
-  unsigned IdentifierNamespace : 15;
+  unsigned IdentifierNamespace : 12;
 
+  /// \brief Whether the \c CachedLinkage field is active.
+  ///
+  /// This field is only valid for NamedDecls subclasses.
+  mutable unsigned HasCachedLinkage : 1;
+  
+  /// \brief If \c HasCachedLinkage, the linkage of this declaration.
+  ///
+  /// This field is only valid for NamedDecls subclasses.
+  mutable unsigned CachedLinkage : 2;
+  
+  
 private:
-#ifndef NDEBUG
   void CheckAccessDeclContext() const;
-#else
-  void CheckAccessDeclContext() const { }
-#endif
 
 protected:
 
@@ -247,7 +254,9 @@ protected:
       Loc(L), DeclKind(DK), InvalidDecl(0),
       HasAttrs(false), Implicit(false), Used(false),
       Access(AS_none), PCHLevel(0), ChangedAfterLoad(false),
-      IdentifierNamespace(getIdentifierNamespaceForKind(DK)) {
+      IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
+      HasCachedLinkage(0) 
+  {
     if (Decl::CollectingStats()) add(DK);
   }
 
@@ -255,7 +264,9 @@ protected:
     : NextDeclInContext(0), DeclKind(DK), InvalidDecl(0),
       HasAttrs(false), Implicit(false), Used(false),
       Access(AS_none), PCHLevel(0), ChangedAfterLoad(false),
-      IdentifierNamespace(getIdentifierNamespaceForKind(DK)) {
+      IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
+      HasCachedLinkage(0)
+  {
     if (Decl::CollectingStats()) add(DK);
   }
 
@@ -288,6 +299,13 @@ public:
     return const_cast<Decl*>(this)->getDeclContext();
   }
 
+  /// Finds the innermost non-closure context of this declaration.
+  /// That is, walk out the DeclContext chain, skipping any blocks.
+  DeclContext *getNonClosureContext();
+  const DeclContext *getNonClosureContext() const {
+    return const_cast<Decl*>(this)->getNonClosureContext();
+  }
+
   TranslationUnitDecl *getTranslationUnitDecl();
   const TranslationUnitDecl *getTranslationUnitDecl() const {
     return const_cast<Decl*>(this)->getTranslationUnitDecl();
@@ -299,17 +317,21 @@ public:
 
   void setAccess(AccessSpecifier AS) {
     Access = AS;
+#ifndef NDEBUG
     CheckAccessDeclContext();
+#endif
   }
 
   AccessSpecifier getAccess() const {
+#ifndef NDEBUG
     CheckAccessDeclContext();
+#endif
     return AccessSpecifier(Access);
   }
 
   bool hasAttrs() const { return HasAttrs; }
   void setAttrs(const AttrVec& Attrs);
-  AttrVec& getAttrs() {
+  AttrVec &getAttrs() {
     return const_cast<AttrVec&>(const_cast<const Decl*>(this)->getAttrs());
   }
   const AttrVec &getAttrs() const;
@@ -552,6 +574,9 @@ public:
   /// template parameter pack.
   bool isTemplateParameterPack() const;
 
+  /// \brief Whether this declaration is a parameter pack.
+  bool isParameterPack() const;
+  
   /// \brief Whether this declaration is a function or function template.
   bool isFunctionOrFunctionTemplate() const;
 
@@ -622,6 +647,8 @@ public:
                          llvm::raw_ostream &Out, const PrintingPolicy &Policy,
                          unsigned Indentation = 0);
   void dump() const;
+  void dumpXML() const;
+  void dumpXML(llvm::raw_ostream &OS) const;
 
 private:
   const Attr *getAttrsImpl() const;
@@ -765,6 +792,10 @@ public:
   
   ASTContext &getParentASTContext() const {
     return cast<Decl>(this)->getASTContext();
+  }
+
+  bool isClosure() const {
+    return DeclKind == Decl::Block;
   }
 
   bool isFunctionOrMethod() const {
