@@ -1,0 +1,20 @@
+/*
+ * README.android describes in high-level the LLVM changes that we cannot push
+ * upstream to the llvm.org repository:
+ *  - Changes due to Android's build system.
+ *  - Changes due to Android's toolchain.
+ *  - Changes due to the limitations in Android-based consumer electronics.
+ *
+ * Some of them are to-dos. If and when they are done, there will no longer be
+ * merge conflicts with upstream on those parts.
+ *
+ * The file contains useful hints when we try to resolve future 3-way merge
+ * conflicts.
+ */
+
+* Synced to upstream r127120
+
+* We add Android's *.mk files that are specific to Android's build system.
+
+* Changes for enabling both host and device builds.
+
