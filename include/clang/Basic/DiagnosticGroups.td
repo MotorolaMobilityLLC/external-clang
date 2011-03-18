@@ -137,6 +137,7 @@ def Trigraphs      : DiagGroup<"trigraphs">;
 
 def : DiagGroup<"type-limits">;
 def Uninitialized  : DiagGroup<"uninitialized">;
+def UninitializedMaybe : DiagGroup<"conditional-uninitialized">;
 def UnknownPragmas : DiagGroup<"unknown-pragmas">;
 def UnknownAttributes : DiagGroup<"unknown-attributes">;
 def UnnamedTypeTemplateArgs : DiagGroup<"unnamed-type-template-args">;
@@ -168,6 +169,7 @@ def VolatileRegisterVar : DiagGroup<"volatile-register-var">;
 def : DiagGroup<"write-strings">;
 def CharSubscript : DiagGroup<"char-subscripts">;
 def LargeByValueCopy : DiagGroup<"large-by-value-copy">;
+def DuplicateArgDecl : DiagGroup<"duplicate-method-arg">;
 
 // Aggregation warning settings.
 

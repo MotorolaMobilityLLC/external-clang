@@ -1049,17 +1049,19 @@ class NonTypeTemplateParmDecl
   /// \brief The number of types in an expanded parameter pack.
   unsigned NumExpandedTypes;
     
-  NonTypeTemplateParmDecl(DeclContext *DC, SourceLocation L, unsigned D,
-                          unsigned P, IdentifierInfo *Id, QualType T,
+  NonTypeTemplateParmDecl(DeclContext *DC, SourceLocation StartLoc,
+                          SourceLocation IdLoc, unsigned D, unsigned P,
+                          IdentifierInfo *Id, QualType T,
                           bool ParameterPack, TypeSourceInfo *TInfo)
-    : DeclaratorDecl(NonTypeTemplateParm, DC, L, Id, T, TInfo),
+    : DeclaratorDecl(NonTypeTemplateParm, DC, IdLoc, Id, T, TInfo, StartLoc),
       TemplateParmPosition(D, P), DefaultArgumentAndInherited(0, false),
       ParameterPack(ParameterPack), ExpandedParameterPack(false),
       NumExpandedTypes(0)
   { }
 
-  NonTypeTemplateParmDecl(DeclContext *DC, SourceLocation L, unsigned D,
-                          unsigned P, IdentifierInfo *Id, QualType T,
+  NonTypeTemplateParmDecl(DeclContext *DC, SourceLocation StartLoc,
+                          SourceLocation IdLoc, unsigned D, unsigned P,
+                          IdentifierInfo *Id, QualType T,
                           TypeSourceInfo *TInfo,
                           const QualType *ExpandedTypes,
                           unsigned NumExpandedTypes,
@@ -1069,13 +1071,14 @@ class NonTypeTemplateParmDecl
     
 public:
   static NonTypeTemplateParmDecl *
-  Create(const ASTContext &C, DeclContext *DC, SourceLocation L, unsigned D,
-         unsigned P, IdentifierInfo *Id, QualType T, bool ParameterPack, 
-         TypeSourceInfo *TInfo);
+  Create(const ASTContext &C, DeclContext *DC, SourceLocation StartLoc,
+         SourceLocation IdLoc, unsigned D, unsigned P, IdentifierInfo *Id,
+         QualType T, bool ParameterPack, TypeSourceInfo *TInfo);
 
   static NonTypeTemplateParmDecl *
-  Create(const ASTContext &C, DeclContext *DC, SourceLocation L, unsigned D,
-         unsigned P, IdentifierInfo *Id, QualType T, TypeSourceInfo *TInfo,
+  Create(const ASTContext &C, DeclContext *DC, SourceLocation StartLoc,
+         SourceLocation IdLoc, unsigned D, unsigned P, IdentifierInfo *Id,
+         QualType T, TypeSourceInfo *TInfo,
          const QualType *ExpandedTypes, unsigned NumExpandedTypes,
          TypeSourceInfo **ExpandedTInfos);
 
@@ -1085,7 +1088,6 @@ public:
   using TemplateParmPosition::setPosition;
   using TemplateParmPosition::getIndex;
 
-  SourceLocation getInnerLocStart() const;
   SourceRange getSourceRange() const;
 
   /// \brief Determine whether this template parameter has a default
@@ -1344,7 +1346,8 @@ class ClassTemplateSpecializationDecl
 
 protected:
   ClassTemplateSpecializationDecl(ASTContext &Context, Kind DK, TagKind TK,
-                                  DeclContext *DC, SourceLocation L,
+                                  DeclContext *DC, SourceLocation StartLoc,
+                                  SourceLocation IdLoc,
                                   ClassTemplateDecl *SpecializedTemplate,
                                   const TemplateArgument *Args,
                                   unsigned NumArgs,
@@ -1354,7 +1357,8 @@ protected:
 
 public:
   static ClassTemplateSpecializationDecl *
-  Create(ASTContext &Context, TagKind TK, DeclContext *DC, SourceLocation L,
+  Create(ASTContext &Context, TagKind TK, DeclContext *DC,
+         SourceLocation StartLoc, SourceLocation IdLoc,
          ClassTemplateDecl *SpecializedTemplate,
          const TemplateArgument *Args,
          unsigned NumArgs,
@@ -1516,8 +1520,6 @@ public:
     return ExplicitInfo ? ExplicitInfo->TemplateKeywordLoc : SourceLocation();
   }
 
-  SourceLocation getInnerLocStart() const { return getTemplateKeywordLoc(); }
-
   SourceRange getSourceRange() const;
 
   void Profile(llvm::FoldingSetNodeID &ID) const {
@@ -1574,7 +1576,9 @@ class ClassTemplatePartialSpecializationDecl
       InstantiatedFromMember;
     
   ClassTemplatePartialSpecializationDecl(ASTContext &Context, TagKind TK,
-                                         DeclContext *DC, SourceLocation L,
+                                         DeclContext *DC,
+                                         SourceLocation StartLoc,
+                                         SourceLocation IdLoc,
                                          TemplateParameterList *Params,
                                          ClassTemplateDecl *SpecializedTemplate,
                                          const TemplateArgument *Args,
@@ -1592,7 +1596,8 @@ class ClassTemplatePartialSpecializationDecl
 
 public:
   static ClassTemplatePartialSpecializationDecl *
-  Create(ASTContext &Context, TagKind TK,DeclContext *DC, SourceLocation L,
+  Create(ASTContext &Context, TagKind TK,DeclContext *DC,
+         SourceLocation StartLoc, SourceLocation IdLoc,
          TemplateParameterList *Params,
          ClassTemplateDecl *SpecializedTemplate,
          const TemplateArgument *Args,

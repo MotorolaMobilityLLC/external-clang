@@ -154,6 +154,11 @@ bool CodeGenModule::isTargetDarwin() const {
   return getContext().Target.getTriple().getOS() == llvm::Triple::Darwin;
 }
 
+void CodeGenModule::Error(SourceLocation loc, llvm::StringRef error) {
+  unsigned diagID = getDiags().getCustomDiagID(Diagnostic::Error, error);
+  getDiags().Report(Context.getFullLoc(loc), diagID);
+}
+
 /// ErrorUnsupported - Print out an error that codegen doesn't support the
 /// specified stmt yet.
 void CodeGenModule::ErrorUnsupported(const Stmt *S, const char *Type,
@@ -1281,7 +1286,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
     EmitCXXGlobalVarDeclInitFunc(D, GV);
 
   // Emit global variable debug information.
-  if (CGDebugInfo *DI = getDebugInfo()) {
+  if (CGDebugInfo *DI = getModuleDebugInfo()) {
     DI->setLocation(D->getLocation());
     DI->EmitGlobalVariable(GV, D);
   }
@@ -1391,7 +1396,14 @@ static void ReplaceUsesOfNonProtoTypeWithRealFunction(llvm::GlobalValue *Old,
 
 void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD) {
   const FunctionDecl *D = cast<FunctionDecl>(GD.getDecl());
-  const llvm::FunctionType *Ty = getTypes().GetFunctionType(GD);
+
+  // Compute the function info and LLVM type.
+  const CGFunctionInfo &FI = getTypes().getFunctionInfo(GD);
+  bool variadic = false;
+  if (const FunctionProtoType *fpt = D->getType()->getAs<FunctionProtoType>())
+    variadic = fpt->isVariadic();
+  const llvm::FunctionType *Ty = getTypes().GetFunctionType(FI, variadic, false);
+
   // Get or create the prototype for the function.
   llvm::Constant *Entry = GetAddrOfFunction(GD, Ty);
 
@@ -1451,7 +1463,7 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD) {
   // FIXME: this is redundant with part of SetFunctionDefinitionAttributes
   setGlobalVisibility(Fn, D);
 
-  CodeGenFunction(*this).GenerateCode(D, Fn);
+  CodeGenFunction(*this).GenerateCode(D, Fn, FI);
 
   SetFunctionDefinitionAttributes(D, Fn);
   SetLLVMFunctionAttributesForDefinition(D, Fn);
@@ -1662,7 +1674,10 @@ CodeGenModule::GetAddrOfConstantCFString(const StringLiteral *Literal) {
     // does make plain ascii ones writable.
     isConstant = true;
   } else {
-    Linkage = llvm::GlobalValue::PrivateLinkage;
+    // FIXME: With OS X ld 123.2 (xcode 4) and LTO we would get a linker error
+    // when using private linkage. It is not clear if this is a bug in ld
+    // or a reasonable new restriction.
+    Linkage = llvm::GlobalValue::LinkerPrivateLinkage;
     isConstant = !Features.WritableStrings;
   }
   
@@ -1924,7 +1939,7 @@ void CodeGenModule::EmitObjCPropertyImplementations(const
 /// EmitObjCIvarInitializations - Emit information for ivar initialization
 /// for an implementation.
 void CodeGenModule::EmitObjCIvarInitializations(ObjCImplementationDecl *D) {
-  if (!Features.NeXTRuntime || D->getNumIvarInitializers() == 0)
+  if (D->getNumIvarInitializers() == 0)
     return;
   DeclContext* DC = const_cast<DeclContext*>(dyn_cast<DeclContext>(D));
   assert(DC && "EmitObjCIvarInitializations - null DeclContext");

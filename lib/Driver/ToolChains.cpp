@@ -114,7 +114,8 @@ llvm::StringRef Darwin::getDarwinArchName(const ArgList &Args) const {
   switch (getTriple().getArch()) {
   default:
     return getArchName();
-
+  
+  case llvm::Triple::thumb:
   case llvm::Triple::arm: {
     if (const Arg *A = Args.getLastArg(options::OPT_march_EQ))
       if (const char *Arch = GetArmArchForMArch(A->getValue(Args)))
@@ -1279,6 +1280,8 @@ enum LinuxDistro {
   Fedora13,
   Fedora14,
   OpenSuse11_3,
+  UbuntuHardy,
+  UbuntuIntrepid,
   UbuntuJaunty,
   UbuntuKarmic,
   UbuntuLucid,
@@ -1299,7 +1302,8 @@ static bool IsDebian(enum LinuxDistro Distro) {
 }
 
 static bool IsUbuntu(enum LinuxDistro Distro) {
-  return Distro == UbuntuLucid || Distro == UbuntuMaverick || 
+  return Distro == UbuntuHardy  || Distro == UbuntuIntrepid ||
+         Distro == UbuntuLucid  || Distro == UbuntuMaverick || 
          Distro == UbuntuJaunty || Distro == UbuntuKarmic;
 }
 
@@ -1328,6 +1332,10 @@ static LinuxDistro DetectLinuxDistro(llvm::Triple::ArchType Arch) {
     llvm::SmallVector<llvm::StringRef, 8> Lines;
     Data.split(Lines, "\n");
     for (unsigned int i = 0, s = Lines.size(); i < s; ++ i) {
+      if (Lines[i] == "DISTRIB_CODENAME=hardy")
+        return UbuntuHardy;
+      if (Lines[i] == "DISTRIB_CODENAME=intrepid")
+        return UbuntuIntrepid;      
       if (Lines[i] == "DISTRIB_CODENAME=maverick")
         return UbuntuMaverick;
       else if (Lines[i] == "DISTRIB_CODENAME=lucid")
@@ -1401,7 +1409,7 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
     Lib64 = "lib64";
 
   std::string GccTriple = "";
-  if (Arch == llvm::Triple::arm) {
+  if (Arch == llvm::Triple::arm || Arch == llvm::Triple::thumb) {
     if (!llvm::sys::fs::exists("/usr/lib/gcc/arm-linux-gnueabi", Exists) &&
         Exists)
       GccTriple = "arm-linux-gnueabi";
@@ -1443,7 +1451,8 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
 
   const char* GccVersions[] = {"4.5.2", "4.5.1", "4.5", "4.4.5", "4.4.4",
                                "4.4.3", "4.4", "4.3.4", "4.3.3", "4.3.2",
-                               "4.3"};
+                               "4.3", "4.2.4", "4.2.3", "4.2.2", "4.2.1",
+                               "4.2"};
   std::string Base = "";
   for (unsigned i = 0; i < sizeof(GccVersions)/sizeof(char*); ++i) {
     std::string Suffix = GccTriple + "/" + GccVersions[i];
@@ -1486,7 +1495,7 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
     ExtraOpts.push_back("relro");
   }
 
-  if (Arch == llvm::Triple::arm)
+  if (Arch == llvm::Triple::arm || Arch == llvm::Triple::thumb)
     ExtraOpts.push_back("-X");
 
   if (IsFedora(Distro) || Distro == UbuntuMaverick)

@@ -98,7 +98,7 @@ static void AnalyzerOptsToArgs(const AnalyzerOptions &Opts,
     Res.push_back("-trim-egraph");
   if (Opts.VisualizeEGDot)
     Res.push_back("-analyzer-viz-egraph-graphviz");
-  if (Opts.VisualizeEGDot)
+  if (Opts.VisualizeEGUbi)
     Res.push_back("-analyzer-viz-egraph-ubigraph");
 
   for (unsigned i = 0, e = Opts.CheckersControlList.size(); i != e; ++i) {
@@ -127,6 +127,8 @@ static void CodeGenOptsToArgs(const CodeGenOptions &Opts,
     Res.push_back("-fno-merge-all-constants");
   if (Opts.NoCommon)
     Res.push_back("-fno-common");
+  if (Opts.ForbidGuardVariables)
+    Res.push_back("-fforbid-guard-variables");
   if (Opts.NoImplicitFloat)
     Res.push_back("-no-implicit-float");
   if (Opts.OmitLeafFramePointer)
@@ -322,7 +324,6 @@ static const char *getActionName(frontend::ActionKind Kind) {
   case frontend::ASTDump:                return "-ast-dump";
   case frontend::ASTDumpXML:             return "-ast-dump-xml";
   case frontend::ASTPrint:               return "-ast-print";
-  case frontend::ASTPrintXML:            return "-ast-print-xml";
   case frontend::ASTView:                return "-ast-view";
   case frontend::BoostCon:               return "-boostcon";
   case frontend::CreateModule:           return "-create-module";
@@ -705,6 +706,10 @@ static void PreprocessorOptsToArgs(const PreprocessorOptions &Opts,
       assert(Opts.ImplicitPTHInclude == Opts.TokenCache &&
              "Unsupported option combination!");
   }
+  for (unsigned i = 0, e = Opts.ChainedIncludes.size(); i != e; ++i) {
+    Res.push_back("-chain-include");
+    Res.push_back(Opts.ChainedIncludes[i]);
+  }
   for (unsigned i = 0, e = Opts.RemappedFiles.size(); i != e; ++i) {
     Res.push_back("-remap-file");
     Res.push_back(Opts.RemappedFiles[i].first + ";" +
@@ -893,6 +898,7 @@ static void ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.LimitDebugInfo = Args.hasArg(OPT_flimit_debug_info);
   Opts.DisableLLVMOpts = Args.hasArg(OPT_disable_llvm_optzns);
   Opts.DisableRedZone = Args.hasArg(OPT_disable_red_zone);
+  Opts.ForbidGuardVariables = Args.hasArg(OPT_fforbid_guard_variables);
   Opts.RelaxedAliasing = Args.hasArg(OPT_relaxed_aliasing);
   Opts.DwarfDebugFlags = Args.getLastArgValue(OPT_dwarf_debug_flags);
   Opts.MergeAllConstants = !Args.hasArg(OPT_fno_merge_all_constants);
@@ -1039,8 +1045,6 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
       Opts.ProgramAction = frontend::ASTDumpXML; break;
     case OPT_ast_print:
       Opts.ProgramAction = frontend::ASTPrint; break;
-    case OPT_ast_print_xml:
-      Opts.ProgramAction = frontend::ASTPrintXML; break;
     case OPT_ast_view:
       Opts.ProgramAction = frontend::ASTView; break;
     case OPT_boostcon:
@@ -1563,6 +1567,12 @@ static void ParsePreprocessorArgs(PreprocessorOptions &Opts, ArgList &Args,
       Opts.Includes.push_back(OriginalFile);
     } else
       Opts.Includes.push_back(A->getValue(Args));
+  }
+
+  for (arg_iterator it = Args.filtered_begin(OPT_chain_include),
+         ie = Args.filtered_end(); it != ie; ++it) {
+    const Arg *A = *it;
+    Opts.ChainedIncludes.push_back(A->getValue(Args));
   }
 
   // Include 'altivec.h' if -faltivec option present

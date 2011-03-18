@@ -41,7 +41,7 @@ using namespace clang::driver::tools;
 /// arguments that is shared with gcc.
 static void CheckPreprocessingOptions(const Driver &D, const ArgList &Args) {
   if (Arg *A = Args.getLastArg(options::OPT_C, options::OPT_CC))
-    if (!Args.hasArg(options::OPT_E))
+    if (!Args.hasArg(options::OPT_E) && !D.CCCIsCPP)
       D.Diag(clang::diag::err_drv_argument_only_allowed_with)
         << A->getAsString(Args) << "-E";
 }
@@ -420,7 +420,8 @@ static bool isSignedCharDefault(const llvm::Triple &Triple) {
 }
 
 void Clang::AddARMTargetArgs(const ArgList &Args,
-                             ArgStringList &CmdArgs) const {
+                             ArgStringList &CmdArgs,
+                             bool KernelOrKext) const {
   const Driver &D = getToolChain().getDriver();
   llvm::Triple Triple = getToolChain().getTriple();
 
@@ -582,6 +583,22 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
       CmdArgs.push_back("+neon");
     } else
       D.Diag(clang::diag::err_drv_clang_unsupported) << A->getAsString(Args);
+  }
+
+  // Setting -msoft-float effectively disables NEON because of the GCC
+  // implementation, although the same isn't true of VFP or VFP3.
+  if (FloatABI == "soft") {
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back("-neon");
+  }
+
+  // Kernel code has more strict alignment requirements.
+  if (KernelOrKext) {
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-arm-long-calls");
+
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-arm-strict-align");
   }
 }
 
@@ -826,25 +843,16 @@ static void addExceptionArgs(const ArgList &Args, types::ID InputType,
   if (ExceptionsEnabled && DidHaveExplicitExceptionFlag)
     ShouldUseExceptionTables = true;
 
-  if (types::isObjC(InputType)) {
-    bool ObjCExceptionsEnabled = ExceptionsEnabled;
+  // Obj-C exceptions are enabled by default, regardless of -fexceptions. This
+  // is not necessarily sensible, but follows GCC.
+  if (types::isObjC(InputType) &&
+      Args.hasFlag(options::OPT_fobjc_exceptions, 
+                   options::OPT_fno_objc_exceptions,
+                   true)) {
+    CmdArgs.push_back("-fobjc-exceptions");
 
-    if (Arg *A = Args.getLastArg(options::OPT_fobjc_exceptions, 
-                                 options::OPT_fno_objc_exceptions,
-                                 options::OPT_fexceptions,
-                                 options::OPT_fno_exceptions)) {
-      if (A->getOption().matches(options::OPT_fobjc_exceptions))
-        ObjCExceptionsEnabled = true;
-      else if (A->getOption().matches(options::OPT_fno_objc_exceptions))
-        ObjCExceptionsEnabled = false;
-    }
-
-    if (ObjCExceptionsEnabled) {
-      CmdArgs.push_back("-fobjc-exceptions");
-
-      ShouldUseExceptionTables |= 
-        shouldUseExceptionTablesForObjCExceptions(Args, Triple);
-    }
+    ShouldUseExceptionTables |= 
+      shouldUseExceptionTablesForObjCExceptions(Args, Triple);
   }
 
   if (types::isCXX(InputType)) {
@@ -1011,7 +1019,8 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       if (getToolChain().getTriple().getVendor() == llvm::Triple::Apple)
         CmdArgs.push_back("-analyzer-checker=macosx");
 
-      CmdArgs.push_back("-analyzer-checker=DeadStores");
+      CmdArgs.push_back("-analyzer-checker=deadcode.DeadStores");
+      CmdArgs.push_back("-analyzer-checker=deadcode.IdempotentOperations");
 
       // Checks to perform for Objective-C/Objective-C++.
       if (types::isObjC(InputType)) {
@@ -1129,6 +1138,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (getToolChain().getTriple().getOS() != llvm::Triple::Darwin)
     CmdArgs.push_back("-mconstructor-aliases");
 
+  // Darwin's kernel doesn't support guard variables; just die if we
+  // try to use them.
+  if (KernelOrKext &&
+      getToolChain().getTriple().getOS() == llvm::Triple::Darwin)
+    CmdArgs.push_back("-fforbid-guard-variables");
+
   if (Args.hasArg(options::OPT_mms_bitfields)) {
     CmdArgs.push_back("-mms-bitfields");
   }
@@ -1165,7 +1180,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
-    AddARMTargetArgs(Args, CmdArgs);
+    AddARMTargetArgs(Args, CmdArgs, KernelOrKext);
     break;
 
   case llvm::Triple::mips:
@@ -1887,7 +1902,8 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
                     !IsOpt))
     CmdArgs.push_back("-relax-all");
 
-  // FIXME: Add -force_cpusubtype_ALL support, once we have it.
+  // Ignore explicit -force_cpusubtype_ALL option.
+  (void) Args.hasArg(options::OPT_force__cpusubtype__ALL);
 
   // FIXME: Add -g support, once we have it.
 
@@ -2403,7 +2419,7 @@ void darwin::Preprocess::ConstructJob(Compilation &C, const JobAction &JA,
   OutputArgs.push_back("-o");
   OutputArgs.push_back(Output.getFilename());
 
-  if (Args.hasArg(options::OPT_E)) {
+  if (Args.hasArg(options::OPT_E) || getToolChain().getDriver().CCCIsCPP) {
     AddCPPOptionsArgs(Args, CmdArgs, Inputs, OutputArgs);
   } else {
     AddCPPOptionsArgs(Args, CmdArgs, Inputs, ArgStringList());
@@ -3599,13 +3615,15 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back("-m");
   if (ToolChain.getArch() == llvm::Triple::x86)
     CmdArgs.push_back("elf_i386");
-  else if (ToolChain.getArch() == llvm::Triple::arm)
+  else if (ToolChain.getArch() == llvm::Triple::arm 
+           ||  ToolChain.getArch() == llvm::Triple::thumb)
     CmdArgs.push_back("armelf_linux_eabi");
   else
     CmdArgs.push_back("elf_x86_64");
 
   if (Args.hasArg(options::OPT_static)) {
-    if (ToolChain.getArch() == llvm::Triple::arm)
+    if (ToolChain.getArch() == llvm::Triple::arm
+        || ToolChain.getArch() == llvm::Triple::thumb)
       CmdArgs.push_back("-Bstatic");
     else
       CmdArgs.push_back("-static");
@@ -3614,12 +3632,14 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   if (ToolChain.getArch() == llvm::Triple::arm ||
+      ToolChain.getArch() == llvm::Triple::thumb ||
       (!Args.hasArg(options::OPT_static) &&
        !Args.hasArg(options::OPT_shared))) {
     CmdArgs.push_back("-dynamic-linker");
     if (ToolChain.getArch() == llvm::Triple::x86)
       CmdArgs.push_back("/lib/ld-linux.so.2");
-    else if (ToolChain.getArch() == llvm::Triple::arm)
+    else if (ToolChain.getArch() == llvm::Triple::arm ||
+             ToolChain.getArch() == llvm::Triple::thumb)
       CmdArgs.push_back("/lib/ld-linux.so.3");
     else
       CmdArgs.push_back("/lib64/ld-linux-x86-64.so.2");

@@ -20,6 +20,8 @@
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/Job.h"
+#include "clang/Driver/ArgList.h"
+#include "clang/Driver/Options.h"
 #include "clang/Driver/Tool.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
@@ -42,6 +44,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Timer.h"
+#include "llvm/Support/CrashRecoveryContext.h"
 #include <cstdlib>
 #include <cstdio>
 #include <sys/stat.h>
@@ -90,7 +93,8 @@ const unsigned DefaultPreambleRebuildInterval = 5;
 static llvm::sys::cas_flag ActiveASTUnitObjects;
 
 ASTUnit::ASTUnit(bool _MainFileIsAST)
-  : CaptureDiagnostics(false), MainFileIsAST(_MainFileIsAST), 
+  : OnlyLocalDecls(false), CaptureDiagnostics(false),
+    MainFileIsAST(_MainFileIsAST), 
     CompleteTranslationUnit(true), WantTiming(getenv("LIBCLANG_TIMING")),
     OwnsRemappedFileBuffers(true),
     NumStoredDiagnosticsFromDriver(0),
@@ -497,6 +501,12 @@ ASTUnit *ASTUnit::LoadFromASTFile(const std::string &Filename,
                                   unsigned NumRemappedFiles,
                                   bool CaptureDiagnostics) {
   llvm::OwningPtr<ASTUnit> AST(new ASTUnit(true));
+
+  // Recover resources if we crash before exiting this method.
+  llvm::CrashRecoveryContextCleanupRegistrar
+    ASTUnitCleanup(llvm::CrashRecoveryContextCleanup::
+                    create<ASTUnit>(AST.get()));
+
   ConfigureDiags(Diags, 0, 0, *AST, CaptureDiagnostics);
 
   AST->OnlyLocalDecls = OnlyLocalDecls;
@@ -1520,6 +1530,19 @@ llvm::StringRef ASTUnit::getMainFileName() const {
   return Invocation->getFrontendOpts().Inputs[0].second;
 }
 
+ASTUnit *ASTUnit::create(CompilerInvocation *CI,
+                         llvm::IntrusiveRefCntPtr<Diagnostic> Diags) {
+  llvm::OwningPtr<ASTUnit> AST;
+  AST.reset(new ASTUnit(false));
+  ConfigureDiags(Diags, 0, 0, *AST, /*CaptureDiagnostics=*/false);
+  AST->Diagnostics = Diags;
+  AST->Invocation.reset(CI);
+  AST->FileMgr.reset(new FileManager(CI->getFileSystemOpts()));
+  AST->SourceMgr.reset(new SourceManager(*Diags, *AST->FileMgr));
+
+  return AST.take();
+}
+
 bool ASTUnit::LoadFromCompilerInvocation(bool PrecompilePreamble) {
   if (!Invocation)
     return true;
@@ -1563,6 +1586,11 @@ ASTUnit *ASTUnit::LoadFromCompilerInvocation(CompilerInvocation *CI,
   AST->ShouldCacheCodeCompletionResults = CacheCodeCompletionResults;
   AST->Invocation.reset(CI);
   
+  // Recover resources if we crash before exiting this method.
+  llvm::CrashRecoveryContextCleanupRegistrar
+    ASTUnitCleanup(llvm::CrashRecoveryContextCleanup::
+                   create<ASTUnit>(AST.get()));
+
   return AST->LoadFromCompilerInvocation(PrecompilePreamble)? 0 : AST.take();
 }
 
@@ -1574,6 +1602,7 @@ ASTUnit *ASTUnit::LoadFromCommandLine(const char **ArgBegin,
                                       bool CaptureDiagnostics,
                                       RemappedFile *RemappedFiles,
                                       unsigned NumRemappedFiles,
+                                      bool RemappedFilesKeepOriginalName,
                                       bool PrecompilePreamble,
                                       bool CompleteTranslationUnit,
                                       bool CacheCodeCompletionResults,
@@ -1613,6 +1642,12 @@ ASTUnit *ASTUnit::LoadFromCommandLine(const char **ArgBegin,
     llvm::OwningPtr<driver::Compilation> C(
       TheDriver.BuildCompilation(Args.size(), Args.data()));
 
+    // Just print the cc1 options if -### was present.
+    if (C->getArgs().hasArg(driver::options::OPT__HASH_HASH_HASH)) {
+      C->PrintJob(llvm::errs(), C->getJobs(), "\n", true);
+      return 0;
+    }
+
     // We expect to get back exactly one command job, if we didn't something
     // failed.
     const driver::JobList &Jobs = C->getJobs();
@@ -1650,6 +1685,8 @@ ASTUnit *ASTUnit::LoadFromCommandLine(const char **ArgBegin,
       CI->getPreprocessorOpts().addRemappedFile(RemappedFiles[I].first, fname);
     }
   }
+  CI->getPreprocessorOpts().RemappedFilesKeepOriginalName =
+                                                  RemappedFilesKeepOriginalName;
   
   // Override the resources path.
   CI->getHeaderSearchOpts().ResourceDir = ResourceFilesPath;
@@ -1679,6 +1716,12 @@ ASTUnit *ASTUnit::LoadFromCommandLine(const char **ArgBegin,
   AST->NumStoredDiagnosticsInPreamble = StoredDiagnostics.size();
   AST->StoredDiagnostics.swap(StoredDiagnostics);
   AST->Invocation.reset(CI.take());
+  
+  // Recover resources if we crash before exiting this method.
+  llvm::CrashRecoveryContextCleanupRegistrar
+    ASTUnitCleanup(llvm::CrashRecoveryContextCleanup::
+                    create<ASTUnit>(AST.get()));
+
   return AST->LoadFromCompilerInvocation(PrecompilePreamble) ? 0 : AST.take();
 }
 
@@ -2137,7 +2180,16 @@ bool ASTUnit::Save(llvm::StringRef File) {
                            llvm::raw_fd_ostream::F_Binary);
   if (!ErrorInfo.empty() || Out.has_error())
     return true;
-  
+
+  serialize(Out);
+  Out.close();
+  return Out.has_error();
+}
+
+bool ASTUnit::serialize(llvm::raw_ostream &OS) {
+  if (getDiagnostics().hasErrorOccurred())
+    return true;
+
   std::vector<unsigned char> Buffer;
   llvm::BitstreamWriter Stream(Buffer);
   ASTWriter Writer(Stream);
@@ -2145,7 +2197,7 @@ bool ASTUnit::Save(llvm::StringRef File) {
   
   // Write the generated bitstream to "Out".
   if (!Buffer.empty())
-    Out.write((char *)&Buffer.front(), Buffer.size());  
-  Out.close();
-  return Out.has_error();
+    OS.write((char *)&Buffer.front(), Buffer.size());
+
+  return false;
 }

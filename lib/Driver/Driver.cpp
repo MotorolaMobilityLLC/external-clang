@@ -63,8 +63,8 @@ Driver::Driver(llvm::StringRef _ClangExecutable,
     DriverTitle("clang \"gcc-compatible\" driver"),
     Host(0),
     CCPrintOptionsFilename(0), CCPrintHeadersFilename(0), CCCIsCXX(false),
-    CCCEcho(false), CCCPrintBindings(false), CCPrintOptions(false),
-    CCPrintHeaders(false), CCCGenericGCCName("gcc"),
+    CCCIsCPP(false),CCCEcho(false), CCCPrintBindings(false),
+    CCPrintOptions(false), CCPrintHeaders(false), CCCGenericGCCName("gcc"),
     CheckInputsExist(true), CCCUseClang(true), CCCUseClangCXX(true),
     CCCUseClangCPP(true), CCCUsePCH(true), SuppressMissingInputWarning(false) {
   if (IsProduction) {
@@ -593,7 +593,7 @@ static bool ContainsCompileAction(const Action *A) {
 }
 
 void Driver::BuildUniversalActions(const ToolChain &TC,
-                                   const ArgList &Args,
+                                   const DerivedArgList &Args,
                                    ActionList &Actions) const {
   llvm::PrettyStackTraceString CrashInfo("Building universal build actions");
   // Collect the list of architectures. Duplicates are allowed, but should only
@@ -688,7 +688,7 @@ void Driver::BuildUniversalActions(const ToolChain &TC,
   }
 }
 
-void Driver::BuildActions(const ToolChain &TC, const ArgList &Args,
+void Driver::BuildActions(const ToolChain &TC, const DerivedArgList &Args,
                           ActionList &Actions) const {
   llvm::PrettyStackTraceString CrashInfo("Building compilation actions");
   // Start by constructing the list of inputs and their types.
@@ -721,18 +721,23 @@ void Driver::BuildActions(const ToolChain &TC, const ArgList &Args,
           //
           // Otherwise emit an error but still use a valid type to avoid
           // spurious errors (e.g., no inputs).
-          if (!Args.hasArgNoClaim(options::OPT_E))
+          if (!Args.hasArgNoClaim(options::OPT_E) && !CCCIsCPP)
             Diag(clang::diag::err_drv_unknown_stdin_type);
           Ty = types::TY_C;
         } else {
-          // Otherwise lookup by extension, and fallback to ObjectType if not
-          // found. We use a host hook here because Darwin at least has its own
+          // Otherwise lookup by extension.
+          // Fallback is C if invoked as C preprocessor or Object otherwise.
+          // We use a host hook here because Darwin at least has its own
           // idea of what .s is.
           if (const char *Ext = strrchr(Value, '.'))
             Ty = TC.LookupTypeForExtension(Ext + 1);
 
-          if (Ty == types::TY_INVALID)
-            Ty = types::TY_Object;
+          if (Ty == types::TY_INVALID) {
+            if (CCCIsCPP)
+              Ty = types::TY_C;
+            else
+              Ty = types::TY_Object;
+          }
 
           // If the driver is invoked as C++ compiler (like clang++ or c++) it
           // should autodetect some input files as C++ for g++ compatibility.
@@ -799,6 +804,15 @@ void Driver::BuildActions(const ToolChain &TC, const ArgList &Args,
     }
   }
 
+  if (CCCIsCPP && Inputs.empty()) {
+    // If called as standalone preprocessor, stdin is processed
+    // if no other input is present.
+    unsigned Index = Args.getBaseArgs().MakeIndex("-");
+    Arg *A = Opts->ParseOneArg(Args, Index);
+    A->claim();
+    Inputs.push_back(std::make_pair(types::TY_C, A));
+  }
+
   if (!SuppressMissingInputWarning && Inputs.empty()) {
     Diag(clang::diag::err_drv_no_input_files);
     return;
@@ -811,7 +825,8 @@ void Driver::BuildActions(const ToolChain &TC, const ArgList &Args,
   phases::ID FinalPhase;
 
   // -{E,M,MM} only run the preprocessor.
-  if ((FinalPhaseArg = Args.getLastArg(options::OPT_E)) ||
+  if (CCCIsCPP ||
+      (FinalPhaseArg = Args.getLastArg(options::OPT_E)) ||
       (FinalPhaseArg = Args.getLastArg(options::OPT_M, options::OPT_MM))) {
     FinalPhase = phases::Preprocess;
 

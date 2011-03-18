@@ -96,7 +96,8 @@ class ASTContext {
     DependentSizedExtVectorTypes;
   mutable llvm::FoldingSet<VectorType> VectorTypes;
   mutable llvm::FoldingSet<FunctionNoProtoType> FunctionNoProtoTypes;
-  mutable llvm::FoldingSet<FunctionProtoType> FunctionProtoTypes;
+  mutable llvm::ContextualFoldingSet<FunctionProtoType, ASTContext&>
+    FunctionProtoTypes;
   mutable llvm::FoldingSet<DependentTypeOfExprType> DependentTypeOfExprTypes;
   mutable llvm::FoldingSet<DependentDecltypeType> DependentDecltypeTypes;
   mutable llvm::FoldingSet<TemplateTypeParmType> TemplateTypeParmTypes;
@@ -1332,7 +1333,8 @@ public:
                                const ObjCObjectType *RHS);
   bool canAssignObjCInterfacesInBlockPointer(
                                           const ObjCObjectPointerType *LHSOPT,
-                                          const ObjCObjectPointerType *RHSOPT);
+                                          const ObjCObjectPointerType *RHSOPT,
+                                          bool BlockReturnType);
   bool areComparableObjCPointerTypes(QualType LHS, QualType RHS);
   QualType areCommonBaseCompatible(const ObjCObjectPointerType *LHSOPT,
                                    const ObjCObjectPointerType *RHSOPT);
@@ -1340,7 +1342,7 @@ public:
 
   // Functions for calculating composite types
   QualType mergeTypes(QualType, QualType, bool OfBlockPointer=false,
-                      bool Unqualified = false);
+                      bool Unqualified = false, bool BlockReturnType = false);
   QualType mergeFunctionTypes(QualType, QualType, bool OfBlockPointer=false,
                               bool Unqualified = false);
   QualType mergeFunctionArgumentTypes(QualType, QualType,
@@ -1528,13 +1530,13 @@ private:
 };
   
 /// @brief Utility function for constructing a nullary selector.
-static inline Selector GetNullarySelector(const char* name, ASTContext& Ctx) {
+static inline Selector GetNullarySelector(llvm::StringRef name, ASTContext& Ctx) {
   IdentifierInfo* II = &Ctx.Idents.get(name);
   return Ctx.Selectors.getSelector(0, &II);
 }
 
 /// @brief Utility function for constructing an unary selector.
-static inline Selector GetUnarySelector(const char* name, ASTContext& Ctx) {
+static inline Selector GetUnarySelector(llvm::StringRef name, ASTContext& Ctx) {
   IdentifierInfo* II = &Ctx.Idents.get(name);
   return Ctx.Selectors.getSelector(1, &II);
 }

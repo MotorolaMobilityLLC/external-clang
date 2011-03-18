@@ -2436,19 +2436,19 @@ private:
   unsigned NumArgs : 20;
 
   /// NumExceptions - The number of types in the exception spec, if any.
-  unsigned NumExceptions : 10;
+  unsigned NumExceptions : 9;
 
-  /// HasExceptionSpec - Whether this function has an exception spec at all.
-  unsigned HasExceptionSpec : 1;
-
-  /// HasAnyExceptionSpec - Whether this function has a throw(...) spec.
-  unsigned HasAnyExceptionSpec : 1;
+  /// ExceptionSpecType - The type of exception specification this function has.
+  unsigned ExceptionSpecType : 3;
 
   /// ArgInfo - There is an variable size array after the class in memory that
   /// holds the argument types.
 
   /// Exceptions - There is another variable size array after ArgInfo that
   /// holds the exception types.
+
+  /// NoexceptExpr - Instead of Exceptions, there may be a single Expr* pointing
+  /// to the expression in the noexcept() specifier.
 
   friend class ASTContext;  // ASTContext creates these.
 
@@ -2463,29 +2463,66 @@ public:
     ExtProtoInfo EPI;
     EPI.ExtInfo = getExtInfo();
     EPI.Variadic = isVariadic();
-    EPI.ExceptionSpecType = hasExceptionSpec() ?
-        (hasAnyExceptionSpec() ? EST_DynamicAny : EST_Dynamic) : EST_None;
+    EPI.ExceptionSpecType = getExceptionSpecType();
     EPI.TypeQuals = static_cast<unsigned char>(getTypeQuals());
     EPI.RefQualifier = getRefQualifier();
-    EPI.NumExceptions = NumExceptions;
-    EPI.Exceptions = exception_begin();
+    if (EPI.ExceptionSpecType == EST_Dynamic) {
+      EPI.NumExceptions = NumExceptions;
+      EPI.Exceptions = exception_begin();
+    } else if (EPI.ExceptionSpecType == EST_ComputedNoexcept) {
+      EPI.NoexceptExpr = getNoexceptExpr();
+    }
     return EPI;
   }
 
-  bool hasExceptionSpec() const { return HasExceptionSpec; }
-  bool hasAnyExceptionSpec() const { return HasAnyExceptionSpec; }
+  /// \brief Get the kind of exception specification on this function.
+  ExceptionSpecificationType getExceptionSpecType() const {
+    return static_cast<ExceptionSpecificationType>(ExceptionSpecType);
+  }
+  /// \brief Return whether this function has any kind of exception spec.
+  bool hasExceptionSpec() const {
+    return getExceptionSpecType() != EST_None;
+  }
+  /// \brief Return whether this function has a dynamic (throw) exception spec.
+  bool hasDynamicExceptionSpec() const {
+    return isDynamicExceptionSpec(getExceptionSpecType());
+  }
+  /// \brief Return whther this function has a noexcept exception spec.
+  bool hasNoexceptExceptionSpec() const {
+    return isNoexceptExceptionSpec(getExceptionSpecType());
+  }
+  /// \brief Result type of getNoexceptSpec().
+  enum NoexceptResult {
+    NR_NoNoexcept,  ///< There is no noexcept specifier.
+    NR_BadNoexcept, ///< The noexcept specifier has a bad expression.
+    NR_Dependent,   ///< The noexcept specifier is dependent.
+    NR_Throw,       ///< The noexcept specifier evaluates to false.
+    NR_Nothrow      ///< The noexcept specifier evaluates to true.
+  };
+  /// \brief Get the meaning of the noexcept spec on this function, if any.
+  NoexceptResult getNoexceptSpec(ASTContext &Ctx) const;
   unsigned getNumExceptions() const { return NumExceptions; }
   QualType getExceptionType(unsigned i) const {
     assert(i < NumExceptions && "Invalid exception number!");
     return exception_begin()[i];
   }
-  bool hasEmptyExceptionSpec() const {
-    return hasExceptionSpec() && !hasAnyExceptionSpec() &&
-      getNumExceptions() == 0;
+  Expr *getNoexceptExpr() const {
+    if (getExceptionSpecType() != EST_ComputedNoexcept)
+      return 0;
+    // NoexceptExpr sits where the arguments end.
+    return *reinterpret_cast<Expr *const *>(arg_type_end());
+  }
+  bool isNothrow(ASTContext &Ctx) const {
+    ExceptionSpecificationType EST = getExceptionSpecType();
+    if (EST == EST_DynamicNone || EST == EST_BasicNoexcept)
+      return true;
+    if (EST != EST_ComputedNoexcept)
+      return false;
+    return getNoexceptSpec(Ctx) == NR_Nothrow;
   }
 
   using FunctionType::isVariadic;
-  
+
   /// \brief Determines whether this function prototype contains a
   /// parameter pack at the end.
   ///
@@ -2514,6 +2551,8 @@ public:
     return arg_type_end();
   }
   exception_iterator exception_end() const {
+    if (getExceptionSpecType() != EST_Dynamic)
+      return exception_begin();
     return exception_begin() + NumExceptions;
   }
 
@@ -2525,10 +2564,10 @@ public:
   }
   static bool classof(const FunctionProtoType *) { return true; }
 
-  void Profile(llvm::FoldingSetNodeID &ID);
+  void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Ctx);
   static void Profile(llvm::FoldingSetNodeID &ID, QualType Result,
                       arg_type_iterator ArgTys, unsigned NumArgs,
-                      const ExtProtoInfo &EPI);
+                      const ExtProtoInfo &EPI, const ASTContext &Context);
 };
 
 

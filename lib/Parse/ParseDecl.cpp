@@ -1249,7 +1249,7 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
                                          DiagID, getLang());
       break;
     case tok::kw_auto:
-      if (getLang().CPlusPlus0x || getLang().ObjC2) {
+      if (getLang().CPlusPlus0x) {
         if (isKnownToBeTypeSpecifier(GetLookAheadToken(1))) {
           isInvalid = DS.SetStorageClassSpec(DeclSpec::SCS_auto, Loc, PrevSpec,
                                            DiagID, getLang());
@@ -2123,7 +2123,6 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
       
   bool Owned = false;
   bool IsDependent = false;
-  SourceLocation TSTLoc = NameLoc.isValid()? NameLoc : StartLoc;
   const char *PrevSpec = 0;
   unsigned DiagID;
   Decl *TagDecl = Actions.ActOnTag(getCurScope(), DeclSpec::TST_enum, TUK,
@@ -2150,8 +2149,9 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
       return;
     }
     
-    if (DS.SetTypeSpecType(DeclSpec::TST_typename, TSTLoc, PrevSpec, DiagID,
-                           Type.get()))
+    if (DS.SetTypeSpecType(DeclSpec::TST_typename, StartLoc,
+                           NameLoc.isValid() ? NameLoc : StartLoc,
+                           PrevSpec, DiagID, Type.get()))
       Diag(StartLoc, DiagID) << PrevSpec;
     
     return;
@@ -2172,10 +2172,9 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
   if (Tok.is(tok::l_brace))
     ParseEnumBody(StartLoc, TagDecl);
 
-  // FIXME: The DeclSpec should keep the locations of both the keyword
-  // and the name (if there is one).
-  if (DS.SetTypeSpecType(DeclSpec::TST_enum, TSTLoc, PrevSpec, DiagID,
-                         TagDecl, Owned))
+  if (DS.SetTypeSpecType(DeclSpec::TST_enum, StartLoc,
+                         NameLoc.isValid() ? NameLoc : StartLoc,
+                         PrevSpec, DiagID, TagDecl, Owned))
     Diag(StartLoc, DiagID) << PrevSpec;
 }
 
@@ -2601,7 +2600,9 @@ void Parser::ParseTypeQualifierListOpt(DeclSpec &DS,
     else
       Diag(Loc, diag::err_attributes_not_allowed);
   }
-  
+
+  SourceLocation EndLoc;
+
   while (1) {
     bool isInvalid = false;
     const char *PrevSpec = 0;
@@ -2654,6 +2655,8 @@ void Parser::ParseTypeQualifierListOpt(DeclSpec &DS,
       // If this is not a type-qualifier token, we're done reading type
       // qualifiers.  First verify that DeclSpec's are consistent.
       DS.Finish(Diags, PP);
+      if (EndLoc.isValid())
+        DS.SetRangeEnd(EndLoc);
       return;
     }
 
@@ -2662,7 +2665,7 @@ void Parser::ParseTypeQualifierListOpt(DeclSpec &DS,
       assert(PrevSpec && "Method did not return previous specifier!");
       Diag(Tok, DiagID) << PrevSpec;
     }
-    ConsumeToken();
+    EndLoc = ConsumeToken();
   }
 }
 
@@ -3144,8 +3147,7 @@ void Parser::ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
     if (RequiresArg)
       Diag(Tok, diag::err_argument_required_after_attribute);
 
-    SourceLocation RParenLoc = ConsumeParen();  // Eat the closing ')'.
-    SourceLocation EndLoc = RParenLoc;
+    SourceLocation EndLoc = ConsumeParen();  // Eat the closing ')'.
 
     // cv-qualifier-seq[opt].
     DeclSpec DS;
@@ -3167,7 +3169,7 @@ void Parser::ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
       if (Tok.is(tok::amp) || Tok.is(tok::ampamp)) {
         if (!getLang().CPlusPlus0x)
           Diag(Tok, diag::ext_ref_qualifier);
-        
+
         RefQualifierIsLValueRef = Tok.is(tok::amp);
         RefQualifierLoc = ConsumeToken();
         EndLoc = RefQualifierLoc;
@@ -3203,7 +3205,7 @@ void Parser::ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
                                                DynamicExceptions.size(),
                                                NoexceptExpr.isUsable() ?
                                                  NoexceptExpr.get() : 0,
-                                               LParenLoc, RParenLoc, D,
+                                               LParenLoc, EndLoc, D,
                                                TrailingReturnType),
                   EndLoc);
     return;
@@ -3393,8 +3395,7 @@ void Parser::ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
   }
 
   // If we have the closing ')', eat it.
-  SourceLocation RParenLoc = MatchRHSPunctuation(tok::r_paren, LParenLoc);
-  SourceLocation EndLoc = RParenLoc;
+  SourceLocation EndLoc = MatchRHSPunctuation(tok::r_paren, LParenLoc);
 
   DeclSpec DS;
   SourceLocation RefQualifierLoc;
@@ -3458,7 +3459,7 @@ void Parser::ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
                                              DynamicExceptions.size(),
                                              NoexceptExpr.isUsable() ?
                                                NoexceptExpr.get() : 0,
-                                             LParenLoc, RParenLoc, D,
+                                             LParenLoc, EndLoc, D,
                                              TrailingReturnType),
                 EndLoc);
 }
@@ -3660,10 +3661,8 @@ void Parser::ParseTypeofSpecifier(DeclSpec &DS) {
   bool isCastExpr;
   ParsedType CastTy;
   SourceRange CastRange;
-  ExprResult Operand = ParseExprAfterTypeofSizeofAlignof(OpTok,
-                                                         isCastExpr,
-                                                         CastTy,
-                                                         CastRange);
+  ExprResult Operand = ParseExprAfterUnaryExprOrTypeTrait(OpTok, isCastExpr,
+                                                          CastTy, CastRange);
   if (hasParens)
     DS.setTypeofParensRange(CastRange);
 

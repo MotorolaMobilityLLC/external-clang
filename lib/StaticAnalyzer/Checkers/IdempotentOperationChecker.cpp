@@ -336,10 +336,9 @@ void IdempotentOperationChecker::checkPostStmt(const BinaryOperator *B,
     = cast<StmtPoint>(C.getPredecessor()->getLocation()).getStmt();
   
   // Ignore implicit calls to setters.
-  if (isa<ObjCPropertyRefExpr>(predStmt))
+  if (!isa<BinaryOperator>(predStmt))
     return;
-  
-  assert(isa<BinaryOperator>(predStmt));
+
   Data.explodedNodes.Add(C.getPredecessor());
 }
 
@@ -641,9 +640,10 @@ bool IdempotentOperationChecker::CanVary(const Expr *Ex,
     return false;
 
   // Cases requiring custom logic
-  case Stmt::SizeOfAlignOfExprClass: {
-    const SizeOfAlignOfExpr *SE = cast<const SizeOfAlignOfExpr>(Ex);
-    if (!SE->isSizeOf())
+  case Stmt::UnaryExprOrTypeTraitExprClass: {
+    const UnaryExprOrTypeTraitExpr *SE = 
+                       cast<const UnaryExprOrTypeTraitExpr>(Ex);
+    if (SE->getKind() != UETT_SizeOf)
       return false;
     return SE->getTypeOfArgument()->isVariableArrayType();
   }
