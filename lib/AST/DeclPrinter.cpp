@@ -54,6 +54,7 @@ namespace {
     void VisitLabelDecl(LabelDecl *D);
     void VisitParmVarDecl(ParmVarDecl *D);
     void VisitFileScopeAsmDecl(FileScopeAsmDecl *D);
+    void VisitStaticAssertDecl(StaticAssertDecl *D);
     void VisitNamespaceDecl(NamespaceDecl *D);
     void VisitUsingDirectiveDecl(UsingDirectiveDecl *D);
     void VisitNamespaceAliasDecl(NamespaceAliasDecl *D);
@@ -412,22 +413,32 @@ void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
       if (TypeQuals & Qualifiers::Restrict)
         Proto += " restrict";
     }
-    
-    if (FT && FT->hasExceptionSpec()) {
+
+    if (FT && FT->hasDynamicExceptionSpec()) {
       Proto += " throw(";
-      if (FT->hasAnyExceptionSpec())
+      if (FT->getExceptionSpecType() == EST_MSAny)
         Proto += "...";
       else 
         for (unsigned I = 0, N = FT->getNumExceptions(); I != N; ++I) {
           if (I)
             Proto += ", ";
-          
-          
+
           std::string ExceptionType;
           FT->getExceptionType(I).getAsStringInternal(ExceptionType, SubPolicy);
           Proto += ExceptionType;
         }
       Proto += ")";
+    } else if (FT && isNoexceptExceptionSpec(FT->getExceptionSpecType())) {
+      Proto += " noexcept";
+      if (FT->getExceptionSpecType() == EST_ComputedNoexcept) {
+        Proto += "(";
+        llvm::raw_string_ostream EOut(Proto);
+        FT->getNoexceptExpr()->printPretty(EOut, Context, 0, SubPolicy,
+                                           Indentation);
+        EOut.flush();
+        Proto += EOut.str();
+        Proto += ")";
+      }
     }
 
     if (D->hasAttr<NoReturnAttr>())
@@ -577,6 +588,14 @@ void DeclPrinter::VisitParmVarDecl(ParmVarDecl *D) {
 void DeclPrinter::VisitFileScopeAsmDecl(FileScopeAsmDecl *D) {
   Out << "__asm (";
   D->getAsmString()->printPretty(Out, Context, 0, Policy, Indentation);
+  Out << ")";
+}
+
+void DeclPrinter::VisitStaticAssertDecl(StaticAssertDecl *D) {
+  Out << "static_assert(";
+  D->getAssertExpr()->printPretty(Out, Context, 0, Policy, Indentation);
+  Out << ", ";
+  D->getMessage()->printPretty(Out, Context, 0, Policy, Indentation);
   Out << ")";
 }
 

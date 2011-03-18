@@ -221,6 +221,7 @@ void ASTDeclWriter::VisitEnumConstantDecl(EnumConstantDecl *D) {
 
 void ASTDeclWriter::VisitDeclaratorDecl(DeclaratorDecl *D) {
   VisitValueDecl(D);
+  Writer.AddSourceLocation(D->getInnerLocStart(), Record);
   Record.push_back(D->hasExtInfo());
   if (D->hasExtInfo())
     Writer.AddQualifierInfo(*D->getExtInfo(), Record);
@@ -576,6 +577,7 @@ void ASTDeclWriter::VisitImplicitParamDecl(ImplicitParamDecl *D) {
 void ASTDeclWriter::VisitParmVarDecl(ParmVarDecl *D) {
   VisitVarDecl(D);
   Record.push_back(D->getObjCDeclQualifier()); // FIXME: stable encoding
+  Record.push_back(D->isKNRPromoted());
   Record.push_back(D->hasInheritedDefaultArg());
   Record.push_back(D->hasUninstantiatedDefaultArg());
   if (D->hasUninstantiatedDefaultArg())
@@ -594,6 +596,7 @@ void ASTDeclWriter::VisitParmVarDecl(ParmVarDecl *D) {
       D->getStorageClass() == 0 &&
       !D->hasCXXDirectInitializer() && // Can params have this ever?
       D->getObjCDeclQualifier() == 0 &&
+      !D->isKNRPromoted() &&
       !D->hasInheritedDefaultArg() &&
       D->getInit() == 0 &&
       !D->hasUninstantiatedDefaultArg())  // No default expr.
@@ -647,6 +650,7 @@ void ASTDeclWriter::VisitBlockDecl(BlockDecl *D) {
 void ASTDeclWriter::VisitLinkageSpecDecl(LinkageSpecDecl *D) {
   VisitDecl(D);
   Record.push_back(D->getLanguage());
+  Writer.AddSourceLocation(D->getExternLoc(), Record);
   Writer.AddSourceLocation(D->getRBraceLoc(), Record);
   Code = serialization::DECL_LINKAGE_SPEC;
 }
@@ -661,8 +665,8 @@ void ASTDeclWriter::VisitLabelDecl(LabelDecl *D) {
 void ASTDeclWriter::VisitNamespaceDecl(NamespaceDecl *D) {
   VisitNamedDecl(D);
   Record.push_back(D->isInline());
-  Writer.AddSourceLocation(D->getLBracLoc(), Record);
-  Writer.AddSourceLocation(D->getRBracLoc(), Record);
+  Writer.AddSourceLocation(D->getLocStart(), Record);
+  Writer.AddSourceLocation(D->getRBraceLoc(), Record);
   Writer.AddDeclRef(D->getNextNamespace(), Record);
 
   // Only write one reference--original or anonymous
@@ -1053,6 +1057,7 @@ void ASTDeclWriter::VisitStaticAssertDecl(StaticAssertDecl *D) {
   VisitDecl(D);
   Writer.AddStmt(D->getAssertExpr());
   Writer.AddStmt(D->getMessage());
+  Writer.AddSourceLocation(D->getRParenLoc(), Record);
   Code = serialization::DECL_STATIC_ASSERT;
 }
 
@@ -1129,6 +1134,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   // ValueDecl
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Type
   // DeclaratorDecl
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // InnerStartLoc
   Abv->Add(BitCodeAbbrevOp(0));                       // hasExtInfo
   Abv->Add(BitCodeAbbrevOp(serialization::PREDEF_TYPE_NULL_ID)); // InfoType
   // VarDecl
@@ -1143,6 +1149,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // HasMemberSpecializationInfo
   // ParmVarDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // ObjCDeclQualifier
+  Abv->Add(BitCodeAbbrevOp(0));                       // KNRPromoted
   Abv->Add(BitCodeAbbrevOp(0));                       // HasInheritedDefaultArg
   Abv->Add(BitCodeAbbrevOp(0));                   // HasUninstantiatedDefaultArg
 

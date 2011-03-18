@@ -192,15 +192,18 @@ public:
   const FileEntry *LookupFile(llvm::StringRef Filename, bool isAngled,
                               const DirectoryLookup *FromDir,
                               const DirectoryLookup *&CurDir,
-                              const FileEntry *CurFileEnt);
+                              const FileEntry *CurFileEnt,
+                              llvm::SmallVectorImpl<char> *RawPath);
 
   /// LookupSubframeworkHeader - Look up a subframework for the specified
   /// #include file.  For example, if #include'ing <HIToolbox/HIToolbox.h> from
   /// within ".../Carbon.framework/Headers/Carbon.h", check to see if HIToolbox
   /// is a subframework within Carbon.framework.  If so, return the FileEntry
   /// for the designated file, otherwise return null.
-  const FileEntry *LookupSubframeworkHeader(llvm::StringRef Filename,
-                                            const FileEntry *RelativeFileEnt);
+  const FileEntry *LookupSubframeworkHeader(
+      llvm::StringRef Filename,
+      const FileEntry *RelativeFileEnt,
+      llvm::SmallVectorImpl<char> *RawPath);
 
   /// LookupFrameworkCache - Look up the specified framework name in our
   /// framework cache, returning the DirectoryEntry it is in if we know,
@@ -260,6 +263,17 @@ public:
 
   // Used by ASTReader.
   void setHeaderFileInfoForUID(HeaderFileInfo HFI, unsigned UID);
+
+  // Used by external tools
+  typedef std::vector<DirectoryLookup>::const_iterator search_dir_iterator;
+  search_dir_iterator search_dir_begin() const { return SearchDirs.begin(); }
+  search_dir_iterator search_dir_end() const { return SearchDirs.end(); }
+  unsigned search_dir_size() const { return SearchDirs.size(); }
+
+  search_dir_iterator system_dir_begin() const {
+    return SearchDirs.begin() + SystemDirIdx;
+  }
+  search_dir_iterator system_dir_end() const { return SearchDirs.end(); }
 
   void PrintStats();
 private:

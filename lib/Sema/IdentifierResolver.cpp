@@ -104,7 +104,8 @@ IdentifierResolver::~IdentifierResolver() {
 /// if 'D' is in Scope 'S', otherwise 'S' is ignored and isDeclInScope returns
 /// true if 'D' belongs to the given declaration context.
 bool IdentifierResolver::isDeclInScope(Decl *D, DeclContext *Ctx,
-                                       ASTContext &Context, Scope *S) const {
+                                       ASTContext &Context, Scope *S,
+                             bool ExplicitInstantiationOrSpecialization) const {
   Ctx = Ctx->getRedeclContext();
 
   if (Ctx->isFunctionOrMethod()) {
@@ -135,7 +136,10 @@ bool IdentifierResolver::isDeclInScope(Decl *D, DeclContext *Ctx,
     return false;
   }
 
-  return D->getDeclContext()->getRedeclContext()->Equals(Ctx);
+  DeclContext *DCtx = D->getDeclContext()->getRedeclContext();
+  return ExplicitInstantiationOrSpecialization
+           ? Ctx->InEnclosingNamespaceSetOf(DCtx)
+           : Ctx->Equals(DCtx);
 }
 
 /// AddDecl - Link the decl to its shadowed decl chain.
@@ -162,6 +166,29 @@ void IdentifierResolver::AddDecl(NamedDecl *D) {
     IDI = toIdDeclInfo(Ptr);
 
   IDI->AddDecl(D);
+}
+
+void IdentifierResolver::InsertDeclAfter(iterator Pos, NamedDecl *D) {
+  DeclarationName Name = D->getDeclName();
+  void *Ptr = Name.getFETokenInfo<void>();
+  
+  if (Pos == iterator() || isDeclPtr(Ptr)) {
+    // Simple case: insert at the end of the list (which is the
+    // end of the stored vector).
+    AddDecl(D);
+    return;
+  }
+
+  if (IdentifierInfo *II = Name.getAsIdentifierInfo())
+    II->setIsFromAST(false);
+  
+  // General case: insert the declaration at the appropriate point in the 
+  // list, which already has at least two elements.
+  IdDeclInfo *IDI = toIdDeclInfo(Ptr);
+  if (Pos.isIterator()) {
+    IDI->InsertDecl(Pos.getIterator() + 1, D);
+  } else
+    IDI->InsertDecl(IDI->decls_begin(), D);
 }
 
 /// RemoveDecl - Unlink the decl from its shadowed decl chain.

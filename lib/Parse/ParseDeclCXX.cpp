@@ -111,8 +111,8 @@ Decl *Parser::ParseNamespace(unsigned Context,
   ParseScope NamespaceScope(this, Scope::DeclScope);
 
   Decl *NamespcDecl =
-    Actions.ActOnStartNamespaceDef(getCurScope(), InlineLoc, IdentLoc, Ident,
-                                   LBrace, attrs.getList());
+    Actions.ActOnStartNamespaceDef(getCurScope(), InlineLoc, NamespaceLoc,
+                                   IdentLoc, Ident, LBrace, attrs.getList());
 
   PrettyDeclStackTraceEntry CrashInfo(Actions, NamespcDecl, NamespaceLoc,
                                       "parsing namespace");
@@ -194,9 +194,9 @@ Decl *Parser::ParseLinkage(ParsingDeclSpec &DS, unsigned Context) {
   ParseScope LinkageScope(this, Scope::DeclScope);
   Decl *LinkageSpec
     = Actions.ActOnStartLinkageSpecification(getCurScope(),
-                                             /*FIXME: */SourceLocation(),
+                                             DS.getSourceRange().getBegin(),
                                              Loc, Lang,
-                                       Tok.is(tok::l_brace)? Tok.getLocation()
+                                      Tok.is(tok::l_brace) ? Tok.getLocation()
                                                            : SourceLocation());
 
   ParsedAttributesWithRange attrs;
@@ -441,14 +441,15 @@ Decl *Parser::ParseStaticAssertDeclaration(SourceLocation &DeclEnd){
   if (AssertMessage.isInvalid())
     return 0;
 
-  MatchRHSPunctuation(tok::r_paren, LParenLoc);
+  SourceLocation RParenLoc = MatchRHSPunctuation(tok::r_paren, LParenLoc);
 
   DeclEnd = Tok.getLocation();
   ExpectAndConsumeSemi(diag::err_expected_semi_after_static_assert);
 
   return Actions.ActOnStaticAssertDeclaration(StaticAssertLoc,
                                               AssertExpr.take(),
-                                              AssertMessage.take());
+                                              AssertMessage.take(),
+                                              RParenLoc);
 }
 
 /// ParseDecltypeSpecifier - Parse a C++0x decltype specifier.
@@ -1016,19 +1017,17 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
       ParseStructUnionBody(StartLoc, TagType, TagOrTempResult.get());
   }
 
-  // FIXME: The DeclSpec should keep the locations of both the keyword and the
-  // name (if there is one).
-  SourceLocation TSTLoc = NameLoc.isValid()? NameLoc : StartLoc;
-
   const char *PrevSpec = 0;
   unsigned DiagID;
   bool Result;
   if (!TypeResult.isInvalid()) {
-    Result = DS.SetTypeSpecType(DeclSpec::TST_typename, TSTLoc,
+    Result = DS.SetTypeSpecType(DeclSpec::TST_typename, StartLoc,
+                                NameLoc.isValid() ? NameLoc : StartLoc,
                                 PrevSpec, DiagID, TypeResult.get());
   } else if (!TagOrTempResult.isInvalid()) {
-    Result = DS.SetTypeSpecType(TagType, TSTLoc, PrevSpec, DiagID,
-                                TagOrTempResult.get(), Owned);
+    Result = DS.SetTypeSpecType(TagType, StartLoc,
+                                NameLoc.isValid() ? NameLoc : StartLoc,
+                                PrevSpec, DiagID, TagOrTempResult.get(), Owned);
   } else {
     DS.SetTypeSpecError();
     return;
@@ -2041,6 +2040,11 @@ Parser::MaybeParseExceptionSpecification(SourceRange &SpecificationRange,
     SourceLocation LParenLoc = ConsumeParen();
     NoexceptType = EST_ComputedNoexcept;
     NoexceptExpr = ParseConstantExpression();
+    // The argument must be contextually convertible to bool. We use
+    // ActOnBooleanCondition for this purpose.
+    if (!NoexceptExpr.isInvalid())
+      NoexceptExpr = Actions.ActOnBooleanCondition(getCurScope(), KeywordLoc,
+                                                   NoexceptExpr.get());
     SourceLocation RParenLoc = MatchRHSPunctuation(tok::r_paren, LParenLoc);
     NoexceptRange = SourceRange(KeywordLoc, RParenLoc);
   } else {
@@ -2089,7 +2093,7 @@ ExceptionSpecificationType Parser::ParseDynamicExceptionSpecification(
   if (!Tok.is(tok::l_paren)) {
     Diag(Tok, diag::err_expected_lparen_after) << "throw";
     SpecificationRange.setEnd(SpecificationRange.getBegin());
-    return EST_Dynamic;
+    return EST_DynamicNone;
   }
   SourceLocation LParenLoc = ConsumeParen();
 
@@ -2101,7 +2105,7 @@ ExceptionSpecificationType Parser::ParseDynamicExceptionSpecification(
       Diag(EllipsisLoc, diag::ext_ellipsis_exception_spec);
     SourceLocation RParenLoc = MatchRHSPunctuation(tok::r_paren, LParenLoc);
     SpecificationRange.setEnd(RParenLoc);
-    return EST_DynamicAny;
+    return EST_MSAny;
   }
 
   // Parse the sequence of type-ids.
@@ -2131,7 +2135,7 @@ ExceptionSpecificationType Parser::ParseDynamicExceptionSpecification(
   }
 
   SpecificationRange.setEnd(MatchRHSPunctuation(tok::r_paren, LParenLoc));
-  return EST_Dynamic;
+  return Exceptions.empty() ? EST_DynamicNone : EST_Dynamic;
 }
 
 /// ParseTrailingReturnType - Parse a trailing return type on a new-style
@@ -2370,8 +2374,8 @@ ExprResult Parser::ParseCXX0XAlignArgument(SourceLocation Start) {
     SourceLocation TypeLoc = Tok.getLocation();
     ParsedType Ty = ParseTypeName().get();
     SourceRange TypeRange(Start, Tok.getLocation());
-    return Actions.ActOnSizeOfAlignOfExpr(TypeLoc, false, true,
-                                          Ty.getAsOpaquePtr(), TypeRange);
+    return Actions.ActOnUnaryExprOrTypeTraitExpr(TypeLoc, UETT_AlignOf, true,
+                                                Ty.getAsOpaquePtr(), TypeRange);
   } else
     return ParseConstantExpression();
 }

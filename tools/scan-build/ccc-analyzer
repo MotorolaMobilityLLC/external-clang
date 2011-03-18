@@ -147,9 +147,10 @@ sub GetCCArgs {
 }
 
 sub Analyze {
-  my ($Clang, $Args, $AnalyzeArgs, $Lang, $Output, $Verbose, $HtmlDir,
+  my ($Clang, $OriginalArgs, $AnalyzeArgs, $Lang, $Output, $Verbose, $HtmlDir,
       $file) = @_;
 
+  my @Args = @$OriginalArgs;
   my $Cmd;
   my @CmdArgs;
   my @CmdArgsSansAnalyses;
@@ -166,41 +167,35 @@ sub Analyze {
   else {
     $Cmd = $Clang;
     if ($Lang eq "objective-c" || $Lang eq "objective-c++") {
-      push @$Args,'-DIBOutlet=__attribute__((iboutlet))';
-      push @$Args,'-DIBOutletCollection(ClassName)=__attribute__((iboutletcollection)))';
-      push @$Args,'-DIBAction=void)__attribute__((ibaction)';
+      push @Args,'-DIBOutlet=__attribute__((iboutlet))';
+      push @Args,'-DIBOutletCollection(ClassName)=__attribute__((iboutletcollection)))';
+      push @Args,'-DIBAction=void)__attribute__((ibaction)';
     }
 
     # Create arguments for doing regular parsing.
-    my $SyntaxArgs = GetCCArgs("-fsyntax-only", $Args);
-    @CmdArgsSansAnalyses = @CmdArgs;    
-    push @CmdArgsSansAnalyses, @$SyntaxArgs;
-    
+    my $SyntaxArgs = GetCCArgs("-fsyntax-only", \@Args);
+    @CmdArgsSansAnalyses = @$SyntaxArgs;
+
     # Create arguments for doing static analysis.
     if (defined $ResultFile) {
-      push @$Args,'-o';
-      push @$Args, $ResultFile;
+      push @Args, '-o', $ResultFile;
     }
     elsif (defined $HtmlDir) {
-      push @$Args,'-o';
-      push @$Args, $HtmlDir;
+      push @Args, '-o', $HtmlDir;
     }
-    push @$Args,"-Xclang";
-    push @$Args,"-analyzer-display-progress";
+    push @Args, "-Xclang", "-analyzer-display-progress";
 
     foreach my $arg (@$AnalyzeArgs) {
-      push @$Args, "-Xclang";
-      push @$Args, $arg;
-    }
-    
-    # Display Ubiviz graph?
-    if (defined $ENV{'CCC_UBI'}) {   
-      push @$Args, "-Xclang";
-      push @$Args,"-analyzer-viz-egraph-ubigraph";
+      push @Args, "-Xclang", $arg;
     }
 
-    my $AnalysisArgs = GetCCArgs("--analyze", $Args);
-    push @CmdArgs, @$AnalysisArgs;
+    # Display Ubiviz graph?
+    if (defined $ENV{'CCC_UBI'}) {   
+      push @Args, "-Xclang", "-analyzer-viz-egraph-ubigraph";
+    }
+
+    my $AnalysisArgs = GetCCArgs("--analyze", \@Args);
+    @CmdArgs = @$AnalysisArgs;
   }
 
   my @PrintArgs;
@@ -217,7 +212,7 @@ sub Analyze {
   if ($Verbose == 1) {
     # We MUST print to stderr.  Some clients use the stdout output of
     # gcc for various purposes. 
-    print STDERR join(' ',@PrintArgs);
+    print STDERR join(' ', @PrintArgs);
     print STDERR "\n";
   }
   elsif ($Verbose == 2) {
@@ -613,8 +608,7 @@ if ($Action eq 'compile' or $Action eq 'link') {
     my @AnalyzeArgs;    
     
     if ($FileLang ne 'unknown') {
-      push @CmdArgs,'-x';
-      push @CmdArgs,$FileLang;
+      push @CmdArgs, '-x', $FileLang;
     }
 
     if (defined $StoreModel) {
@@ -646,8 +640,7 @@ if ($Action eq 'compile' or $Action eq 'link') {
     if (scalar @Archs) {
       foreach my $arch (@Archs) {
         my @NewArgs;
-        push @NewArgs, '-arch';
-        push @NewArgs, $arch;
+        push @NewArgs, '-arch', $arch;
         push @NewArgs, @CmdArgs;
         Analyze($Clang, \@NewArgs, \@AnalyzeArgs, $FileLang, $Output,
                 $Verbose, $HtmlDir, $file);
