@@ -27,7 +27,8 @@ clang_serialization_SRC_FILES :=\
   ASTReaderStmt.cpp \
   ASTWriter.cpp \
   ASTWriterDecl.cpp \
-  ASTWriterStmt.cpp
+  ASTWriterStmt.cpp \
+  ChainedIncludesSource.cpp
 
 LOCAL_SRC_FILES := $(clang_serialization_SRC_FILES)
 

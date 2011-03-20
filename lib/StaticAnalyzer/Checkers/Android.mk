@@ -33,6 +33,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   DivZeroChecker.cpp \
   FixedAddressChecker.cpp \
   IdempotentOperationChecker.cpp \
+  IteratorsChecker.cpp \
   LLVMConventionsChecker.cpp \
   MacOSXAPIChecker.cpp \
   MallocChecker.cpp \

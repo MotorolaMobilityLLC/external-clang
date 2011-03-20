@@ -25,8 +25,7 @@ clang_analysis_SRC_FILES :=	\
 	PseudoConstantAnalysis.cpp	\
 	ReachableCode.cpp	\
 	ScanfFormatString.cpp	\
-	UninitializedValues.cpp	\
-	UninitializedValuesV2.cpp
+	UninitializedValues.cpp
 
 
 LOCAL_SRC_FILES := $(clang_analysis_SRC_FILES)
