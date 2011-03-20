@@ -26,10 +26,8 @@ clang_frontend_SRC_FILES := \
   CacheTokens.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
-  DeclXML.cpp \
   DependencyFile.cpp \
   DiagChecker.cpp \
-  DocumentXML.cpp \
   FrontendAction.cpp \
   FrontendActions.cpp \
   FrontendOptions.cpp \
@@ -39,10 +37,8 @@ clang_frontend_SRC_FILES := \
   LangStandards.cpp \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
-  StmtXML.cpp \
   TextDiagnosticBuffer.cpp \
   TextDiagnosticPrinter.cpp \
-  TypeXML.cpp \
   VerifyDiagnosticsClient.cpp \
   Warnings.cpp
 
