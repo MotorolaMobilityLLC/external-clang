@@ -3922,6 +3922,12 @@ Decl *Sema::ActOnUsingDirective(Scope *S,
     UDir = UsingDirectiveDecl::Create(Context, CurContext, UsingLoc, NamespcLoc,
                                       SS.getWithLocInContext(Context),
                                       IdentLoc, Named, CommonAncestor);
+
+    if (CurContext->getDeclKind() == Decl::TranslationUnit &&
+        !SourceMgr.isFromMainFile(IdentLoc)) {
+      Diag(IdentLoc, diag::warn_using_directive_in_header);
+    }
+
     PushUsingDirective(S, UDir);
   } else {
     Diag(IdentLoc, diag::err_expected_namespace_name) << SS.getRange();
@@ -6769,10 +6775,7 @@ VarDecl *Sema::BuildExceptionDeclaration(Scope *S,
       Diag(Loc, diag::err_objc_object_catch);
       Invalid = true;
     } else if (T->isObjCObjectPointerType()) {
-      if (!getLangOptions().NeXTRuntime) {
-        Diag(Loc, diag::err_objc_pointer_cxx_catch_gnu);
-        Invalid = true;
-      } else if (!getLangOptions().ObjCNonFragileABI) {
+      if (!getLangOptions().ObjCNonFragileABI) {
         Diag(Loc, diag::err_objc_pointer_cxx_catch_fragile);
         Invalid = true;
       }
@@ -6977,7 +6980,6 @@ Decl *Sema::ActOnTemplatedFriendTag(Scope *S, SourceLocation FriendLoc,
   TagTypeKind Kind = TypeWithKeyword::getTagTypeKindForTypeSpec(TagSpec);
 
   bool isExplicitSpecialization = false;
-  unsigned NumMatchedTemplateParamLists = TempParamLists.size();
   bool Invalid = false;
 
   if (TemplateParameterList *TemplateParams
@@ -6987,8 +6989,6 @@ Decl *Sema::ActOnTemplatedFriendTag(Scope *S, SourceLocation FriendLoc,
                                                   /*friend*/ true,
                                                   isExplicitSpecialization,
                                                   Invalid)) {
-    --NumMatchedTemplateParamLists;
-
     if (TemplateParams->size() > 0) {
       // This is a declaration of a class template.
       if (Invalid)
@@ -6997,7 +6997,7 @@ Decl *Sema::ActOnTemplatedFriendTag(Scope *S, SourceLocation FriendLoc,
       return CheckClassTemplate(S, TagSpec, TUK_Friend, TagLoc,
                                 SS, Name, NameLoc, Attr,
                                 TemplateParams, AS_public,
-                                NumMatchedTemplateParamLists,
+                                TempParamLists.size() - 1,
                    (TemplateParameterList**) TempParamLists.release()).take();
     } else {
       // The "template<>" header is extraneous.
@@ -7012,7 +7012,7 @@ Decl *Sema::ActOnTemplatedFriendTag(Scope *S, SourceLocation FriendLoc,
   assert(SS.isNotEmpty() && "valid templated tag with no SS and no direct?");
 
   bool isAllExplicitSpecializations = true;
-  for (unsigned I = 0; I != NumMatchedTemplateParamLists; ++I) {
+  for (unsigned I = TempParamLists.size(); I-- > 0; ) {
     if (TempParamLists.get()[I]->size()) {
       isAllExplicitSpecializations = false;
       break;
