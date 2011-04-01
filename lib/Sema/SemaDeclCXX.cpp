@@ -563,10 +563,9 @@ Sema::CheckBaseSpecifier(CXXRecordDecl *Class,
   CXXRecordDecl * CXXBaseDecl = cast<CXXRecordDecl>(BaseDecl);
   assert(CXXBaseDecl && "Base type is not a C++ type");
 
-  // C++ [class.derived]p2:
-  //   If a class is marked with the class-virt-specifier final and it appears
-  //   as a base-type-specifier in a base-clause (10 class.derived), the program
-  //   is ill-formed.
+  // C++ [class]p3:
+  //   If a class is marked final and it appears as a base-type-specifier in 
+  //   base-clause, the program is ill-formed.
   if (CXXBaseDecl->hasAttr<FinalAttr>()) {
     Diag(BaseLoc, diag::err_class_marked_final_used_as_base) 
       << CXXBaseDecl->getDeclName();
@@ -918,26 +917,6 @@ void Sema::CheckOverrideControl(const Decl *D) {
                  diag::err_function_marked_override_not_overriding)
       << MD->getDeclName();
     return;
-  }
-
-  // C++0x [class.derived]p8:
-  //   In a class definition marked with the class-virt-specifier explicit,
-  //   if a virtual member function that is neither implicitly-declared nor a 
-  //   destructor overrides a member function of a base class and it is not
-  //   marked with the virt-specifier override, the program is ill-formed.
-  if (MD->getParent()->hasAttr<ExplicitAttr>() && !isa<CXXDestructorDecl>(MD) &&
-      HasOverriddenMethods && !MD->hasAttr<OverrideAttr>()) {
-    llvm::SmallVector<const CXXMethodDecl*, 4> 
-      OverriddenMethods(MD->begin_overridden_methods(), 
-                        MD->end_overridden_methods());
-
-    Diag(MD->getLocation(), diag::err_function_overriding_without_override)
-      << MD->getDeclName() 
-      << (unsigned)OverriddenMethods.size();
-
-    for (unsigned I = 0; I != OverriddenMethods.size(); ++I)
-      Diag(OverriddenMethods[I]->getLocation(),
-           diag::note_overridden_virtual_function);
   }
 }
 
@@ -2480,10 +2459,13 @@ Sema::MarkBaseAndMemberDestructorsReferenced(SourceLocation Location,
       continue;
     
     CXXRecordDecl *FieldClassDecl = cast<CXXRecordDecl>(RT->getDecl());
+    if (FieldClassDecl->isInvalidDecl())
+      continue;
     if (FieldClassDecl->hasTrivialDestructor())
       continue;
 
     CXXDestructorDecl *Dtor = LookupDestructor(FieldClassDecl);
+    assert(Dtor && "No dtor found for FieldClassDecl!");
     CheckDestructorAccess(Field->getLocation(), Dtor,
                           PDiag(diag::err_access_dtor_field)
                             << Field->getDeclName()
@@ -2504,12 +2486,16 @@ Sema::MarkBaseAndMemberDestructorsReferenced(SourceLocation Location,
     if (Base->isVirtual())
       DirectVirtualBases.insert(RT);
 
-    // Ignore trivial destructors.
     CXXRecordDecl *BaseClassDecl = cast<CXXRecordDecl>(RT->getDecl());
+    // If our base class is invalid, we probably can't get its dtor anyway.
+    if (BaseClassDecl->isInvalidDecl())
+      continue;
+    // Ignore trivial destructors.
     if (BaseClassDecl->hasTrivialDestructor())
       continue;
 
     CXXDestructorDecl *Dtor = LookupDestructor(BaseClassDecl);
+    assert(Dtor && "No dtor found for BaseClassDecl!");
 
     // FIXME: caret should be on the start of the class name
     CheckDestructorAccess(Base->getSourceRange().getBegin(), Dtor,
@@ -2531,12 +2517,16 @@ Sema::MarkBaseAndMemberDestructorsReferenced(SourceLocation Location,
     if (DirectVirtualBases.count(RT))
       continue;
 
-    // Ignore trivial destructors.
     CXXRecordDecl *BaseClassDecl = cast<CXXRecordDecl>(RT->getDecl());
+    // If our base class is invalid, we probably can't get its dtor anyway.
+    if (BaseClassDecl->isInvalidDecl())
+      continue;
+    // Ignore trivial destructors.
     if (BaseClassDecl->hasTrivialDestructor())
       continue;
 
     CXXDestructorDecl *Dtor = LookupDestructor(BaseClassDecl);
+    assert(Dtor && "No dtor found for BaseClassDecl!");
     CheckDestructorAccess(ClassDecl->getLocation(), Dtor,
                           PDiag(diag::err_access_dtor_vbase)
                             << VBase->getType());
@@ -3838,6 +3828,19 @@ NamespaceDecl *Sema::getOrCreateStdNamespace() {
   return getStdNamespace();
 }
 
+/// \brief Determine whether a using statement is in a context where it will be
+/// apply in all contexts.
+static bool IsUsingDirectiveInToplevelContext(DeclContext *CurContext) {
+  switch (CurContext->getDeclKind()) {
+    case Decl::TranslationUnit:
+      return true;
+    case Decl::LinkageSpec:
+      return IsUsingDirectiveInToplevelContext(CurContext->getParent());
+    default:
+      return false;
+  }
+}
+
 Decl *Sema::ActOnUsingDirective(Scope *S,
                                           SourceLocation UsingLoc,
                                           SourceLocation NamespcLoc,
@@ -3923,7 +3926,7 @@ Decl *Sema::ActOnUsingDirective(Scope *S,
                                       SS.getWithLocInContext(Context),
                                       IdentLoc, Named, CommonAncestor);
 
-    if (CurContext->getDeclKind() == Decl::TranslationUnit &&
+    if (IsUsingDirectiveInToplevelContext(CurContext) &&
         !SourceMgr.isFromMainFile(IdentLoc)) {
       Diag(IdentLoc, diag::warn_using_directive_in_header);
     }
@@ -6063,6 +6066,13 @@ Sema::BuildCXXConstructExpr(SourceLocation ConstructLoc, QualType DeclInitType,
   unsigned NumExprs = ExprArgs.size();
   Expr **Exprs = (Expr **)ExprArgs.release();
 
+  for (specific_attr_iterator<NonNullAttr>
+           i = Constructor->specific_attr_begin<NonNullAttr>(),
+           e = Constructor->specific_attr_end<NonNullAttr>(); i != e; ++i) {
+    const NonNullAttr *NonNull = *i;
+    CheckNonNullArguments(NonNull, ExprArgs.get(), ConstructLoc);
+  }
+
   MarkDeclarationReferenced(ConstructLoc, Constructor);
   return Owned(CXXConstructExpr::Create(Context, DeclInitType, ConstructLoc,
                                         Constructor, Elidable, Exprs, NumExprs, 
@@ -6092,20 +6102,29 @@ bool Sema::InitializeVarWithConstructor(VarDecl *VD,
 }
 
 void Sema::FinalizeVarWithDestructor(VarDecl *VD, const RecordType *Record) {
-  CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(Record->getDecl());
-  if (!ClassDecl->isInvalidDecl() && !VD->isInvalidDecl() &&
-      !ClassDecl->hasTrivialDestructor() && !ClassDecl->isDependentContext()) {
-    CXXDestructorDecl *Destructor = LookupDestructor(ClassDecl);
-    MarkDeclarationReferenced(VD->getLocation(), Destructor);
-    CheckDestructorAccess(VD->getLocation(), Destructor,
-                          PDiag(diag::err_access_dtor_var)
-                            << VD->getDeclName()
-                            << VD->getType());
+  if (VD->isInvalidDecl()) return;
 
-    // TODO: this should be re-enabled for static locals by !CXAAtExit
-    if (!VD->isInvalidDecl() && VD->hasGlobalStorage() && !VD->isStaticLocal())
-      Diag(VD->getLocation(), diag::warn_global_destructor);
-  }
+  CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(Record->getDecl());
+  if (ClassDecl->isInvalidDecl()) return;
+  if (ClassDecl->hasTrivialDestructor()) return;
+  if (ClassDecl->isDependentContext()) return;
+
+  CXXDestructorDecl *Destructor = LookupDestructor(ClassDecl);
+  MarkDeclarationReferenced(VD->getLocation(), Destructor);
+  CheckDestructorAccess(VD->getLocation(), Destructor,
+                        PDiag(diag::err_access_dtor_var)
+                        << VD->getDeclName()
+                        << VD->getType());
+
+  if (!VD->hasGlobalStorage()) return;
+
+  // Emit warning for non-trivial dtor in global scope (a real global,
+  // class-static, function-static).
+  Diag(VD->getLocation(), diag::warn_exit_time_destructor);
+
+  // TODO: this should be re-enabled for static locals by !CXAAtExit
+  if (!VD->isStaticLocal())
+    Diag(VD->getLocation(), diag::warn_global_destructor);
 }
 
 /// AddCXXDirectInitializerToDecl - This action is called immediately after

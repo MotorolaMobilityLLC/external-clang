@@ -19,6 +19,7 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/PartialDiagnostic.h"
+#include "clang/Basic/VersionTuple.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/PrettyPrinter.h"
@@ -28,6 +29,7 @@
 #include "clang/AST/UsuallyTinyPtrVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/Allocator.h"
@@ -78,7 +80,7 @@ namespace clang {
 
 /// ASTContext - This class holds long-lived AST nodes (such as types and
 /// decls) that can be referred to throughout the semantic analysis of a file.
-class ASTContext {
+class ASTContext : public llvm::RefCountedBase<ASTContext> {
   ASTContext &this_() { return *this; }
 
   mutable std::vector<Type*> Types;

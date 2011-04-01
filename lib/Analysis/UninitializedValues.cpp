@@ -51,7 +51,7 @@ public:
   unsigned size() const { return map.size(); }
   
   /// Returns the bit vector index for a given declaration.
-  llvm::Optional<unsigned> getValueIndex(const VarDecl *d);
+  llvm::Optional<unsigned> getValueIndex(const VarDecl *d) const;
 };
 }
 
@@ -66,8 +66,8 @@ void DeclToIndex::computeMap(const DeclContext &dc) {
   }
 }
 
-llvm::Optional<unsigned> DeclToIndex::getValueIndex(const VarDecl *d) {
-  llvm::DenseMap<const VarDecl *, unsigned>::iterator I = map.find(d);
+llvm::Optional<unsigned> DeclToIndex::getValueIndex(const VarDecl *d) const {
+  llvm::DenseMap<const VarDecl *, unsigned>::const_iterator I = map.find(d);
   if (I == map.end())
     return llvm::Optional<unsigned>();
   return I->second;
@@ -91,6 +91,7 @@ static bool isAlwaysUninit(const Value v) {
   return v == Uninitialized;
 }
 
+namespace {
 class ValueVector {
   llvm::BitVector vec;
 public:
@@ -126,7 +127,6 @@ public:
 
 typedef std::pair<ValueVector *, ValueVector *> BVPair;
 
-namespace {
 class CFGBlockValues {
   const CFG &cfg;
   BVPair *vals;
@@ -152,12 +152,16 @@ public:
     return declToIndex.size() == 0;
   }
   
+  bool hasEntry(const VarDecl *vd) const {
+    return declToIndex.getValueIndex(vd).hasValue();
+  }
+  
   void resetScratch();
   ValueVector &getScratch() { return scratch; }
   
   ValueVector::reference operator[](const VarDecl *vd);
 };  
-}
+} // end anonymous namespace
 
 CFGBlockValues::CFGBlockValues(const CFG &c) : cfg(c), vals(0) {
   unsigned n = cfg.getNumBlockIDs();
@@ -379,7 +383,13 @@ public:
   void BlockStmt_VisitObjCForCollectionStmt(ObjCForCollectionStmt *fs);
   
   bool isTrackedVar(const VarDecl *vd) {
+#if 1
+    // FIXME: This is a temporary workaround to deal with the fact
+    // that DeclContext's do not always contain all of their variables!
+    return vals.hasEntry(vd);
+#else
     return ::isTrackedVar(vd, cast<DeclContext>(ac.getDecl()));
+#endif
   }
   
   FindVarResult findBlockVarDecl(Expr *ex);
@@ -430,13 +440,18 @@ void TransferFunctions::BlockStmt_VisitObjCForCollectionStmt(
 void TransferFunctions::VisitBlockExpr(BlockExpr *be) {
   if (!flagBlockUses || !handler)
     return;
-  AnalysisContext::referenced_decls_iterator i, e;
-  llvm::tie(i, e) = ac.getReferencedBlockVars(be->getBlockDecl());
-  for ( ; i != e; ++i) {
-    const VarDecl *vd = *i;
-    if (vd->getAttr<BlocksAttr>() || !vd->hasLocalStorage() || 
-        !isTrackedVar(vd))
+  const BlockDecl *bd = be->getBlockDecl();
+  for (BlockDecl::capture_const_iterator i = bd->capture_begin(),
+        e = bd->capture_end() ; i != e; ++i) {
+    const VarDecl *vd = i->getVariable();
+    if (!vd->hasLocalStorage())
       continue;
+    if (!isTrackedVar(vd))
+      continue;
+    if (i->isByRef()) {
+      vals[vd] = Initialized;
+      continue;
+    }
     Value v = vals[vd];
     if (isUninitialized(v))
       handler->handleUseOfUninitVariable(be, vd, isAlwaysUninit(v));

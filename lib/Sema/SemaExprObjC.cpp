@@ -324,6 +324,12 @@ bool Sema::CheckMessageArgumentTypes(Expr **Args, unsigned NumArgs,
 }
 
 bool Sema::isSelfExpr(Expr *RExpr) {
+  // 'self' is objc 'self' in an objc method only.
+  DeclContext *DC = CurContext;
+  while (isa<BlockDecl>(DC))
+    DC = DC->getParent();
+  if (DC && !isa<ObjCMethodDecl>(DC))
+    return false;
   if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(RExpr))
     if (ICE->getCastKind() == CK_LValueToRValue)
       RExpr = ICE->getSubExpr();
@@ -422,6 +428,7 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
     if (DiagnoseUseOfDecl(PD, MemberLoc))
       return ExprError();
     QualType ResTy = PD->getType();
+    ResTy = ResTy.getNonLValueExprType(Context);
     Selector Sel = PP.getSelectorTable().getNullarySelector(Member);
     ObjCMethodDecl *Getter = IFace->lookupInstanceMethod(Sel);
     if (DiagnosePropertyAccessorMismatch(PD, Getter, MemberLoc))

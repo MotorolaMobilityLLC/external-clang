@@ -22,7 +22,7 @@
 using namespace clang;
 
 Parser::Parser(Preprocessor &pp, Sema &actions)
-  : CrashInfo(*this), PP(pp), Actions(actions), Diags(PP.getDiagnostics()),
+  : PP(pp), Actions(actions), Diags(PP.getDiagnostics()),
     GreaterThanIsOperator(true), ColonIsSacred(false), 
     InMessageExpression(false), TemplateParameterDepth(0) {
   Tok.setKind(tok::eof);
@@ -422,6 +422,11 @@ void Parser::Initialize() {
     Ident_vector = &PP.getIdentifierTable().get("vector");
     Ident_pixel = &PP.getIdentifierTable().get("pixel");
   }
+
+  Ident_introduced = 0;
+  Ident_deprecated = 0;
+  Ident_obsoleted = 0;
+  Ident_unavailable = 0;
 }
 
 /// ParseTopLevelDecl - Parse one top-level declaration, return whatever the
@@ -437,7 +442,7 @@ bool Parser::ParseTopLevelDecl(DeclGroupPtrTy &Result) {
     return true;
   }
 
-  ParsedAttributesWithRange attrs;
+  ParsedAttributesWithRange attrs(AttrFactory);
   MaybeParseCXX0XAttributes(attrs);
   MaybeParseMicrosoftAttributes(attrs);
   
@@ -835,7 +840,7 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
     SourceLocation DSStart = Tok.getLocation();
 
     // Parse the common declaration-specifiers piece.
-    DeclSpec DS;
+    DeclSpec DS(AttrFactory);
     ParseDeclarationSpecifiers(DS);
 
     // C99 6.9.1p6: 'each declaration in the declaration list shall have at
@@ -1032,7 +1037,8 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext) {
     //            simple-template-id
     SourceLocation TypenameLoc = ConsumeToken();
     CXXScopeSpec SS;
-    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/ParsedType(), false))
+    if (ParseOptionalCXXScopeSpecifier(SS, /*ObjectType=*/ParsedType(), false,
+                                       0, /*IsTypename*/true))
       return true;
     if (!SS.isSet()) {
       Diag(Tok.getLocation(), diag::err_expected_qualified_after_typename);

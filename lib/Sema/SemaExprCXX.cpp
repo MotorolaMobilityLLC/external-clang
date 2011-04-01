@@ -343,7 +343,7 @@ ExprResult
 Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
                      bool isType, void *TyOrExpr, SourceLocation RParenLoc) {
   // Find the std::type_info type.
-  if (!StdNamespace)
+  if (!getStdNamespace())
     return ExprError(Diag(OpLoc, diag::err_need_header_before_typeid));
 
   if (!CXXTypeInfoDecl) {
@@ -1388,15 +1388,15 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
     Candidates.NoteCandidates(*this, OCD_ViableCandidates, Args, NumArgs);
     return true;
 
-  case OR_Deleted:
+  case OR_Deleted: {
     Diag(StartLoc, diag::err_ovl_deleted_call)
       << Best->Function->isDeleted()
       << Name 
-      << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+      << getDeletedOrUnavailableSuffix(Best->Function)
       << Range;
     Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     return true;
+  }
   }
   assert(false && "Unreachable, bad result from BestViableFunction");
   return true;
@@ -2153,10 +2153,16 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
   case ICK_Pointer_Conversion: {
     if (SCS.IncompatibleObjC && Action != AA_Casting) {
       // Diagnose incompatible Objective-C conversions
-      Diag(From->getSourceRange().getBegin(),
-           diag::ext_typecheck_convert_incompatible_pointer)
-        << From->getType() << ToType << Action
-        << From->getSourceRange();
+      if (Action == AA_Initializing)
+        Diag(From->getSourceRange().getBegin(),
+             diag::ext_typecheck_convert_incompatible_pointer)
+          << ToType << From->getType() << Action
+          << From->getSourceRange();
+      else
+        Diag(From->getSourceRange().getBegin(),
+             diag::ext_typecheck_convert_incompatible_pointer)
+          << From->getType() << ToType << Action
+          << From->getSourceRange();
     }
 
     CastKind Kind = CK_Invalid;
@@ -2271,6 +2277,15 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
       break;
     }
       
+  case ICK_TransparentUnionConversion: {
+    Sema::AssignConvertType ConvTy =
+      CheckTransparentUnionArgumentConstraints(ToType, From);
+    assert ((ConvTy == Sema::Compatible) &&
+            "Improper transparent union conversion");
+    (void)ConvTy;
+    break;
+  }
+
   case ICK_Lvalue_To_Rvalue:
   case ICK_Array_To_Pointer:
   case ICK_Function_To_Pointer:

@@ -30,6 +30,7 @@
 #include "clang/Basic/Version.h"
 
 #include "llvm/Config/config.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/Support/PrettyStackTrace.h"
@@ -58,8 +59,8 @@ Driver::Driver(llvm::StringRef _ClangExecutable,
                bool IsProduction, bool CXXIsProduction,
                Diagnostic &_Diags)
   : Opts(createDriverOptTable()), Diags(_Diags),
-    ClangExecutable(_ClangExecutable), DefaultHostTriple(_DefaultHostTriple),
-    DefaultImageName(_DefaultImageName),
+    ClangExecutable(_ClangExecutable), UseStdLib(true),
+    DefaultHostTriple(_DefaultHostTriple), DefaultImageName(_DefaultImageName),
     DriverTitle("clang \"gcc-compatible\" driver"),
     Host(0),
     CCPrintOptionsFilename(0), CCPrintHeadersFilename(0), CCCIsCXX(false),
@@ -100,11 +101,10 @@ Driver::~Driver() {
   delete Host;
 }
 
-InputArgList *Driver::ParseArgStrings(const char **ArgBegin,
-                                      const char **ArgEnd) {
+InputArgList *Driver::ParseArgStrings(llvm::ArrayRef<const char *> ArgList) {
   llvm::PrettyStackTraceString CrashInfo("Command line argument parsing");
   unsigned MissingArgIndex, MissingArgCount;
-  InputArgList *Args = getOpts().ParseArgs(ArgBegin, ArgEnd,
+  InputArgList *Args = getOpts().ParseArgs(ArgList.begin(), ArgList.end(),
                                            MissingArgIndex, MissingArgCount);
 
   // Check for missing argument error.
@@ -206,7 +206,7 @@ DerivedArgList *Driver::TranslateInputArgs(const InputArgList &Args) const {
   return DAL;
 }
 
-Compilation *Driver::BuildCompilation(int argc, const char **argv) {
+Compilation *Driver::BuildCompilation(llvm::ArrayRef<const char *> ArgList) {
   llvm::PrettyStackTraceString CrashInfo("Compilation construction");
 
   // FIXME: Handle environment options which effect driver behavior, somewhere
@@ -218,9 +218,7 @@ Compilation *Driver::BuildCompilation(int argc, const char **argv) {
   // FIXME: This stuff needs to go into the Compilation, not the driver.
   bool CCCPrintOptions = false, CCCPrintActions = false;
 
-  const char **Start = argv + 1, **End = argv + argc;
-
-  InputArgList *Args = ParseArgStrings(Start, End);
+  InputArgList *Args = ParseArgStrings(ArgList.slice(1));
 
   // -no-canonical-prefixes is used very early in main.
   Args->ClaimAllArgs(options::OPT_no_canonical_prefixes);
@@ -287,6 +285,10 @@ Compilation *Driver::BuildCompilation(int argc, const char **argv) {
     A->claim();
     PrefixDirs.push_back(A->getValue(*Args, 0));
   }
+  if (const Arg *A = Args->getLastArg(options::OPT__sysroot_EQ))
+    SysRoot = A->getValue(*Args);
+  if (Args->hasArg(options::OPT_nostdlib))
+    UseStdLib = false;
 
   Host = GetHostInfo(DefaultHostTriple.c_str());
 
@@ -1224,7 +1226,13 @@ const char *Driver::GetNamedOutputPath(Compilation &C,
   }
 
   llvm::SmallString<128> BasePath(BaseInput);
-  llvm::StringRef BaseName = llvm::sys::path::filename(BasePath);
+  llvm::StringRef BaseName;
+
+  // Dsymutil actions should use the full path.
+  if (isa<DsymutilJobAction>(JA))
+    BaseName = BasePath;
+  else
+    BaseName = llvm::sys::path::filename(BasePath);
 
   // Determine what the derived output name should be.
   const char *NamedOutput;
@@ -1261,7 +1269,12 @@ std::string Driver::GetFilePath(const char *Name, const ToolChain &TC) const {
   // attempting to use this prefix when lokup up program paths.
   for (Driver::prefix_list::const_iterator it = PrefixDirs.begin(),
        ie = PrefixDirs.end(); it != ie; ++it) {
-    llvm::sys::Path P(*it);
+    std::string Dir(*it);
+    if (Dir.empty())
+      continue;
+    if (Dir[0] == '=')
+      Dir = SysRoot + Dir.substr(1);
+    llvm::sys::Path P(Dir);
     P.appendComponent(Name);
     bool Exists;
     if (!llvm::sys::fs::exists(P.str(), Exists) && Exists)
@@ -1271,7 +1284,12 @@ std::string Driver::GetFilePath(const char *Name, const ToolChain &TC) const {
   const ToolChain::path_list &List = TC.getFilePaths();
   for (ToolChain::path_list::const_iterator
          it = List.begin(), ie = List.end(); it != ie; ++it) {
-    llvm::sys::Path P(*it);
+    std::string Dir(*it);
+    if (Dir.empty())
+      continue;
+    if (Dir[0] == '=')
+      Dir = SysRoot + Dir.substr(1);
+    llvm::sys::Path P(Dir);
     P.appendComponent(Name);
     bool Exists;
     if (!llvm::sys::fs::exists(P.str(), Exists) && Exists)

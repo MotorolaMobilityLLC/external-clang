@@ -25,6 +25,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/CharUnits.h"
@@ -500,7 +501,7 @@ void Sema::PushOnScopeChains(NamedDecl *D, Scope *S, bool AddToContext) {
     // isn't strictly lexical, which breaks name lookup. Be careful to insert
     // the label at the appropriate place in the identifier chain.
     for (I = IdResolver.begin(D->getDeclName()); I != IEnd; ++I) {
-      DeclContext *IDC = (*I)->getLexicalDeclContext();
+      DeclContext *IDC = (*I)->getLexicalDeclContext()->getRedeclContext();
       if (IDC == CurContext) {
         if (!S->isDeclScope(*I))
           continue;
@@ -1764,12 +1765,7 @@ void Sema::MergeVarDecl(VarDecl *New, LookupResult &Previous) {
 /// ParsedFreeStandingDeclSpec - This method is invoked when a declspec with
 /// no declarator (e.g. "struct foo;") is parsed.
 Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
-                                            DeclSpec &DS) {
-  // FIXME: Error on inline/virtual/explicit
-  // FIXME: Warn on useless __thread
-  // FIXME: Warn on useless const/volatile
-  // FIXME: Warn on useless static/extern/typedef/private_extern/mutable
-  // FIXME: Warn on useless attributes
+                                       DeclSpec &DS) {
   Decl *TagD = 0;
   TagDecl *Tag = 0;
   if (DS.getTypeSpecType() == DeclSpec::TST_class ||
@@ -1803,6 +1799,10 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
       return 0;
     return ActOnFriendTypeDecl(S, DS, MultiTemplateParamsArg(*this, 0, 0));
   }
+
+  // Track whether we warned about the fact that there aren't any
+  // declarators.
+  bool emittedWarning = false;
          
   if (RecordDecl *Record = dyn_cast_or_null<RecordDecl>(Tag)) {
     ProcessDeclAttributeList(S, Record, DS.getAttributes().getList());
@@ -1815,6 +1815,7 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
 
       Diag(DS.getSourceRange().getBegin(), diag::ext_no_declarators)
         << DS.getSourceRange();
+      emittedWarning = true;
     }
   }
 
@@ -1840,12 +1841,16 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
       DS.getStorageClassSpec() != DeclSpec::SCS_typedef)
     if (EnumDecl *Enum = dyn_cast_or_null<EnumDecl>(Tag))
       if (Enum->enumerator_begin() == Enum->enumerator_end() &&
-          !Enum->getIdentifier() && !Enum->isInvalidDecl())
+          !Enum->getIdentifier() && !Enum->isInvalidDecl()) {
         Diag(Enum->getLocation(), diag::ext_no_declarators)
           << DS.getSourceRange();
+        emittedWarning = true;
+      }
+
+  // Skip all the checks below if we have a type error.
+  if (DS.getTypeSpecType() == DeclSpec::TST_error) return TagD;
       
-  if (!DS.isMissingDeclaratorOk() &&
-      DS.getTypeSpecType() != DeclSpec::TST_error) {
+  if (!DS.isMissingDeclaratorOk()) {
     // Warn about typedefs of enums without names, since this is an
     // extension in both Microsoft and GNU.
     if (DS.getStorageClassSpec() == DeclSpec::SCS_typedef &&
@@ -1857,7 +1862,40 @@ Decl *Sema::ParsedFreeStandingDeclSpec(Scope *S, AccessSpecifier AS,
 
     Diag(DS.getSourceRange().getBegin(), diag::ext_no_declarators)
       << DS.getSourceRange();
+    emittedWarning = true;
   }
+
+  // We're going to complain about a bunch of spurious specifiers;
+  // only do this if we're declaring a tag, because otherwise we
+  // should be getting diag::ext_no_declarators.
+  if (emittedWarning || (TagD && TagD->isInvalidDecl()))
+    return TagD;
+
+  // Note that a linkage-specification sets a storage class, but
+  // 'extern "C" struct foo;' is actually valid and not theoretically
+  // useless.
+  if (DeclSpec::SCS scs = DS.getStorageClassSpec())
+    if (!DS.isExternInLinkageSpec())
+      Diag(DS.getStorageClassSpecLoc(), diag::warn_standalone_specifier)
+        << DeclSpec::getSpecifierName(scs);
+
+  if (DS.isThreadSpecified())
+    Diag(DS.getThreadSpecLoc(), diag::warn_standalone_specifier) << "__thread";
+  if (DS.getTypeQualifiers()) {
+    if (DS.getTypeQualifiers() & DeclSpec::TQ_const)
+      Diag(DS.getConstSpecLoc(), diag::warn_standalone_specifier) << "const";
+    if (DS.getTypeQualifiers() & DeclSpec::TQ_volatile)
+      Diag(DS.getConstSpecLoc(), diag::warn_standalone_specifier) << "volatile";
+    // Restrict is covered above.
+  }
+  if (DS.isInlineSpecified())
+    Diag(DS.getInlineSpecLoc(), diag::warn_standalone_specifier) << "inline";
+  if (DS.isVirtualSpecified())
+    Diag(DS.getVirtualSpecLoc(), diag::warn_standalone_specifier) << "virtual";
+  if (DS.isExplicitSpecified())
+    Diag(DS.getExplicitSpecLoc(), diag::warn_standalone_specifier) <<"explicit";
+
+  // FIXME: Warn on useless attributes
 
   return TagD;
 }
@@ -4627,6 +4665,46 @@ bool Sema::CheckForConstantInitializer(Expr *Init, QualType DclT) {
   return true;
 }
 
+namespace {
+  // Visits an initialization expression to see if OrigDecl is evaluated in
+  // its own initialization and throws a warning if it does.
+  class SelfReferenceChecker
+      : public EvaluatedExprVisitor<SelfReferenceChecker> {
+    Sema &S;
+    Decl *OrigDecl;
+
+  public:
+    typedef EvaluatedExprVisitor<SelfReferenceChecker> Inherited;
+
+    SelfReferenceChecker(Sema &S, Decl *OrigDecl) : Inherited(S.Context),
+                                                    S(S), OrigDecl(OrigDecl) { }
+
+    void VisitExpr(Expr *E) {
+      if (isa<ObjCMessageExpr>(*E)) return;
+      Inherited::VisitExpr(E);
+    }
+
+    void VisitImplicitCastExpr(ImplicitCastExpr *E) {
+      CheckForSelfReference(E);
+      Inherited::VisitImplicitCastExpr(E);
+    }
+
+    void CheckForSelfReference(ImplicitCastExpr *E) {
+      if (E->getCastKind() != CK_LValueToRValue) return;
+      Expr* SubExpr = E->getSubExpr()->IgnoreParenImpCasts();
+      DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(SubExpr);
+      if (!DRE) return;
+      Decl* ReferenceDecl = DRE->getDecl();
+      if (OrigDecl != ReferenceDecl) return;
+      LookupResult Result(S, DRE->getNameInfo(), Sema::LookupOrdinaryName,
+                          Sema::NotForRedeclaration);
+      S.Diag(SubExpr->getLocStart(), diag::warn_uninit_self_reference_in_init)
+        << Result.getLookupName() << OrigDecl->getLocation()
+        << SubExpr->getSourceRange();
+    }
+  };
+}
+
 /// AddInitializerToDecl - Adds the initializer Init to the
 /// declaration dcl. If DirectInit is true, this is C++ direct
 /// initialization rather than copy initialization.
@@ -4636,6 +4714,8 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
   // the initializer.
   if (RealDecl == 0 || RealDecl->isInvalidDecl())
     return;
+
+  SelfReferenceChecker(*this, RealDecl).VisitExpr(Init);
 
   if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(RealDecl)) {
     // With declarators parsed the way they are, the parser cannot
@@ -5194,7 +5274,7 @@ Sema::FinalizeDeclaratorGroup(Scope *S, const DeclSpec &DS,
     if (Decl *D = Group[i])
       Decls.push_back(D);
 
-  return BuildDeclaratorGroup(Decls.data(), Decls.size(), 
+  return BuildDeclaratorGroup(Decls.data(), Decls.size(),
                               DS.getTypeSpecType() == DeclSpec::TST_auto);
 }
 
@@ -5470,7 +5550,8 @@ void Sema::ActOnFinishKNRParamDeclarations(Scope *S, Declarator &D,
 
         // Implicitly declare the argument as type 'int' for lack of a better
         // type.
-        DeclSpec DS;
+        AttributeFactory attrs;
+        DeclSpec DS(attrs);
         const char* PrevSpec; // unused
         unsigned DiagID; // unused
         DS.SetTypeSpecType(DeclSpec::TST_int, FTI.ArgInfo[i].IdentLoc,
@@ -5513,7 +5594,7 @@ static bool ShouldWarnAboutMissingPrototype(const FunctionDecl *FD) {
     return false;
 
   // Don't warn about inline functions.
-  if (FD->isInlineSpecified())
+  if (FD->isInlined())
     return false;
 
   // Don't warn about function templates.
@@ -5620,7 +5701,9 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D) {
   DLLImportAttr *DA = FD->getAttr<DLLImportAttr>();
   if (DA && (!FD->getAttr<DLLExportAttr>())) {
     // dllimport attribute cannot be directly applied to definition.
-    if (!DA->isInherited()) {
+    // Microsoft accepts dllimport for functions defined within class scope. 
+    if (!DA->isInherited() &&
+        !(LangOpts.Microsoft && FD->getLexicalDeclContext()->isRecord())) {
       Diag(FD->getLocation(),
            diag::err_attribute_can_be_applied_only_to_symbol_declaration)
         << "dllimport";
@@ -5806,17 +5889,18 @@ NamedDecl *Sema::ImplicitlyDefineFunction(SourceLocation Loc,
 
   // Set a Declarator for the implicit definition: int foo();
   const char *Dummy;
-  DeclSpec DS;
+  AttributeFactory attrFactory;
+  DeclSpec DS(attrFactory);
   unsigned DiagID;
   bool Error = DS.SetTypeSpecType(DeclSpec::TST_int, Loc, Dummy, DiagID);
   (void)Error; // Silence warning.
   assert(!Error && "Error setting up implicit decl!");
   Declarator D(DS, Declarator::BlockContext);
-  D.AddTypeInfo(DeclaratorChunk::getFunction(ParsedAttributes(),
-                                             false, false, SourceLocation(), 0,
+  D.AddTypeInfo(DeclaratorChunk::getFunction(false, false, SourceLocation(), 0,
                                              0, 0, true, SourceLocation(),
                                              EST_None, SourceLocation(),
                                              0, 0, 0, 0, Loc, Loc, D),
+                DS.getAttributes(),
                 SourceLocation());
   D.SetIdentifier(&II, Loc);
 
@@ -6680,7 +6764,7 @@ void Sema::ActOnTagStartDefinition(Scope *S, Decl *TagD) {
 }
 
 void Sema::ActOnStartCXXMemberDeclarations(Scope *S, Decl *TagD,
-                                           ClassVirtSpecifiers &CVS,
+                                           SourceLocation FinalLoc,
                                            SourceLocation LBraceLoc) {
   AdjustDeclIfTemplate(TagD);
   CXXRecordDecl *Record = cast<CXXRecordDecl>(TagD);
@@ -6690,10 +6774,8 @@ void Sema::ActOnStartCXXMemberDeclarations(Scope *S, Decl *TagD,
   if (!Record->getIdentifier())
     return;
 
-  if (CVS.isFinalSpecified())
-    Record->addAttr(new (Context) FinalAttr(CVS.getFinalLoc(), Context));
-  if (CVS.isExplicitSpecified())
-    Record->addAttr(new (Context) ExplicitAttr(CVS.getExplicitLoc(), Context));
+  if (FinalLoc.isValid())
+    Record->addAttr(new (Context) FinalAttr(FinalLoc, Context));
     
   // C++ [class]p2:
   //   [...] The class-name is also inserted into the scope of the

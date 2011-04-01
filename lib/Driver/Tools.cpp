@@ -37,6 +37,17 @@
 using namespace clang::driver;
 using namespace clang::driver::tools;
 
+/// FindTargetProgramPath - Return path of the target specific version of
+/// ProgName.  If it doesn't exist, return path of ProgName itself.
+static std::string FindTargetProgramPath(const ToolChain &TheToolChain,
+                                         const char *ProgName) {
+  std::string Executable(TheToolChain.getTripleString() + "-" + ProgName);
+  std::string Path(TheToolChain.GetProgramPath(Executable.c_str()));
+  if (Path != Executable)
+    return Path;
+  return TheToolChain.GetProgramPath(ProgName);
+}
+
 /// CheckPreprocessingOptions - Perform some validation of preprocessing
 /// arguments that is shared with gcc.
 static void CheckPreprocessingOptions(const Driver &D, const ArgList &Args) {
@@ -363,6 +374,8 @@ static const char *getARMTargetCPU(const ArgList &Args,
     return "iwmmxt";
   if (MArch == "xscale")
     return "xscale";
+  if (MArch == "armv6m" || MArch == "armv6-m")
+    return "cortex-m0";
 
   // If all else failed, return the most base CPU LLVM supports.
   return "arm7tdmi";
@@ -427,7 +440,7 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
 
   // Disable movt generation, if requested.
 #ifdef DISABLE_ARM_DARWIN_USE_MOVT
-  CmdArgs.push_back("-mllvm");
+  CmdArgs.push_back("-backend-option");
   CmdArgs.push_back("-arm-darwin-use-movt=0");
 #endif
 
@@ -594,10 +607,10 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
 
   // Kernel code has more strict alignment requirements.
   if (KernelOrKext) {
-    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-backend-option");
     CmdArgs.push_back("-arm-long-calls");
 
-    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-backend-option");
     CmdArgs.push_back("-arm-strict-align");
   }
 }
@@ -937,10 +950,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
         if (Value == "-force_cpusubtype_ALL") {
           // Do nothing, this is the default and we don't support anything else.
         } else if (Value == "-L") {
-          // We don't support -L yet, but it isn't important enough to error
-          // on. No one should really be using it for a semantic change.
-          D.Diag(clang::diag::warn_drv_unsupported_option_argument)
-            << A->getOption().getName() << Value;
+          CmdArgs.push_back("-msave-temp-labels");
         } else {
           D.Diag(clang::diag::err_drv_unsupported_option_argument)
             << A->getOption().getName() << Value;
@@ -1007,28 +1017,19 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     // Treat blocks as analysis entry points.
     CmdArgs.push_back("-analyzer-opt-analyze-nested-blocks");
 
+    CmdArgs.push_back("-analyzer-eagerly-assume");
+
     // Add default argument set.
     if (!Args.hasArg(options::OPT__analyzer_no_default_checks)) {
-      types::ID InputType = Inputs[0].getType();
-
-      // Checks to perform for all language types.
-
       CmdArgs.push_back("-analyzer-checker=core");
+      CmdArgs.push_back("-analyzer-checker=deadcode");
+      CmdArgs.push_back("-analyzer-checker=security");
+
       if (getToolChain().getTriple().getOS() != llvm::Triple::Win32)
         CmdArgs.push_back("-analyzer-checker=unix");
+
       if (getToolChain().getTriple().getVendor() == llvm::Triple::Apple)
-        CmdArgs.push_back("-analyzer-checker=macosx");
-
-      CmdArgs.push_back("-analyzer-checker=deadcode.DeadStores");
-      CmdArgs.push_back("-analyzer-checker=deadcode.IdempotentOperations");
-
-      // Checks to perform for Objective-C/Objective-C++.
-      if (types::isObjC(InputType)) {
-        // Enable all checkers in 'cocoa' package.
-        CmdArgs.push_back("-analyzer-checker=cocoa");
-      }
-
-      CmdArgs.push_back("-analyzer-eagerly-assume");
+        CmdArgs.push_back("-analyzer-checker=osx");
     }
 
     // Set the output format. The default is plist, for (lame) historical
@@ -1444,7 +1445,17 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(A->getValue(Args));
   }
 
-  Args.AddLastArg(CmdArgs, options::OPT_fwrapv);
+  // -fno-strict-overflow implies -fwrapv if it isn't disabled, but
+  // -fstrict-overflow won't turn off an explicitly enabled -fwrapv.
+  if (Arg *A = Args.getLastArg(options::OPT_fwrapv,
+                               options::OPT_fno_wrapv)) {
+    if (A->getOption().matches(options::OPT_fwrapv))
+      CmdArgs.push_back("-fwrapv");
+  } else if (Arg *A = Args.getLastArg(options::OPT_fstrict_overflow,
+                                      options::OPT_fno_strict_overflow)) {
+    if (A->getOption().matches(options::OPT_fno_strict_overflow))
+      CmdArgs.push_back("-fwrapv");
+  }
   Args.AddLastArg(CmdArgs, options::OPT_fwritable_strings);
   Args.AddLastArg(CmdArgs, options::OPT_funroll_loops);
 
@@ -1716,6 +1727,16 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
         Args.getLastArg(options::OPT_fdiagnostics_show_category_EQ)) {
     CmdArgs.push_back("-fdiagnostics-show-category");
     CmdArgs.push_back(A->getValue(Args));
+  }
+
+  if (Arg *A = Args.getLastArg(
+      options::OPT_fdiagnostics_show_note_include_stack,
+      options::OPT_fno_diagnostics_show_note_include_stack)) {
+    if (A->getOption().matches(
+        options::OPT_fdiagnostics_show_note_include_stack))
+      CmdArgs.push_back("-fdiagnostics-show-note-include-stack");
+    else
+      CmdArgs.push_back("-fno-diagnostics-show-note-include-stack");
   }
 
   // Color diagnostics are the default, unless the terminal doesn't support
@@ -2864,7 +2885,10 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
             CmdArgs.push_back("-lcrt0.o");
           } else {
             // Derived from darwin_crt1 spec.
-            if (getDarwinToolChain().isTargetIPhoneOS()) {
+            if (getDarwinToolChain().isTargetIOSSimulator()) {
+              // The simulator doesn't have a versioned crt1 file.
+              CmdArgs.push_back("-lcrt1.o");
+            } else if (getDarwinToolChain().isTargetIPhoneOS()) {
               if (getDarwinToolChain().isIPhoneOSVersionLT(3, 1))
                 CmdArgs.push_back("-lcrt1.o");
               else
@@ -3259,6 +3283,9 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
   const Driver &D = getToolChain().getDriver();
   ArgStringList CmdArgs;
 
+  if (!D.SysRoot.empty())
+    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
+
   if (Args.hasArg(options::OPT_static)) {
     CmdArgs.push_back("-Bstatic");
   } else {
@@ -3424,8 +3451,8 @@ void netbsd::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(II.getFilename());
   }
 
-  const char *Exec =
-    Args.MakeArgString(getToolChain().GetProgramPath("as"));
+  const char *Exec = Args.MakeArgString(FindTargetProgramPath(getToolChain(),
+                                                              "as"));
   C.addCommand(new Command(JA, *this, Exec, CmdArgs));
 }
 
@@ -3436,6 +3463,9 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                  const char *LinkingOutput) const {
   const Driver &D = getToolChain().getDriver();
   ArgStringList CmdArgs;
+
+  if (!D.SysRoot.empty())
+    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
 
   if (Args.hasArg(options::OPT_static)) {
     CmdArgs.push_back("-Bstatic");
@@ -3535,8 +3565,8 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                                                     "crtn.o")));
   }
 
-  const char *Exec =
-    Args.MakeArgString(getToolChain().GetProgramPath("ld"));
+  const char *Exec = Args.MakeArgString(FindTargetProgramPath(getToolChain(),
+                                                              "ld"));
   C.addCommand(new Command(JA, *this, Exec, CmdArgs));
 }
 
@@ -3594,10 +3624,8 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
   // handled somewhere else.
   Args.ClaimAllArgs(options::OPT_w);
 
-  if (Arg *A = Args.getLastArg(options::OPT__sysroot_EQ)) {
-    CmdArgs.push_back("--sysroot");
-    CmdArgs.push_back(A->getValue(Args));
-  }
+  if (!D.SysRoot.empty())
+    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
 
   if (Args.hasArg(options::OPT_pie))
     CmdArgs.push_back("-pie");
@@ -3877,6 +3905,9 @@ void dragonfly::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                    const char *LinkingOutput) const {
   const Driver &D = getToolChain().getDriver();
   ArgStringList CmdArgs;
+
+  if (!D.SysRoot.empty())
+    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
 
   if (Args.hasArg(options::OPT_static)) {
     CmdArgs.push_back("-Bstatic");

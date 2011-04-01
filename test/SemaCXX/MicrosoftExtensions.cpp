@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 %s -fsyntax-only -Wmicrosoft -verify -fms-extensions -fexceptions -fcxx-exceptions
+// RUN: %clang_cc1 %s -triple i686-pc-win32 -fsyntax-only -Wmicrosoft -verify -fms-extensions -fexceptions -fcxx-exceptions
 
 
 // ::type_info is predeclared with forward class declartion
@@ -114,3 +114,16 @@ struct X0 {
 enum : long long {  // expected-warning{{enumeration types with a fixed underlying type are a Microsoft extension}}
   SomeValue = 0x100000000
 };
+
+
+class AAA {
+__declspec(dllimport) void f(void) { }
+void f2(void);
+};
+
+__declspec(dllimport) void AAA::f2(void) { // expected-error {{dllimport attribute can be applied only to symbol}}
+
+}
+
+
+

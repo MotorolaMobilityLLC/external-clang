@@ -2390,21 +2390,37 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   
   // Configure the diagnostics.
   DiagnosticOptions DiagOpts;
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags;
-  Diags = CompilerInstance::createDiagnostics(DiagOpts, num_command_line_args, 
-                                              command_line_args);
+  llvm::IntrusiveRefCntPtr<Diagnostic>
+    Diags(CompilerInstance::createDiagnostics(DiagOpts, num_command_line_args, 
+                                                command_line_args));
 
-  llvm::SmallVector<ASTUnit::RemappedFile, 4> RemappedFiles;
+  // Recover resources if we crash before exiting this function.
+  llvm::CrashRecoveryContextCleanupRegistrar<Diagnostic,
+    llvm::CrashRecoveryContextReleaseRefCleanup<Diagnostic> >
+    DiagCleanup(Diags.getPtr());
+
+  llvm::OwningPtr<std::vector<ASTUnit::RemappedFile> >
+    RemappedFiles(new std::vector<ASTUnit::RemappedFile>());
+
+  // Recover resources if we crash before exiting this function.
+  llvm::CrashRecoveryContextCleanupRegistrar<
+    std::vector<ASTUnit::RemappedFile> > RemappedCleanup(RemappedFiles.get());
+
   for (unsigned I = 0; I != num_unsaved_files; ++I) {
     llvm::StringRef Data(unsaved_files[I].Contents, unsaved_files[I].Length);
     const llvm::MemoryBuffer *Buffer
       = llvm::MemoryBuffer::getMemBufferCopy(Data, unsaved_files[I].Filename);
-    RemappedFiles.push_back(std::make_pair(unsaved_files[I].Filename,
-                                           Buffer));
+    RemappedFiles->push_back(std::make_pair(unsaved_files[I].Filename,
+                                            Buffer));
   }
 
-  llvm::SmallVector<const char *, 16> Args;
-  
+  llvm::OwningPtr<std::vector<const char *> > 
+    Args(new std::vector<const char*>());
+
+  // Recover resources if we crash before exiting this method.
+  llvm::CrashRecoveryContextCleanupRegistrar<std::vector<const char*> >
+    ArgsCleanup(Args.get());
+
   // Since the Clang C library is primarily used by batch tools dealing with
   // (often very broken) source code, where spell-checking can have a
   // significant negative impact on performance (particularly when 
@@ -2419,10 +2435,10 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
     }
   }
   if (!FoundSpellCheckingArgument)
-    Args.push_back("-fno-spell-checking");
+    Args->push_back("-fno-spell-checking");
   
-  Args.insert(Args.end(), command_line_args,
-              command_line_args + num_command_line_args);
+  Args->insert(Args->end(), command_line_args,
+               command_line_args + num_command_line_args);
 
   // The 'source_filename' argument is optional.  If the caller does not
   // specify it then it is assumed that the source file is specified
@@ -2430,23 +2446,25 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   // Put the source file after command_line_args otherwise if '-x' flag is
   // present it will be unused.
   if (source_filename)
-    Args.push_back(source_filename);
+    Args->push_back(source_filename);
 
   // Do we need the detailed preprocessing record?
   if (options & CXTranslationUnit_DetailedPreprocessingRecord) {
-    Args.push_back("-Xclang");
-    Args.push_back("-detailed-preprocessing-record");
+    Args->push_back("-Xclang");
+    Args->push_back("-detailed-preprocessing-record");
   }
   
   unsigned NumErrors = Diags->getClient()->getNumErrors();
   llvm::OwningPtr<ASTUnit> Unit(
-    ASTUnit::LoadFromCommandLine(Args.data(), Args.data() + Args.size(),
+    ASTUnit::LoadFromCommandLine(Args->size() ? &(*Args)[0] : 0 
+                                 /* vector::data() not portable */,
+                                 Args->size() ? (&(*Args)[0] + Args->size()) :0,
                                  Diags,
                                  CXXIdx->getClangResourcesPath(),
                                  CXXIdx->getOnlyLocalDecls(),
                                  /*CaptureDiagnostics=*/true,
-                                 RemappedFiles.data(),
-                                 RemappedFiles.size(),
+                                 RemappedFiles->size() ? &(*RemappedFiles)[0]:0,
+                                 RemappedFiles->size(),
                                  /*RemappedFilesKeepOriginalName=*/true,
                                  PrecompilePreamble,
                                  CompleteTranslationUnit,
@@ -2569,16 +2587,23 @@ static void clang_reparseTranslationUnit_Impl(void *UserData) {
   ASTUnit *CXXUnit = static_cast<ASTUnit *>(TU->TUData);
   ASTUnit::ConcurrencyCheck Check(*CXXUnit);
   
-  llvm::SmallVector<ASTUnit::RemappedFile, 4> RemappedFiles;
+  llvm::OwningPtr<std::vector<ASTUnit::RemappedFile> >
+    RemappedFiles(new std::vector<ASTUnit::RemappedFile>());
+  
+  // Recover resources if we crash before exiting this function.
+  llvm::CrashRecoveryContextCleanupRegistrar<
+    std::vector<ASTUnit::RemappedFile> > RemappedCleanup(RemappedFiles.get());
+  
   for (unsigned I = 0; I != num_unsaved_files; ++I) {
     llvm::StringRef Data(unsaved_files[I].Contents, unsaved_files[I].Length);
     const llvm::MemoryBuffer *Buffer
       = llvm::MemoryBuffer::getMemBufferCopy(Data, unsaved_files[I].Filename);
-    RemappedFiles.push_back(std::make_pair(unsaved_files[I].Filename,
-                                           Buffer));
+    RemappedFiles->push_back(std::make_pair(unsaved_files[I].Filename,
+                                            Buffer));
   }
   
-  if (!CXXUnit->Reparse(RemappedFiles.data(), RemappedFiles.size()))
+  if (!CXXUnit->Reparse(RemappedFiles->size() ? &(*RemappedFiles)[0] : 0,
+                        RemappedFiles->size()))
     RTUI->result = 0;
 }
 
@@ -2693,7 +2718,22 @@ CXSourceRange clang_getRange(CXSourceLocation begin, CXSourceLocation end) {
                            begin.int_data, end.int_data };
   return Result;
 }
+} // end: extern "C"
 
+static void createNullLocation(CXFile *file, unsigned *line,
+                               unsigned *column, unsigned *offset) {
+  if (file)
+   *file = 0;
+  if (line)
+   *line = 0;
+  if (column)
+   *column = 0;
+  if (offset)
+   *offset = 0;
+  return;
+}
+
+extern "C" {
 void clang_getInstantiationLocation(CXSourceLocation location,
                                     CXFile *file,
                                     unsigned *line,
@@ -2702,14 +2742,7 @@ void clang_getInstantiationLocation(CXSourceLocation location,
   SourceLocation Loc = SourceLocation::getFromRawEncoding(location.int_data);
 
   if (!location.ptr_data[0] || Loc.isInvalid()) {
-    if (file)
-      *file = 0;
-    if (line)
-      *line = 0;
-    if (column)
-      *column = 0;
-    if (offset)
-      *offset = 0;
+    createNullLocation(file, line, column, offset);
     return;
   }
 
@@ -2717,8 +2750,17 @@ void clang_getInstantiationLocation(CXSourceLocation location,
     *static_cast<const SourceManager*>(location.ptr_data[0]);
   SourceLocation InstLoc = SM.getInstantiationLoc(Loc);
 
+  // Check that the FileID is invalid on the instantiation location.
+  // This can manifest in invalid code.
+  FileID fileID = SM.getFileID(InstLoc);
+  const SrcMgr::SLocEntry &sloc = SM.getSLocEntry(fileID);
+  if (!sloc.isFile()) {
+    createNullLocation(file, line, column, offset);
+    return;
+  }
+
   if (file)
-    *file = (void *)SM.getFileEntryForID(SM.getFileID(InstLoc));
+    *file = (void *)SM.getFileEntryForSLocEntry(sloc);
   if (line)
     *line = SM.getInstantiationLineNumber(InstLoc);
   if (column)
@@ -4872,14 +4914,22 @@ extern "C" {
 enum CXAvailabilityKind clang_getCursorAvailability(CXCursor cursor) {
   if (clang_isDeclaration(cursor.kind))
     if (Decl *D = cxcursor::getCursorDecl(cursor)) {
-      if (D->hasAttr<UnavailableAttr>() ||
-          (isa<FunctionDecl>(D) && cast<FunctionDecl>(D)->isDeleted()))
+      if (isa<FunctionDecl>(D) && cast<FunctionDecl>(D)->isDeleted())
         return CXAvailability_Available;
       
-      if (D->hasAttr<DeprecatedAttr>())
+      switch (D->getAvailability()) {
+      case AR_Available:
+      case AR_NotYetIntroduced:
+        return CXAvailability_Available;
+
+      case AR_Deprecated:
         return CXAvailability_Deprecated;
+
+      case AR_Unavailable:
+        return CXAvailability_NotAvailable;
+      }
     }
-  
+
   return CXAvailability_Available;
 }
 

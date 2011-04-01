@@ -24,6 +24,7 @@ def : DiagGroup<"aggregate-return">;
 def AmbigMemberTemplate : DiagGroup<"ambiguous-member-template">;
 def : DiagGroup<"attributes">;
 def : DiagGroup<"bad-function-cast">;
+def Availability : DiagGroup<"availability">;
 def BoolConversions : DiagGroup<"bool-conversions">;
 def CXXCompat: DiagGroup<"c++-compat">;
 def CastAlign : DiagGroup<"cast-align">;
@@ -54,6 +55,7 @@ def CXXHexFloats : DiagGroup<"c++-hex-floats">;
 
 def : DiagGroup<"c++0x-compat", [CXXHexFloats]>;
 def : DiagGroup<"effc++">;
+def ExitTimeDestructors : DiagGroup<"exit-time-destructors">;
 def FourByteMultiChar : DiagGroup<"four-char-constants">;
 def GlobalConstructors : DiagGroup<"global-constructors">;
 def : DiagGroup<"idiomatic-parentheses">;
@@ -94,6 +96,8 @@ def Padded : DiagGroup<"padded">;
 def PointerArith : DiagGroup<"pointer-arith">;
 def PoundWarning : DiagGroup<"#warnings">,
                    DiagCategory<"#warning Directive">;
+def PoundPragmaMessage : DiagGroup<"#pragma messages">,
+                         DiagCategory<"#pragma message Directive">;
 def : DiagGroup<"pointer-to-int-cast">;
 def : DiagGroup<"redundant-decls">;
 def ReturnType : DiagGroup<"return-type">;

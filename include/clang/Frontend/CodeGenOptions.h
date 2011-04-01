@@ -15,6 +15,7 @@
 #define LLVM_CLANG_FRONTEND_CODEGENOPTIONS_H
 
 #include <string>
+#include <vector>
 
 namespace clang {
 
@@ -76,6 +77,7 @@ public:
   unsigned OptimizeSize      : 1; /// If -Os is specified.
   unsigned RelaxAll          : 1; /// Relax all machine code instructions.
   unsigned RelaxedAliasing   : 1; /// Set when -fno-strict-aliasing is enabled.
+  unsigned SaveTempLabels    : 1; /// Save temporary labels.
   unsigned SimplifyLibCalls  : 1; /// Set when -fbuiltin is enabled.
   unsigned SoftFloat         : 1; /// -soft-float.
   unsigned TimePasses        : 1; /// Set when -ftime-report is enabled.
@@ -114,6 +116,9 @@ public:
   /// The name of the relocation model to use.
   std::string RelocationModel;
 
+  /// A list of command-line options to forward to the LLVM backend.
+  std::vector<std::string> BackendOptions;
+
   /// The user specified number of registers to be used for integral arguments,
   /// or 0 if unspecified.
   unsigned NumRegisterParameters;
@@ -150,6 +155,7 @@ public:
     OptimizeSize = 0;
     RelaxAll = 0;
     RelaxedAliasing = 0;
+    SaveTempLabels = 0;
     SimplifyLibCalls = 1;
     SoftFloat = 0;
     TimePasses = 0;

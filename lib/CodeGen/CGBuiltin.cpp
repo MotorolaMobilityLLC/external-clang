@@ -473,7 +473,7 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
     BasicBlock *End = createBasicBlock("fpclassify_end", this->CurFn);
     Builder.SetInsertPoint(End);
     PHINode *Result =
-      Builder.CreatePHI(ConvertType(E->getArg(0)->getType()),
+      Builder.CreatePHI(ConvertType(E->getArg(0)->getType()), 4,
                         "fpclassify_result");
 
     // if (V==0) return FP_ZERO
@@ -948,8 +948,7 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
       getContext().BuiltinInfo.isPredefinedLibFunction(BuiltinID))
     return EmitCall(E->getCallee()->getType(),
                     CGM.getBuiltinLibFunction(FD, BuiltinID),
-                    ReturnValueSlot(),
-                    E->arg_begin(), E->arg_end());
+                    ReturnValueSlot(), E->arg_begin(), E->arg_end(), FD);
 
   // See if we have a target specific intrinsic.
   const char *Name = getContext().BuiltinInfo.GetName(BuiltinID);
@@ -1465,9 +1464,9 @@ Value *CodeGenFunction::EmitARMBuiltinExpr(unsigned BuiltinID,
     return EmitNeonCall(CGM.getIntrinsic(Intrinsic::arm_neon_vmulp, &Ty, 1),
                         Ops, "vmul");
   case ARM::BI__builtin_neon_vmull_v:
-    assert(poly && "vmull builtin only supported for polynomial types");
-    return EmitNeonCall(CGM.getIntrinsic(Intrinsic::arm_neon_vmullp, &Ty, 1),
-                        Ops, "vmull");
+    Int = usgn ? Intrinsic::arm_neon_vmullu : Intrinsic::arm_neon_vmulls;
+    Int = poly ? (unsigned)Intrinsic::arm_neon_vmullp : Int;
+    return EmitNeonCall(CGM.getIntrinsic(Int, &Ty, 1), Ops, "vmull");
   case ARM::BI__builtin_neon_vpadal_v:
   case ARM::BI__builtin_neon_vpadalq_v: {
     Int = usgn ? Intrinsic::arm_neon_vpadalu : Intrinsic::arm_neon_vpadals;

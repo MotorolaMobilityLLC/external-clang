@@ -48,6 +48,12 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
                                  bool InOverloadResolution,
                                  StandardConversionSequence &SCS,
                                  bool CStyle);
+  
+static bool IsTransparentUnionStandardConversion(Sema &S, Expr* From, 
+                                                 QualType &ToType,
+                                                 bool InOverloadResolution,
+                                                 StandardConversionSequence &SCS,
+                                                 bool CStyle);
 static OverloadingResult
 IsUserDefinedConversion(Sema &S, Expr *From, QualType ToType,
                         UserDefinedConversionSequence& User,
@@ -128,7 +134,9 @@ ImplicitConversionRank GetConversionRank(ImplicitConversionKind Kind) {
     ICR_Conversion,
     ICR_Conversion,
     ICR_Conversion,
-    ICR_Complex_Real_Conversion
+    ICR_Complex_Real_Conversion,
+    ICR_Conversion,
+    ICR_Conversion
   };
   return Rank[(int)Kind];
 }
@@ -157,7 +165,9 @@ const char* GetImplicitConversionName(ImplicitConversionKind Kind) {
     "Derived-to-base conversion",
     "Vector conversion",
     "Vector splat",
-    "Complex-real conversion"
+    "Complex-real conversion",
+    "Block Pointer conversion",
+    "Transparent Union Conversion"
   };
   return Name[Kind];
 }
@@ -1048,27 +1058,33 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
           // otherwise, only a boolean conversion is standard   
           if (!ToType->isBooleanType()) 
             return false; 
-
-      }
-        
-      if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(Fn)) {
-        if (!Method->isStatic()) {
-          const Type *ClassType
-            = S.Context.getTypeDeclType(Method->getParent()).getTypePtr();
-          FromType = S.Context.getMemberPointerType(FromType, ClassType);
-        }
       }
 
-      // If the "from" expression takes the address of the overloaded
-      // function, update the type of the resulting expression accordingly.
-      if (FromType->getAs<FunctionType>())
-        if (UnaryOperator *UnOp = dyn_cast<UnaryOperator>(From->IgnoreParens()))
-          if (UnOp->getOpcode() == UO_AddrOf)
-            FromType = S.Context.getPointerType(FromType);
+      // Check if the "from" expression is taking the address of an overloaded
+      // function and recompute the FromType accordingly. Take advantage of the
+      // fact that non-static member functions *must* have such an address-of
+      // expression. 
+      CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(Fn);
+      if (Method && !Method->isStatic()) {
+        assert(isa<UnaryOperator>(From->IgnoreParens()) &&
+               "Non-unary operator on non-static member address");
+        assert(cast<UnaryOperator>(From->IgnoreParens())->getOpcode()
+               == UO_AddrOf &&
+               "Non-address-of operator on non-static member address");
+        const Type *ClassType
+          = S.Context.getTypeDeclType(Method->getParent()).getTypePtr();
+        FromType = S.Context.getMemberPointerType(FromType, ClassType);
+      } else if (isa<UnaryOperator>(From->IgnoreParens())) {
+        assert(cast<UnaryOperator>(From->IgnoreParens())->getOpcode() ==
+               UO_AddrOf &&
+               "Non-address-of operator for overloaded function expression");
+        FromType = S.Context.getPointerType(FromType);
+      }
 
       // Check that we've computed the proper type after overload resolution.
-      assert(S.Context.hasSameType(FromType,
-            S.FixOverloadedFunctionReference(From, AccessPair, Fn)->getType()));
+      assert(S.Context.hasSameType(
+        FromType,
+        S.FixOverloadedFunctionReference(From, AccessPair, Fn)->getType()));
     } else {
       return false;
     }
@@ -1203,6 +1219,11 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
   } else if (IsNoReturnConversion(S.Context, FromType, ToType, FromType)) {
     // Treat a conversion that strips "noreturn" as an identity conversion.
     SCS.Second = ICK_NoReturn_Adjustment;
+  } else if (IsTransparentUnionStandardConversion(S, From, ToType,
+                                             InOverloadResolution,
+                                             SCS, CStyle)) {
+    SCS.Second = ICK_TransparentUnionConversion;
+    FromType = ToType;
   } else {
     // No second conversion required.
     SCS.Second = ICK_Identity;
@@ -1243,6 +1264,30 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
     return false;
 
   return true;
+}
+  
+static bool
+IsTransparentUnionStandardConversion(Sema &S, Expr* From, 
+                                     QualType &ToType,
+                                     bool InOverloadResolution,
+                                     StandardConversionSequence &SCS,
+                                     bool CStyle) {
+    
+  const RecordType *UT = ToType->getAsUnionType();
+  if (!UT || !UT->getDecl()->hasAttr<TransparentUnionAttr>())
+    return false;
+  // The field to initialize within the transparent union.
+  RecordDecl *UD = UT->getDecl();
+  // It's compatible if the expression matches any of the fields.
+  for (RecordDecl::field_iterator it = UD->field_begin(),
+       itend = UD->field_end();
+       it != itend; ++it) {
+    if (IsStandardConversion(S, From, it->getType(), InOverloadResolution, SCS, CStyle)) {
+      ToType = it->getType();
+      return true;
+    }
+  }
+  return false;
 }
 
 /// IsIntegralPromotion - Determines whether the conversion from the
@@ -6282,8 +6327,7 @@ OverloadCandidateSet::BestViableFunction(Sema &S, SourceLocation Loc,
 
   // Best is the best viable function.
   if (Best->Function &&
-      (Best->Function->isDeleted() ||
-       Best->Function->getAttr<UnavailableAttr>()))
+      (Best->Function->isDeleted() || Best->Function->isUnavailable()))
     return OR_Deleted;
 
   return OR_Success;
@@ -6735,7 +6779,7 @@ void NoteFunctionCandidate(Sema &S, OverloadCandidate *Cand,
   FunctionDecl *Fn = Cand->Function;
 
   // Note deleted candidates, but only if they're viable.
-  if (Cand->Viable && (Fn->isDeleted() || Fn->hasAttr<UnavailableAttr>())) {
+  if (Cand->Viable && (Fn->isDeleted() || Fn->isUnavailable())) {
     std::string FnDesc;
     OverloadCandidateKind FnKind = ClassifyOverloadCandidate(S, Fn, FnDesc);
 
@@ -7136,6 +7180,21 @@ public:
         DeclAccessPair dap;
         if( FunctionDecl* Fn = S.ResolveSingleFunctionTemplateSpecialization(
                                             OvlExpr, false, &dap) ) {
+
+          if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(Fn)) {
+            if (!Method->isStatic()) {
+              // If the target type is a non-function type and the function
+              // found is a non-static member function, pretend as if that was
+              // the target, it's the only possible type to end up with.
+              TargetTypeIsNonStaticMemberFunction = true;
+
+              // And skip adding the function if its not in the proper form.
+              // We'll diagnose this due to an empty set of functions.
+              if (!OvlExprInfo.HasFormOfMemberPointer)
+                return;
+            }
+          }
+
           Matches.push_back(std::make_pair(dap,Fn));
         }
       }
@@ -7744,8 +7803,7 @@ Sema::BuildOverloadedCallExpr(Scope *S, Expr *Fn, UnresolvedLookupExpr *ULE,
       Diag(Fn->getSourceRange().getBegin(), diag::err_ovl_deleted_call)
         << Best->Function->isDeleted()
         << ULE->getName()
-        << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+        << getDeletedOrUnavailableSuffix(Best->Function)
         << Fn->getSourceRange();
       CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     }
@@ -7928,8 +7986,7 @@ Sema::CreateOverloadedUnaryOp(SourceLocation OpLoc, unsigned OpcIn,
       Diag(OpLoc, diag::err_ovl_deleted_oper)
         << Best->Function->isDeleted()
         << UnaryOperator::getOpcodeStr(Opc)
-        << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+        << getDeletedOrUnavailableSuffix(Best->Function)
         << Input->getSourceRange();
       CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
       return ExprError();
@@ -8199,8 +8256,7 @@ Sema::CreateOverloadedBinOp(SourceLocation OpLoc,
       Diag(OpLoc, diag::err_ovl_deleted_oper)
         << Best->Function->isDeleted()
         << BinaryOperator::getOpcodeStr(Opc)
-        << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+        << getDeletedOrUnavailableSuffix(Best->Function)
         << Args[0]->getSourceRange() << Args[1]->getSourceRange();
       CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args, 2);
       return ExprError();
@@ -8349,8 +8405,7 @@ Sema::CreateOverloadedArraySubscriptExpr(SourceLocation LLoc,
     case OR_Deleted:
       Diag(LLoc, diag::err_ovl_deleted_oper)
         << Best->Function->isDeleted() << "[]"
-        << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+        << getDeletedOrUnavailableSuffix(Best->Function)
         << Args[0]->getSourceRange() << Args[1]->getSourceRange();
       CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args, 2,
                                   "[]", LLoc);
@@ -8468,8 +8523,7 @@ Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
       Diag(UnresExpr->getMemberLoc(), diag::err_ovl_deleted_member_call)
         << Best->Function->isDeleted()
         << DeclName 
-        << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+        << getDeletedOrUnavailableSuffix(Best->Function)
         << MemExprE->getSourceRange();
       CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
       // FIXME: Leaking incoming expressions!
@@ -8643,8 +8697,7 @@ Sema::BuildCallToObjectOfClassType(Scope *S, Expr *Object,
          diag::err_ovl_deleted_object_call)
       << Best->Function->isDeleted()
       << Object->getType() 
-      << Best->Function->getMessageUnavailableAttr(
-           !Best->Function->isDeleted())
+      << getDeletedOrUnavailableSuffix(Best->Function)
       << Object->getSourceRange();
     CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
     break;
@@ -8852,8 +8905,7 @@ Sema::BuildOverloadedArrowExpr(Scope *S, Expr *Base, SourceLocation OpLoc) {
     Diag(OpLoc,  diag::err_ovl_deleted_oper)
       << Best->Function->isDeleted()
       << "->" 
-      << Best->Function->getMessageUnavailableAttr(
-             !Best->Function->isDeleted())
+      << getDeletedOrUnavailableSuffix(Best->Function)
       << Base->getSourceRange();
     CandidateSet.NoteCandidates(*this, OCD_AllCandidates, &Base, 1);
     return ExprError();

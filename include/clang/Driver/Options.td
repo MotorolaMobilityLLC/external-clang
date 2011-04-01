@@ -271,6 +271,7 @@ def fdiagnostics_fixit_info : Flag<"-fdiagnostics-fixit-info">, Group<f_Group>;
 def fdiagnostics_print_source_range_info : Flag<"-fdiagnostics-print-source-range-info">, Group<f_Group>;
 def fdiagnostics_parseable_fixits : Flag<"-fdiagnostics-parseable-fixits">, Group<f_Group>;
 def fdiagnostics_show_option : Flag<"-fdiagnostics-show-option">, Group<f_Group>;
+def fdiagnostics_show_note_include_stack : Flag<"-fdiagnostics-show-note-include-stack">, Group<f_Group>;
 def fdiagnostics_show_category_EQ : Joined<"-fdiagnostics-show-category=">, Group<f_Group>;
 def fdollars_in_identifiers : Flag<"-fdollars-in-identifiers">, Group<f_Group>;
 def felide_constructors : Flag<"-felide-constructors">, Group<f_Group>;
@@ -329,6 +330,7 @@ def fno_constant_cfstrings : Flag<"-fno-constant-cfstrings">, Group<f_Group>;
 def fno_cxx_exceptions: Flag<"-fno-cxx-exceptions">, Group<f_Group>;
 def fno_diagnostics_fixit_info : Flag<"-fno-diagnostics-fixit-info">, Group<f_Group>;
 def fno_diagnostics_show_option : Flag<"-fno-diagnostics-show-option">, Group<f_Group>;
+def fno_diagnostics_show_note_include_stack : Flag<"-fno-diagnostics-show-note-include-stack">, Group<f_Group>;
 def fno_dollars_in_identifiers : Flag<"-fno-dollars-in-identifiers">, Group<f_Group>;
 def fno_elide_constructors : Flag<"-fno-elide-constructors">, Group<f_Group>;
 def fno_eliminate_unused_debug_symbols : Flag<"-fno-eliminate-unused-debug-symbols">, Group<f_Group>;
@@ -355,12 +357,14 @@ def fno_show_source_location : Flag<"-fno-show-source-location">, Group<f_Group>
 def fno_spell_checking : Flag<"-fno-spell-checking">, Group<f_Group>;
 def fno_stack_protector : Flag<"-fno-stack-protector">, Group<f_Group>;
 def fno_strict_aliasing : Flag<"-fno-strict-aliasing">, Group<f_Group>;
+def fno_strict_overflow : Flag<"-fno-strict-overflow">, Group<f_Group>;
 def fno_threadsafe_statics : Flag<"-fno-threadsafe-statics">, Group<f_Group>;
 def fno_use_cxa_atexit : Flag<"-fno-use-cxa-atexit">, Group<f_Group>;
 def fno_unit_at_a_time : Flag<"-fno-unit-at-a-time">, Group<f_Group>;
 def fno_unwind_tables : Flag<"-fno-unwind-tables">, Group<f_Group>;
 def fno_verbose_asm : Flag<"-fno-verbose-asm">, Group<f_Group>;
 def fno_working_directory : Flag<"-fno-working-directory">, Group<f_Group>;
+def fno_wrapv : Flag<"-fno-wrapv">, Group<f_Group>;
 def fno_zero_initialized_in_bss : Flag<"-fno-zero-initialized-in-bss">, Group<f_Group>;
 def fobjc_atdefs : Flag<"-fobjc-atdefs">, Group<clang_ignored_f_Group>;
 def fobjc_call_cxx_cdtors : Flag<"-fobjc-call-cxx-cdtors">, Group<clang_ignored_f_Group>;
@@ -408,6 +412,7 @@ def fsigned_char : Flag<"-fsigned-char">, Group<f_Group>;
 def fstack_protector_all : Flag<"-fstack-protector-all">, Group<f_Group>;
 def fstack_protector : Flag<"-fstack-protector">, Group<f_Group>;
 def fstrict_aliasing : Flag<"-fstrict-aliasing">, Group<f_Group>;
+def fstrict_overflow : Flag<"-fstrict-overflow">, Group<f_Group>;
 def fsyntax_only : Flag<"-fsyntax-only">, Flags<[DriverOption]>;
 def ftabstop_EQ : Joined<"-ftabstop=">, Group<f_Group>;
 def ferror_limit_EQ : Joined<"-ferror-limit=">, Group<f_Group>;
@@ -416,6 +421,14 @@ def ftemplate_backtrace_limit_EQ : Joined<"-ftemplate-backtrace-limit=">,
                                    Group<f_Group>;
 def Wlarge_by_value_copy_def : Flag<"-Wlarge-by-value-copy">;
 def Wlarge_by_value_copy_EQ : Joined<"-Wlarge-by-value-copy=">;
+
+// Just silence warnings about -Wlarger-than,  -Wframe-larger-than for now.
+def Wlarger_than : Separate<"-Wlarger-than">, Group<clang_ignored_f_Group>;
+def Wlarger_than_EQ : Joined<"-Wlarger-than=">, Alias<Wlarger_than>;
+def Wlarger_than_ : Joined<"-Wlarger-than-">, Alias<Wlarger_than>;
+def Wframe_larger_than : Separate<"-Wframe-larger-than">, Group<clang_ignored_f_Group>;
+def Wframe_larger_than_EQ : Joined<"-Wframe-larger-than=">, Alias<Wframe_larger_than>;
+
 def fterminated_vtables : Flag<"-fterminated-vtables">, Group<f_Group>;
 def fthreadsafe_statics : Flag<"-fthreadsafe-statics">, Group<f_Group>;
 def ftime_report : Flag<"-ftime-report">, Group<f_Group>;

@@ -101,7 +101,8 @@ static const char *GetArmArchForMCpu(llvm::StringRef Value) {
     return "xscale";
 
   if (Value == "arm1136j-s" || Value == "arm1136jf-s" ||
-      Value == "arm1176jz-s" || Value == "arm1176jzf-s")
+      Value == "arm1176jz-s" || Value == "arm1176jzf-s" ||
+      Value == "cortex-m0" )
     return "armv6";
 
   if (Value == "cortex-a8" || Value == "cortex-r4" || Value == "cortex-m3")
@@ -1018,12 +1019,11 @@ NetBSD::NetBSD(const HostInfo &Host, const llvm::Triple& Triple)
         llvm::Triple::x86_64)
     Lib32 = true;
 
-  getProgramPaths().push_back(getDriver().Dir + "/../libexec");
-  getProgramPaths().push_back("/usr/libexec");
-  if (Lib32) {
-    getFilePaths().push_back("/usr/lib/i386");
-  } else {
-    getFilePaths().push_back("/usr/lib");
+  if (getDriver().UseStdLib) {
+    if (Lib32)
+      getFilePaths().push_back("=/usr/lib/i386");
+    else
+      getFilePaths().push_back("=/usr/lib");
   }
 }
 

@@ -60,7 +60,8 @@ using namespace clang;
 bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
                                             ParsedType ObjectType,
                                             bool EnteringContext,
-                                            bool *MayBePseudoDestructor) {
+                                            bool *MayBePseudoDestructor,
+                                            bool IsTypename) {
   assert(getLang().CPlusPlus &&
          "Call sites of this function should be guarded by checking for C++");
 
@@ -314,12 +315,16 @@ bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
       } 
       
       if (MemberOfUnknownSpecialization && (ObjectType || SS.isSet()) && 
-          IsTemplateArgumentList(1)) {
+          (IsTypename || IsTemplateArgumentList(1))) {
         // We have something like t::getAs<T>, where getAs is a 
         // member of an unknown specialization. However, this will only
         // parse correctly as a template, so suggest the keyword 'template'
         // before 'getAs' and treat this as a dependent template name.
-        Diag(Tok.getLocation(), diag::err_missing_dependent_template_keyword)
+        unsigned DiagID = diag::err_missing_dependent_template_keyword;
+        if (getLang().Microsoft)
+          DiagID = diag::war_missing_dependent_template_keyword;
+        
+        Diag(Tok.getLocation(), DiagID)
           << II.getName()
           << FixItHint::CreateInsertion(Tok.getLocation(), "template ");
         
@@ -800,7 +805,7 @@ bool Parser::ParseCXXCondition(ExprResult &ExprOut,
   }
 
   // type-specifier-seq
-  DeclSpec DS;
+  DeclSpec DS(AttrFactory);
   ParseSpecifierQualifierList(DS);
 
   // declarator
@@ -1391,7 +1396,7 @@ bool Parser::ParseUnqualifiedIdOperator(CXXScopeSpec &SS, bool EnteringContext,
   //     ptr-operator conversion-declarator[opt]
   
   // Parse the type-specifier-seq.
-  DeclSpec DS;
+  DeclSpec DS(AttrFactory);
   if (ParseCXXTypeSpecifierSeq(DS)) // FIXME: ObjectType?
     return true;
   
@@ -1644,7 +1649,7 @@ Parser::ParseCXXNewExpression(bool UseGlobal, SourceLocation Start) {
   SourceLocation PlacementLParen, PlacementRParen;
 
   SourceRange TypeIdParens;
-  DeclSpec DS;
+  DeclSpec DS(AttrFactory);
   Declarator DeclaratorInfo(DS, Declarator::TypeNameContext);
   if (Tok.is(tok::l_paren)) {
     // If it turns out to be a placement, we change the type location.
@@ -1746,10 +1751,12 @@ void Parser::ParseDirectNewDeclarator(Declarator &D) {
     first = false;
 
     SourceLocation RLoc = MatchRHSPunctuation(tok::r_square, LLoc);
-    D.AddTypeInfo(DeclaratorChunk::getArray(0, ParsedAttributes(),
+
+    ParsedAttributes attrs(AttrFactory);
+    D.AddTypeInfo(DeclaratorChunk::getArray(0,
                                             /*static=*/false, /*star=*/false,
                                             Size.release(), LLoc, RLoc),
-                  RLoc);
+                  attrs, RLoc);
 
     if (RLoc.isInvalid())
       return;

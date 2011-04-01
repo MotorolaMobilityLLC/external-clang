@@ -216,10 +216,19 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
                                        InitializedDecl);
   }
 
+  if (const ObjCPropertyRefExpr *PRE = 
+      dyn_cast<ObjCPropertyRefExpr>(E->IgnoreParenImpCasts()))
+    if (PRE->getGetterResultType()->isReferenceType())
+      E = PRE;
+    
   RValue RV;
   if (E->isGLValue()) {
     // Emit the expression as an lvalue.
     LValue LV = CGF.EmitLValue(E);
+    if (LV.isPropertyRef()) {
+      RV = CGF.EmitLoadOfPropertyRefLValue(LV);
+      return RV.getScalarVal();
+    }
     if (LV.isSimple())
       return LV.getAddress();
     
@@ -1415,6 +1424,7 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E) {
   // We know that the pointer points to a type of the correct size, unless the
   // size is a VLA or Objective-C interface.
   llvm::Value *Address = 0;
+  unsigned ArrayAlignment = 0;
   if (const VariableArrayType *VAT =
         getContext().getAsVariableArrayType(E->getType())) {
     llvm::Value *VLASize = GetVLASize(VAT);
@@ -1450,10 +1460,14 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E) {
     // "gep x, i" here.  Emit one "gep A, 0, i".
     assert(Array->getType()->isArrayType() &&
            "Array to pointer decay must have array source type!");
-    llvm::Value *ArrayPtr = EmitLValue(Array).getAddress();
+    LValue ArrayLV = EmitLValue(Array);
+    llvm::Value *ArrayPtr = ArrayLV.getAddress();
     llvm::Value *Zero = llvm::ConstantInt::get(Int32Ty, 0);
     llvm::Value *Args[] = { Zero, Idx };
     
+    // Propagate the alignment from the array itself to the result.
+    ArrayAlignment = ArrayLV.getAlignment();
+
     if (getContext().getLangOptions().isSignedOverflowDefined())
       Address = Builder.CreateGEP(ArrayPtr, Args, Args+2, "arrayidx");
     else
@@ -1471,7 +1485,13 @@ LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E) {
   assert(!T.isNull() &&
          "CodeGenFunction::EmitArraySubscriptExpr(): Illegal base type");
 
-  LValue LV = MakeAddrLValue(Address, T);
+  // Limit the alignment to that of the result type.
+  if (ArrayAlignment) {
+    unsigned Align = getContext().getTypeAlignInChars(T).getQuantity();
+    ArrayAlignment = std::min(Align, ArrayAlignment);
+  }
+
+  LValue LV = MakeAddrLValue(Address, T, ArrayAlignment);
   LV.getQuals().setAddressSpace(E->getBase()->getType().getAddressSpace());
 
   if (getContext().getLangOptions().ObjC1 &&
@@ -1765,9 +1785,8 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
 
   EmitBlock(contBlock);
 
-  llvm::PHINode *phi = Builder.CreatePHI(lhs.getAddress()->getType(),
+  llvm::PHINode *phi = Builder.CreatePHI(lhs.getAddress()->getType(), 2,
                                          "cond-lvalue");
-  phi->reserveOperandSpace(2);
   phi->addIncoming(lhs.getAddress(), lhsBlock);
   phi->addIncoming(rhs.getAddress(), rhsBlock);
   return MakeAddrLValue(phi, expr->getType());

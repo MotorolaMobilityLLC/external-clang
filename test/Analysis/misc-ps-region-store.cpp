@@ -240,3 +240,41 @@ void test_namespace() {
   int x = i;
 }
 
+// Test handling methods that accept references as parameters, and that
+// variables are properly invalidated.
+class RDar9203355 {
+  bool foo(unsigned valA, long long &result) const;
+  bool foo(unsigned valA, int &result) const;
+};
+bool RDar9203355::foo(unsigned valA, int &result) const {
+  long long val;
+  if (foo(valA, val) ||
+      (int)val != val) // no-warning
+    return true;
+  result = val; // no-warning
+  return false;
+}
+
+// Test handling of new[].
+void rdar9212512() {
+  int *x = new int[10];
+  for (unsigned i = 0 ; i < 2 ; ++i) {
+    // This previously triggered an uninitialized values warning.
+    x[i] = 1;  // no-warning
+  }
+}
+
+// Test basic support for dynamic_cast<>.
+struct Rdar9212495_C { virtual void bar() const; };
+class Rdar9212495_B : public Rdar9212495_C {};
+class Rdar9212495_A : public Rdar9212495_B {};
+const Rdar9212495_A& rdar9212495(const Rdar9212495_C* ptr) {
+  const Rdar9212495_A& val = dynamic_cast<const Rdar9212495_A&>(*ptr);
+  
+  if (&val == 0) {
+    val.bar(); // FIXME: This should eventually be a null dereference.
+  }
+  
+  return val;
+}
+
