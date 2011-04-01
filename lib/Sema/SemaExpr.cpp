@@ -68,7 +68,7 @@ bool Sema::DiagnoseUseOfDecl(NamedDecl *D, SourceLocation Loc,
         Diag(Suppressed[I].first, Suppressed[I].second);
       
       // Clear out the list of suppressed diagnostics, so that we don't emit
-      // them again for this specialization. However, we don't remove this
+      // them again for this specialization. However, we don't obsolete this
       // entry from the table, because we want to avoid ever emitting these
       // diagnostics again.
       Suppressed.clear();
@@ -82,25 +82,6 @@ bool Sema::DiagnoseUseOfDecl(NamedDecl *D, SourceLocation Loc,
     return true;
   }
 
-  // See if the decl is deprecated.
-  if (const DeprecatedAttr *DA = D->getAttr<DeprecatedAttr>())
-    EmitDeprecationWarning(D, DA->getMessage(), Loc, UnknownObjCClass);
-
-  // See if the decl is unavailable
-  if (const UnavailableAttr *UA = D->getAttr<UnavailableAttr>()) {
-    if (UA->getMessage().empty()) {
-      if (!UnknownObjCClass)
-        Diag(Loc, diag::err_unavailable) << D->getDeclName();
-      else
-        Diag(Loc, diag::warn_unavailable_fwdclass_message) 
-             << D->getDeclName();
-    }
-    else 
-      Diag(Loc, diag::err_unavailable_message) 
-        << D->getDeclName() << UA->getMessage();
-    Diag(D->getLocation(), diag::note_unavailable_here) << 0;
-  }
-
   // See if this is a deleted function.
   if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     if (FD->isDeleted()) {
@@ -110,11 +91,54 @@ bool Sema::DiagnoseUseOfDecl(NamedDecl *D, SourceLocation Loc,
     }
   }
 
+  // See if this declaration is unavailable or deprecated.
+  std::string Message;
+  switch (D->getAvailability(&Message)) {
+  case AR_Available:
+  case AR_NotYetIntroduced:
+    break;
+
+  case AR_Deprecated:
+    EmitDeprecationWarning(D, Message, Loc, UnknownObjCClass);
+    break;
+
+  case AR_Unavailable:
+    if (Message.empty()) {
+      if (!UnknownObjCClass)
+        Diag(Loc, diag::err_unavailable) << D->getDeclName();
+      else
+        Diag(Loc, diag::warn_unavailable_fwdclass_message) 
+             << D->getDeclName();
+    }
+    else 
+      Diag(Loc, diag::err_unavailable_message) 
+        << D->getDeclName() << Message;
+    Diag(D->getLocation(), diag::note_unavailable_here) << 0;    
+    break;
+  }
+
   // Warn if this is used but marked unused.
   if (D->hasAttr<UnusedAttr>())
     Diag(Loc, diag::warn_used_but_marked_unused) << D->getDeclName();
 
   return false;
+}
+
+/// \brief Retrieve the message suffix that should be added to a
+/// diagnostic complaining about the given function being deleted or
+/// unavailable.
+std::string Sema::getDeletedOrUnavailableSuffix(const FunctionDecl *FD) {
+  // FIXME: C++0x implicitly-deleted special member functions could be
+  // detected here so that we could improve diagnostics to say, e.g.,
+  // "base class 'A' had a deleted copy constructor".
+  if (FD->isDeleted())
+    return std::string();
+
+  std::string Message;
+  if (FD->getAvailability(&Message))
+    return ": " + Message;
+
+  return std::string();
 }
 
 /// DiagnoseSentinelCalls - This routine checks on method dispatch calls
@@ -782,11 +806,20 @@ diagnoseUncapturableValueReference(Sema &S, SourceLocation loc,
   // diagnose this.
   if (!S.CurContext->isFunctionOrMethod()) return CR_NoCapture;
 
-  // This particular madness can happen in ill-formed default
-  // arguments; claim it's okay and let downstream code handle it.
-  if (isa<ParmVarDecl>(var) &&
-      S.CurContext == var->getDeclContext()->getParent())
-    return CR_NoCapture;
+  // Certain madnesses can happen with parameter declarations, which
+  // we want to ignore.
+  if (isa<ParmVarDecl>(var)) {
+    // - If the parameter still belongs to the translation unit, then
+    //   we're actually just using one parameter in the declaration of
+    //   the next.  This is useful in e.g. VLAs.
+    if (isa<TranslationUnitDecl>(var->getDeclContext()))
+      return CR_NoCapture;
+
+    // - This particular madness can happen in ill-formed default
+    //   arguments; claim it's okay and let downstream code handle it.
+    if (S.CurContext == var->getDeclContext()->getParent())
+      return CR_NoCapture;
+  }
 
   DeclarationName functionName;
   if (FunctionDecl *fn = dyn_cast<FunctionDecl>(var->getDeclContext()))
@@ -5072,8 +5105,16 @@ bool Sema::CheckCastTypes(SourceRange TyR, QualType castType,
   if (castType->isExtVectorType())
     return CheckExtVectorCast(TyR, castType, castExpr, Kind);
 
-  if (castType->isVectorType())
-    return CheckVectorCast(TyR, castType, castExpr->getType(), Kind);
+  if (castType->isVectorType()) {
+    if (castType->getAs<VectorType>()->getVectorKind() ==
+        VectorType::AltiVecVector &&
+          (castExpr->getType()->isIntegerType() ||
+           castExpr->getType()->isFloatingType())) {
+      Kind = CK_VectorSplat;
+      return false;
+    } else
+      return CheckVectorCast(TyR, castType, castExpr->getType(), Kind);
+  }
   if (castExpr->getType()->isVectorType())
     return CheckVectorCast(TyR, castExpr->getType(), castType, Kind);
 
@@ -5221,9 +5262,9 @@ Sema::ActOnCastOfParenListExpr(Scope *S, SourceLocation LParenLoc,
                                TypeSourceInfo *TInfo) {
   ParenListExpr *PE = cast<ParenListExpr>(Op);
   QualType Ty = TInfo->getType();
-  bool isAltiVecLiteral = false;
+  bool isVectorLiteral = false;
 
-  // Check for an altivec literal,
+  // Check for an altivec or OpenCL literal,
   // i.e. all the elements are integer constants.
   if (getLangOptions().AltiVec && Ty->isVectorType()) {
     if (PE->getNumExprs() == 0) {
@@ -5232,18 +5273,45 @@ Sema::ActOnCastOfParenListExpr(Scope *S, SourceLocation LParenLoc,
     }
     if (PE->getNumExprs() == 1) {
       if (!PE->getExpr(0)->getType()->isVectorType())
-        isAltiVecLiteral = true;
+        isVectorLiteral = true;
     }
     else
-      isAltiVecLiteral = true;
+      isVectorLiteral = true;
   }
 
-  // If this is an altivec initializer, '(' type ')' '(' init, ..., init ')'
+  // If this is a vector initializer, '(' type ')' '(' init, ..., init ')'
   // then handle it as such.
-  if (isAltiVecLiteral) {
+  if (isVectorLiteral) {
     llvm::SmallVector<Expr *, 8> initExprs;
-    for (unsigned i = 0, e = PE->getNumExprs(); i != e; ++i)
-      initExprs.push_back(PE->getExpr(i));
+    // '(...)' form of vector initialization in AltiVec: the number of
+    // initializers must be one or must match the size of the vector.
+    // If a single value is specified in the initializer then it will be
+    // replicated to all the components of the vector
+    if (Ty->getAs<VectorType>()->getVectorKind() ==
+        VectorType::AltiVecVector) {
+      unsigned numElems = Ty->getAs<VectorType>()->getNumElements();
+      // The number of initializers must be one or must match the size of the
+      // vector. If a single value is specified in the initializer then it will
+      // be replicated to all the components of the vector
+      if (PE->getNumExprs() == 1) {
+        QualType ElemTy = Ty->getAs<VectorType>()->getElementType();
+        Expr *Literal = PE->getExpr(0);
+        ImpCastExprToType(Literal, ElemTy,
+                          PrepareScalarCast(*this, Literal, ElemTy));
+        return BuildCStyleCastExpr(LParenLoc, TInfo, RParenLoc, Literal);
+      }
+      else if (PE->getNumExprs() < numElems) {
+        Diag(PE->getExprLoc(),
+             diag::err_incorrect_number_of_vector_initializers);
+        return ExprError();
+      }
+      else
+        for (unsigned i = 0, e = PE->getNumExprs(); i != e; ++i)
+          initExprs.push_back(PE->getExpr(i));
+    }
+    else
+      for (unsigned i = 0, e = PE->getNumExprs(); i != e; ++i)
+        initExprs.push_back(PE->getExpr(i));
 
     // FIXME: This means that pretty-printing the final AST will produce curly
     // braces instead of the original commas.
@@ -5769,6 +5837,12 @@ checkPointerTypesForAssignment(Sema &S, QualType lhsType, QualType rhsType) {
     // Treat address-space mismatches as fatal.  TODO: address subspaces
     if (lhq.getAddressSpace() != rhq.getAddressSpace())
       ConvTy = Sema::IncompatiblePointerDiscardsQualifiers;
+
+    // It's okay to add or remove GC qualifiers when converting to
+    // and from void*.
+    else if (lhq.withoutObjCGCAttr().compatiblyIncludes(rhq.withoutObjCGCAttr())
+             && (lhptee->isVoidType() || rhptee->isVoidType()))
+      ; // keep old
 
     // For GCC compatibility, other qualifier mismatches are treated
     // as still compatible in C.
@@ -7203,13 +7277,13 @@ QualType Sema::CheckVectorCompareOperands(Expr *&lex, Expr *&rex,
   if (vType.isNull())
     return vType;
 
-  // If AltiVec, the comparison results in a numeric type, i.e.
-  // bool for C++, int for C
-  if (getLangOptions().AltiVec)
-    return Context.getLogicalOperationType();
-
   QualType lType = lex->getType();
   QualType rType = rex->getType();
+
+  // If AltiVec, the comparison results in a numeric type, i.e.
+  // bool for C++, int for C
+  if (vType->getAs<VectorType>()->getVectorKind() == VectorType::AltiVecVector)
+    return Context.getLogicalOperationType();
 
   // For non-floating point types, check for self-comparisons of the form
   // x == x, x != x, x < x, etc.  These always evaluate to a constant, and
@@ -7339,6 +7413,35 @@ static bool IsReadonlyProperty(Expr *E, Sema &S) {
   return false;
 }
 
+static bool IsConstProperty(Expr *E, Sema &S) {
+  if (E->getStmtClass() == Expr::ObjCPropertyRefExprClass) {
+    const ObjCPropertyRefExpr* PropExpr = cast<ObjCPropertyRefExpr>(E);
+    if (PropExpr->isImplicitProperty()) return false;
+    
+    ObjCPropertyDecl *PDecl = PropExpr->getExplicitProperty();
+    QualType T = PDecl->getType();
+    if (T->isReferenceType())
+      T = T->getAs<ReferenceType>()->getPointeeType();
+    CanQualType CT = S.Context.getCanonicalType(T);
+    return CT.isConstQualified();
+  }
+  return false;
+}
+
+static bool IsReadonlyMessage(Expr *E, Sema &S) {
+  if (E->getStmtClass() != Expr::MemberExprClass) 
+    return false;
+  const MemberExpr *ME = cast<MemberExpr>(E);
+  NamedDecl *Member = ME->getMemberDecl();
+  if (isa<FieldDecl>(Member)) {
+    Expr *Base = ME->getBase()->IgnoreParenImpCasts();
+    if (Base->getStmtClass() != Expr::ObjCMessageExprClass)
+      return false;
+    return cast<ObjCMessageExpr>(Base)->getMethodDecl() != 0;
+  }
+  return false;
+}
+
 /// CheckForModifiableLvalue - Verify that E is a modifiable lvalue.  If not,
 /// emit an error and return true.  If so, return false.
 static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
@@ -7347,6 +7450,10 @@ static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
                                                               &Loc);
   if (IsLV == Expr::MLV_Valid && IsReadonlyProperty(E, S))
     IsLV = Expr::MLV_ReadonlyProperty;
+  else if (Expr::MLV_ConstQualified && IsConstProperty(E, S))
+    IsLV = Expr::MLV_Valid;
+  else if (IsLV == Expr::MLV_ClassTemporary && IsReadonlyMessage(E, S))
+    IsLV = Expr::MLV_InvalidMessageExpression;
   if (IsLV == Expr::MLV_Valid)
     return false;
 
@@ -7388,6 +7495,9 @@ static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
     break;
   case Expr::MLV_NoSetterProperty:
     Diag = diag::error_nosetter_property_assignment;
+    break;
+  case Expr::MLV_InvalidMessageExpression:
+    Diag = diag::error_readonly_message_assignment;
     break;
   case Expr::MLV_SubObjCPropertySetting:
     Diag = diag::error_no_subobject_property_setting;
@@ -7773,7 +7883,7 @@ static QualType CheckAddressOfOperand(Sema &S, Expr *OrigOp,
   ValueDecl *dcl = getPrimaryDecl(op);
   Expr::LValueClassification lval = op->ClassifyLValue(S.Context);
 
-  if (lval == Expr::LV_ClassTemporary) {
+  if (lval == Expr::LV_ClassTemporary) { 
     bool sfinae = S.isSFINAEContext();
     S.Diag(OpLoc, sfinae ? diag::err_typecheck_addrof_class_temporary
                          : diag::ext_typecheck_addrof_class_temporary)
@@ -9728,6 +9838,9 @@ void Sema::DiagnoseEqualityWithExtraParens(ParenExpr *parenE) {
   // Don't warn if the parens came from a macro.
   SourceLocation parenLoc = parenE->getLocStart();
   if (parenLoc.isInvalid() || parenLoc.isMacroID())
+    return;
+  // Don't warn for dependent expressions.
+  if (parenE->isTypeDependent())
     return;
 
   Expr *E = parenE->IgnoreParens();

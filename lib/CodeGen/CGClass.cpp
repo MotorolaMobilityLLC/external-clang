@@ -22,12 +22,12 @@
 using namespace clang;
 using namespace CodeGen;
 
-static uint64_t 
+static CharUnits 
 ComputeNonVirtualBaseClassOffset(ASTContext &Context, 
                                  const CXXRecordDecl *DerivedClass,
                                  CastExpr::path_const_iterator Start,
                                  CastExpr::path_const_iterator End) {
-  uint64_t Offset = 0;
+  CharUnits Offset = CharUnits::Zero();
   
   const CXXRecordDecl *RD = DerivedClass;
   
@@ -42,13 +42,12 @@ ComputeNonVirtualBaseClassOffset(ASTContext &Context,
       cast<CXXRecordDecl>(Base->getType()->getAs<RecordType>()->getDecl());
     
     // Add the offset.
-    Offset += Layout.getBaseClassOffsetInBits(BaseDecl);
+    Offset += Layout.getBaseClassOffset(BaseDecl);
     
     RD = BaseDecl;
   }
   
-  // FIXME: We should not use / 8 here.
-  return Offset / 8;
+  return Offset;
 }
 
 llvm::Constant *
@@ -57,16 +56,16 @@ CodeGenModule::GetNonVirtualBaseClassOffset(const CXXRecordDecl *ClassDecl,
                                    CastExpr::path_const_iterator PathEnd) {
   assert(PathBegin != PathEnd && "Base path should not be empty!");
 
-  uint64_t Offset = 
+  CharUnits Offset = 
     ComputeNonVirtualBaseClassOffset(getContext(), ClassDecl,
                                      PathBegin, PathEnd);
-  if (!Offset)
+  if (Offset.isZero())
     return 0;
   
   const llvm::Type *PtrDiffTy = 
   Types.ConvertType(getContext().getPointerDiffType());
   
-  return llvm::ConstantInt::get(PtrDiffTy, Offset);
+  return llvm::ConstantInt::get(PtrDiffTy, Offset.getQuantity());
 }
 
 /// Gets the address of a direct base class within a complete object.
@@ -85,20 +84,20 @@ CodeGenFunction::GetAddressOfDirectBaseInCompleteClass(llvm::Value *This,
            == ConvertType(Derived));
 
   // Compute the offset of the virtual base.
-  uint64_t Offset;
+  CharUnits Offset;
   const ASTRecordLayout &Layout = getContext().getASTRecordLayout(Derived);
   if (BaseIsVirtual)
-    Offset = Layout.getVBaseClassOffsetInBits(Base);
+    Offset = Layout.getVBaseClassOffset(Base);
   else
-    Offset = Layout.getBaseClassOffsetInBits(Base);
+    Offset = Layout.getBaseClassOffset(Base);
 
   // Shift and cast down to the base type.
   // TODO: for complete types, this should be possible with a GEP.
   llvm::Value *V = This;
-  if (Offset) {
+  if (Offset.isPositive()) {
     const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(getLLVMContext());
     V = Builder.CreateBitCast(V, Int8PtrTy);
-    V = Builder.CreateConstInBoundsGEP1_64(V, Offset / 8);
+    V = Builder.CreateConstInBoundsGEP1_64(V, Offset.getQuantity());
   }
   V = Builder.CreateBitCast(V, ConvertType(Base)->getPointerTo());
 
@@ -107,13 +106,14 @@ CodeGenFunction::GetAddressOfDirectBaseInCompleteClass(llvm::Value *This,
 
 static llvm::Value *
 ApplyNonVirtualAndVirtualOffset(CodeGenFunction &CGF, llvm::Value *ThisPtr,
-                                uint64_t NonVirtual, llvm::Value *Virtual) {
+                                CharUnits NonVirtual, llvm::Value *Virtual) {
   const llvm::Type *PtrDiffTy = 
     CGF.ConvertType(CGF.getContext().getPointerDiffType());
   
   llvm::Value *NonVirtualOffset = 0;
-  if (NonVirtual)
-    NonVirtualOffset = llvm::ConstantInt::get(PtrDiffTy, NonVirtual);
+  if (!NonVirtual.isZero())
+    NonVirtualOffset = llvm::ConstantInt::get(PtrDiffTy, 
+                                              NonVirtual.getQuantity());
   
   llvm::Value *BaseOffset;
   if (Virtual) {
@@ -150,7 +150,7 @@ CodeGenFunction::GetAddressOfBaseClass(llvm::Value *Value,
     ++Start;
   }
   
-  uint64_t NonVirtualOffset = 
+  CharUnits NonVirtualOffset = 
     ComputeNonVirtualBaseClassOffset(getContext(), VBase ? VBase : Derived,
                                      Start, PathEnd);
 
@@ -158,7 +158,7 @@ CodeGenFunction::GetAddressOfBaseClass(llvm::Value *Value,
   const llvm::Type *BasePtrTy = 
     ConvertType((PathEnd[-1])->getType())->getPointerTo();
   
-  if (!NonVirtualOffset && !VBase) {
+  if (NonVirtualOffset.isZero() && !VBase) {
     // Just cast back.
     return Builder.CreateBitCast(Value, BasePtrTy);
   }    
@@ -187,14 +187,15 @@ CodeGenFunction::GetAddressOfBaseClass(llvm::Value *Value,
 
       const ASTRecordLayout &Layout = getContext().getASTRecordLayout(Derived);
 
-      uint64_t VBaseOffset = Layout.getVBaseClassOffsetInBits(VBase);
-      NonVirtualOffset += VBaseOffset / 8;
+      CharUnits VBaseOffset = Layout.getVBaseClassOffset(VBase);
+      NonVirtualOffset += VBaseOffset;
     } else
       VirtualOffset = GetVirtualBaseClassOffset(Value, Derived, VBase);
   }
 
   // Apply the offsets.
-  Value = ApplyNonVirtualAndVirtualOffset(*this, Value, NonVirtualOffset, 
+  Value = ApplyNonVirtualAndVirtualOffset(*this, Value, 
+                                          NonVirtualOffset,
                                           VirtualOffset);
   
   // Cast back.
@@ -206,8 +207,7 @@ CodeGenFunction::GetAddressOfBaseClass(llvm::Value *Value,
     Builder.CreateBr(CastEnd);
     EmitBlock(CastEnd);
     
-    llvm::PHINode *PHI = Builder.CreatePHI(Value->getType());
-    PHI->reserveOperandSpace(2);
+    llvm::PHINode *PHI = Builder.CreatePHI(Value->getType(), 2);
     PHI->addIncoming(Value, CastNotNull);
     PHI->addIncoming(llvm::Constant::getNullValue(Value->getType()), 
                      CastNull);
@@ -267,8 +267,7 @@ CodeGenFunction::GetAddressOfDerivedClass(llvm::Value *Value,
     Builder.CreateBr(CastEnd);
     EmitBlock(CastEnd);
     
-    llvm::PHINode *PHI = Builder.CreatePHI(Value->getType());
-    PHI->reserveOperandSpace(2);
+    llvm::PHINode *PHI = Builder.CreatePHI(Value->getType(), 2);
     PHI->addIncoming(Value, CastNotNull);
     PHI->addIncoming(llvm::Constant::getNullValue(Value->getType()), 
                      CastNull);
@@ -304,9 +303,9 @@ static llvm::Value *GetVTTParameter(CodeGenFunction &CGF, GlobalDecl GD,
   } else {
     const ASTRecordLayout &Layout = 
       CGF.getContext().getASTRecordLayout(RD);
-    uint64_t BaseOffset = ForVirtualBase ? 
-      Layout.getVBaseClassOffsetInBits(Base) : 
-      Layout.getBaseClassOffsetInBits(Base);
+    CharUnits BaseOffset = ForVirtualBase ? 
+      Layout.getVBaseClassOffset(Base) : 
+      Layout.getBaseClassOffset(Base);
 
     SubVTTIndex = 
       CGF.CGM.getVTables().getSubVTTIndex(RD, BaseSubobject(Base, BaseOffset));
@@ -1337,7 +1336,7 @@ CodeGenFunction::GetVirtualBaseClassOffset(llvm::Value *This,
 void
 CodeGenFunction::InitializeVTablePointer(BaseSubobject Base, 
                                          const CXXRecordDecl *NearestVBase,
-                                         uint64_t OffsetFromNearestVBase,
+                                         CharUnits OffsetFromNearestVBase,
                                          llvm::Constant *VTable,
                                          const CXXRecordDecl *VTableClass) {
   const CXXRecordDecl *RD = Base.getBase();
@@ -1367,23 +1366,23 @@ CodeGenFunction::InitializeVTablePointer(BaseSubobject Base,
 
   // Compute where to store the address point.
   llvm::Value *VirtualOffset = 0;
-  uint64_t NonVirtualOffset = 0;
+  CharUnits NonVirtualOffset = CharUnits::Zero();
   
   if (CodeGenVTables::needsVTTParameter(CurGD) && NearestVBase) {
     // We need to use the virtual base offset offset because the virtual base
     // might have a different offset in the most derived class.
     VirtualOffset = GetVirtualBaseClassOffset(LoadCXXThis(), VTableClass, 
                                               NearestVBase);
-    NonVirtualOffset = OffsetFromNearestVBase / 8;
+    NonVirtualOffset = OffsetFromNearestVBase;
   } else {
     // We can just use the base offset in the complete class.
-    NonVirtualOffset = Base.getBaseOffset() / 8;
+    NonVirtualOffset = Base.getBaseOffset();
   }
   
   // Apply the offsets.
   llvm::Value *VTableField = LoadCXXThis();
   
-  if (NonVirtualOffset || VirtualOffset)
+  if (!NonVirtualOffset.isZero() || VirtualOffset)
     VTableField = ApplyNonVirtualAndVirtualOffset(*this, VTableField, 
                                                   NonVirtualOffset,
                                                   VirtualOffset);
@@ -1398,7 +1397,7 @@ CodeGenFunction::InitializeVTablePointer(BaseSubobject Base,
 void
 CodeGenFunction::InitializeVTablePointers(BaseSubobject Base, 
                                           const CXXRecordDecl *NearestVBase,
-                                          uint64_t OffsetFromNearestVBase,
+                                          CharUnits OffsetFromNearestVBase,
                                           bool BaseIsNonVirtualPrimaryBase,
                                           llvm::Constant *VTable,
                                           const CXXRecordDecl *VTableClass,
@@ -1423,8 +1422,8 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
     if (!BaseDecl->isDynamicClass())
       continue;
 
-    uint64_t BaseOffset;
-    uint64_t BaseOffsetFromNearestVBase;
+    CharUnits BaseOffset;
+    CharUnits BaseOffsetFromNearestVBase;
     bool BaseDeclIsNonVirtualPrimaryBase;
 
     if (I->isVirtual()) {
@@ -1435,16 +1434,15 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
       const ASTRecordLayout &Layout = 
         getContext().getASTRecordLayout(VTableClass);
 
-      BaseOffset = Layout.getVBaseClassOffsetInBits(BaseDecl);
-      BaseOffsetFromNearestVBase = 0;
+      BaseOffset = Layout.getVBaseClassOffset(BaseDecl);
+      BaseOffsetFromNearestVBase = CharUnits::Zero();
       BaseDeclIsNonVirtualPrimaryBase = false;
     } else {
       const ASTRecordLayout &Layout = getContext().getASTRecordLayout(RD);
 
-      BaseOffset = 
-        Base.getBaseOffset() + Layout.getBaseClassOffsetInBits(BaseDecl);
+      BaseOffset = Base.getBaseOffset() + Layout.getBaseClassOffset(BaseDecl);
       BaseOffsetFromNearestVBase = 
-        OffsetFromNearestVBase + Layout.getBaseClassOffsetInBits(BaseDecl);
+        OffsetFromNearestVBase + Layout.getBaseClassOffset(BaseDecl);
       BaseDeclIsNonVirtualPrimaryBase = Layout.getPrimaryBase() == BaseDecl;
     }
     
@@ -1466,8 +1464,9 @@ void CodeGenFunction::InitializeVTablePointers(const CXXRecordDecl *RD) {
 
   // Initialize the vtable pointers for this class and all of its bases.
   VisitedVirtualBasesSetTy VBases;
-  InitializeVTablePointers(BaseSubobject(RD, 0), /*NearestVBase=*/0, 
-                           /*OffsetFromNearestVBase=*/0,
+  InitializeVTablePointers(BaseSubobject(RD, CharUnits::Zero()), 
+                           /*NearestVBase=*/0, 
+                           /*OffsetFromNearestVBase=*/CharUnits::Zero(),
                            /*BaseIsNonVirtualPrimaryBase=*/false, 
                            VTable, RD, VBases);
 }

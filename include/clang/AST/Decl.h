@@ -20,6 +20,7 @@
 #include "clang/AST/DeclarationName.h"
 #include "clang/AST/ExternalASTSource.h"
 #include "clang/Basic/Linkage.h"
+#include "llvm/ADT/Optional.h"
 
 namespace clang {
 class CXXTemporary;
@@ -117,14 +118,6 @@ public:
   llvm::StringRef getName() const {
     assert(Name.isIdentifier() && "Name is not a simple identifier");
     return getIdentifier() ? getIdentifier()->getName() : "";
-  }
-
-  llvm::StringRef getMessageUnavailableAttr(bool unavailable) const {
-    if (!unavailable)
-      return "";
-    if (const UnavailableAttr *UA = getAttr<UnavailableAttr>())
-      return UA->getMessage();
-    return "";
   }
 
   /// getNameAsString - Get a human-readable name for the declaration, even if
@@ -280,6 +273,10 @@ public:
 
   /// \brief Determines the linkage and visibility of this entity.
   LinkageInfo getLinkageAndVisibility() const;
+
+  /// \brief If visibility was explicitly specified for this
+  /// declaration, return that visibility.
+  llvm::Optional<Visibility> getExplicitVisibility() const;
 
   /// \brief Clear the linkage cache in response to a change
   /// to the declaration. 

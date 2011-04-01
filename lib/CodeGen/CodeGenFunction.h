@@ -1107,14 +1107,12 @@ public:
   llvm::Constant *GenerateCopyHelperFunction(const CGBlockInfo &blockInfo);
   llvm::Constant *GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo);
 
-  llvm::Constant *GeneratebyrefCopyHelperFunction(const llvm::Type *,
-                                                  BlockFieldFlags flags,
-                                                  const VarDecl *BD);
-  llvm::Constant *GeneratebyrefDestroyHelperFunction(const llvm::Type *T, 
-                                                     BlockFieldFlags flags, 
-                                                     const VarDecl *BD);
-
   void BuildBlockRelease(llvm::Value *DeclPtr, BlockFieldFlags flags);
+
+  class AutoVarEmission;
+
+  void emitByrefStructureInit(const AutoVarEmission &emission);
+  void enterByrefCleanup(const AutoVarEmission &emission);
 
   llvm::Value *LoadBlockStruct() {
     assert(BlockPointer && "no block pointer set!");
@@ -1161,14 +1159,14 @@ public:
   ///
   void InitializeVTablePointer(BaseSubobject Base,
                                const CXXRecordDecl *NearestVBase,
-                               uint64_t OffsetFromNearestVBase,
+                               CharUnits OffsetFromNearestVBase,
                                llvm::Constant *VTable,
                                const CXXRecordDecl *VTableClass);
 
   typedef llvm::SmallPtrSet<const CXXRecordDecl *, 4> VisitedVirtualBasesSetTy;
   void InitializeVTablePointers(BaseSubobject Base,
                                 const CXXRecordDecl *NearestVBase,
-                                uint64_t OffsetFromNearestVBase,
+                                CharUnits OffsetFromNearestVBase,
                                 bool BaseIsNonVirtualPrimaryBase,
                                 llvm::Constant *VTable,
                                 const CXXRecordDecl *VTableClass,
@@ -2177,6 +2175,10 @@ private:
   }
 
   void EmitDeclMetadata();
+
+  CodeGenModule::ByrefHelpers *
+  buildByrefHelpers(const llvm::StructType &byrefType,
+                    const AutoVarEmission &emission);
 };
 
 /// Helper class with most of the code for saving a value for a

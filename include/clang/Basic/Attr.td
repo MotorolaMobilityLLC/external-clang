@@ -46,6 +46,7 @@ class Argument<string name> {
   string Name = name;
 }
 
+class BoolArgument<string name> : Argument<name>;
 class IdentifierArgument<string name> : Argument<name>;
 class IntArgument<string name> : Argument<name>;
 class StringArgument<string name> : Argument<name>;
@@ -54,6 +55,9 @@ class FunctionArgument<string name> : Argument<name>;
 class TypeArgument<string name> : Argument<name>;
 class UnsignedArgument<string name> : Argument<name>;
 class VariadicUnsignedArgument<string name> : Argument<name>;
+
+// A version of the form major.minor[.subminor].
+class VersionArgument<string name> : Argument<name>;
 
 // This one's a doozy, so it gets its own special type
 // It can be an unsigned integer, or a type. Either can
@@ -132,6 +136,20 @@ def Annotate : InheritableAttr {
 def AsmLabel : InheritableAttr {
   let Spellings = [];
   let Args = [StringArgument<"Label">];
+}
+
+def Availability : InheritableAttr {
+  let Spellings = ["availability"];
+  let Args = [IdentifierArgument<"platform">, VersionArgument<"introduced">,
+              VersionArgument<"deprecated">, VersionArgument<"obsoleted">,
+              BoolArgument<"unavailable">];
+  let AdditionalMembers =
+[{static llvm::StringRef getPrettyPlatformName(llvm::StringRef Platform) {
+    return llvm::StringSwitch<llvm::StringRef>(Platform)
+             .Case("ios", "iOS")
+             .Case("macosx", "Mac OS X")
+             .Default(llvm::StringRef());
+} }];
 }
 
 def Blocks : InheritableAttr {
@@ -227,10 +245,6 @@ def DLLExport : InheritableAttr {
 
 def DLLImport : InheritableAttr {
   let Spellings = ["dllimport"];
-}
-
-def Explicit : InheritableAttr {
-  let Spellings = [];
 }
 
 def FastCall : InheritableAttr {

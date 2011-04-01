@@ -33,7 +33,8 @@ namespace clang {
   class PragmaUnusedHandler;
   class ColonProtectionRAIIObject;
   class InMessageExpressionRAIIObject;
-  
+  class VersionTuple;
+
 /// PrettyStackTraceParserEntry - If a crash happens while the parser is active,
 /// an entry is printed for it.
 class PrettyStackTraceParserEntry : public llvm::PrettyStackTraceEntry {
@@ -76,7 +77,6 @@ class Parser : public CodeCompletionHandler {
   friend class ColonProtectionRAIIObject;
   friend class InMessageExpressionRAIIObject;
   friend class ParenBraceBracketBalancer;
-  PrettyStackTraceParserEntry CrashInfo;
 
   Preprocessor &PP;
 
@@ -111,6 +111,18 @@ class Parser : public CodeCompletionHandler {
   /// AltiVec enabled.
   IdentifierInfo *Ident_vector;
   IdentifierInfo *Ident_pixel;
+
+  /// \brief Identifier for "introduced".
+  IdentifierInfo *Ident_introduced;
+
+  /// \brief Identifier for "deprecated".
+  IdentifierInfo *Ident_deprecated;
+
+  /// \brief Identifier for "obsoleted".
+  IdentifierInfo *Ident_obsoleted;
+
+  /// \brief Identifier for "unavailable".
+  IdentifierInfo *Ident_unavailable;
 
   /// C++0x contextual keywords. 
   mutable IdentifierInfo *Ident_final;
@@ -148,7 +160,7 @@ class Parser : public CodeCompletionHandler {
   unsigned TemplateParameterDepth;
   
   /// Factory object for creating AttributeList objects.
-  AttributeList::Factory AttrFactory;
+  AttributeFactory AttrFactory;
 
 public:
   Parser(Preprocessor &PP, Sema &Actions);
@@ -792,10 +804,9 @@ private:
     ParsingDeclRAIIObject ParsingRAII;
 
   public:
-    ParsingDeclSpec(Parser &P) : ParsingRAII(P) {}
-    ParsingDeclSpec(ParsingDeclRAIIObject &RAII) : ParsingRAII(RAII) {}
+    ParsingDeclSpec(Parser &P) : DeclSpec(P.AttrFactory), ParsingRAII(P) {}
     ParsingDeclSpec(Parser &P, ParsingDeclRAIIObject *RAII)
-      : ParsingRAII(P, RAII) {}
+      : DeclSpec(P.AttrFactory), ParsingRAII(P, RAII) {}
 
     void complete(Decl *D) {
       ParsingRAII.complete(D);
@@ -934,6 +945,9 @@ private:
   //===--------------------------------------------------------------------===//
   // C99 6.9: External Definitions.
   struct ParsedAttributesWithRange : ParsedAttributes {
+    ParsedAttributesWithRange(AttributeFactory &factory)
+      : ParsedAttributes(factory) {}
+
     SourceRange Range;
   };
 
@@ -1094,7 +1108,8 @@ private:
   bool ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
                                       ParsedType ObjectType,
                                       bool EnteringContext,
-                                      bool *MayBePseudoDestructor = 0);
+                                      bool *MayBePseudoDestructor = 0,
+                                      bool IsTypename = false);
 
   //===--------------------------------------------------------------------===//
   // C++ 5.2p1: C++ Casts
@@ -1486,7 +1501,7 @@ private:
 
   TypeResult ParseTypeName(SourceRange *Range = 0,
                            Declarator::TheContext Context
-                                                 = Declarator::TypeNameContext);
+                             = Declarator::TypeNameContext);
   void ParseBlockId();
 
   void ProhibitAttributes(ParsedAttributesWithRange &attrs) {
@@ -1497,10 +1512,10 @@ private:
 
   void MaybeParseGNUAttributes(Declarator &D) {
     if (Tok.is(tok::kw___attribute)) {
-      ParsedAttributes attrs;
+      ParsedAttributes attrs(AttrFactory);
       SourceLocation endLoc;
       ParseGNUAttributes(attrs, &endLoc);
-      D.addAttributes(attrs.getList(), endLoc);
+      D.takeAttributes(attrs, endLoc);
     }
   }
   void MaybeParseGNUAttributes(ParsedAttributes &attrs,
@@ -1513,18 +1528,18 @@ private:
 
   void MaybeParseCXX0XAttributes(Declarator &D) {
     if (getLang().CPlusPlus0x && isCXX0XAttributeSpecifier()) {
-      ParsedAttributesWithRange attrs;
+      ParsedAttributesWithRange attrs(AttrFactory);
       SourceLocation endLoc;
       ParseCXX0XAttributes(attrs, &endLoc);
-      D.addAttributes(attrs.getList(), endLoc);
+      D.takeAttributes(attrs, endLoc);
     }
   }
   void MaybeParseCXX0XAttributes(ParsedAttributes &attrs,
                                  SourceLocation *endLoc = 0) {
     if (getLang().CPlusPlus0x && isCXX0XAttributeSpecifier()) {
-      ParsedAttributesWithRange attrsWithRange;
+      ParsedAttributesWithRange attrsWithRange(AttrFactory);
       ParseCXX0XAttributes(attrsWithRange, endLoc);
-      attrs.append(attrsWithRange.getList());
+      attrs.takeAllFrom(attrsWithRange);
     }
   }
   void MaybeParseCXX0XAttributes(ParsedAttributesWithRange &attrs,
@@ -1548,6 +1563,12 @@ private:
   void ParseOpenCLAttributes(ParsedAttributes &attrs);
   void ParseOpenCLQualifiers(DeclSpec &DS);
 
+  VersionTuple ParseVersionTuple(SourceRange &Range);
+  void ParseAvailabilityAttribute(IdentifierInfo &Availability,
+                                  SourceLocation AvailabilityLoc,
+                                  ParsedAttributes &attrs,
+                                  SourceLocation *endLoc);
+
   void ParseTypeofSpecifier(DeclSpec &DS);
   void ParseDecltypeSpecifier(DeclSpec &DS);
   
@@ -1556,8 +1577,7 @@ private:
   VirtSpecifiers::Specifier isCXX0XVirtSpecifier() const;
   void ParseOptionalCXX0XVirtSpecifierSeq(VirtSpecifiers &VS);
 
-  ClassVirtSpecifiers::Specifier isCXX0XClassVirtSpecifier() const;
-  void ParseOptionalCXX0XClassVirtSpecifierSeq(ClassVirtSpecifiers &CVS);
+  bool isCXX0XFinalKeyword() const;
 
   /// DeclaratorScopeObj - RAII object used in Parser::ParseDirectDeclarator to
   /// enter a new C++ declarator scope and exit it when the function is

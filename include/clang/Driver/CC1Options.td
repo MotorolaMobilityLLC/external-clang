@@ -155,10 +155,14 @@ def momit_leaf_frame_pointer : Flag<"-momit-leaf-frame-pointer">,
   HelpText<"Omit frame pointer setup for leaf functions.">;
 def msoft_float : Flag<"-msoft-float">,
   HelpText<"Use software floating point">;
+def backend_option : Separate<"-backend-option">,
+  HelpText<"Additional arguments to forward to LLVM backend (during code gen)">;
 def mregparm : Separate<"-mregparm">,
   HelpText<"Limit the number of registers available for integer arguments">;
 def mrelax_all : Flag<"-mrelax-all">,
-  HelpText<"Relax all machine instructions">;
+  HelpText<"(integrated-as) Relax all machine instructions">;
+def msave_temp_labels : Flag<"-msave-temp-labels">,
+  HelpText<"(integrated-as) Save temporary labels">;
 def mrtd: Flag<"-mrtd">,
   HelpText<"Make StdCall calling convention the default">;
 def mrelocation_model : Separate<"-mrelocation-model">,
@@ -208,6 +212,9 @@ def fno_caret_diagnostics : Flag<"-fno-caret-diagnostics">,
   HelpText<"Do not include source line and caret with diagnostics">;
 def fno_diagnostics_fixit_info : Flag<"-fno-diagnostics-fixit-info">,
   HelpText<"Do not include fixit information in diagnostics">;
+def fno_diagnostics_show_note_include_stack :
+  Flag<"-fno-diagnostics-show-note-include-stack">,
+  HelpText<"Display include stacks for diagnostic notes">;
 def w : Flag<"-w">, HelpText<"Suppress all warnings">;
 def pedantic : Flag<"-pedantic">;
 def pedantic_errors : Flag<"-pedantic-errors">;
@@ -225,7 +232,9 @@ def fdiagnostics_show_option : Flag<"-fdiagnostics-show-option">,
   HelpText<"Print diagnostic name with mappable diagnostics">;
 def fdiagnostics_show_category : Separate<"-fdiagnostics-show-category">,
   HelpText<"Print diagnostic category">;
-
+def fdiagnostics_show_note_include_stack :
+  Flag<"-fdiagnostics-show-note-include-stack">,
+  HelpText<"Display include stacks for diagnostic notes">;
 def ftabstop : Separate<"-ftabstop">, MetaVarName<"<N>">,
   HelpText<"Set the tab stop distance.">;
 def ferror_limit : Separate<"-ferror-limit">, MetaVarName<"<N>">,

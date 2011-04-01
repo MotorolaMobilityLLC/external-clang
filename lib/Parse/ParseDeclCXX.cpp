@@ -69,11 +69,9 @@ Decl *Parser::ParseNamespace(unsigned Context,
   }
 
   // Read label attributes, if present.
-  ParsedAttributes attrs;
+  ParsedAttributes attrs(AttrFactory);
   if (Tok.is(tok::kw___attribute)) {
     attrTok = Tok;
-
-    // FIXME: save these somewhere.
     ParseGNUAttributes(attrs);
   }
 
@@ -118,7 +116,7 @@ Decl *Parser::ParseNamespace(unsigned Context,
                                       "parsing namespace");
 
   while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
-    ParsedAttributesWithRange attrs;
+    ParsedAttributesWithRange attrs(AttrFactory);
     MaybeParseCXX0XAttributes(attrs);
     MaybeParseMicrosoftAttributes(attrs);
     ParseExternalDeclaration(attrs);
@@ -138,9 +136,9 @@ Decl *Parser::ParseNamespace(unsigned Context,
 /// alias definition.
 ///
 Decl *Parser::ParseNamespaceAlias(SourceLocation NamespaceLoc,
-                                              SourceLocation AliasLoc,
-                                              IdentifierInfo *Alias,
-                                              SourceLocation &DeclEnd) {
+                                  SourceLocation AliasLoc,
+                                  IdentifierInfo *Alias,
+                                  SourceLocation &DeclEnd) {
   assert(Tok.is(tok::equal) && "Not equal token");
 
   ConsumeToken(); // eat the '='.
@@ -199,7 +197,7 @@ Decl *Parser::ParseLinkage(ParsingDeclSpec &DS, unsigned Context) {
                                       Tok.is(tok::l_brace) ? Tok.getLocation()
                                                            : SourceLocation());
 
-  ParsedAttributesWithRange attrs;
+  ParsedAttributesWithRange attrs(AttrFactory);
   MaybeParseCXX0XAttributes(attrs);
   MaybeParseMicrosoftAttributes(attrs);
 
@@ -216,7 +214,7 @@ Decl *Parser::ParseLinkage(ParsingDeclSpec &DS, unsigned Context) {
 
   SourceLocation LBrace = ConsumeBrace();
   while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
-    ParsedAttributesWithRange attrs;
+    ParsedAttributesWithRange attrs(AttrFactory);
     MaybeParseCXX0XAttributes(attrs);
     MaybeParseMicrosoftAttributes(attrs);
     ParseExternalDeclaration(attrs);
@@ -380,7 +378,7 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
   }
 
   // Parse (optional) attributes (most likely GNU strong-using extension).
-  ParsedAttributes attrs;
+  ParsedAttributes attrs(AttrFactory);
   MaybeParseGNUAttributes(attrs);
 
   // Eat ';'.
@@ -590,7 +588,7 @@ Parser::TypeResult Parser::ParseClassName(SourceLocation &EndLocation,
   EndLocation = IdLoc;
 
   // Fake up a Declarator to use with ActOnTypeName.
-  DeclSpec DS;
+  DeclSpec DS(AttrFactory);
   DS.SetRangeStart(IdLoc);
   DS.SetRangeEnd(EndLocation);
   DS.getTypeSpecScope() = SS;
@@ -677,7 +675,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
     SuppressingAccessChecks = true;
   }
 
-  ParsedAttributes attrs;
+  ParsedAttributes attrs(AttrFactory);
   // If attributes exist after tag, parse them.
   if (Tok.is(tok::kw___attribute))
     ParseGNUAttributes(attrs);
@@ -812,7 +810,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   // There are four options here.  If we have 'struct foo;', then this
   // is either a forward declaration or a friend declaration, which
   // have to be treated differently.  If we have 'struct foo {...',
-  // 'struct foo :...' or 'struct foo <class-virt-specifier>' then this is a
+  // 'struct foo :...' or 'struct foo final[opt]' then this is a
   // definition. Otherwise we have something like 'struct foo xyz', a reference.
   // However, in some contexts, things look like declarations but are just
   // references, e.g.
@@ -825,7 +823,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
     TUK = Sema::TUK_Reference;
   else if (Tok.is(tok::l_brace) || 
            (getLang().CPlusPlus && Tok.is(tok::colon)) ||
-           isCXX0XClassVirtSpecifier() != ClassVirtSpecifiers::CVS_None) {
+           isCXX0XFinalKeyword()) {
     if (DS.isFriendSpecified()) {
       // C++ [class.friend]p2:
       //   A class shall not be defined in a friend declaration.
@@ -1010,7 +1008,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   if (TUK == Sema::TUK_Definition) {
     assert(Tok.is(tok::l_brace) ||
            (getLang().CPlusPlus && Tok.is(tok::colon)) ||
-           isCXX0XClassVirtSpecifier() != ClassVirtSpecifiers::CVS_None);
+           isCXX0XFinalKeyword());
     if (getLang().CPlusPlus)
       ParseCXXMemberSpecification(StartLoc, TagType, TagOrTempResult.get());
     else
@@ -1271,13 +1269,9 @@ void Parser::HandleMemberFunctionDefaultArgs(Declarator& DeclaratorInfo,
 ///       virt-specifier:
 ///         override
 ///         final
-///         new
 VirtSpecifiers::Specifier Parser::isCXX0XVirtSpecifier() const {
   if (!getLang().CPlusPlus)
     return VirtSpecifiers::VS_None;
-
-  if (Tok.is(tok::kw_new))
-    return VirtSpecifiers::VS_New;
 
   if (Tok.is(tok::identifier)) {
     IdentifierInfo *II = Tok.getIdentifierInfo();
@@ -1324,61 +1318,22 @@ void Parser::ParseOptionalCXX0XVirtSpecifierSeq(VirtSpecifiers &VS) {
   }
 }
 
-/// isCXX0XClassVirtSpecifier - Determine whether the next token is a C++0x
-/// class-virt-specifier.
-///
-///       class-virt-specifier:
-///         final
-///         explicit
-ClassVirtSpecifiers::Specifier Parser::isCXX0XClassVirtSpecifier() const {
+/// isCXX0XFinalKeyword - Determine whether the next token is a C++0x
+/// contextual 'final' keyword.
+bool Parser::isCXX0XFinalKeyword() const {
   if (!getLang().CPlusPlus)
-    return ClassVirtSpecifiers::CVS_None;
+    return false;
 
-  if (Tok.is(tok::kw_explicit))
-    return ClassVirtSpecifiers::CVS_Explicit;
+  if (!Tok.is(tok::identifier))
+    return false;
 
-  if (Tok.is(tok::identifier)) {
-    IdentifierInfo *II = Tok.getIdentifierInfo();
+  // Initialize the contextual keywords.
+  if (!Ident_final) {
+    Ident_final = &PP.getIdentifierTable().get("final");
+    Ident_override = &PP.getIdentifierTable().get("override");
+  }
   
-    // Initialize the contextual keywords.
-    if (!Ident_final) {
-      Ident_final = &PP.getIdentifierTable().get("final");
-      Ident_override = &PP.getIdentifierTable().get("override");
-    }
-
-    if (II == Ident_final)
-      return ClassVirtSpecifiers::CVS_Final;
-  }
-
-  return ClassVirtSpecifiers::CVS_None;
-}
-
-/// ParseOptionalCXX0XClassVirtSpecifierSeq - Parse a class-virt-specifier-seq.
-///
-///       class-virt-specifier-seq:
-///         class-virt-specifier
-///         class-virt-specifier-seq class-virt-specifier
-void Parser::ParseOptionalCXX0XClassVirtSpecifierSeq(ClassVirtSpecifiers &CVS) {
-  while (true) {
-    ClassVirtSpecifiers::Specifier Specifier = isCXX0XClassVirtSpecifier();
-    if (Specifier == ClassVirtSpecifiers::CVS_None)
-      return;
-
-    // C++ [class]p1:
-    // A class-virt-specifier-seq shall contain at most one of each 
-    // class-virt-specifier.
-    const char *PrevSpec = 0;
-    if (CVS.SetSpecifier(Specifier, Tok.getLocation(), PrevSpec))
-      Diag(Tok.getLocation(), diag::err_duplicate_class_virt_specifier)
-       << PrevSpec
-       << FixItHint::CreateRemoval(Tok.getLocation());
-
-    if (!getLang().CPlusPlus0x)
-      Diag(Tok.getLocation(), diag::ext_override_control_keyword)
-      << ClassVirtSpecifiers::getSpecifierName(Specifier);
-
-    ConsumeToken();
-  }
+  return Tok.getIdentifierInfo() == Ident_final;
 }
 
 /// ParseCXXClassMemberDeclaration - Parse a C++ class member declaration.
@@ -1488,7 +1443,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
   // is a bitfield.
   ColonProtectionRAIIObject X(*this);
 
-  ParsedAttributesWithRange attrs;
+  ParsedAttributesWithRange attrs(AttrFactory);
   // Optional C++0x attribute-specifier
   MaybeParseCXX0XAttributes(attrs);
   MaybeParseMicrosoftAttributes(attrs);
@@ -1764,8 +1719,24 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
   if (TagDecl)
     Actions.ActOnTagStartDefinition(getCurScope(), TagDecl);
 
-  ClassVirtSpecifiers CVS;
-  ParseOptionalCXX0XClassVirtSpecifierSeq(CVS);
+  SourceLocation FinalLoc;
+
+  // Parse the optional 'final' keyword.
+  if (getLang().CPlusPlus && Tok.is(tok::identifier)) {
+    IdentifierInfo *II = Tok.getIdentifierInfo();
+    
+    // Initialize the contextual keywords.
+    if (!Ident_final) {
+      Ident_final = &PP.getIdentifierTable().get("final");
+      Ident_override = &PP.getIdentifierTable().get("override");
+    }
+      
+    if (II == Ident_final)
+      FinalLoc = ConsumeToken();
+
+    if (!getLang().CPlusPlus0x) 
+      Diag(FinalLoc, diag::ext_override_control_keyword) << "final";
+  }
 
   if (Tok.is(tok::colon)) {
     ParseBaseClause(TagDecl);
@@ -1784,7 +1755,7 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
   SourceLocation LBraceLoc = ConsumeBrace();
 
   if (TagDecl)
-    Actions.ActOnStartCXXMemberDeclarations(getCurScope(), TagDecl, CVS,
+    Actions.ActOnStartCXXMemberDeclarations(getCurScope(), TagDecl, FinalLoc,
                                             LBraceLoc);
 
   // C++ 11p3: Members of a class defined with the keyword class are private
@@ -1837,7 +1808,7 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
   }
 
   // If attributes exist after class contents, parse them.
-  ParsedAttributes attrs;
+  ParsedAttributes attrs(AttrFactory);
   MaybeParseGNUAttributes(attrs);
 
   if (TagDecl)
@@ -2309,8 +2280,8 @@ void Parser::ParseCXX0XAttributes(ParsedAttributesWithRange &attrs,
           break;
         }
 
-        attrs.add(AttrFactory.Create(AttrName, AttrLoc, 0, AttrLoc, 0,
-                                     SourceLocation(), 0, 0, false, true));
+        attrs.addNew(AttrName, AttrLoc, 0, AttrLoc, 0,
+                     SourceLocation(), 0, 0, false, true);
         AttrParsed = true;
         break;
       }
@@ -2330,9 +2301,9 @@ void Parser::ParseCXX0XAttributes(ParsedAttributesWithRange &attrs,
 
         ExprVector ArgExprs(Actions);
         ArgExprs.push_back(ArgExpr.release());
-        attrs.add(AttrFactory.Create(AttrName, AttrLoc, 0, AttrLoc,
-                                     0, ParamLoc, ArgExprs.take(), 1,
-                                     false, true));
+        attrs.addNew(AttrName, AttrLoc, 0, AttrLoc,
+                     0, ParamLoc, ArgExprs.take(), 1,
+                     false, true);
 
         AttrParsed = true;
         break;

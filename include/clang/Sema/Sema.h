@@ -999,7 +999,7 @@ public:
   /// C++ record definition's base-specifiers clause and are starting its
   /// member declarations.
   void ActOnStartCXXMemberDeclarations(Scope *S, Decl *TagDecl,
-                                       ClassVirtSpecifiers &CVS,
+                                       SourceLocation FinalLoc,
                                        SourceLocation LBraceLoc);
 
   /// ActOnTagFinishDefinition - Invoked once we have finished parsing
@@ -1901,6 +1901,7 @@ public:
 
   bool DiagnoseUseOfDecl(NamedDecl *D, SourceLocation Loc, 
                          bool UnknownObjCClass=false);
+  std::string getDeletedOrUnavailableSuffix(const FunctionDecl *FD);
   bool DiagnosePropertyAccessorMismatch(ObjCPropertyDecl *PD,
                                         ObjCMethodDecl *Getter,
                                         SourceLocation Loc);
@@ -5299,7 +5300,8 @@ private:
                          bool isPrintf);
 
   void CheckNonNullArguments(const NonNullAttr *NonNull,
-                             const CallExpr *TheCall);
+                             const Expr * const *ExprArgs,
+                             SourceLocation CallSiteLoc);
 
   void CheckPrintfScanfArguments(const CallExpr *TheCall, bool HasVAListArg,
                                  unsigned format_idx, unsigned firstDataArg,

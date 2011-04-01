@@ -530,6 +530,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
 
   return llvm::StringSwitch<bool>(II->getName())
            .Case("attribute_analyzer_noreturn", true)
+           .Case("attribute_availability", true)
            .Case("attribute_cf_returns_not_retained", true)
            .Case("attribute_cf_returns_retained", true)
            .Case("attribute_deprecated_with_message", true)
@@ -562,6 +563,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
          //.Case("cxx_lambdas", false)
            .Case("cxx_noexcept", LangOpts.CPlusPlus0x)
          //.Case("cxx_nullptr", false)
+           .Case("cxx_override_control", LangOpts.CPlusPlus0x)
            .Case("cxx_reference_qualified_functions", LangOpts.CPlusPlus0x)
            .Case("cxx_rvalue_references", LangOpts.CPlusPlus0x)
            .Case("cxx_strong_enums", LangOpts.CPlusPlus0x)

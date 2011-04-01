@@ -247,9 +247,6 @@ class CodeGenModule : public CodeGenTypeCache {
     int GlobalUniqueCount;
   } Block;
 
-  llvm::DenseMap<uint64_t, llvm::Constant *> AssignCache;
-  llvm::DenseMap<uint64_t, llvm::Constant *> DestroyCache;
-
   /// @}
 public:
   CodeGenModule(ASTContext &C, const CodeGenOptions &CodeGenOpts,
@@ -313,6 +310,7 @@ public:
   enum TypeVisibilityKind {
     TVK_ForVTT,
     TVK_ForVTable,
+    TVK_ForConstructionVTable,
     TVK_ForRTTI,
     TVK_ForRTTIName
   };
@@ -384,14 +382,35 @@ public:
                                CastExpr::path_const_iterator PathBegin,
                                CastExpr::path_const_iterator PathEnd);
 
-  llvm::Constant *BuildbyrefCopyHelper(const llvm::Type *T,
-                                       BlockFieldFlags flags,
-                                       unsigned Align,
-                                       const VarDecl *variable);
-  llvm::Constant *BuildbyrefDestroyHelper(const llvm::Type *T,
-                                          BlockFieldFlags flags,
-                                          unsigned Align,
-                                          const VarDecl *variable);
+  /// A pair of helper functions for a __block variable.
+  class ByrefHelpers : public llvm::FoldingSetNode {
+  public:
+    llvm::Constant *CopyHelper;
+    llvm::Constant *DisposeHelper;
+
+    /// The alignment of the field.  This is important because
+    /// different offsets to the field within the byref struct need to
+    /// have different helper functions.
+    CharUnits Alignment;
+
+    ByrefHelpers(CharUnits alignment) : Alignment(alignment) {}
+    virtual ~ByrefHelpers();
+
+    void Profile(llvm::FoldingSetNodeID &id) const {
+      id.AddInteger(Alignment.getQuantity());
+      profileImpl(id);
+    }
+    virtual void profileImpl(llvm::FoldingSetNodeID &id) const = 0;
+
+    virtual bool needsCopy() const { return true; }
+    virtual void emitCopy(CodeGenFunction &CGF,
+                          llvm::Value *dest, llvm::Value *src) = 0;
+
+    virtual bool needsDispose() const { return true; }
+    virtual void emitDispose(CodeGenFunction &CGF, llvm::Value *field) = 0;
+  };
+
+  llvm::FoldingSet<ByrefHelpers> ByrefHelpersCache;
 
   /// getUniqueBlockCount - Fetches the global unique block count.
   int getUniqueBlockCount() { return ++Block.GlobalUniqueCount; }
@@ -506,10 +525,8 @@ public:
 
   ///@}
 
-  void UpdateCompletedType(const TagDecl *TD) {
-    // Make sure that this type is translated.
-    Types.UpdateCompletedType(TD);
-  }
+  // UpdateCompleteType - Make sure that this type is translated.
+  void UpdateCompletedType(const TagDecl *TD);
 
   llvm::Constant *getMemberPointerConstant(const UnaryOperator *e);
 

@@ -37,13 +37,6 @@ Decl *Parser::ParseCXXInlineMethodDef(AccessSpecifier AS, ParsingDeclarator &D,
     FnD = Actions.ActOnFriendFunctionDecl(getCurScope(), D, true,
                                           move(TemplateParams));
   else { // FIXME: pass template information through
-    if (VS.isOverrideSpecified())
-      Diag(VS.getOverrideLoc(), diag::ext_override_inline) << "override";
-    if (VS.isFinalSpecified())
-      Diag(VS.getFinalLoc(), diag::ext_override_inline) << "final";
-    if (VS.isNewSpecified())
-      Diag(VS.getNewLoc(), diag::ext_override_inline) << "new";
-
     FnD = Actions.ActOnCXXMemberDeclarator(getCurScope(), AS, D,
                                            move(TemplateParams), 0, 
                                            VS, 0, /*IsDefinition*/true);

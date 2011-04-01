@@ -248,6 +248,8 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   }
   if (llvm::TimePassesIsEnabled)
     BackendArgs.push_back("-time-passes");
+  for (unsigned i = 0, e = CodeGenOpts.BackendOptions.size(); i != e; ++i)
+    BackendArgs.push_back(CodeGenOpts.BackendOptions[i].c_str());
   BackendArgs.push_back(0);
   llvm::cl::ParseCommandLineOptions(BackendArgs.size() - 1,
                                     const_cast<char **>(&BackendArgs[0]));
@@ -266,6 +268,8 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
 
   if (CodeGenOpts.RelaxAll)
     TM->setMCRelaxAll(true);
+  if (CodeGenOpts.SaveTempLabels)
+    TM->setMCSaveTempLabels(true);
 
   // Create the code generator passes.
   PassManager *PM = getCodeGenPasses();

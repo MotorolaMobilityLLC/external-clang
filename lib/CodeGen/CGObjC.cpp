@@ -236,7 +236,8 @@ void CodeGenFunction::GenerateObjCGetter(ObjCImplementationDecl *IMP,
     CallArgList Args;
     Args.push_back(std::make_pair(RValue::get(SelfAsId), IdTy));
     Args.push_back(std::make_pair(RValue::get(CmdVal), Cmd->getType()));
-    Args.push_back(std::make_pair(RValue::get(Offset), getContext().LongTy));
+    Args.push_back(std::make_pair(RValue::get(Offset),
+                getContext().getPointerDiffType()));
     Args.push_back(std::make_pair(RValue::get(True), getContext().BoolTy));
     // FIXME: We shouldn't need to get the function info here, the
     // runtime already should have computed it to build the function.
@@ -293,11 +294,17 @@ void CodeGenFunction::GenerateObjCGetter(ObjCImplementationDecl *IMP,
     else {
         LValue LV = EmitLValueForIvar(TypeOfSelfObject(), LoadObjCSelf(), 
                                     Ivar, 0);
-        CodeGenTypes &Types = CGM.getTypes();
-        RValue RV = EmitLoadOfLValue(LV, IVART);
-        RV = RValue::get(Builder.CreateBitCast(RV.getScalarVal(),
+        if (PD->getType()->isReferenceType()) {
+          RValue RV = RValue::get(LV.getAddress());
+          EmitReturnOfRValue(RV, PD->getType());
+        }
+        else {
+          CodeGenTypes &Types = CGM.getTypes();
+          RValue RV = EmitLoadOfLValue(LV, IVART);
+          RV = RValue::get(Builder.CreateBitCast(RV.getScalarVal(),
                                                Types.ConvertType(PD->getType())));
-        EmitReturnOfRValue(RV, PD->getType());
+          EmitReturnOfRValue(RV, PD->getType());
+        }
     }
   }
 
@@ -394,7 +401,8 @@ void CodeGenFunction::GenerateObjCSetter(ObjCImplementationDecl *IMP,
     CallArgList Args;
     Args.push_back(std::make_pair(RValue::get(SelfAsId), IdTy));
     Args.push_back(std::make_pair(RValue::get(CmdVal), Cmd->getType()));
-    Args.push_back(std::make_pair(RValue::get(Offset), getContext().LongTy));
+    Args.push_back(std::make_pair(RValue::get(Offset),
+                getContext().getPointerDiffType()));
     Args.push_back(std::make_pair(RValue::get(ArgAsId), IdTy));
     Args.push_back(std::make_pair(RValue::get(IsAtomic ? True : False),
                                   getContext().BoolTy));
@@ -434,7 +442,10 @@ void CodeGenFunction::GenerateObjCSetter(ObjCImplementationDecl *IMP,
       ObjCIvarDecl *Ivar = PID->getPropertyIvarDecl();
       DeclRefExpr Base(Self, Self->getType(), VK_RValue, Loc);
       ParmVarDecl *ArgDecl = *OMD->param_begin();
-      DeclRefExpr Arg(ArgDecl, ArgDecl->getType(), VK_LValue, Loc);
+      QualType T = ArgDecl->getType();
+      if (T->isReferenceType())
+        T = cast<ReferenceType>(T)->getPointeeType();
+      DeclRefExpr Arg(ArgDecl, T, VK_LValue, Loc);
       ObjCIvarRefExpr IvarRef(Ivar, Ivar->getType(), Loc, &Base, true, true);
     
       // The property type can differ from the ivar type in some situations with
@@ -458,20 +469,104 @@ void CodeGenFunction::GenerateObjCSetter(ObjCImplementationDecl *IMP,
   FinishFunction();
 }
 
+// FIXME: these are stolen from CGClass.cpp, which is lame.
+namespace {
+  struct CallArrayIvarDtor : EHScopeStack::Cleanup {
+    const ObjCIvarDecl *ivar;
+    llvm::Value *self;
+    CallArrayIvarDtor(const ObjCIvarDecl *ivar, llvm::Value *self)
+      : ivar(ivar), self(self) {}
+
+    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+      LValue lvalue =
+        CGF.EmitLValueForIvar(CGF.TypeOfSelfObject(), self, ivar, 0);
+
+      QualType type = ivar->getType();
+      const ConstantArrayType *arrayType
+        = CGF.getContext().getAsConstantArrayType(type);
+      QualType baseType = CGF.getContext().getBaseElementType(arrayType);
+      const CXXRecordDecl *classDecl = baseType->getAsCXXRecordDecl();
+
+      llvm::Value *base
+        = CGF.Builder.CreateBitCast(lvalue.getAddress(),
+                                    CGF.ConvertType(baseType)->getPointerTo());
+      CGF.EmitCXXAggrDestructorCall(classDecl->getDestructor(),
+                                    arrayType, base);
+    }
+  };
+
+  struct CallIvarDtor : EHScopeStack::Cleanup {
+    const ObjCIvarDecl *ivar;
+    llvm::Value *self;
+    CallIvarDtor(const ObjCIvarDecl *ivar, llvm::Value *self)
+      : ivar(ivar), self(self) {}
+
+    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+      LValue lvalue =
+        CGF.EmitLValueForIvar(CGF.TypeOfSelfObject(), self, ivar, 0);
+
+      QualType type = ivar->getType();
+      const CXXRecordDecl *classDecl = type->getAsCXXRecordDecl();
+
+      CGF.EmitCXXDestructorCall(classDecl->getDestructor(),
+                                Dtor_Complete, /*ForVirtualBase=*/false,
+                                lvalue.getAddress());
+    }
+  };
+}
+
+static void emitCXXDestructMethod(CodeGenFunction &CGF,
+                                  ObjCImplementationDecl *impl) {
+  CodeGenFunction::RunCleanupsScope scope(CGF);
+
+  llvm::Value *self = CGF.LoadObjCSelf();
+
+  ObjCInterfaceDecl *iface
+    = const_cast<ObjCInterfaceDecl*>(impl->getClassInterface());
+  for (ObjCIvarDecl *ivar = iface->all_declared_ivar_begin();
+       ivar; ivar = ivar->getNextIvar()) {
+    QualType type = ivar->getType();
+
+    // Drill down to the base element type.
+    QualType baseType = type;
+    const ConstantArrayType *arrayType = 
+      CGF.getContext().getAsConstantArrayType(baseType);
+    if (arrayType) baseType = CGF.getContext().getBaseElementType(arrayType);
+
+    // Check whether the ivar is a destructible type.
+    QualType::DestructionKind destructKind = baseType.isDestructedType();
+    assert(destructKind == type.isDestructedType());
+
+    switch (destructKind) {
+    case QualType::DK_none:
+      continue;
+
+    case QualType::DK_cxx_destructor:
+      if (arrayType)
+        CGF.EHStack.pushCleanup<CallArrayIvarDtor>(NormalAndEHCleanup,
+                                                   ivar, self);
+      else
+        CGF.EHStack.pushCleanup<CallIvarDtor>(NormalAndEHCleanup,
+                                              ivar, self);
+      break;
+    }
+  }
+
+  assert(scope.requiresCleanups() && "nothing to do in .cxx_destruct?");
+}
+
 void CodeGenFunction::GenerateObjCCtorDtorMethod(ObjCImplementationDecl *IMP,
                                                  ObjCMethodDecl *MD,
                                                  bool ctor) {
-  llvm::SmallVector<CXXCtorInitializer *, 8> IvarInitializers;
   MD->createImplicitParams(CGM.getContext(), IMP->getClassInterface());
   StartObjCMethod(MD, IMP->getClassInterface());
-  for (ObjCImplementationDecl::init_const_iterator B = IMP->init_begin(),
-       E = IMP->init_end(); B != E; ++B) {
-    CXXCtorInitializer *Member = (*B);
-    IvarInitializers.push_back(Member);
-  }
+
+  // Emit .cxx_construct.
   if (ctor) {
-    for (unsigned I = 0, E = IvarInitializers.size(); I != E; ++I) {
-      CXXCtorInitializer *IvarInit = IvarInitializers[I];
+    llvm::SmallVector<CXXCtorInitializer *, 8> IvarInitializers;
+    for (ObjCImplementationDecl::init_const_iterator B = IMP->init_begin(),
+           E = IMP->init_end(); B != E; ++B) {
+      CXXCtorInitializer *IvarInit = (*B);
       FieldDecl *Field = IvarInit->getAnyMember();
       ObjCIvarDecl  *Ivar = cast<ObjCIvarDecl>(Field);
       LValue LV = EmitLValueForIvar(TypeOfSelfObject(), 
@@ -484,37 +579,10 @@ void CodeGenFunction::GenerateObjCCtorDtorMethod(ObjCImplementationDecl *IMP,
     llvm::Value *SelfAsId =
       Builder.CreateBitCast(LoadObjCSelf(), Types.ConvertType(IdTy));
     EmitReturnOfRValue(RValue::get(SelfAsId), IdTy);
+
+  // Emit .cxx_destruct.
   } else {
-    // dtor
-    for (size_t i = IvarInitializers.size(); i > 0; --i) {
-      FieldDecl *Field = IvarInitializers[i - 1]->getAnyMember();
-      QualType FieldType = Field->getType();
-      const ConstantArrayType *Array = 
-        getContext().getAsConstantArrayType(FieldType);
-      if (Array)
-        FieldType = getContext().getBaseElementType(FieldType);
-      
-      ObjCIvarDecl  *Ivar = cast<ObjCIvarDecl>(Field);
-      LValue LV = EmitLValueForIvar(TypeOfSelfObject(), 
-                                    LoadObjCSelf(), Ivar, 0);
-      const RecordType *RT = FieldType->getAs<RecordType>();
-      CXXRecordDecl *FieldClassDecl = cast<CXXRecordDecl>(RT->getDecl());
-      CXXDestructorDecl *Dtor = FieldClassDecl->getDestructor();
-      if (!Dtor->isTrivial()) {
-        if (Array) {
-          const llvm::Type *BasePtr = ConvertType(FieldType);
-          BasePtr = llvm::PointerType::getUnqual(BasePtr);
-          llvm::Value *BaseAddrPtr =
-            Builder.CreateBitCast(LV.getAddress(), BasePtr);
-          EmitCXXAggrDestructorCall(Dtor,
-                                    Array, BaseAddrPtr);
-        } else {
-          EmitCXXDestructorCall(Dtor,
-                                Dtor_Complete, /*ForVirtualBase=*/false,
-                                LV.getAddress());
-        }
-      }
-    }
+    emitCXXDestructMethod(*this, IMP);
   }
   FinishFunction();
 }
@@ -583,16 +651,14 @@ static RValue GenerateMessageSendSuper(CodeGenFunction &CGF,
 RValue CodeGenFunction::EmitLoadOfPropertyRefLValue(LValue LV,
                                                     ReturnValueSlot Return) {
   const ObjCPropertyRefExpr *E = LV.getPropertyRefExpr();
-  QualType ResultType;
+  QualType ResultType = E->getGetterResultType();
   Selector S;
   if (E->isExplicitProperty()) {
     const ObjCPropertyDecl *Property = E->getExplicitProperty();
     S = Property->getGetterName();
-    ResultType = E->getType();
   } else {
     const ObjCMethodDecl *Getter = E->getImplicitPropertyGetter();
     S = Getter->getSelector();
-    ResultType = Getter->getResultType(); // with reference!
   }
 
   llvm::Value *Receiver = LV.getPropertyRefBaseAddr();
@@ -613,14 +679,8 @@ void CodeGenFunction::EmitStoreThroughPropertyRefLValue(RValue Src,
                                                         LValue Dst) {
   const ObjCPropertyRefExpr *E = Dst.getPropertyRefExpr();
   Selector S = E->getSetterSelector();
-  QualType ArgType;
-  if (E->isImplicitProperty()) {
-    const ObjCMethodDecl *Setter = E->getImplicitPropertySetter();
-    ObjCMethodDecl::param_iterator P = Setter->param_begin(); 
-    ArgType = (*P)->getType();
-  } else {
-    ArgType = E->getType();
-  }
+  QualType ArgType = E->getSetterArgType();
+  
   // FIXME. Other than scalars, AST is not adequate for setter and
   // getter type mismatches which require conversion.
   if (Src.isScalar()) {
@@ -762,11 +822,11 @@ void CodeGenFunction::EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S){
   EmitBlock(LoopBodyBB);
 
   // The current index into the buffer.
-  llvm::PHINode *index = Builder.CreatePHI(UnsignedLongLTy, "forcoll.index");
+  llvm::PHINode *index = Builder.CreatePHI(UnsignedLongLTy, 3, "forcoll.index");
   index->addIncoming(zero, LoopInitBB);
 
   // The current buffer size.
-  llvm::PHINode *count = Builder.CreatePHI(UnsignedLongLTy, "forcoll.count");
+  llvm::PHINode *count = Builder.CreatePHI(UnsignedLongLTy, 3, "forcoll.count");
   count->addIncoming(initialBufferLimit, LoopInitBB);
 
   // Check whether the mutations value has changed from where it was

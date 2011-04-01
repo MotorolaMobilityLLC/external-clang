@@ -76,7 +76,9 @@ public:
 
 
 static void getDarwinDefines(MacroBuilder &Builder, const LangOptions &Opts,
-                             const llvm::Triple &Triple) {
+                             const llvm::Triple &Triple,
+                             llvm::StringRef &PlatformName,
+                             VersionTuple &PlatformMinVersion) {
   Builder.defineMacro("__APPLE_CC__", "5621");
   Builder.defineMacro("__APPLE__");
   Builder.defineMacro("__MACH__");
@@ -120,6 +122,9 @@ static void getDarwinDefines(MacroBuilder &Builder, const LangOptions &Opts,
     Str[4] = '0' + (Rev % 10);
     Str[5] = '\0';
     Builder.defineMacro("__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__", Str);
+
+    PlatformName = "ios";
+    PlatformMinVersion = VersionTuple(Maj, Min, Rev);
   } else {
     // For historical reasons that make little sense, the version passed here is
     // the "darwin" version, which drops the 10 and offsets by 4.
@@ -136,6 +141,9 @@ static void getDarwinDefines(MacroBuilder &Builder, const LangOptions &Opts,
     Str[3] = '0' + Rev;
     Str[4] = '\0';
     Builder.defineMacro("__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__", Str);
+
+    PlatformName = "macosx";
+    PlatformMinVersion = VersionTuple(Maj, Min, Rev);
   }
 }
 
@@ -145,7 +153,8 @@ class DarwinTargetInfo : public OSTargetInfo<Target> {
 protected:
   virtual void getOSDefines(const LangOptions &Opts, const llvm::Triple &Triple,
                             MacroBuilder &Builder) const {
-    getDarwinDefines(Builder, Opts, Triple);
+    getDarwinDefines(Builder, Opts, Triple, this->PlatformName, 
+                     this->PlatformMinVersion);
   }
 
 public:
@@ -1452,7 +1461,7 @@ class VisualStudioWindowsX86_32TargetInfo : public WindowsX86_32TargetInfo {
 public:
   VisualStudioWindowsX86_32TargetInfo(const std::string& triple)
     : WindowsX86_32TargetInfo(triple) {
-    LongDoubleWidth = 64;
+    LongDoubleWidth = LongDoubleAlign = 64;
     LongDoubleFormat = &llvm::APFloat::IEEEdouble;
   }
   virtual void getTargetDefines(const LangOptions &Opts,
@@ -1615,6 +1624,8 @@ class VisualStudioWindowsX86_64TargetInfo : public WindowsX86_64TargetInfo {
 public:
   VisualStudioWindowsX86_64TargetInfo(const std::string& triple)
     : WindowsX86_64TargetInfo(triple) {
+    LongDoubleWidth = LongDoubleAlign = 64;
+    LongDoubleFormat = &llvm::APFloat::IEEEdouble;
   }
   virtual void getTargetDefines(const LangOptions &Opts,
                                 MacroBuilder &Builder) const {
@@ -1843,6 +1854,7 @@ public:
       .Cases("arm1156t2-s", "arm1156t2f-s", "6T2")
       .Cases("cortex-a8", "cortex-a9", "7A")
       .Case("cortex-m3", "7M")
+      .Case("cortex-m0", "6M")
       .Default(0);
   }
   virtual bool setCPU(const std::string &Name) {
@@ -2005,7 +2017,7 @@ class DarwinARMTargetInfo :
 protected:
   virtual void getOSDefines(const LangOptions &Opts, const llvm::Triple &Triple,
                             MacroBuilder &Builder) const {
-    getDarwinDefines(Builder, Opts, Triple);
+    getDarwinDefines(Builder, Opts, Triple, PlatformName, PlatformMinVersion);
   }
 
 public:
