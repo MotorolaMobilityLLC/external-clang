@@ -43,15 +43,16 @@ struct BaseOffset {
   /// (Or the offset from the virtual base class to the base class, if the 
   /// path from the derived class to the base class involves a virtual base
   /// class.
-  int64_t NonVirtualOffset;
+  CharUnits NonVirtualOffset;
   
-  BaseOffset() : DerivedClass(0), VirtualBase(0), NonVirtualOffset(0) { }
+  BaseOffset() : DerivedClass(0), VirtualBase(0), 
+    NonVirtualOffset(CharUnits::Zero()) { }
   BaseOffset(const CXXRecordDecl *DerivedClass,
-             const CXXRecordDecl *VirtualBase, int64_t NonVirtualOffset)
+             const CXXRecordDecl *VirtualBase, CharUnits NonVirtualOffset)
     : DerivedClass(DerivedClass), VirtualBase(VirtualBase), 
     NonVirtualOffset(NonVirtualOffset) { }
 
-  bool isEmpty() const { return !NonVirtualOffset && !VirtualBase; }
+  bool isEmpty() const { return NonVirtualOffset.isZero() && !VirtualBase; }
 };
 
 /// FinalOverriders - Contains the final overrider member functions for all
@@ -214,7 +215,7 @@ FinalOverriders::FinalOverriders(const CXXRecordDecl *MostDerivedClass,
 static BaseOffset ComputeBaseOffset(ASTContext &Context, 
                                     const CXXRecordDecl *DerivedRD,
                                     const CXXBasePath &Path) {
-  int64_t NonVirtualOffset = 0;
+  CharUnits NonVirtualOffset = CharUnits::Zero();
 
   unsigned NonVirtualStart = 0;
   const CXXRecordDecl *VirtualBase = 0;
@@ -243,13 +244,13 @@ static BaseOffset ComputeBaseOffset(ASTContext &Context,
     const RecordType *BaseType = Element.Base->getType()->getAs<RecordType>();
     const CXXRecordDecl *Base = cast<CXXRecordDecl>(BaseType->getDecl());
 
-    NonVirtualOffset += Layout.getBaseClassOffsetInBits(Base);
+    NonVirtualOffset += Layout.getBaseClassOffset(Base);
   }
   
   // FIXME: This should probably use CharUnits or something. Maybe we should
   // even change the base offsets in ASTRecordLayout to be specified in 
   // CharUnits.
-  return BaseOffset(DerivedRD, VirtualBase, NonVirtualOffset / 8);
+  return BaseOffset(DerivedRD, VirtualBase, NonVirtualOffset);
   
 }
 
@@ -433,7 +434,7 @@ void FinalOverriders::dump(llvm::raw_ostream &Out, BaseSubobject Base,
       if (Offset.VirtualBase)
         Out << Offset.VirtualBase->getQualifiedNameAsString() << " vbase, ";
              
-      Out << Offset.NonVirtualOffset << " nv]";
+      Out << Offset.NonVirtualOffset.getQuantity() << " nv]";
     }
     
     Out << "\n";
@@ -462,15 +463,15 @@ public:
     CK_UnusedFunctionPointer
   };
 
-  static VTableComponent MakeVCallOffset(int64_t Offset) {
+  static VTableComponent MakeVCallOffset(CharUnits Offset) {
     return VTableComponent(CK_VCallOffset, Offset);
   }
 
-  static VTableComponent MakeVBaseOffset(int64_t Offset) {
+  static VTableComponent MakeVBaseOffset(CharUnits Offset) {
     return VTableComponent(CK_VBaseOffset, Offset);
   }
 
-  static VTableComponent MakeOffsetToTop(int64_t Offset) {
+  static VTableComponent MakeOffsetToTop(CharUnits Offset) {
     return VTableComponent(CK_OffsetToTop, Offset);
   }
   
@@ -512,19 +513,19 @@ public:
     return (Kind)(Value & 0x7);
   }
 
-  int64_t getVCallOffset() const {
+  CharUnits getVCallOffset() const {
     assert(getKind() == CK_VCallOffset && "Invalid component kind!");
     
     return getOffset();
   }
 
-  int64_t getVBaseOffset() const {
+  CharUnits getVBaseOffset() const {
     assert(getKind() == CK_VBaseOffset && "Invalid component kind!");
     
     return getOffset();
   }
 
-  int64_t getOffsetToTop() const {
+  CharUnits getOffsetToTop() const {
     assert(getKind() == CK_OffsetToTop && "Invalid component kind!");
     
     return getOffset();
@@ -556,13 +557,13 @@ public:
   }
   
 private:
-  VTableComponent(Kind ComponentKind, int64_t Offset) {
+  VTableComponent(Kind ComponentKind, CharUnits Offset) {
     assert((ComponentKind == CK_VCallOffset || 
             ComponentKind == CK_VBaseOffset ||
             ComponentKind == CK_OffsetToTop) && "Invalid component kind!");
-    assert(Offset <= ((1LL << 56) - 1) && "Offset is too big!");
+    assert(Offset.getQuantity() <= ((1LL << 56) - 1) && "Offset is too big!");
     
-    Value = ((Offset << 3) | ComponentKind);
+    Value = ((Offset.getQuantity() << 3) | ComponentKind);
   }
 
   VTableComponent(Kind ComponentKind, uintptr_t Ptr) {
@@ -578,11 +579,11 @@ private:
     Value = Ptr | ComponentKind;
   }
   
-  int64_t getOffset() const {
+  CharUnits getOffset() const {
     assert((getKind() == CK_VCallOffset || getKind() == CK_VBaseOffset ||
             getKind() == CK_OffsetToTop) && "Invalid component kind!");
     
-    return Value >> 3;
+    return CharUnits::fromQuantity(Value >> 3);
   }
 
   uintptr_t getPointer() const {
@@ -610,7 +611,7 @@ private:
 /// VCallOffsetMap - Keeps track of vcall offsets when building a vtable.
 struct VCallOffsetMap {
   
-  typedef std::pair<const CXXMethodDecl *, int64_t> MethodAndOffsetPairTy;
+  typedef std::pair<const CXXMethodDecl *, CharUnits> MethodAndOffsetPairTy;
   
   /// Offsets - Keeps track of methods and their offsets.
   // FIXME: This should be a real map and not a vector.
@@ -625,11 +626,11 @@ public:
   /// AddVCallOffset - Adds a vcall offset to the map. Returns true if the
   /// add was successful, or false if there was already a member function with
   /// the same signature in the map.
-  bool AddVCallOffset(const CXXMethodDecl *MD, int64_t OffsetOffset);
+  bool AddVCallOffset(const CXXMethodDecl *MD, CharUnits OffsetOffset);
   
   /// getVCallOffsetOffset - Returns the vcall offset offset (relative to the
   /// vtable address point) for the given virtual member function.
-  int64_t getVCallOffsetOffset(const CXXMethodDecl *MD);
+  CharUnits getVCallOffsetOffset(const CXXMethodDecl *MD);
   
   // empty - Return whether the offset map is empty or not.
   bool empty() const { return Offsets.empty(); }
@@ -679,7 +680,7 @@ bool VCallOffsetMap::MethodsCanShareVCallOffset(const CXXMethodDecl *LHS,
 }
 
 bool VCallOffsetMap::AddVCallOffset(const CXXMethodDecl *MD, 
-                                    int64_t OffsetOffset) {
+                                    CharUnits OffsetOffset) {
   // Check if we can reuse an offset.
   for (unsigned I = 0, E = Offsets.size(); I != E; ++I) {
     if (MethodsCanShareVCallOffset(Offsets[I].first, MD))
@@ -691,7 +692,7 @@ bool VCallOffsetMap::AddVCallOffset(const CXXMethodDecl *MD,
   return true;
 }
 
-int64_t VCallOffsetMap::getVCallOffsetOffset(const CXXMethodDecl *MD) {
+CharUnits VCallOffsetMap::getVCallOffsetOffset(const CXXMethodDecl *MD) {
   // Look for an offset.
   for (unsigned I = 0, E = Offsets.size(); I != E; ++I) {
     if (MethodsCanShareVCallOffset(Offsets[I].first, MD))
@@ -699,7 +700,7 @@ int64_t VCallOffsetMap::getVCallOffsetOffset(const CXXMethodDecl *MD) {
   }
   
   assert(false && "Should always find a vcall offset offset!");
-  return 0;
+  return CharUnits::Zero();
 }
 
 /// VCallAndVBaseOffsetBuilder - Class for building vcall and vbase offsets.
@@ -873,7 +874,7 @@ void VCallAndVBaseOffsetBuilder::AddVCallOffsets(BaseSubobject Base,
     
     // Don't add a vcall offset if we already have one for this member function
     // signature.
-    if (!VCallOffsets.AddVCallOffset(MD, OffsetOffset.getQuantity()))
+    if (!VCallOffsets.AddVCallOffset(MD, OffsetOffset))
       continue;
 
     CharUnits Offset = CharUnits::Zero();
@@ -889,7 +890,7 @@ void VCallAndVBaseOffsetBuilder::AddVCallOffsets(BaseSubobject Base,
     }
     
     Components.push_back(
-      VTableComponent::MakeVCallOffset(Offset.getQuantity()));
+      VTableComponent::MakeVCallOffset(Offset));
   }
 
   // And iterate over all non-virtual bases (ignoring the primary base).
@@ -939,7 +940,7 @@ VCallAndVBaseOffsetBuilder::AddVBaseOffsets(const CXXRecordDecl *RD,
           std::make_pair(BaseDecl, VBaseOffsetOffset.getQuantity()));
 
       Components.push_back(
-          VTableComponent::MakeVBaseOffset(Offset.getQuantity()));
+          VTableComponent::MakeVBaseOffset(Offset));
     }
 
     // Check the base class looking for more vbase offsets.
@@ -1101,9 +1102,9 @@ private:
   ///   C-in-D's copy of A's vtable is never referenced, so this is not 
   ///   necessary.
   bool IsOverriderUsed(const CXXMethodDecl *Overrider,
-                       uint64_t BaseOffsetInLayoutClass,
+                       CharUnits BaseOffsetInLayoutClass,
                        const CXXRecordDecl *FirstBaseInPrimaryBaseChain,
-                       uint64_t FirstBaseOffsetInLayoutClass) const;
+                       CharUnits FirstBaseOffsetInLayoutClass) const;
 
   
   /// AddMethods - Add the methods of this base subobject and all its
@@ -1342,7 +1343,7 @@ ReturnAdjustment VTableBuilder::ComputeReturnAdjustment(BaseOffset Offset) {
       }
     }
 
-    Adjustment.NonVirtual = Offset.NonVirtualOffset;
+    Adjustment.NonVirtual = Offset.NonVirtualOffset.getQuantity();
   }
   
   return Adjustment;
@@ -1369,8 +1370,7 @@ VTableBuilder::ComputeThisAdjustmentBaseOffset(BaseSubobject Base,
        I != E; ++I) {
     BaseOffset Offset = ComputeBaseOffset(Context, DerivedRD, *I);
     
-    CharUnits OffsetToBaseSubobject = 
-      CharUnits::fromQuantity(Offset.NonVirtualOffset);
+    CharUnits OffsetToBaseSubobject = Offset.NonVirtualOffset;
     
     if (Offset.VirtualBase) {
       // If we have a virtual base class, the non-virtual offset is relative
@@ -1440,11 +1440,12 @@ VTableBuilder::ComputeThisAdjustment(const CXXMethodDecl *MD,
       VCallOffsets = Builder.getVCallOffsets();
     }
       
-    Adjustment.VCallOffsetOffset = VCallOffsets.getVCallOffsetOffset(MD);
+    Adjustment.VCallOffsetOffset = 
+      VCallOffsets.getVCallOffsetOffset(MD).getQuantity();
   }
 
   // Set the non-virtual part of the adjustment.
-  Adjustment.NonVirtual = Offset.NonVirtualOffset;
+  Adjustment.NonVirtual = Offset.NonVirtualOffset.getQuantity();
   
   return Adjustment;
 }
@@ -1500,9 +1501,9 @@ OverridesIndirectMethodInBases(const CXXMethodDecl *MD,
 
 bool 
 VTableBuilder::IsOverriderUsed(const CXXMethodDecl *Overrider,
-                               uint64_t BaseOffsetInLayoutClass,
+                               CharUnits BaseOffsetInLayoutClass,
                                const CXXRecordDecl *FirstBaseInPrimaryBaseChain,
-                               uint64_t FirstBaseOffsetInLayoutClass) const {
+                               CharUnits FirstBaseOffsetInLayoutClass) const {
   // If the base and the first base in the primary base chain have the same
   // offsets, then this overrider will be used.
   if (BaseOffsetInLayoutClass == FirstBaseOffsetInLayoutClass)
@@ -1540,7 +1541,7 @@ VTableBuilder::IsOverriderUsed(const CXXMethodDecl *Overrider,
 
       // Now check if this is the primary base that is not a primary base in the
       // most derived class.
-      if (LayoutClassLayout.getVBaseClassOffsetInBits(PrimaryBase) !=
+      if (LayoutClassLayout.getVBaseClassOffset(PrimaryBase) !=
           FirstBaseOffsetInLayoutClass) {
         // We found it, stop walking the chain.
         break;
@@ -1703,9 +1704,9 @@ VTableBuilder::AddMethods(BaseSubobject Base, CharUnits BaseOffsetInLayoutClass,
 
     // Check if this overrider is going to be used.
     const CXXMethodDecl *OverriderMD = Overrider.Method;
-    if (!IsOverriderUsed(OverriderMD, Context.toBits(BaseOffsetInLayoutClass),
+    if (!IsOverriderUsed(OverriderMD, BaseOffsetInLayoutClass,
                          FirstBaseInPrimaryBaseChain, 
-                         Context.toBits(FirstBaseOffsetInLayoutClass))) {
+                         FirstBaseOffsetInLayoutClass)) {
       Components.push_back(VTableComponent::MakeUnusedFunction(OverriderMD));
       continue;
     }
@@ -1771,7 +1772,7 @@ VTableBuilder::LayoutPrimaryAndSecondaryVTables(BaseSubobject Base,
   // Add the offset to top.
   CharUnits OffsetToTop = MostDerivedClassOffset - OffsetInLayoutClass;
   Components.push_back(
-    VTableComponent::MakeOffsetToTop(OffsetToTop.getQuantity()));
+    VTableComponent::MakeOffsetToTop(OffsetToTop));
   
   // Next, add the RTTI.
   Components.push_back(VTableComponent::MakeRTTI(MostDerivedClass));
@@ -2016,15 +2017,21 @@ void VTableBuilder::dumpLayout(llvm::raw_ostream& Out) {
     switch (Component.getKind()) {
 
     case VTableComponent::CK_VCallOffset:
-      Out << "vcall_offset (" << Component.getVCallOffset() << ")";
+      Out << "vcall_offset ("
+          << Component.getVCallOffset().getQuantity() 
+          << ")";
       break;
 
     case VTableComponent::CK_VBaseOffset:
-      Out << "vbase_offset (" << Component.getVBaseOffset() << ")";
+      Out << "vbase_offset ("
+          << Component.getVBaseOffset().getQuantity()
+          << ")";
       break;
 
     case VTableComponent::CK_OffsetToTop:
-      Out << "offset_to_top (" << Component.getOffsetToTop() << ")";
+      Out << "offset_to_top ("
+          << Component.getOffsetToTop().getQuantity()
+          << ")";
       break;
     
     case VTableComponent::CK_RTTI:
@@ -2931,15 +2938,18 @@ CodeGenVTables::CreateVTableInitializer(const CXXRecordDecl *RD,
 
     switch (Component.getKind()) {
     case VTableComponent::CK_VCallOffset:
-      Init = llvm::ConstantInt::get(PtrDiffTy, Component.getVCallOffset());
+      Init = llvm::ConstantInt::get(PtrDiffTy, 
+                                    Component.getVCallOffset().getQuantity());
       Init = llvm::ConstantExpr::getIntToPtr(Init, Int8PtrTy);
       break;
     case VTableComponent::CK_VBaseOffset:
-      Init = llvm::ConstantInt::get(PtrDiffTy, Component.getVBaseOffset());
+      Init = llvm::ConstantInt::get(PtrDiffTy, 
+                                    Component.getVBaseOffset().getQuantity());
       Init = llvm::ConstantExpr::getIntToPtr(Init, Int8PtrTy);
       break;
     case VTableComponent::CK_OffsetToTop:
-      Init = llvm::ConstantInt::get(PtrDiffTy, Component.getOffsetToTop());
+      Init = llvm::ConstantInt::get(PtrDiffTy, 
+                                    Component.getOffsetToTop().getQuantity());
       Init = llvm::ConstantExpr::getIntToPtr(Init, Int8PtrTy);
       break;
     case VTableComponent::CK_RTTI:
