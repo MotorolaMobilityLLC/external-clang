@@ -138,6 +138,8 @@ public:
   CFGBlockValues(const CFG &cfg);
   ~CFGBlockValues();
   
+  unsigned getNumEntries() const { return declToIndex.size(); }
+  
   void computeSetOfDeclarations(const DeclContext &dc);  
   ValueVector &getValueVector(const CFGBlock *block,
                                 const CFGBlock *dstBlock);
@@ -155,6 +157,8 @@ public:
   bool hasEntry(const VarDecl *vd) const {
     return declToIndex.getValueIndex(vd).hasValue();
   }
+  
+  bool hasValues(const CFGBlock *block);
   
   void resetScratch();
   ValueVector &getScratch() { return scratch; }
@@ -229,6 +233,11 @@ ValueVector &CFGBlockValues::getValueVector(const CFGBlock *block,
 
   assert(vals[idx].second == 0);
   return lazyCreate(vals[idx].first);
+}
+
+bool CFGBlockValues::hasValues(const CFGBlock *block) {
+  unsigned idx = block->getBlockID();
+  return vals[idx].second != 0;  
 }
 
 BVPair &CFGBlockValues::getValueVectors(const clang::CFGBlock *block,
@@ -463,13 +472,24 @@ void TransferFunctions::VisitDeclStmt(DeclStmt *ds) {
        DI != DE; ++DI) {
     if (VarDecl *vd = dyn_cast<VarDecl>(*DI)) {
       if (isTrackedVar(vd)) {
-        vals[vd] = Uninitialized;
-        if (Stmt *init = vd->getInit()) {
+        if (Expr *init = vd->getInit()) {
           Visit(init);
-          vals[vd] = Initialized;
+
+          // If the initializer consists solely of a reference to itself, we
+          // explicitly mark the variable as uninitialized. This allows code
+          // like the following:
+          //
+          //   int x = x;
+          //
+          // to deliberately leave a variable uninitialized. Different analysis
+          // clients can detect this pattern and adjust their reporting
+          // appropriately, but we need to continue to analyze subsequent uses
+          // of the variable.
+          DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(init->IgnoreParenImpCasts());
+          vals[vd] = (DRE && DRE->getDecl() == vd) ? Uninitialized
+                                                   : Initialized;
         }
-      }
-      else if (Stmt *init = vd->getInit()) {
+      } else if (Stmt *init = vd->getInit()) {
         Visit(init);
       }
     }
@@ -603,8 +623,11 @@ void TransferFunctions::VisitUnaryExprOrTypeTraitExpr(
 
 static bool runOnBlock(const CFGBlock *block, const CFG &cfg,
                        AnalysisContext &ac, CFGBlockValues &vals,
+                       llvm::BitVector &wasAnalyzed,
                        UninitVariablesHandler *handler = 0,
                        bool flagBlockUses = false) {
+  
+  wasAnalyzed[block->getBlockID()] = true;
   
   if (const BinaryOperator *b = getLogicalOperatorInChain(block)) {
     CFGBlock::const_pred_iterator itr = block->pred_begin();
@@ -659,14 +682,29 @@ void clang::runUninitializedVariablesAnalysis(const DeclContext &dc,
   vals.computeSetOfDeclarations(dc);
   if (vals.hasNoDeclarations())
     return;
+
+  // Mark all variables uninitialized at the entry.
+  const CFGBlock &entry = cfg.getEntry();
+  for (CFGBlock::const_succ_iterator i = entry.succ_begin(), 
+        e = entry.succ_end(); i != e; ++i) {
+    if (const CFGBlock *succ = *i) {
+      ValueVector &vec = vals.getValueVector(&entry, succ);
+      const unsigned n = vals.getNumEntries();
+      for (unsigned j = 0; j < n ; ++j) {
+        vec[j] = Uninitialized;
+      }
+    }
+  }
+
+  // Proceed with the workist.
   DataflowWorklist worklist(cfg);
   llvm::BitVector previouslyVisited(cfg.getNumBlockIDs());
-  
   worklist.enqueueSuccessors(&cfg.getEntry());
+  llvm::BitVector wasAnalyzed(cfg.getNumBlockIDs(), false);
 
   while (const CFGBlock *block = worklist.dequeue()) {
     // Did the block change?
-    bool changed = runOnBlock(block, cfg, ac, vals);    
+    bool changed = runOnBlock(block, cfg, ac, vals, wasAnalyzed);    
     if (changed || !previouslyVisited[block->getBlockID()])
       worklist.enqueueSuccessors(block);    
     previouslyVisited[block->getBlockID()] = true;
@@ -674,7 +712,9 @@ void clang::runUninitializedVariablesAnalysis(const DeclContext &dc,
   
   // Run through the blocks one more time, and report uninitialized variabes.
   for (CFG::const_iterator BI = cfg.begin(), BE = cfg.end(); BI != BE; ++BI) {
-    runOnBlock(*BI, cfg, ac, vals, &handler, /* flagBlockUses */ true);
+    if (wasAnalyzed[(*BI)->getBlockID()])
+      runOnBlock(*BI, cfg, ac, vals, wasAnalyzed, &handler,
+                 /* flagBlockUses */ true);
   }
 }
 

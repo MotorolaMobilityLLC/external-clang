@@ -32,6 +32,7 @@ namespace llvm {
 namespace clang {
   class VarDecl;
   class ObjCInterfaceDecl;
+  class ClassTemplateSpecializationDecl;
 
 namespace CodeGen {
   class CodeGenModule;
@@ -122,6 +123,16 @@ class CGDebugInfo {
                        llvm::DIFile F,
                        llvm::SmallVectorImpl<llvm::Value *> &EltTys,
                        llvm::DIType RecordTy);
+  
+  llvm::DIArray
+  CollectTemplateParams(const TemplateParameterList *TPList,
+                        const TemplateArgumentList &TAList,
+                        llvm::DIFile Unit);
+  llvm::DIArray
+  CollectFunctionTemplateParams(const FunctionDecl *FD, llvm::DIFile Unit);
+  llvm::DIArray 
+  CollectCXXTemplateParams(const ClassTemplateSpecializationDecl *TS,
+                           llvm::DIFile F);
 
   llvm::DIType createFieldType(llvm::StringRef name, QualType type,
                                Expr *bitWidth, SourceLocation loc,

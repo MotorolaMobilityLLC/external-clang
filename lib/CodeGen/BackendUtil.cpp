@@ -108,9 +108,9 @@ void EmitAssemblyHelper::CreatePasses() {
     OptLevel = 0;
     Inlining = CodeGenOpts.NoInlining;
   }
-  
+
   FunctionPassManager *FPM = getPerFunctionPasses();
-  
+
   TargetLibraryInfo *TLI =
     new TargetLibraryInfo(Triple(TheModule->getTargetTriple()));
   if (!CodeGenOpts.SimplifyLibCalls)
@@ -146,7 +146,7 @@ void EmitAssemblyHelper::CreatePasses() {
   }
 
   PassManager *MPM = getPerModulePasses();
-  
+
   TLI = new TargetLibraryInfo(Triple(TheModule->getTargetTriple()));
   if (!CodeGenOpts.SimplifyLibCalls)
     TLI->disableAllFunctions();
@@ -190,7 +190,7 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   }
 
   // Set float ABI type.
-  if (CodeGenOpts.FloatABI == "soft")
+  if (CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp")
     llvm::FloatABIType = llvm::FloatABI::Soft;
   else if (CodeGenOpts.FloatABI == "hard")
     llvm::FloatABIType = llvm::FloatABI::Hard;
@@ -322,6 +322,9 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
     if (!AddEmitPasses(Action, FormattedOS))
       return;
   }
+
+  // Before executing passes, print the final values of the LLVM options.
+  cl::PrintOptionValues();
 
   // Run passes. For now we do all passes at once, but eventually we
   // would like to have the option of streaming code generation.

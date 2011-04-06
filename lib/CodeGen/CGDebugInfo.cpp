@@ -655,9 +655,7 @@ CGDebugInfo::getOrCreateMethodType(const CXXMethodDecl *Method,
   if (!Method->isStatic())
   {
         // "this" pointer is always first argument.
-        ASTContext &Context = CGM.getContext();
-        QualType ThisPtr =
-          Context.getPointerType(Context.getTagDeclType(Method->getParent()));
+        QualType ThisPtr = Method->getThisType(CGM.getContext());
         llvm::DIType ThisPtrType =
           DBuilder.createArtificialType(getOrCreateType(ThisPtr, Unit));
 
@@ -835,6 +833,60 @@ CollectCXXBases(const CXXRecordDecl *RD, llvm::DIFile Unit,
   }
 }
 
+/// CollectTemplateParams - A helper function to collect template parameters.
+llvm::DIArray CGDebugInfo::
+CollectTemplateParams(const TemplateParameterList *TPList,
+                      const TemplateArgumentList &TAList,
+                      llvm::DIFile Unit) {
+  llvm::SmallVector<llvm::Value *, 16> TemplateParams;  
+  for (unsigned i = 0, e = TAList.size(); i != e; ++i) {
+    const TemplateArgument &TA = TAList[i];
+    const NamedDecl *ND = TPList->getParam(i);
+    if (TA.getKind() == TemplateArgument::Type) {
+      llvm::DIType TTy = getOrCreateType(TA.getAsType(), Unit);
+      llvm::DITemplateTypeParameter TTP =
+        DBuilder.createTemplateTypeParameter(TheCU, ND->getName(), TTy);
+      TemplateParams.push_back(TTP);
+    } else if (TA.getKind() == TemplateArgument::Integral) {
+      llvm::DIType TTy = getOrCreateType(TA.getIntegralType(), Unit);
+      llvm::DITemplateValueParameter TVP =
+        DBuilder.createTemplateValueParameter(TheCU, ND->getName(), TTy,
+                                          TA.getAsIntegral()->getZExtValue());
+      TemplateParams.push_back(TVP);          
+    }
+  }
+  return DBuilder.getOrCreateArray(TemplateParams.data(), TemplateParams.size());
+}
+
+/// CollectFunctionTemplateParams - A helper function to collect debug
+/// info for function template parameters.
+llvm::DIArray CGDebugInfo::
+CollectFunctionTemplateParams(const FunctionDecl *FD, llvm::DIFile Unit) {
+  if (FD->getTemplatedKind() == FunctionDecl::TK_FunctionTemplateSpecialization){
+    const TemplateParameterList *TList =
+      FD->getTemplateSpecializationInfo()->getTemplate()->getTemplateParameters();
+    return 
+      CollectTemplateParams(TList, *FD->getTemplateSpecializationArgs(), Unit);
+  }
+  return llvm::DIArray();
+}
+
+/// CollectCXXTemplateParams - A helper function to collect debug info for
+/// template parameters.
+llvm::DIArray CGDebugInfo::
+CollectCXXTemplateParams(const ClassTemplateSpecializationDecl *TSpecial,
+                         llvm::DIFile Unit) {
+  llvm::PointerUnion<ClassTemplateDecl *,
+                     ClassTemplatePartialSpecializationDecl *>
+    PU = TSpecial->getSpecializedTemplateOrPartial();
+  
+  TemplateParameterList *TPList = PU.is<ClassTemplateDecl *>() ?
+    PU.get<ClassTemplateDecl *>()->getTemplateParameters() :
+    PU.get<ClassTemplatePartialSpecializationDecl *>()->getTemplateParameters();
+  const TemplateArgumentList &TAList = TSpecial->getTemplateInstantiationArgs();
+  return CollectTemplateParams(TPList, TAList, Unit);
+}
+
 /// getOrCreateVTablePtrType - Return debug info descriptor for vtable.
 llvm::DIType CGDebugInfo::getOrCreateVTablePtrType(llvm::DIFile Unit) {
   if (VTablePtrType.isValid())
@@ -971,30 +1023,13 @@ llvm::DIType CGDebugInfo::CreateType(const RecordType *Ty) {
     }
 
   CollectRecordFields(RD, Unit, EltTys);
-  llvm::SmallVector<llvm::Value *, 16> TemplateParams;
+  llvm::DIArray TParamsArray;
   if (CXXDecl) {
     CollectCXXMemberFunctions(CXXDecl, Unit, EltTys, FwdDecl);
     CollectCXXFriends(CXXDecl, Unit, EltTys, FwdDecl);
-    if (ClassTemplateSpecializationDecl *TSpecial
-        = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
-      const TemplateArgumentList &TAL = TSpecial->getTemplateArgs();
-      for (unsigned i = 0, e = TAL.size(); i != e; ++i) {
-        const TemplateArgument &TA = TAL[i];
-        if (TA.getKind() == TemplateArgument::Type) {
-          llvm::DIType TTy = getOrCreateType(TA.getAsType(), Unit);
-          llvm::DITemplateTypeParameter TTP =
-            DBuilder.createTemplateTypeParameter(TheCU, TTy.getName(), TTy);
-          TemplateParams.push_back(TTP);
-        } else if (TA.getKind() == TemplateArgument::Integral) {
-          llvm::DIType TTy = getOrCreateType(TA.getIntegralType(), Unit);
-          // FIXME: Get parameter name, instead of parameter type name.
-          llvm::DITemplateValueParameter TVP =
-            DBuilder.createTemplateValueParameter(TheCU, TTy.getName(), TTy,
-                                                  TA.getAsIntegral()->getZExtValue());
-          TemplateParams.push_back(TVP);          
-        }
-      }
-    }
+    if (const ClassTemplateSpecializationDecl *TSpecial
+        = dyn_cast<ClassTemplateSpecializationDecl>(RD))
+      TParamsArray = CollectCXXTemplateParams(TSpecial, Unit);
   }
 
   RegionStack.pop_back();
@@ -1035,8 +1070,7 @@ llvm::DIType CGDebugInfo::CreateType(const RecordType *Ty) {
     }
     else if (CXXDecl->isDynamicClass()) 
       ContainingType = FwdDecl;
-    llvm::DIArray TParamsArray = 
-      DBuilder.getOrCreateArray(TemplateParams.data(), TemplateParams.size());
+
    RealDecl = DBuilder.createClassType(RDContext, RDName, DefUnit, Line,
                                        Size, Align, 0, 0, llvm::DIType(),
                                        Elements, ContainingType,
@@ -1226,12 +1260,7 @@ llvm::DIType CGDebugInfo::CreateType(const ArrayType *Ty,
   } else if (Ty->isIncompleteArrayType()) {
     Size = 0;
     Align = CGM.getContext().getTypeAlign(Ty->getElementType());
-  } else if (Ty->isDependentSizedArrayType()) {
-    Size = 0;
-    Align = 0;
-  } else if (Ty->getElementType()->getTypeClass() 
-             == Type::TemplateSpecialization) {
-    // FIXME : Emit appropriate element type info.
+  } else if (Ty->isDependentSizedArrayType() || Ty->isIncompleteType()) {
     Size = 0;
     Align = 0;
   } else {
@@ -1524,9 +1553,11 @@ void CGDebugInfo::EmitFunctionStart(GlobalDecl GD, QualType FnType,
   FnBeginRegionCount.push_back(RegionStack.size());
 
   const Decl *D = GD.getDecl();
+
   unsigned Flags = 0;
   llvm::DIFile Unit = getOrCreateFile(CurLoc);
   llvm::DIDescriptor FDContext(Unit);
+  llvm::DIArray TParamsArray;
   if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     // If there is a DISubprogram for  this function available then use it.
     llvm::DenseMap<const FunctionDecl *, llvm::WeakVH>::iterator
@@ -1550,6 +1581,9 @@ void CGDebugInfo::EmitFunctionStart(GlobalDecl GD, QualType FnType,
     if (const NamespaceDecl *NSDecl =
         dyn_cast_or_null<NamespaceDecl>(FD->getDeclContext()))
       FDContext = getOrCreateNameSpace(NSDecl);
+
+    // Collect template parameters.
+    TParamsArray = CollectFunctionTemplateParams(FD, Unit);
   } else if (const ObjCMethodDecl *OMD = dyn_cast<ObjCMethodDecl>(D)) {
     Name = getObjCMethodName(OMD);
     Flags |= llvm::DIDescriptor::FlagPrototyped;
@@ -1571,7 +1605,8 @@ void CGDebugInfo::EmitFunctionStart(GlobalDecl GD, QualType FnType,
     DBuilder.createFunction(FDContext, Name, LinkageName, Unit,
                             LineNo, getOrCreateType(FnType, Unit),
                             Fn->hasInternalLinkage(), true/*definition*/,
-                            Flags, CGM.getLangOptions().Optimize, Fn);
+                            Flags, CGM.getLangOptions().Optimize, Fn,
+                            TParamsArray);
 
   // Push function on region stack.
   llvm::MDNode *SPN = SP;

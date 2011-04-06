@@ -7,11 +7,11 @@ int far(const int& x);
 
 // Test self-references within initializers which are guaranteed to be
 // uninitialized.
-int a = a; // FIXME: This doesn't warn!? Seems it doesn't cast 'a' to an RValue.
+int a = a; // no-warning: used to signal intended lack of initialization.
 int b = b + 1; // expected-warning {{variable 'b' is uninitialized when used within its own initialization}}
 int c = (c + c); // expected-warning 2 {{variable 'c' is uninitialized when used within its own initialization}}
 void test() {
-  int d = ({ d + d ;}); // expected-warning 2 {{variable 'd' is uninitialized when used within its own initialization}}
+  int d = ({ d + d ;}); // expected-warning {{variable 'd' is uninitialized when used within its own initialization}}
 }
 int e = static_cast<long>(e) + 1; // expected-warning {{variable 'e' is uninitialized when used within its own initialization}}
 int f = foo(f); // expected-warning {{variable 'f' is uninitialized when used within its own initialization}}
