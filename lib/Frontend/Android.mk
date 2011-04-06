@@ -26,6 +26,7 @@ clang_frontend_SRC_FILES := \
   CacheTokens.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
+	CreateInvocationFromCommandLine.cpp \
   DependencyFile.cpp \
   DiagChecker.cpp \
   FrontendAction.cpp \

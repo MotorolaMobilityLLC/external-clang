@@ -36,6 +36,7 @@ clang_codegen_SRC_FILES :=	\
 	CGObjC.cpp	\
 	CGObjCGNU.cpp	\
 	CGObjCMac.cpp	\
+	CGObjCRuntime.cpp \
 	CGRecordLayoutBuilder.cpp	\
 	CGRTTI.cpp	\
 	CGStmt.cpp	\
