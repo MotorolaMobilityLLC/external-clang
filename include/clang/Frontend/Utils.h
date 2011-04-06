@@ -14,7 +14,10 @@
 #ifndef LLVM_CLANG_FRONTEND_UTILS_H
 #define LLVM_CLANG_FRONTEND_UTILS_H
 
+#include "clang/Basic/Diagnostic.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
@@ -24,6 +27,7 @@ class Triple;
 namespace clang {
 class ASTConsumer;
 class CompilerInstance;
+class CompilerInvocation;
 class Decl;
 class DependencyOutputOptions;
 class Diagnostic;
@@ -91,6 +95,16 @@ void AttachHeaderIncludeGen(Preprocessor &PP, bool ShowAllHeaders = false,
 /// CacheTokens - Cache tokens for use with PCH. Note that this requires
 /// a seekable stream.
 void CacheTokens(Preprocessor &PP, llvm::raw_fd_ostream* OS);
+
+/// createInvocationFromCommandLine - Construct a compiler invocation object for
+/// a command line argument vector.
+///
+/// \return A CompilerInvocation, or 0 if none was built for the given
+/// argument vector.
+CompilerInvocation *
+createInvocationFromCommandLine(llvm::ArrayRef<const char *> Args,
+                                llvm::IntrusiveRefCntPtr<Diagnostic> Diags =
+                                    llvm::IntrusiveRefCntPtr<Diagnostic>());
 
 }  // end namespace clang
 
