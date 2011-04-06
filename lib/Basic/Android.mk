@@ -30,7 +30,8 @@ clang_basic_SRC_FILES :=	\
 	TargetInfo.cpp	\
 	Targets.cpp	\
 	TokenKinds.cpp	\
-	Version.cpp
+	Version.cpp \
+	VersionTuple.cpp
 
 LOCAL_SRC_FILES := $(clang_basic_SRC_FILES)
 

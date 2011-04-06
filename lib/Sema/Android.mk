@@ -22,6 +22,7 @@ clang_sema_SRC_FILES :=	\
 	CodeCompleteConsumer.cpp	\
 	DeclSpec.cpp	\
 	IdentifierResolver.cpp	\
+	DelayedDiagnostic.cpp \
 	JumpDiagnostics.cpp	\
 	Sema.cpp	\
 	SemaAccess.cpp	\
