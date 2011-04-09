@@ -814,10 +814,13 @@ CollectCXXBases(const CXXRecordDecl *RD, llvm::DIFile Unit,
     if (BI->isVirtual()) {
       // virtual base offset offset is -ve. The code generator emits dwarf
       // expression where it expects +ve number.
-      BaseOffset = 0 - CGM.getVTables().getVirtualBaseOffsetOffset(RD, Base);
+      BaseOffset = 
+        0 - CGM.getVTables().getVirtualBaseOffsetOffset(RD, Base).getQuantity();
       BFlags = llvm::DIDescriptor::FlagVirtual;
     } else
       BaseOffset = RL.getBaseClassOffsetInBits(Base);
+    // FIXME: Inconsistent units for BaseOffset. It is in bytes when
+    // BI->isVirtual() and bits when not.
     
     AccessSpecifier Access = BI->getAccessSpecifier();
     if (Access == clang::AS_private)
@@ -1232,11 +1235,16 @@ llvm::DIType CGDebugInfo::CreateType(const TagType *Ty) {
 llvm::DIType CGDebugInfo::CreateType(const VectorType *Ty,
                                      llvm::DIFile Unit) {
   llvm::DIType ElementTy = getOrCreateType(Ty->getElementType(), Unit);
-  uint64_t NumElems = Ty->getNumElements();
-  if (NumElems > 0)
+  int64_t NumElems = Ty->getNumElements();
+  int64_t LowerBound = 0;
+  if (NumElems == 0)
+    // If number of elements are not known then this is an unbounded array.
+    // Use Low = 1, Hi = 0 to express such arrays.
+    LowerBound = 1;
+  else
     --NumElems;
 
-  llvm::Value *Subscript = DBuilder.getOrCreateSubrange(0, NumElems);
+  llvm::Value *Subscript = DBuilder.getOrCreateSubrange(LowerBound, NumElems);
   llvm::DIArray SubscriptArray = DBuilder.getOrCreateArray(&Subscript, 1);
 
   uint64_t Size = CGM.getContext().getTypeSize(Ty);
@@ -1278,12 +1286,18 @@ llvm::DIType CGDebugInfo::CreateType(const ArrayType *Ty,
     EltTy = Ty->getElementType();
   else {
     while ((Ty = dyn_cast<ArrayType>(EltTy))) {
-      uint64_t Upper = 0;
+      int64_t UpperBound = 0;
+      int64_t LowerBound = 0;
       if (const ConstantArrayType *CAT = dyn_cast<ConstantArrayType>(Ty))
         if (CAT->getSize().getZExtValue())
-          Upper = CAT->getSize().getZExtValue() - 1;
+          UpperBound = CAT->getSize().getZExtValue() - 1;
+      else
+        // This is an unbounded array. Use Low = 1, Hi = 0 to express such 
+        // arrays.
+        LowerBound = 1;
+
       // FIXME: Verify this is right for VLAs.
-      Subscripts.push_back(DBuilder.getOrCreateSubrange(0, Upper));
+      Subscripts.push_back(DBuilder.getOrCreateSubrange(LowerBound, UpperBound));
       EltTy = Ty->getElementType();
     }
   }

@@ -408,6 +408,16 @@ const ObjCObjectPointerType *Type::getAsObjCQualifiedIdType() const {
   return 0;
 }
 
+const ObjCObjectPointerType *Type::getAsObjCQualifiedClassType() const {
+  // There is no sugar for ObjCQualifiedClassType's, just return the canonical
+  // type pointer if it is the right class.
+  if (const ObjCObjectPointerType *OPT = getAs<ObjCObjectPointerType>()) {
+    if (OPT->isObjCQualifiedClassType())
+      return OPT;
+  }
+  return 0;
+}
+
 const ObjCObjectPointerType *Type::getAsObjCInterfacePointerType() const {
   if (const ObjCObjectPointerType *OPT = getAs<ObjCObjectPointerType>()) {
     if (OPT->getInterfaceType())
@@ -1122,6 +1132,7 @@ const char *BuiltinType::getName(const LangOptions &LO) const {
   case NullPtr:           return "nullptr_t";
   case Overload:          return "<overloaded function type>";
   case Dependent:         return "<dependent type>";
+  case UnknownAny:        return "<unknown type>";
   case ObjCId:            return "id";
   case ObjCClass:         return "Class";
   case ObjCSel:           return "SEL";

@@ -1093,7 +1093,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
   if (!Args.hasFlag(options::OPT_fmerge_all_constants,
                     options::OPT_fno_merge_all_constants))
-    CmdArgs.push_back("-no-merge-all-constants");
+    CmdArgs.push_back("-fno-merge-all-constants");
 
   // LLVM Code Generator Options.
 
@@ -1245,6 +1245,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
   Args.AddLastArg(CmdArgs, options::OPT_P);
   Args.AddLastArg(CmdArgs, options::OPT_print_ivar_layout);
+
+  if (D.CCLogDiagnostics) {
+    CmdArgs.push_back("-diagnostic-log-file");
+    CmdArgs.push_back(D.CCLogDiagnosticsFilename ?
+                      D.CCLogDiagnosticsFilename : "-");
+  }
 
   // Special case debug options to only pass -g to clang. This is
   // wrong.
@@ -1443,6 +1449,13 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (Arg *A = Args.getLastArg(options::OPT_ftrapv_handler_EQ)) {
     CmdArgs.push_back("-ftrapv-handler");
     CmdArgs.push_back(A->getValue(Args));
+  }
+
+  // Forward -ftrap_function= options to the backend.
+  if (Arg *A = Args.getLastArg(options::OPT_ftrap_function_EQ)) {
+    llvm::StringRef FuncName = A->getValue(Args);
+    CmdArgs.push_back("-backend-option");
+    CmdArgs.push_back(Args.MakeArgString("-trap-func=" + FuncName));
   }
 
   // -fno-strict-overflow implies -fwrapv if it isn't disabled, but
@@ -2257,6 +2270,9 @@ void darwin::CC1::AddCC1OptionsArgs(const ArgList &Args, ArgStringList &CmdArgs,
   } else
     Args.AddAllArgs(CmdArgs, options::OPT_f_Group, options::OPT_fsyntax_only);
 
+  // Claim Clang only -f options, they aren't worth warning about.
+  Args.ClaimAllArgs(options::OPT_f_clang_Group);
+
   Args.AddAllArgs(CmdArgs, options::OPT_undef);
   if (Args.hasArg(options::OPT_Qn))
     CmdArgs.push_back("-fno-ident");
@@ -2313,6 +2329,9 @@ void darwin::CC1::AddCPPOptionsArgs(const ArgList &Args, ArgStringList &CmdArgs,
 
   // The driver treats -fsyntax-only specially.
   Args.AddAllArgs(CmdArgs, options::OPT_f_Group, options::OPT_fsyntax_only);
+
+  // Claim Clang only -f options, they aren't worth warning about.
+  Args.ClaimAllArgs(options::OPT_f_clang_Group);
 
   if (Args.hasArg(options::OPT_g_Group) && !Args.hasArg(options::OPT_g0) &&
       !Args.hasArg(options::OPT_fno_working_directory))
