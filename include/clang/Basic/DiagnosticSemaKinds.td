@@ -874,18 +874,19 @@ def warn_field_is_uninit : Warning<"field is uninitialized when used here">,
 def warn_uninit_self_reference_in_init : Warning<
   "variable %0 is uninitialized when used within its own initialization">,
   InGroup<Uninitialized>;
-def warn_uninit_var : Warning<"variable %0 is possibly uninitialized when used here">,
+def warn_uninit_var : Warning<
+  "variable %0 is uninitialized when used here">,
   InGroup<Uninitialized>, DefaultIgnore;
 def warn_maybe_uninit_var :
-  Warning<"variable %0 is possibly uninitialized when used here">,
+  Warning<"variable %0 may be uninitialized when used here">,
     InGroup<UninitializedMaybe>, DefaultIgnore;
 def note_uninit_var_def : Note<
   "variable %0 is declared here">;
 def warn_uninit_var_captured_by_block : Warning<
-  "variable %0 is possibly uninitialized when captured by block">,
+  "variable %0 is uninitialized when captured by block">,
   InGroup<Uninitialized>, DefaultIgnore;
 def warn_maybe_uninit_var_captured_by_block : Warning<
-  "variable %0 is possibly uninitialized when captured by block">,
+  "variable %0 may be uninitialized when captured by block">,
   InGroup<UninitializedMaybe>, DefaultIgnore;
 def note_var_fixit_add_initialization : Note<
   "add initialization to silence this warning">;
@@ -2724,6 +2725,8 @@ def warn_root_inst_method_not_found : Warning<
   "instance method %0 is being used on 'Class' which is not in the root class">;
 def warn_class_method_not_found : Warning<
   "class method %objcclass0 not found (return type defaults to 'id')">;
+def warn_instance_method_on_class_found : Warning<
+  "instance method %0 found instead of class method %1">;
 def warn_inst_method_not_found : Warning<
   "instance method %objcinstance0 not found (return type defaults to 'id')">;
 def error_no_super_class_message : Error<
@@ -3846,6 +3849,9 @@ def note_namespace_defined_here : Note<"namespace %0 defined here">;
 def err_sizeof_pack_no_pack_name_suggest : Error<
   "%0 does not refer to the name of a parameter pack; did you mean %1?">;
 def note_parameter_pack_here : Note<"parameter pack %0 declared here">;
+
+def err_bad_use_of_unknown_any : Error<
+  "no known type for %0; must explicitly cast this expression to use it">;
 
 } // end of sema category
 

@@ -1327,6 +1327,7 @@ public:
   // for object declared using an interface.
   const ObjCObjectPointerType *getAsObjCInterfacePointerType() const;
   const ObjCObjectPointerType *getAsObjCQualifiedIdType() const;
+  const ObjCObjectPointerType *getAsObjCQualifiedClassType() const;
   const ObjCObjectType *getAsObjCQualifiedInterfaceType() const;
   const CXXRecordDecl *getCXXRecordDeclForPointerType() const;
 
@@ -1487,7 +1488,14 @@ public:
     /// theoretically deducible.
     Dependent,
 
-    Overload,  // This represents the type of an overloaded function declaration.
+    /// The type of an unresolved overload set.
+    Overload,
+
+    /// __builtin_any_type.  Useful for clients like debuggers
+    /// that don't know what type to give something.  Only a small
+    /// number of operations are valid on expressions of unknown type;
+    /// notable among them, calls and explicit casts.
+    UnknownAny,
 
     /// The primitive Objective C 'id' type.  The type pointed to by the
     /// user-visible 'id' type.  Only ever shows up in an AST as the base
@@ -1536,7 +1544,7 @@ public:
   /// i.e. a type which cannot appear in arbitrary positions in a
   /// fully-formed expression.
   bool isPlaceholderType() const {
-    return getKind() == Overload;
+    return getKind() == Overload || getKind() == UnknownAny;
   }
 
   static bool classof(const Type *T) { return T->getTypeClass() == Builtin; }

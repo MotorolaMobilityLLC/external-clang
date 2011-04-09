@@ -246,7 +246,10 @@ bool Sema::CheckMessageArgumentTypes(Expr **Args, unsigned NumArgs,
       if (Args[i]->isTypeDependent())
         continue;
 
-      DefaultArgumentPromotion(Args[i]);
+      ExprResult Result = DefaultArgumentPromotion(Args[i]);
+      if (Result.isInvalid())
+        return true;
+      Args[i] = Result.take();
     }
 
     unsigned DiagID = isClassMessage ? diag::warn_class_method_not_found :
@@ -305,7 +308,9 @@ bool Sema::CheckMessageArgumentTypes(Expr **Args, unsigned NumArgs,
       if (Args[i]->isTypeDependent())
         continue;
 
-      IsError |= DefaultVariadicArgumentPromotion(Args[i], VariadicMethod, 0);
+      ExprResult Arg = DefaultVariadicArgumentPromotion(Args[i], VariadicMethod, 0);
+      IsError |= Arg.isInvalid();
+      Args[i] = Arg.take();
     }
   } else {
     // Check for extra arguments to non-variadic methods.
@@ -1040,7 +1045,10 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
 
     // If necessary, apply function/array conversion to the receiver.
     // C99 6.7.5.3p[7,8].
-    DefaultFunctionArrayLvalueConversion(Receiver);
+    ExprResult Result = DefaultFunctionArrayLvalueConversion(Receiver);
+    if (Result.isInvalid())
+      return ExprError();
+    Receiver = Result.take();
     ReceiverType = Receiver->getType();
   }
 
@@ -1059,39 +1067,53 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
     } else if (ReceiverType->isObjCClassType() ||
                ReceiverType->isObjCQualifiedClassType()) {
       // Handle messages to Class.
-      if (ObjCMethodDecl *CurMeth = getCurMethodDecl()) {
-        if (ObjCInterfaceDecl *ClassDecl = CurMeth->getClassInterface()) {
-          // First check the public methods in the class interface.
-          Method = ClassDecl->lookupClassMethod(Sel);
-
-          if (!Method)
-            Method = LookupPrivateClassMethod(Sel, ClassDecl);
-
-          // FIXME: if we still haven't found a method, we need to look in
-          // protocols (if we have qualifiers).
+      // We allow sending a message to a qualified Class ("Class<foo>"), which 
+      // is ok as long as one of the protocols implements the selector (if not, warn).
+      if (const ObjCObjectPointerType *QClassTy 
+            = ReceiverType->getAsObjCQualifiedClassType()) {
+        // Search protocols for class methods.
+        Method = LookupMethodInQualifiedType(Sel, QClassTy, false);
+        if (!Method) {
+          Method = LookupMethodInQualifiedType(Sel, QClassTy, true);
+          // warn if instance method found for a Class message.
+          if (Method) {
+            Diag(Loc, diag::warn_instance_method_on_class_found)
+              << Method->getSelector() << Sel;
+            Diag(Method->getLocation(), diag::note_method_declared_at);
+          }
         }
-        if (Method && DiagnoseUseOfDecl(Method, Loc))
-          return ExprError();
-      }
-      if (!Method) {
-        // If not messaging 'self', look for any factory method named 'Sel'.
-        if (!Receiver || !isSelfExpr(Receiver)) {
-          Method = LookupFactoryMethodInGlobalPool(Sel, 
+      } else {
+        if (ObjCMethodDecl *CurMeth = getCurMethodDecl()) {
+          if (ObjCInterfaceDecl *ClassDecl = CurMeth->getClassInterface()) {
+            // First check the public methods in the class interface.
+            Method = ClassDecl->lookupClassMethod(Sel);
+
+            if (!Method)
+              Method = LookupPrivateClassMethod(Sel, ClassDecl);
+          }
+          if (Method && DiagnoseUseOfDecl(Method, Loc))
+            return ExprError();
+        }
+        if (!Method) {
+          // If not messaging 'self', look for any factory method named 'Sel'.
+          if (!Receiver || !isSelfExpr(Receiver)) {
+            Method = LookupFactoryMethodInGlobalPool(Sel, 
+                                                SourceRange(LBracLoc, RBracLoc),
+                                                     true);
+            if (!Method) {
+              // If no class (factory) method was found, check if an _instance_
+              // method of the same name exists in the root class only.
+              Method = LookupInstanceMethodInGlobalPool(Sel,
                                                SourceRange(LBracLoc, RBracLoc),
-                                                   true);
-          if (!Method) {
-            // If no class (factory) method was found, check if an _instance_
-            // method of the same name exists in the root class only.
-            Method = LookupInstanceMethodInGlobalPool(Sel,
-                                               SourceRange(LBracLoc, RBracLoc),
-                                                      true);
-            if (Method)
-                if (const ObjCInterfaceDecl *ID =
-                  dyn_cast<ObjCInterfaceDecl>(Method->getDeclContext())) {
-                if (ID->getSuperClass())
-                  Diag(Loc, diag::warn_root_inst_method_not_found)
-                    << Sel << SourceRange(LBracLoc, RBracLoc);
-              }
+                                                        true);
+              if (Method)
+                  if (const ObjCInterfaceDecl *ID =
+                      dyn_cast<ObjCInterfaceDecl>(Method->getDeclContext())) {
+                    if (ID->getSuperClass())
+                      Diag(Loc, diag::warn_root_inst_method_not_found)
+                      << Sel << SourceRange(LBracLoc, RBracLoc);
+                  }
+            }
           }
         }
       }
@@ -1148,37 +1170,42 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
           << ReceiverType 
           << Receiver->getSourceRange();
         if (ReceiverType->isPointerType())
-          ImpCastExprToType(Receiver, Context.getObjCIdType(), 
-                            CK_BitCast);
+          Receiver = ImpCastExprToType(Receiver, Context.getObjCIdType(), 
+                            CK_BitCast).take();
         else {
           // TODO: specialized warning on null receivers?
           bool IsNull = Receiver->isNullPointerConstant(Context,
                                               Expr::NPC_ValueDependentIsNull);
-          ImpCastExprToType(Receiver, Context.getObjCIdType(),
-                            IsNull ? CK_NullToPointer : CK_IntegralToPointer);
+          Receiver = ImpCastExprToType(Receiver, Context.getObjCIdType(),
+                            IsNull ? CK_NullToPointer : CK_IntegralToPointer).take();
         }
         ReceiverType = Receiver->getType();
       } 
-      else if (getLangOptions().CPlusPlus &&
-               !PerformContextuallyConvertToObjCId(Receiver)) {
-        if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(Receiver)) {
-          Receiver = ICE->getSubExpr();
-          ReceiverType = Receiver->getType();
+      else {
+        ExprResult ReceiverRes;
+        if (getLangOptions().CPlusPlus)
+          ReceiverRes = PerformContextuallyConvertToObjCId(Receiver);
+        if (ReceiverRes.isUsable()) {
+          Receiver = ReceiverRes.take();
+          if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(Receiver)) {
+            Receiver = ICE->getSubExpr();
+            ReceiverType = Receiver->getType();
+          }
+          return BuildInstanceMessage(Receiver,
+                                      ReceiverType,
+                                      SuperLoc,
+                                      Sel,
+                                      Method,
+                                      LBracLoc,
+                                      SelectorLoc,
+                                      RBracLoc,
+                                      move(ArgsIn));
+        } else {
+          // Reject other random receiver types (e.g. structs).
+          Diag(Loc, diag::err_bad_receiver_type)
+            << ReceiverType << Receiver->getSourceRange();
+          return ExprError();
         }
-        return BuildInstanceMessage(Receiver,
-                                    ReceiverType,
-                                    SuperLoc,
-                                    Sel,
-                                    Method,
-                                    LBracLoc,
-                                    SelectorLoc,
-                                    RBracLoc,
-                                    move(ArgsIn));
-      } else {
-        // Reject other random receiver types (e.g. structs).
-        Diag(Loc, diag::err_bad_receiver_type)
-          << ReceiverType << Receiver->getSourceRange();
-        return ExprError();
       }
     }
   }
