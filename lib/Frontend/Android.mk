@@ -26,7 +26,7 @@ clang_frontend_SRC_FILES := \
   CacheTokens.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
-	CreateInvocationFromCommandLine.cpp \
+  CreateInvocationFromCommandLine.cpp \
   DependencyFile.cpp \
   DiagChecker.cpp \
   FrontendAction.cpp \
@@ -36,6 +36,7 @@ clang_frontend_SRC_FILES := \
   InitHeaderSearch.cpp \
   InitPreprocessor.cpp \
   LangStandards.cpp \
+  LogDiagnosticPrinter.cpp \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
   TextDiagnosticBuffer.cpp \
