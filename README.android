@@ -12,7 +12,7 @@
  * conflicts.
  */
 
-* Synced to upstream r127120
+* Synced to upstream r129173
 
 * We add Android's *.mk files that are specific to Android's build system.
 
