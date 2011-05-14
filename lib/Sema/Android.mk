@@ -24,6 +24,7 @@ clang_sema_SRC_FILES :=	\
 	IdentifierResolver.cpp	\
 	DelayedDiagnostic.cpp \
 	JumpDiagnostics.cpp	\
+	Scope.cpp \
 	Sema.cpp	\
 	SemaAccess.cpp	\
 	SemaAttr.cpp	\

@@ -58,6 +58,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMBitWriter \
   libLLVMSelectionDAG \
   libLLVMInstCombine \
+  libLLVMInstrumentation \
   libLLVMCodeGen \
   libLLVMipo \
   libLLVMipa \
