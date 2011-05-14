@@ -189,23 +189,6 @@ namespace {
   }
 }
 
-/// Determines if the given record type has a mutable field.
-static bool hasMutableField(const CXXRecordDecl *record) {
-  for (CXXRecordDecl::field_iterator
-         i = record->field_begin(), e = record->field_end(); i != e; ++i)
-    if ((*i)->isMutable())
-      return true;
-
-  for (CXXRecordDecl::base_class_const_iterator
-         i = record->bases_begin(), e = record->bases_end(); i != e; ++i) {
-    const RecordType *record = i->getType()->castAs<RecordType>();
-    if (hasMutableField(cast<CXXRecordDecl>(record->getDecl())))
-      return true;
-  }
-
-  return false;
-}
-
 /// Determines if the given type is safe for constant capture in C++.
 static bool isSafeForCXXConstantCapture(QualType type) {
   const RecordType *recordType =
@@ -222,7 +205,7 @@ static bool isSafeForCXXConstantCapture(QualType type) {
 
   // Otherwise, we just have to make sure there aren't any mutable
   // fields that might have changed since initialization.
-  return !hasMutableField(record);
+  return !record->hasMutableFields();
 }
 
 /// It is illegal to modify a const object after initialization.
@@ -722,7 +705,7 @@ RValue CodeGenFunction::EmitBlockCallExpr(const CallExpr* E,
   // Add the block literal.
   QualType VoidPtrTy = getContext().getPointerType(getContext().VoidTy);
   CallArgList Args;
-  Args.push_back(std::make_pair(RValue::get(BlockLiteral), VoidPtrTy));
+  Args.add(RValue::get(BlockLiteral), VoidPtrTy);
 
   QualType FnType = BPT->getPointeeType();
 
@@ -1063,6 +1046,10 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
   IdentifierInfo *II
     = &CGM.getContext().Idents.get("__copy_helper_block_");
 
+  // Check if we should generate debug info for this block helper function.
+  if (CGM.getModuleDebugInfo())
+    DebugInfo = CGM.getModuleDebugInfo();
+
   FunctionDecl *FD = FunctionDecl::Create(C,
                                           C.getTranslationUnitDecl(),
                                           SourceLocation(),
@@ -1149,6 +1136,10 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
   llvm::Function *Fn =
     llvm::Function::Create(LTy, llvm::GlobalValue::InternalLinkage,
                            "__destroy_helper_block_", &CGM.getModule());
+
+  // Check if we should generate debug info for this block destroy function.
+  if (CGM.getModuleDebugInfo())
+    DebugInfo = CGM.getModuleDebugInfo();
 
   IdentifierInfo *II
     = &CGM.getContext().Idents.get("__destroy_helper_block_");

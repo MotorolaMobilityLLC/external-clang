@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This provides Objective-C code generation targetting the GNU runtime.  The
+// This provides Objective-C code generation targeting the GNU runtime.  The
 // class in this file generates structures used by the GNU Objective-C runtime
 // library.  These structures are defined in objc/objc.h and objc/objc-api.h in
 // the GNU runtime distribution.
@@ -36,7 +36,6 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Target/TargetData.h"
 
-#include <map>
 #include <stdarg.h>
 
 
@@ -689,11 +688,13 @@ CGObjCGNU::CGObjCGNU(CodeGenModule &cgm, unsigned runtimeABIVersion,
   PtrTy = PtrToInt8Ty;
 
   // Object type
-  ASTIdTy = CGM.getContext().getCanonicalType(CGM.getContext().getObjCIdType());
-  if (QualType() == ASTIdTy) {
-    IdTy = PtrToInt8Ty;
-  } else {
+  QualType UnqualIdTy = CGM.getContext().getObjCIdType();
+  ASTIdTy = CanQualType();
+  if (UnqualIdTy != QualType()) {
+    ASTIdTy = CGM.getContext().getCanonicalType(UnqualIdTy);
     IdTy = cast<llvm::PointerType>(CGM.getTypes().ConvertType(ASTIdTy));
+  } else {
+    IdTy = PtrToInt8Ty;
   }
   PtrToIdTy = llvm::PointerType::getUnqual(IdTy);
 
@@ -959,11 +960,8 @@ CGObjCGNU::GenerateMessageSendSuper(CodeGenFunction &CGF,
 
   CallArgList ActualArgs;
 
-  ActualArgs.push_back(
-      std::make_pair(RValue::get(EnforceType(Builder, Receiver, IdTy)),
-      ASTIdTy));
-  ActualArgs.push_back(std::make_pair(RValue::get(cmd),
-                                      CGF.getContext().getObjCSelType()));
+  ActualArgs.add(RValue::get(EnforceType(Builder, Receiver, IdTy)), ASTIdTy);
+  ActualArgs.add(RValue::get(cmd), CGF.getContext().getObjCSelType());
   ActualArgs.insert(ActualArgs.end(), CallArgs.begin(), CallArgs.end());
 
   CodeGenTypes &Types = CGM.getTypes();
@@ -1035,7 +1033,7 @@ CGObjCGNU::GenerateMessageSendSuper(CodeGenFunction &CGF,
       llvm::MDString::get(VMContext, Class->getSuperClass()->getNameAsString()),
       llvm::ConstantInt::get(llvm::Type::getInt1Ty(VMContext), IsClassMessage)
    };
-  llvm::MDNode *node = llvm::MDNode::get(VMContext, impMD, 3);
+  llvm::MDNode *node = llvm::MDNode::get(VMContext, impMD);
 
   llvm::Instruction *call;
   RValue msgRet = CGF.EmitCall(FnInfo, imp, Return, ActualArgs,
@@ -1109,16 +1107,14 @@ CGObjCGNU::GenerateMessageSend(CodeGenFunction &CGF,
         llvm::MDString::get(VMContext, Class ? Class->getNameAsString() :""),
         llvm::ConstantInt::get(llvm::Type::getInt1Ty(VMContext), Class!=0)
    };
-  llvm::MDNode *node = llvm::MDNode::get(VMContext, impMD, 3);
+  llvm::MDNode *node = llvm::MDNode::get(VMContext, impMD);
 
   // Get the IMP to call
   llvm::Value *imp = LookupIMP(CGF, Receiver, cmd, node);
 
   CallArgList ActualArgs;
-  ActualArgs.push_back(
-    std::make_pair(RValue::get(Receiver), ASTIdTy));
-  ActualArgs.push_back(std::make_pair(RValue::get(cmd),
-                                      CGF.getContext().getObjCSelType()));
+  ActualArgs.add(RValue::get(Receiver), ASTIdTy);
+  ActualArgs.add(RValue::get(cmd), CGF.getContext().getObjCSelType());
   ActualArgs.insert(ActualArgs.end(), CallArgs.begin(), CallArgs.end());
 
   CodeGenTypes &Types = CGM.getTypes();
@@ -1330,8 +1326,10 @@ llvm::Constant *CGObjCGNU::GenerateClassStructure(
   Elements.push_back(llvm::ConstantInt::get(LongTy, info));
   if (isMeta) {
     llvm::TargetData td(&TheModule);
-    Elements.push_back(llvm::ConstantInt::get(LongTy,
-                     td.getTypeSizeInBits(ClassTy)/8));
+    Elements.push_back(
+        llvm::ConstantInt::get(LongTy,
+                               td.getTypeSizeInBits(ClassTy) /
+                                 CGM.getContext().getCharWidth()));
   } else
     Elements.push_back(InstanceSize);
   Elements.push_back(IVars);
@@ -2002,12 +2000,10 @@ llvm::Function *CGObjCGNU::ModuleInitFunction() {
   const llvm::StructType *SelStructTy = dyn_cast<llvm::StructType>(
           SelectorTy->getElementType());
   const llvm::Type *SelStructPtrTy = SelectorTy;
-  bool isSelOpaque = false;
   if (SelStructTy == 0) {
     SelStructTy = llvm::StructType::get(VMContext, PtrToInt8Ty,
                                         PtrToInt8Ty, NULL);
     SelStructPtrTy = llvm::PointerType::getUnqual(SelStructTy);
-    isSelOpaque = true;
   }
 
   // Name the ObjC types to make the IR a bit easier to read
@@ -2137,8 +2133,10 @@ llvm::Function *CGObjCGNU::ModuleInitFunction() {
   Elements.push_back(llvm::ConstantInt::get(LongTy, RuntimeVersion));
   // sizeof(ModuleTy)
   llvm::TargetData td(&TheModule);
-  Elements.push_back(llvm::ConstantInt::get(LongTy,
-                     td.getTypeSizeInBits(ModuleTy)/8));
+  Elements.push_back(
+    llvm::ConstantInt::get(LongTy,
+                           td.getTypeSizeInBits(ModuleTy) /
+                             CGM.getContext().getCharWidth()));
 
   // The path to the source file where this module was declared
   SourceManager &SM = CGM.getContext().getSourceManager();

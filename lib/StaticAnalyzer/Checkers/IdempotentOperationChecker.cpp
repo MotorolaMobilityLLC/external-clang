@@ -59,7 +59,6 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/Support/ErrorHandling.h"
-#include <deque>
 
 using namespace clang;
 using namespace ento;
@@ -588,7 +587,7 @@ IdempotentOperationChecker::pathWasCompletelyAnalyzed(AnalysisContext *AC,
       if (!B)
         return true;
       
-      return CRA.isReachable(B, TargetBlock);
+      return B == TargetBlock || CRA.isReachable(B, TargetBlock);
     }
   };
   VisitWL visitWL(AC->getCFGStmtMap(), CB, *CRA);

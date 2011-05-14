@@ -62,7 +62,8 @@ ExprResult Sema::ParseObjCStringLiteral(SourceLocation *AtLocs,
 
     // Create the aggregate string with the appropriate content and location
     // information.
-    S = StringLiteral::Create(Context, &StrBuf[0], StrBuf.size(), false,
+    S = StringLiteral::Create(Context, &StrBuf[0], StrBuf.size(),
+                              /*Wide=*/false, /*Pascal=*/false,
                               Context.getPointerType(Context.CharTy),
                               &StrLocs[0], StrLocs.size());
   }
@@ -323,6 +324,12 @@ bool Sema::CheckMessageArgumentTypes(Expr **Args, unsigned NumArgs,
                        Args[NumArgs-1]->getLocEnd());
     }
   }
+  // diagnose nonnull arguments.
+  for (specific_attr_iterator<NonNullAttr>
+       i = Method->specific_attr_begin<NonNullAttr>(),
+       e = Method->specific_attr_end<NonNullAttr>(); i != e; ++i) {
+    CheckNonNullArguments(*i, Args, lbrac);
+  }
 
   DiagnoseSentinelCalls(Method, lbrac, Args, NumArgs);
   return IsError;
@@ -419,6 +426,13 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
                           bool Super) {
   const ObjCInterfaceType *IFaceT = OPT->getInterfaceType();
   ObjCInterfaceDecl *IFace = IFaceT->getDecl();
+  
+  if (MemberName.getNameKind() != DeclarationName::Identifier) {
+    Diag(MemberLoc, diag::err_invalid_property_name)
+      << MemberName << QualType(OPT, 0);
+    return ExprError();
+  }
+  
   IdentifierInfo *Member = MemberName.getAsIdentifierInfo();
 
   if (IFace->isForwardDecl()) {
@@ -1141,7 +1155,7 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
           // Search protocol qualifiers.
           Method = LookupMethodInQualifiedType(Sel, OCIType, true);
         
-        bool forwardClass = false;
+        const ObjCInterfaceDecl *forwardClass = 0;
         if (!Method) {
           // If we have implementations in scope, check "private" methods.
           Method = LookupPrivateInstanceMethod(Sel, ClassDecl);
@@ -1153,7 +1167,8 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
             if (OCIType->qual_empty()) {
               Method = LookupInstanceMethodInGlobalPool(Sel,
                                                  SourceRange(LBracLoc, RBracLoc));
-              forwardClass = OCIType->getInterfaceDecl()->isForwardDecl();
+              if (OCIType->getInterfaceDecl()->isForwardDecl())
+                forwardClass = OCIType->getInterfaceDecl();
               if (Method && !forwardClass)
                 Diag(Loc, diag::warn_maynot_respond)
                   << OCIType->getInterfaceDecl()->getIdentifier() << Sel;

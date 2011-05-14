@@ -68,13 +68,15 @@ static uint64_t LookupFieldBitOffset(CodeGen::CodeGenModule &CGM,
 uint64_t CGObjCRuntime::ComputeIvarBaseOffset(CodeGen::CodeGenModule &CGM,
                                               const ObjCInterfaceDecl *OID,
                                               const ObjCIvarDecl *Ivar) {
-  return LookupFieldBitOffset(CGM, OID, 0, Ivar) / 8;
+  return LookupFieldBitOffset(CGM, OID, 0, Ivar) / 
+    CGM.getContext().getCharWidth();
 }
 
 uint64_t CGObjCRuntime::ComputeIvarBaseOffset(CodeGen::CodeGenModule &CGM,
                                               const ObjCImplementationDecl *OID,
                                               const ObjCIvarDecl *Ivar) {
-  return LookupFieldBitOffset(CGM, OID->getClassInterface(), OID, Ivar) / 8;
+  return LookupFieldBitOffset(CGM, OID->getClassInterface(), OID, Ivar) / 
+    CGM.getContext().getCharWidth();
 }
 
 LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
@@ -115,8 +117,8 @@ LValue CGObjCRuntime::EmitValueForIvarAtOffset(CodeGen::CodeGenFunction &CGF,
     CGF.CGM.getContext().getASTObjCInterfaceLayout(OID);
   uint64_t TypeSizeInBits = CGF.CGM.getContext().toBits(RL.getSize());
   uint64_t FieldBitOffset = LookupFieldBitOffset(CGF.CGM, OID, 0, Ivar);
-  uint64_t BitOffset = FieldBitOffset % 8;
-  uint64_t ContainingTypeAlign = 8;
+  uint64_t BitOffset = FieldBitOffset % CGF.CGM.getContext().getCharWidth();
+  uint64_t ContainingTypeAlign = CGF.CGM.getContext().Target.getCharAlign();
   uint64_t ContainingTypeSize = TypeSizeInBits - (FieldBitOffset - BitOffset);
   uint64_t BitFieldSize =
     Ivar->getBitWidth()->EvaluateAsInt(CGF.getContext()).getZExtValue();
@@ -231,6 +233,8 @@ void CGObjCRuntime::EmitTryCatchStmt(CodeGenFunction &CGF,
       cast<llvm::CallInst>(Exn)->setDoesNotThrow();
     }
 
+    CodeGenFunction::RunCleanupsScope cleanups(CGF);
+
     if (endCatchFn) {
       // Add a cleanup to leave the catch.
       bool EndCatchMightThrow = (Handler.Variable == 0);
@@ -253,9 +257,8 @@ void CGObjCRuntime::EmitTryCatchStmt(CodeGenFunction &CGF,
     CGF.EmitStmt(Handler.Body);
     CGF.ObjCEHValueStack.pop_back();
 
-    // Leave the earlier cleanup.
-    if (endCatchFn) 
-      CGF.PopCleanupBlock();
+    // Leave any cleanups associated with the catch.
+    cleanups.ForceCleanup();
 
     CGF.EmitBranchThroughCleanup(Cont);
   }  

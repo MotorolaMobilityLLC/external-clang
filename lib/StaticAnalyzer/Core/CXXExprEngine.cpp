@@ -132,7 +132,7 @@ void ExprEngine::VisitCXXConstructExpr(const CXXConstructExpr *E,
   assert(CD);
   
 #if 0
-  if (!(CD->isThisDeclarationADefinition() && AMgr.shouldInlineCall()))
+  if (!(CD->doesThisDeclarationHaveABody() && AMgr.shouldInlineCall()))
     // FIXME: invalidate the object.
     return;
 #endif
@@ -146,7 +146,7 @@ void ExprEngine::VisitCXXConstructExpr(const CXXConstructExpr *E,
   // Is the constructor elidable?
   if (E->isElidable()) {
     VisitAggExpr(E->getArg(0), destNodes, Pred, Dst);
-    // FIXME: this is here to force propogation if VisitAggExpr doesn't
+    // FIXME: this is here to force propagation if VisitAggExpr doesn't
     if (destNodes.empty())
       destNodes.Add(Pred);
     return;
@@ -246,7 +246,7 @@ void ExprEngine::VisitCXXDestructor(const CXXDestructorDecl *DD,
                                       const Stmt *S,
                                       ExplodedNode *Pred, 
                                       ExplodedNodeSet &Dst) {
-  if (!(DD->isThisDeclarationADefinition() && AMgr.shouldInlineCall()))
+  if (!(DD->doesThisDeclarationHaveABody() && AMgr.shouldInlineCall()))
     return;
   // Create the context for 'this' region.
   const StackFrameContext *SFC = AMgr.getStackFrame(DD,
@@ -268,9 +268,9 @@ void ExprEngine::VisitCXXDestructor(const CXXDestructorDecl *DD,
 void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
                                    ExplodedNodeSet &Dst) {
   
-  unsigned Count = Builder->getCurrentBlockCount();
+  unsigned blockCount = Builder->getCurrentBlockCount();
   DefinedOrUnknownSVal symVal =
-    svalBuilder.getConjuredSymbolVal(NULL, CNE, CNE->getType(), Count);
+    svalBuilder.getConjuredSymbolVal(NULL, CNE, CNE->getType(), blockCount);
   const MemRegion *NewReg = cast<loc::MemRegionVal>(symVal).getRegion();  
   QualType ObjTy = CNE->getType()->getAs<PointerType>()->getPointeeType();
   const ElementRegion *EleReg = 
@@ -297,11 +297,39 @@ void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
   // Initialize the object region and bind the 'new' expression.
   for (ExplodedNodeSet::iterator I = argsEvaluated.begin(), 
                                  E = argsEvaluated.end(); I != E; ++I) {
+
     const GRState *state = GetState(*I);
+    
+    // Accumulate list of regions that are invalidated.
+    // FIXME: Eventually we should unify the logic for constructor
+    // processing in one place.
+    llvm::SmallVector<const MemRegion*, 10> regionsToInvalidate;
+    for (CXXNewExpr::const_arg_iterator
+          ai = CNE->constructor_arg_begin(), ae = CNE->constructor_arg_end();
+          ai != ae; ++ai)
+    {
+      SVal val = state->getSVal(*ai);
+      if (const MemRegion *region = val.getAsRegion())
+        regionsToInvalidate.push_back(region);
+    }
 
     if (ObjTy->isRecordType()) {
-      state = state->invalidateRegion(EleReg, CNE, Count);
+      regionsToInvalidate.push_back(EleReg);
+      // Invalidate the regions.
+      state = state->invalidateRegions(regionsToInvalidate.data(),
+                                       regionsToInvalidate.data() +
+                                       regionsToInvalidate.size(),
+                                       CNE, blockCount, 0,
+                                       /* invalidateGlobals = */ true);
+      
     } else {
+      // Invalidate the regions.
+      state = state->invalidateRegions(regionsToInvalidate.data(),
+                                       regionsToInvalidate.data() +
+                                       regionsToInvalidate.size(),
+                                       CNE, blockCount, 0,
+                                       /* invalidateGlobals = */ true);
+
       if (CNE->hasInitializer()) {
         SVal V = state->getSVal(*CNE->constructor_arg_begin());
         state = state->bindLoc(loc::MemRegionVal(EleReg), V);

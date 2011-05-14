@@ -58,6 +58,7 @@ bool Parser::isCXXDeclarationStatement() {
   case tok::kw_using:
     // static_assert-declaration
   case tok::kw_static_assert:
+  case tok::kw__Static_assert:
     return true;
     // simple-declaration
   default:
@@ -658,10 +659,13 @@ Parser::isExpressionOrTypeSpecifierSimple(tok::TokenKind Kind) {
   case tok::kw___is_convertible_to:
   case tok::kw___is_empty:
   case tok::kw___is_enum:
+  case tok::kw___is_literal:
+  case tok::kw___is_literal_type:
   case tok::kw___is_pod:
   case tok::kw___is_polymorphic:
+  case tok::kw___is_trivial:
+  case tok::kw___is_trivially_copyable:
   case tok::kw___is_union:
-  case tok::kw___is_literal:
   case tok::kw___uuidof:
     return TPResult::True();
       
@@ -673,6 +677,7 @@ Parser::isExpressionOrTypeSpecifierSimple(tok::TokenKind Kind) {
   case tok::kw_float:
   case tok::kw_int:
   case tok::kw_long:
+  case tok::kw___int64:
   case tok::kw_restrict:
   case tok::kw_short:
   case tok::kw_signed:
@@ -968,6 +973,7 @@ Parser::TPResult Parser::isCXXDeclarationSpecifier() {
   case tok::kw_short:
   case tok::kw_int:
   case tok::kw_long:
+  case tok::kw___int64:
   case tok::kw_signed:
   case tok::kw_unsigned:
   case tok::kw_float:

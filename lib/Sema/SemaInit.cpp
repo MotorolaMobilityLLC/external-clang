@@ -92,13 +92,31 @@ static void CheckStringInit(Expr *Str, QualType &DeclT, const ArrayType *AT,
 
   const ConstantArrayType *CAT = cast<ConstantArrayType>(AT);
 
-  // C99 6.7.8p14. We have an array of character type with known size.  However,
+  // We have an array of character type with known size.  However,
   // the size may be smaller or larger than the string we are initializing.
   // FIXME: Avoid truncation for 64-bit length strings.
-  if (StrLength-1 > CAT->getSize().getZExtValue())
-    S.Diag(Str->getSourceRange().getBegin(),
-           diag::warn_initializer_string_for_char_array_too_long)
-      << Str->getSourceRange();
+  if (S.getLangOptions().CPlusPlus) {
+    if (StringLiteral *SL = dyn_cast<StringLiteral>(Str)) {
+      // For Pascal strings it's OK to strip off the terminating null character,
+      // so the example below is valid:
+      //
+      // unsigned char a[2] = "\pa";
+      if (SL->isPascal())
+        StrLength--;
+    }
+  
+    // [dcl.init.string]p2
+    if (StrLength > CAT->getSize().getZExtValue())
+      S.Diag(Str->getSourceRange().getBegin(),
+             diag::err_initializer_string_for_char_array_too_long)
+        << Str->getSourceRange();
+  } else {
+    // C99 6.7.8p14.
+    if (StrLength-1 > CAT->getSize().getZExtValue())
+      S.Diag(Str->getSourceRange().getBegin(),
+             diag::warn_initializer_string_for_char_array_too_long)
+        << Str->getSourceRange();
+  }
 
   // Set the type to the actual size that we are initializing.  If we have
   // something like:
@@ -386,15 +404,29 @@ InitListChecker::FillInValueInitializations(const InitializedEntity &Entity,
       if (hadError) {
         // Do nothing
       } else if (Init < NumInits) {
-        ILE->setInit(Init, ElementInit.takeAs<Expr>());
-      } else if (InitSeq.getKind()
+        // For arrays, just set the expression used for value-initialization
+        // of the "holes" in the array.
+        if (ElementEntity.getKind() == InitializedEntity::EK_ArrayElement)
+          ILE->setArrayFiller(ElementInit.takeAs<Expr>());
+        else
+          ILE->setInit(Init, ElementInit.takeAs<Expr>());
+      } else {
+        // For arrays, just set the expression used for value-initialization
+        // of the rest of elements and exit.
+        if (ElementEntity.getKind() == InitializedEntity::EK_ArrayElement) {
+          ILE->setArrayFiller(ElementInit.takeAs<Expr>());
+          return;
+        }
+
+        if (InitSeq.getKind()
                    == InitializationSequence::ConstructorInitialization) {
-        // Value-initialization requires a constructor call, so
-        // extend the initializer list to include the constructor
-        // call and make a note that we'll need to take another pass
-        // through the initializer list.
-        ILE->updateInit(SemaRef.Context, Init, ElementInit.takeAs<Expr>());
-        RequiresSecondPass = true;
+          // Value-initialization requires a constructor call, so
+          // extend the initializer list to include the constructor
+          // call and make a note that we'll need to take another pass
+          // through the initializer list.
+          ILE->updateInit(SemaRef.Context, Init, ElementInit.takeAs<Expr>());
+          RequiresSecondPass = true;
+        }
       }
     } else if (InitListExpr *InnerILE
                  = dyn_cast<InitListExpr>(ILE->getInit(Init)))
@@ -1763,11 +1795,15 @@ InitListChecker::getStructuredSubobjectInit(InitListExpr *IList, unsigned Index,
   // Pre-allocate storage for the structured initializer list.
   unsigned NumElements = 0;
   unsigned NumInits = 0;
-  if (!StructuredList)
+  bool GotNumInits = false;
+  if (!StructuredList) {
     NumInits = IList->getNumInits();
-  else if (Index < IList->getNumInits()) {
-    if (InitListExpr *SubList = dyn_cast<InitListExpr>(IList->getInit(Index)))
+    GotNumInits = true;
+  } else if (Index < IList->getNumInits()) {
+    if (InitListExpr *SubList = dyn_cast<InitListExpr>(IList->getInit(Index))) {
       NumInits = SubList->getNumInits();
+      GotNumInits = true;
+    }
   }
 
   if (const ArrayType *AType
@@ -1776,7 +1812,7 @@ InitListChecker::getStructuredSubobjectInit(InitListExpr *IList, unsigned Index,
       NumElements = CAType->getSize().getZExtValue();
       // Simple heuristic so that we don't allocate a very large
       // initializer with many empty entries at the end.
-      if (NumInits && NumElements > NumInits)
+      if (GotNumInits && NumElements > NumInits)
         NumElements = 0;
     }
   } else if (const VectorType *VType = CurrentObjectType->getAs<VectorType>())
@@ -1944,6 +1980,9 @@ ExprResult Sema::ActOnDesignatedInitializer(Designation &Desig,
                                  Loc, GNUSyntax, Init.takeAs<Expr>());
 
   if (getLangOptions().CPlusPlus)
+    Diag(DIE->getLocStart(), diag::ext_designated_init_cxx)
+      << DIE->getSourceRange();
+  else if (!getLangOptions().C99)
     Diag(DIE->getLocStart(), diag::ext_designated_init)
       << DIE->getSourceRange();
 
@@ -2006,7 +2045,7 @@ DeclarationName InitializedEntity::getName() const {
   case EK_New:
   case EK_Temporary:
   case EK_Base:
-  case EK_Delegation:
+  case EK_Delegating:
   case EK_ArrayElement:
   case EK_VectorElement:
   case EK_BlockElement:
@@ -2029,7 +2068,7 @@ DeclaratorDecl *InitializedEntity::getDecl() const {
   case EK_New:
   case EK_Temporary:
   case EK_Base:
-  case EK_Delegation:
+  case EK_Delegating:
   case EK_ArrayElement:
   case EK_VectorElement:
   case EK_BlockElement:
@@ -2052,7 +2091,7 @@ bool InitializedEntity::allowsNRVO() const {
   case EK_New:
   case EK_Temporary:
   case EK_Base:
-  case EK_Delegation:
+  case EK_Delegating:
   case EK_ArrayElement:
   case EK_VectorElement:
   case EK_BlockElement:
@@ -3307,7 +3346,7 @@ getAssignmentAction(const InitializedEntity &Entity) {
   case InitializedEntity::EK_New:
   case InitializedEntity::EK_Exception:
   case InitializedEntity::EK_Base:
-  case InitializedEntity::EK_Delegation:
+  case InitializedEntity::EK_Delegating:
     return Sema::AA_Initializing;
 
   case InitializedEntity::EK_Parameter:
@@ -3344,7 +3383,7 @@ static bool shouldBindAsTemporary(const InitializedEntity &Entity) {
   case InitializedEntity::EK_New:
   case InitializedEntity::EK_Variable:
   case InitializedEntity::EK_Base:
-  case InitializedEntity::EK_Delegation:
+  case InitializedEntity::EK_Delegating:
   case InitializedEntity::EK_VectorElement:
   case InitializedEntity::EK_Exception:
   case InitializedEntity::EK_BlockElement:
@@ -3366,7 +3405,7 @@ static bool shouldDestroyTemporary(const InitializedEntity &Entity) {
     case InitializedEntity::EK_Result:
     case InitializedEntity::EK_New:
     case InitializedEntity::EK_Base:
-    case InitializedEntity::EK_Delegation:
+    case InitializedEntity::EK_Delegating:
     case InitializedEntity::EK_VectorElement:
     case InitializedEntity::EK_BlockElement:
       return false;
@@ -3451,7 +3490,7 @@ static ExprResult CopyObject(Sema &S,
   case InitializedEntity::EK_Temporary:
   case InitializedEntity::EK_New:
   case InitializedEntity::EK_Base:
-  case InitializedEntity::EK_Delegation:
+  case InitializedEntity::EK_Delegating:
   case InitializedEntity::EK_VectorElement:
   case InitializedEntity::EK_BlockElement:
     Loc = CurInitExpr->getLocStart();
@@ -3980,8 +4019,9 @@ InitializationSequence::Perform(Sema &S,
         // the definition for completely trivial constructors.
         CXXRecordDecl *ClassDecl = Constructor->getParent();
         assert(ClassDecl && "No parent class for constructor.");
-        if (Constructor->isImplicit() && Constructor->isDefaultConstructor() &&
-            ClassDecl->hasTrivialConstructor() && !Constructor->isUsed(false))
+        if (Constructor->isDefaulted() && Constructor->isDefaultConstructor() &&
+            ClassDecl->hasTrivialDefaultConstructor() &&
+            !Constructor->isUsed(false))
           S.DefineImplicitDefaultConstructor(Loc, Constructor);
       }
 
@@ -4021,6 +4061,8 @@ InitializationSequence::Perform(Sema &S,
           ConstructKind = Entity.getBaseSpecifier()->isVirtual() ?
             CXXConstructExpr::CK_VirtualBase :
             CXXConstructExpr::CK_NonVirtualBase;
+        } else if (Entity.getKind() == InitializedEntity::EK_Delegating) {
+          ConstructKind = CXXConstructExpr::CK_Delegating;
         }
 
         // Only get the parenthesis range if it is a direct construction.
@@ -4681,6 +4723,21 @@ void InitializationSequence::dump() const {
 //===----------------------------------------------------------------------===//
 // Initialization helper functions
 //===----------------------------------------------------------------------===//
+bool
+Sema::CanPerformCopyInitialization(const InitializedEntity &Entity,
+                                   ExprResult Init) {
+  if (Init.isInvalid())
+    return false;
+
+  Expr *InitE = Init.get();
+  assert(InitE && "No initialization expression");
+
+  InitializationKind Kind = InitializationKind::CreateCopy(SourceLocation(),
+                                                           SourceLocation());
+  InitializationSequence Seq(*this, Entity, Kind, &InitE, 1);
+  return Seq.getKind() != InitializationSequence::FailedSequence;
+}
+
 ExprResult
 Sema::PerformCopyInitialization(const InitializedEntity &Entity,
                                 SourceLocation EqualLoc,

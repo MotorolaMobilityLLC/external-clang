@@ -179,9 +179,11 @@ bool ExprEngine::wantsRegionChangeUpdate(const GRState* state) {
 
 const GRState *
 ExprEngine::processRegionChanges(const GRState *state,
-                                   const MemRegion * const *Begin,
-                                   const MemRegion * const *End) {
-  return getCheckerManager().runCheckersForRegionChanges(state, Begin, End);
+                            const StoreManager::InvalidatedSymbols *invalidated,
+                                 const MemRegion * const *Begin,
+                                 const MemRegion * const *End) {
+  return getCheckerManager().runCheckersForRegionChanges(state, invalidated,
+                                                         Begin, End);
 }
 
 void ExprEngine::processEndWorklist(bool hasWorkRemaining) {
@@ -423,7 +425,7 @@ void ExprEngine::Visit(const Stmt* S, ExplodedNode* Pred,
     case Stmt::CXXBindTemporaryExprClass:
     case Stmt::CXXCatchStmtClass:
     case Stmt::CXXDependentScopeMemberExprClass:
-    case Stmt::CXXNullPtrLiteralExprClass:
+    case Stmt::CXXForRangeStmtClass:
     case Stmt::CXXPseudoDestructorExprClass:
     case Stmt::CXXTemporaryObjectExprClass:
     case Stmt::CXXThrowExprClass:
@@ -435,11 +437,16 @@ void ExprEngine::Visit(const Stmt* S, ExplodedNode* Pred,
     case Stmt::DependentScopeDeclRefExprClass:
     case Stmt::UnaryTypeTraitExprClass:
     case Stmt::BinaryTypeTraitExprClass:
+    case Stmt::ArrayTypeTraitExprClass:
+    case Stmt::ExpressionTraitExprClass:
     case Stmt::UnresolvedLookupExprClass:
     case Stmt::UnresolvedMemberExprClass:
     case Stmt::CXXNoexceptExprClass:
     case Stmt::PackExpansionExprClass:
     case Stmt::SubstNonTypeTemplateParmPackExprClass:
+    case Stmt::SEHTryStmtClass:
+    case Stmt::SEHExceptStmtClass:
+    case Stmt::SEHFinallyStmtClass:
     {
       SaveAndRestore<bool> OldSink(Builder->BuildSinks);
       Builder->BuildSinks = true;
@@ -457,6 +464,8 @@ void ExprEngine::Visit(const Stmt* S, ExplodedNode* Pred,
 
     case Stmt::ParenExprClass:
       llvm_unreachable("ParenExprs already handled.");
+    case Stmt::GenericSelectionExprClass:
+      llvm_unreachable("GenericSelectionExprs already handled.");
     // Cases that should never be evaluated simply because they shouldn't
     // appear in the CFG.
     case Stmt::BreakStmtClass:
@@ -520,6 +529,7 @@ void ExprEngine::Visit(const Stmt* S, ExplodedNode* Pred,
     case Stmt::ExprWithCleanupsClass:
     case Stmt::FloatingLiteralClass:
     case Stmt::SizeOfPackExprClass:
+    case Stmt::CXXNullPtrLiteralExprClass:
       Dst.Add(Pred); // No-op. Simply propagate the current state unchanged.
       break;
 
@@ -2176,7 +2186,6 @@ void ExprEngine::VisitCast(const CastExpr *CastE, const Expr *Ex,
         continue;
       }
       // Various C++ casts that are not handled yet.
-      case CK_ResolveUnknownAnyType:
       case CK_Dynamic:
       case CK_ToUnion:
       case CK_BaseToDerived:

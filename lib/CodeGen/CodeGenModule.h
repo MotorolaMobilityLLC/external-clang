@@ -358,7 +358,6 @@ public:
   llvm::Constant *GetAddrOfGlobalVar(const VarDecl *D,
                                      const llvm::Type *Ty = 0);
 
-  llvm::Constant *getAddrOfUnknownAnyDecl(const NamedDecl *D, QualType type);
 
   /// GetAddrOfFunction - Return the address of the given function.  If Ty is
   /// non-null, then this function will use the specified type if it has to
@@ -735,6 +734,10 @@ private:
   void EmitLLVMUsed(void);
 
   void EmitDeclMetadata();
+
+  /// EmitCoverageFile - Emit the llvm.gcov metadata used to tell LLVM where
+  /// to emit the .gcno and .gcda files in a way that persists in .bc files.
+  void EmitCoverageFile();
 
   /// MayDeferGeneration - Determine if the given decl can be emitted
   /// lazily; this is only relevant for definitions. The given decl

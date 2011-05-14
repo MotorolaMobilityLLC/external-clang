@@ -260,7 +260,7 @@ public:
   const llvm::APSInt *getSymVal(SymbolRef sym) const;
 
   /// Returns the SVal bound to the statement 'S' in the state's environment.
-  SVal getSVal(const Stmt* S) const;
+  SVal getSVal(const Stmt* S, bool useOnlyDirectBindings = false) const;
   
   SVal getSValAsScalarOrLoc(const Stmt *Ex) const;
 
@@ -368,6 +368,12 @@ private:
     assert(refCount > 0);
     --refCount;
   }
+  
+  const GRState *invalidateRegionsImpl(const MemRegion * const *Begin,
+                                       const MemRegion * const *End,
+                                       const Expr *E, unsigned BlockCount,
+                                       StoreManager::InvalidatedSymbols &IS,
+                                       bool invalidateGlobals) const;
 };
 
 class GRStateSet {
@@ -683,14 +689,15 @@ inline const llvm::APSInt *GRState::getSymVal(SymbolRef sym) const {
   return getStateManager().getSymVal(this, sym);
 }
 
-inline SVal GRState::getSVal(const Stmt* Ex) const {
-  return Env.getSVal(Ex, *getStateManager().svalBuilder);
+inline SVal GRState::getSVal(const Stmt* Ex, bool useOnlyDirectBindings) const{
+  return Env.getSVal(Ex, *getStateManager().svalBuilder,
+		     useOnlyDirectBindings);
 }
 
 inline SVal GRState::getSValAsScalarOrLoc(const Stmt *S) const {
   if (const Expr *Ex = dyn_cast<Expr>(S)) {
     QualType T = Ex->getType();
-    if (Loc::isLocType(T) || T->isIntegerType())
+    if (Ex->isLValue() || Loc::isLocType(T) || T->isIntegerType())
       return getSVal(S);
   }
 

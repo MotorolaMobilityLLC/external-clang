@@ -71,7 +71,7 @@ namespace clang {
   class TemplateTypeParmDecl;
   class TranslationUnitDecl;
   class TypeDecl;
-  class TypedefDecl;
+  class TypedefNameDecl;
   class UsingDecl;
   class UsingShadowDecl;
   class UnresolvedSetIterator;
@@ -342,6 +342,14 @@ public:
   }
   void Deallocate(void *Ptr) const { }
   
+  /// Return the total amount of physical memory allocated for representing
+  /// AST nodes and type information.
+  size_t getASTAllocatedMemory() const {
+    return BumpAlloc.getTotalMemory();
+  }
+  /// Return the total memory used for various side tables.
+  size_t getSideTableAllocatedMemory() const;
+  
   PartialDiagnostic::StorageAllocator &getDiagAllocator() {
     return DiagAllocator;
   }
@@ -388,6 +396,31 @@ public:
   FieldDecl *getInstantiatedFromUnnamedFieldDecl(FieldDecl *Field);
 
   void setInstantiatedFromUnnamedFieldDecl(FieldDecl *Inst, FieldDecl *Tmpl);
+  
+  /// ZeroBitfieldFollowsNonBitfield - return 'true" if 'FD' is a zero-length
+  /// bitfield which follows the non-bitfield 'LastFD'.
+  bool ZeroBitfieldFollowsNonBitfield(const FieldDecl *FD, 
+                                      const FieldDecl *LastFD) const;
+
+  /// ZeroBitfieldFollowsBitfield - return 'true" if 'FD' is a zero-length
+  /// bitfield which follows the bitfield 'LastFD'.
+  bool ZeroBitfieldFollowsBitfield(const FieldDecl *FD,
+                                   const FieldDecl *LastFD) const;
+  
+  /// BitfieldFollowsBitfield - return 'true" if 'FD' is a
+  /// bitfield which follows the bitfield 'LastFD'.
+  bool BitfieldFollowsBitfield(const FieldDecl *FD,
+                                   const FieldDecl *LastFD) const;
+  
+  /// NoneBitfieldFollowsBitfield - return 'true" if 'FD' is not a
+  /// bitfield which follows the bitfield 'LastFD'.
+  bool NoneBitfieldFollowsBitfield(const FieldDecl *FD,
+                                   const FieldDecl *LastFD) const;
+  
+  /// BitfieldFollowsNoneBitfield - return 'true" if 'FD' is a
+  /// bitfield which follows the none bitfield 'LastFD'.
+  bool BitfieldFollowsNoneBitfield(const FieldDecl *FD,
+                                   const FieldDecl *LastFD) const;
 
   // Access to the set of methods overridden by the given C++ method.
   typedef CXXMethodVector::iterator overridden_cxx_method_iterator;
@@ -420,8 +453,12 @@ public:
   CanQualType FloatTy, DoubleTy, LongDoubleTy;
   CanQualType FloatComplexTy, DoubleComplexTy, LongDoubleComplexTy;
   CanQualType VoidPtrTy, NullPtrTy;
-  CanQualType OverloadTy, DependentTy, UnknownAnyTy;
+  CanQualType DependentTy, OverloadTy, BoundMemberTy, UnknownAnyTy;
   CanQualType ObjCBuiltinIdTy, ObjCBuiltinClassTy, ObjCBuiltinSelTy;
+
+  // Types for deductions in C++0x [stmt.ranged]'s desugaring. Built on demand.
+  mutable QualType AutoDeductTy;     // Deduction against 'auto'.
+  mutable QualType AutoRRefDeductTy; // Deduction against 'auto &&'.
 
   ASTContext(const LangOptions& LOpts, SourceManager &SM, const TargetInfo &t,
              IdentifierTable &idents, SelectorTable &sels,
@@ -660,9 +697,9 @@ public:
   }
 
   /// getTypedefType - Return the unique reference to the type for the
-  /// specified typename decl.
-  QualType getTypedefType(const TypedefDecl *Decl, QualType Canon = QualType())
-    const;
+  /// specified typedef-name decl.
+  QualType getTypedefType(const TypedefNameDecl *Decl,
+                          QualType Canon = QualType()) const;
 
   QualType getRecordType(const RecordDecl *Decl) const;
 
@@ -682,7 +719,7 @@ public:
 
   QualType getTemplateTypeParmType(unsigned Depth, unsigned Index,
                                    bool ParameterPack,
-                                   IdentifierInfo *Name = 0) const;
+                                   TemplateTypeParmDecl *ParmDecl = 0) const;
 
   QualType getTemplateSpecializationType(TemplateName T,
                                          const TemplateArgument *Args,
@@ -744,6 +781,12 @@ public:
 
   /// getAutoType - C++0x deduced auto type.
   QualType getAutoType(QualType DeducedType) const;
+
+  /// getAutoDeductType - C++0x deduction pattern for 'auto' type.
+  QualType getAutoDeductType() const;
+
+  /// getAutoRRefDeductType - C++0x deduction pattern for 'auto &&' type.
+  QualType getAutoRRefDeductType() const;
 
   /// getTagDeclType - Return the unique reference to the type for the
   /// specified TagDecl (struct/union/class/enum) decl.

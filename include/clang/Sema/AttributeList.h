@@ -213,6 +213,7 @@ public:
     AT_ownership_takes,    // Clang-specific.
     AT_packed,
     AT_pascal,
+    AT_pcs,  // ARM specific
     AT_pure,
     AT_regparm,
     AT_section,
@@ -234,6 +235,7 @@ public:
     AT_weak_import,
     AT_reqd_wg_size,
     AT_init_priority,
+    AT_MsStruct,
     IgnoredAttribute,
     UnknownAttribute
   };
@@ -262,6 +264,10 @@ public:
 
   /// getNumArgs - Return the number of actual arguments to this attribute.
   unsigned getNumArgs() const { return NumArgs; }
+
+  /// hasParameterOrArguments - Return true if this attribute has a parameter,
+  /// or has a non empty argument expression list.
+  bool hasParameterOrArguments() const { return ParmName || NumArgs; }
 
   /// getArg - Return the specified argument.
   Expr *getArg(unsigned Arg) const {

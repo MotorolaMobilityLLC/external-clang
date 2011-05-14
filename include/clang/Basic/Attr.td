@@ -255,6 +255,10 @@ def Final : InheritableAttr {
   let Spellings = [];
 }
 
+def MsStruct : InheritableAttr {
+  let Spellings = ["__ms_struct__"];
+}
+
 def Format : InheritableAttr {
   let Spellings = ["format"];
   let Args = [StringArgument<"Type">, IntArgument<"FormatIdx">,
@@ -414,6 +418,13 @@ def Ownership : InheritableAttr {
 
 def Packed : InheritableAttr {
   let Spellings = ["packed"];
+}
+
+def Pcs : InheritableAttr {
+  let Spellings = ["pcs"];
+  let Args = [EnumArgument<"PCS", "PCSType",
+                           ["aapcs", "aapcs-vfp"],
+                           ["AAPCS", "AAPCS_VFP"]>];
 }
 
 def Pure : InheritableAttr {

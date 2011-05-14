@@ -158,7 +158,7 @@ public:
   /// A scope specifier is present, but may be valid or invalid.
   bool isNotEmpty() const { return !isEmpty(); }
 
-  /// An error occured during parsing of the scope specifier.
+  /// An error occurred during parsing of the scope specifier.
   bool isInvalid() const { return isNotEmpty() && getScopeRep() == 0; }
   /// A scope specifier is present, and it refers to a real scope.
   bool isValid() const { return isNotEmpty() && getScopeRep() != 0; }
@@ -250,6 +250,7 @@ public:
   static const TST TST_typeofExpr = clang::TST_typeofExpr;
   static const TST TST_decltype = clang::TST_decltype;
   static const TST TST_auto = clang::TST_auto;
+  static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
   static const TST TST_error = clang::TST_error;
 
   // type-qualifiers
@@ -461,6 +462,14 @@ public:
   SourceLocation getRestrictSpecLoc() const { return TQ_restrictLoc; }
   SourceLocation getVolatileSpecLoc() const { return TQ_volatileLoc; }
 
+  /// \brief Clear out all of the type qualifiers.
+  void ClearTypeQualifiers() {
+    TypeQualifiers = 0;
+    TQ_constLoc = SourceLocation();
+    TQ_restrictLoc = SourceLocation();
+    TQ_volatileLoc = SourceLocation();
+  }
+
   // function-specifier
   bool isInlineSpecified() const { return FS_inline_specified; }
   SourceLocation getInlineSpecLoc() const { return FS_inlineLoc; }
@@ -651,7 +660,12 @@ public:
 /// "declaration specifiers" specific to objective-c
 class ObjCDeclSpec {
 public:
-  /// ObjCDeclQualifier - Qualifier used on types in method declarations
+  /// ObjCDeclQualifier - Qualifier used on types in method
+  /// declarations.  Not all combinations are sensible.  Parameters
+  /// can be one of { in, out, inout } with one of { bycopy, byref }.
+  /// Returns can either be { oneway } or not.
+  ///
+  /// This should be kept in sync with Decl::ObjCDeclQualifier.
   enum ObjCDeclQualifier {
     DQ_None = 0x0,
     DQ_In = 0x1,
@@ -663,7 +677,8 @@ public:
   };
 
   /// PropertyAttributeKind - list of property attributes.
-  enum ObjCPropertyAttributeKind { DQ_PR_noattr = 0x0,
+  enum ObjCPropertyAttributeKind {
+    DQ_PR_noattr = 0x0,
     DQ_PR_readonly = 0x01,
     DQ_PR_getter = 0x02,
     DQ_PR_assign = 0x04,
@@ -1324,7 +1339,9 @@ public:
     TemplateParamContext,// Within a template parameter list.
     CXXCatchContext,     // C++ catch exception-declaration
     BlockLiteralContext,  // Block literal declarator.
-    TemplateTypeArgContext // Template type argument.
+    TemplateTypeArgContext, // Template type argument.
+    AliasDeclContext,    // C++0x alias-declaration.
+    AliasTemplateContext // C++0x alias-declaration template.
   };
 
 private:
@@ -1465,6 +1482,8 @@ public:
       return false;
 
     case TypeNameContext:
+    case AliasDeclContext:
+    case AliasTemplateContext:
     case PrototypeContext:
     case ObjCPrototypeContext:
     case TemplateParamContext:
@@ -1493,6 +1512,8 @@ public:
       return true;
 
     case TypeNameContext:
+    case AliasDeclContext:
+    case AliasTemplateContext:
     case ObjCPrototypeContext:
     case BlockLiteralContext:
     case TemplateTypeArgContext:
@@ -1520,6 +1541,8 @@ public:
     case TemplateParamContext:
     case CXXCatchContext:
     case TypeNameContext:
+    case AliasDeclContext:
+    case AliasTemplateContext:
     case BlockLiteralContext:
     case TemplateTypeArgContext:
       return false;

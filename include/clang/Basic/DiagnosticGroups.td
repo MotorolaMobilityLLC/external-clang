@@ -148,8 +148,11 @@ def UnknownAttributes : DiagGroup<"unknown-attributes">;
 def UnnamedTypeTemplateArgs : DiagGroup<"unnamed-type-template-args">;
 def UnusedArgument : DiagGroup<"unused-argument">;
 def UnusedExceptionParameter : DiagGroup<"unused-exception-parameter">;
-def UnusedFunction : DiagGroup<"unused-function">;
-def UnusedMemberFunction : DiagGroup<"unused-member-function">;
+def UnneededInternalDecl : DiagGroup<"unneeded-internal-declaration">;
+def UnneededMemberFunction : DiagGroup<"unneeded-member-function">;
+def UnusedFunction : DiagGroup<"unused-function", [UnneededInternalDecl]>;
+def UnusedMemberFunction : DiagGroup<"unused-member-function",
+                                     [UnneededMemberFunction]>;
 def UnusedLabel : DiagGroup<"unused-label">;
 def UnusedParameter : DiagGroup<"unused-parameter">;
 def UnusedValue    : DiagGroup<"unused-value">;
@@ -171,7 +174,10 @@ def VariadicMacros : DiagGroup<"variadic-macros">;
 def VectorConversions : DiagGroup<"vector-conversions">;      // clang specific
 def VLA : DiagGroup<"vla">;
 def VolatileRegisterVar : DiagGroup<"volatile-register-var">;
-def : DiagGroup<"write-strings">;
+
+// GCC calls -Wdeprecated-writable-strings -Wwrite-strings.
+def GCCWriteStrings : DiagGroup<"write-strings" , [DeprecatedWritableStr]>;
+
 def CharSubscript : DiagGroup<"char-subscripts">;
 def LargeByValueCopy : DiagGroup<"large-by-value-copy">;
 def DuplicateArgDecl : DiagGroup<"duplicate-method-arg">;
@@ -179,10 +185,11 @@ def DuplicateArgDecl : DiagGroup<"duplicate-method-arg">;
 // Aggregation warning settings.
 
 // -Widiomatic-parentheses contains warnings about 'idiomatic'
-// missing parentheses;  it is off by default.
+// missing parentheses;  it is off by default.  We do not include it
+// in -Wparentheses because most users who use -Wparentheses explicitly
+// do not want these warnings.
 def Parentheses : DiagGroup<"parentheses",
-                            [LogicalOpParentheses,
-                             DiagGroup<"idiomatic-parentheses">]>;
+                            [LogicalOpParentheses]>;
 
 // -Wconversion has its own warnings, but we split a few out for
 // legacy reasons:
@@ -264,6 +271,8 @@ def NonGCC : DiagGroup<"non-gcc",
 def CXX0xStaticNonIntegralInitializer :
   DiagGroup<"c++0x-static-nonintegral-init">;
 def CXX0x : DiagGroup<"c++0x-extensions", [CXX0xStaticNonIntegralInitializer]>;
+def DelegatingCtorCycles :
+  DiagGroup<"delegating-ctor-cycles">;
 
 // A warning group for warnings about GCC extensions.
 def GNU : DiagGroup<"gnu", [GNUDesignator, VLA]>;

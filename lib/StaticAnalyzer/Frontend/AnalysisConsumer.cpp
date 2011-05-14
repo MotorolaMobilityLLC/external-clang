@@ -232,6 +232,9 @@ void AnalysisConsumer::HandleTranslationUnit(ASTContext &C) {
   checkerMgr->runCheckersOnASTDecl(TU, *Mgr, BR);
   HandleDeclContext(C, TU);
 
+  // After all decls handled, run checkers on the entire TranslationUnit.
+  checkerMgr->runCheckersOnEndOfTranslationUnit(TU, *Mgr, BR);
+
   // Explicitly destroy the PathDiagnosticClient.  This will flush its output.
   // FIXME: This should be replaced with something that doesn't rely on
   // side-effects in PathDiagnosticClient's destructor. This is required when
@@ -254,7 +257,7 @@ static void ActionObjCMemChecker(AnalysisConsumer &C, AnalysisManager& mgr,
 
 void AnalysisConsumer::HandleCode(Decl *D) {
 
-  // Don't run the actions if an error has occured with parsing the file.
+  // Don't run the actions if an error has occurred with parsing the file.
   Diagnostic &Diags = PP.getDiagnostics();
   if (Diags.hasErrorOccurred() || Diags.hasFatalErrorOccurred())
     return;
