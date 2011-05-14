@@ -221,11 +221,6 @@ private:
   void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,
                    unsigned ArgNo, CGBuilderTy &Builder);
 
-  /// EmitDeclare - Emit call to llvm.dbg.declare for a variable
-  /// declaration from an enclosing block.
-  void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,
-                   CGBuilderTy &Builder, const CGBlockInfo &blockInfo);
-
   // EmitTypeForVarWithBlocksAttr - Build up structure info for the byref.  
   // See BuildByRefType.
   llvm::DIType EmitTypeForVarWithBlocksAttr(const ValueDecl *VD, 
@@ -258,6 +253,10 @@ private:
   llvm::DIType CreateMemberType(llvm::DIFile Unit, QualType FType,
                                 llvm::StringRef Name, uint64_t *Offset);
 
+  /// getFunctionDeclaration - Return debug info descriptor to describe method
+  /// declaration for the given method definition.
+  llvm::DISubprogram getFunctionDeclaration(const Decl *D);
+
   /// getFunctionName - Get function name for the given FunctionDecl. If the
   /// name is constructred on demand (e.g. C++ destructor) then the name
   /// is stored on the side.
@@ -266,6 +265,10 @@ private:
   /// getObjCMethodName - Returns the unmangled name of an Objective-C method.
   /// This is the display name for the debugging info.  
   llvm::StringRef getObjCMethodName(const ObjCMethodDecl *FD);
+
+  /// getSelectorName - Return selector name. This is used for debugging
+  /// info.
+  llvm::StringRef getSelectorName(Selector S);
 
   /// getClassName - Get class name including template argument list.
   llvm::StringRef getClassName(RecordDecl *RD);

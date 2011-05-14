@@ -34,6 +34,13 @@
 #include "InputInfo.h"
 #include "ToolChains.h"
 
+#ifdef __CYGWIN__
+#include <cygwin/version.h>
+#if defined(CYGWIN_VERSION_DLL_MAJOR) && CYGWIN_VERSION_DLL_MAJOR<1007
+#define IS_CYGWIN15 1
+#endif
+#endif
+
 using namespace clang::driver;
 using namespace clang::driver::tools;
 
@@ -320,7 +327,7 @@ void Clang::AddPreprocessingOptions(const Driver &D,
   }
 }
 
-/// getARMTargetCPU - Get the (LLVM) name of the ARM cpu we are targetting.
+/// getARMTargetCPU - Get the (LLVM) name of the ARM cpu we are targeting.
 //
 // FIXME: tblgen this.
 static const char *getARMTargetCPU(const ArgList &Args,
@@ -612,6 +619,12 @@ void Clang::AddARMTargetArgs(const ArgList &Args,
 
     CmdArgs.push_back("-backend-option");
     CmdArgs.push_back("-arm-strict-align");
+
+    // The kext linker doesn't know how to deal with movw/movt.
+#ifndef DISABLE_ARM_DARWIN_USE_MOVT
+    CmdArgs.push_back("-backend-option");
+    CmdArgs.push_back("-arm-darwin-use-movt=0");
+#endif
   }
 }
 
@@ -639,7 +652,7 @@ void Clang::AddMIPSTargetArgs(const ArgList &Args,
     else if (MArch == "r6000")
       CmdArgs.push_back("mips2");
     else
-      CmdArgs.push_back(MArch.str().c_str());
+      CmdArgs.push_back(Args.MakeArgString(MArch));
   }
 
   // Select the float ABI as determined by -msoft-float, -mhard-float, and
@@ -892,6 +905,60 @@ static void addExceptionArgs(const ArgList &Args, types::ID InputType,
     CmdArgs.push_back("-fexceptions");
 }
 
+static bool ShouldDisableCFI(const ArgList &Args,
+                             const ToolChain &TC) {
+
+  // FIXME: Duplicated code with ToolChains.cpp
+  // FIXME: This doesn't belong here, but ideally we will support static soon
+  // anyway.
+  bool HasStatic = (Args.hasArg(options::OPT_mkernel) ||
+                    Args.hasArg(options::OPT_static) ||
+                    Args.hasArg(options::OPT_fapple_kext));
+  bool IsIADefault = TC.IsIntegratedAssemblerDefault() && !HasStatic;
+  bool UseIntegratedAs = Args.hasFlag(options::OPT_integrated_as,
+                                      options::OPT_no_integrated_as,
+                                      IsIADefault);
+  bool UseCFI = Args.hasFlag(options::OPT_fdwarf2_cfi_asm,
+                             options::OPT_fno_dwarf2_cfi_asm,
+                             UseIntegratedAs);
+  return !UseCFI;
+}
+
+/// \brief Check whether the given input tree contains any compilation actions.
+static bool ContainsCompileAction(const Action *A) {
+  if (isa<CompileJobAction>(A))
+    return true;
+
+  for (Action::const_iterator it = A->begin(), ie = A->end(); it != ie; ++it)
+    if (ContainsCompileAction(*it))
+      return true;
+
+  return false;
+}
+
+/// \brief Check if -relax-all should be passed to the internal assembler.
+/// This is done by default when compiling non-assembler source with -O0.
+static bool UseRelaxAll(Compilation &C, const ArgList &Args) {
+  bool RelaxDefault = true;
+
+  if (Arg *A = Args.getLastArg(options::OPT_O_Group))
+    RelaxDefault = A->getOption().matches(options::OPT_O0);
+
+  if (RelaxDefault) {
+    RelaxDefault = false;
+    for (ActionList::const_iterator it = C.getActions().begin(),
+           ie = C.getActions().end(); it != ie; ++it) {
+      if (ContainsCompileAction(*it)) {
+        RelaxDefault = true;
+        break;
+      }
+    }
+  }
+
+  return Args.hasFlag(options::OPT_mrelax_all, options::OPT_mno_relax_all,
+    RelaxDefault);
+}
+
 void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                          const InputInfo &Output,
                          const InputInfoList &Inputs,
@@ -927,13 +994,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   } else if (isa<AssembleJobAction>(JA)) {
     CmdArgs.push_back("-emit-obj");
 
-    // At -O0, we use -mrelax-all by default.
-    bool IsOpt = false;
-    if (Arg *A = Args.getLastArg(options::OPT_O_Group))
-      IsOpt = !A->getOption().matches(options::OPT_O0);
-    if (Args.hasFlag(options::OPT_mrelax_all,
-                      options::OPT_mno_relax_all,
-                      !IsOpt))
+    if (UseRelaxAll(C, Args))
       CmdArgs.push_back("-mrelax-all");
 
     // When using an integrated assembler, translate -Wa, and -Xassembler
@@ -1264,6 +1325,21 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
 
   Args.AddAllArgs(CmdArgs, options::OPT_finstrument_functions);
 
+  if (Args.hasArg(options::OPT_ftest_coverage) ||
+      Args.hasArg(options::OPT_coverage))
+    CmdArgs.push_back("-femit-coverage-notes");
+  if (Args.hasArg(options::OPT_fprofile_arcs) ||
+      Args.hasArg(options::OPT_coverage))
+    CmdArgs.push_back("-femit-coverage-data");
+
+  if (C.getArgs().hasArg(options::OPT_c) ||
+      C.getArgs().hasArg(options::OPT_S)) {
+    if (Output.isFilename()) {
+      CmdArgs.push_back("-coverage-file");
+      CmdArgs.push_back(Args.MakeArgString(Output.getFilename()));
+    }
+  }
+
   Args.AddLastArg(CmdArgs, options::OPT_nostdinc);
   Args.AddLastArg(CmdArgs, options::OPT_nostdincxx);
   Args.AddLastArg(CmdArgs, options::OPT_nobuiltininc);
@@ -1289,10 +1365,6 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     else if (A->getOption().matches(options::OPT_O) &&
              A->getValue(Args)[0] == '\0')
       CmdArgs.push_back("-O2");
-    else if (A->getOption().matches(options::OPT_O) &&
-             A->getValue(Args)[0] == 'z' &&
-             A->getValue(Args)[1] == '\0')
-      CmdArgs.push_back("-Os");
     else
       A->render(Args, CmdArgs);
   }
@@ -1333,6 +1405,24 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     Args.AddLastArg(CmdArgs, options::OPT_trigraphs);
   }
 
+  // Map the bizarre '-Wwrite-strings' flag to a more sensible
+  // '-fconst-strings'; this better indicates its actual behavior.
+  if (Args.hasFlag(options::OPT_Wwrite_strings, options::OPT_Wno_write_strings,
+                   false)) {
+    // For perfect compatibility with GCC, we do this even in the presence of
+    // '-w'. This flag names something other than a warning for GCC.
+    CmdArgs.push_back("-fconst-strings");
+  }
+
+  // GCC provides a macro definition '__DEPRECATED' when -Wdeprecated is active
+  // during C++ compilation, which it is by default. GCC keeps this define even
+  // in the presence of '-w', match this behavior bug-for-bug.
+  if (types::isCXX(InputType) &&
+      Args.hasFlag(options::OPT_Wdeprecated, options::OPT_Wno_deprecated,
+                   true)) {
+    CmdArgs.push_back("-fdeprecated-macro");
+  }
+
   // Translate GCC's misnamer '-fasm' arguments to '-fgnu-keywords'.
   if (Arg *Asm = Args.getLastArg(options::OPT_fasm, options::OPT_fno_asm)) {
     if (Asm->getOption().matches(options::OPT_fasm))
@@ -1340,6 +1430,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     else
       CmdArgs.push_back("-fno-gnu-keywords");
   }
+
+  if (ShouldDisableCFI(Args, getToolChain()))
+    CmdArgs.push_back("-fno-dwarf2-cfi-asm");
 
   if (Arg *A = Args.getLastArg(options::OPT_ftemplate_depth_)) {
     CmdArgs.push_back("-ftemplate-depth");
@@ -1490,6 +1583,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(Args.MakeArgString(llvm::Twine(StackProtectorLevel)));
   }
 
+  // Translate -mstackrealign
+  if (Args.hasArg(options::OPT_mstackrealign)) {
+    CmdArgs.push_back("-backend-option");
+    CmdArgs.push_back("-force-align-stack");
+  }
+  
   // Forward -f options with positive and negative forms; we translate
   // these by hand.
 
@@ -1585,6 +1684,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                    options::OPT_fno_borland_extensions, false))
     CmdArgs.push_back("-fborland-extensions");
 
+  // -fno-delayed-template-parsing is default.
+  if (Args.hasFlag(options::OPT_fdelayed_template_parsing,
+                   options::OPT_fno_delayed_template_parsing,
+                   false))
+    CmdArgs.push_back("-fdelayed-template-parsing");
+
   // -fgnu-keywords default varies depending on language; only pass if
   // specified.
   if (Arg *A = Args.getLastArg(options::OPT_fgnu_keywords,
@@ -1661,12 +1766,18 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
       }
     }
 
+    // FIXME: Don't expose -fobjc-default-synthesize-properties as a top-level
+    // driver flag yet.  This feature is still under active development
+    // and shouldn't be exposed as a user visible feature (which may change).
+    // Clang still supports this as a -cc1 option for development and testing.
+#if 0
     // -fobjc-default-synthesize-properties=0 is default.
     if (Args.hasFlag(options::OPT_fobjc_default_synthesize_properties,
                      options::OPT_fno_objc_default_synthesize_properties,
                      getToolChain().IsObjCDefaultSynthPropertiesDefault())) {
       CmdArgs.push_back("-fobjc-default-synthesize-properties");
     }
+#endif
   }
 
   if (!Args.hasFlag(options::OPT_fassume_sane_operator_new,
@@ -1730,6 +1841,11 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   if (!Args.hasFlag(options::OPT_fdiagnostics_fixit_info,
                     options::OPT_fno_diagnostics_fixit_info))
     CmdArgs.push_back("-fno-diagnostics-fixit-info");
+  
+  // Enable -fdiagnostics-show-name by default.
+  if (Args.hasFlag(options::OPT_fdiagnostics_show_name,
+                   options::OPT_fno_diagnostics_show_name, false))
+    CmdArgs.push_back("-fdiagnostics-show-name");
 
   // Enable -fdiagnostics-show-option by default.
   if (Args.hasFlag(options::OPT_fdiagnostics_show_option,
@@ -1932,13 +2048,7 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back("-filetype");
   CmdArgs.push_back("obj");
 
-  // At -O0, we use -mrelax-all by default.
-  bool IsOpt = false;
-  if (Arg *A = Args.getLastArg(options::OPT_O_Group))
-    IsOpt = !A->getOption().matches(options::OPT_O0);
-  if (Args.hasFlag(options::OPT_mrelax_all,
-                    options::OPT_mno_relax_all,
-                    !IsOpt))
+  if (UseRelaxAll(C, Args))
     CmdArgs.push_back("-relax-all");
 
   // Ignore explicit -force_cpusubtype_ALL option.
@@ -1950,6 +2060,7 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
 
   Args.AddAllArgValues(CmdArgs, options::OPT_Wa_COMMA,
                        options::OPT_Xassembler);
+  Args.AddAllArgs(CmdArgs, options::OPT_mllvm);
 
   assert(Output.isFilename() && "Unexpected lipo output.");
   CmdArgs.push_back("-o");
@@ -2065,7 +2176,20 @@ void gcc::Common::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
-  const char *GCCName = getToolChain().getDriver().getCCCGenericGCCName().c_str();
+  const std::string customGCCName = D.getCCCGenericGCCName();
+  const char *GCCName;
+  if (!customGCCName.empty())
+    GCCName = customGCCName.c_str();
+  else if (D.CCCIsCXX) {
+#ifdef IS_CYGWIN15
+    // FIXME: Detect the version of Cygwin at runtime?
+    GCCName = "g++-4";
+#else
+    GCCName = "g++";
+#endif
+  } else
+    GCCName = "gcc";
+
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath(GCCName));
   C.addCommand(new Command(JA, *this, Exec, CmdArgs));
@@ -2178,10 +2302,6 @@ void darwin::CC1::AddCC1Args(const ArgList &Args,
     if (!Args.hasArg(options::OPT_fbuiltin_strcpy))
       CmdArgs.push_back("-fno-builtin-strcpy");
   }
-
-  // gcc has some code here to deal with when no -mmacosx-version-min
-  // and no -miphoneos-version-min is present, but this never happens
-  // due to tool chain specific argument translation.
 
   if (Args.hasArg(options::OPT_g_Flag) &&
       !Args.hasArg(options::OPT_fno_eliminate_unused_debug_symbols))
@@ -2584,11 +2704,16 @@ void darwin::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
   assert(Inputs.size() == 1 && "Unexpected number of inputs.");
   const InputInfo &Input = Inputs[0];
 
-  // Bit of a hack, this is only used for original inputs.
-  //
-  // FIXME: This is broken for preprocessed .s inputs.
-  if (Input.isFilename() &&
-      strcmp(Input.getFilename(), Input.getBaseInput()) == 0) {
+  // Determine the original source input.
+  const Action *SourceAction = &JA;
+  while (SourceAction->getKind() != Action::InputClass) {
+    assert(!SourceAction->getInputs().empty() && "unexpected root action!");
+    SourceAction = SourceAction->getInputs()[0];
+  }
+
+  // Forward -g, assuming we are dealing with an actual assembly file.
+  if (SourceAction->getType() == types::TY_Asm || 
+      SourceAction->getType() == types::TY_PP_Asm) {
     if (Args.hasArg(options::OPT_gstabs))
       CmdArgs.push_back("--gstabs");
     else if (Args.hasArg(options::OPT_g_Group))
@@ -2644,6 +2769,7 @@ void darwin::Link::AddLinkArgs(Compilation &C,
                                const ArgList &Args,
                                ArgStringList &CmdArgs) const {
   const Driver &D = getToolChain().getDriver();
+  const toolchains::Darwin &DarwinTC = getDarwinToolChain();
 
   unsigned Version[3] = { 0, 0, 0 };
   if (Arg *A = Args.getLastArg(options::OPT_mlinker_version_EQ)) {
@@ -2663,7 +2789,7 @@ void darwin::Link::AddLinkArgs(Compilation &C,
   // will match the linker version detected at configure time. We need the
   // universal driver.
   if (Version[0] >= 100 && !Args.hasArg(options::OPT_Z_Xlinker__no_demangle) &&
-      !getDarwinToolChain().isTargetIPhoneOS()) {
+      !DarwinTC.isTargetIPhoneOS()) {
     // Don't pass -demangle to ld_classic.
     //
     // FIXME: This is a temporary workaround, ld should be handling this.
@@ -2738,7 +2864,7 @@ void darwin::Link::AddLinkArgs(Compilation &C,
   Args.AddLastArg(CmdArgs, options::OPT_all__load);
   Args.AddAllArgs(CmdArgs, options::OPT_allowable__client);
   Args.AddLastArg(CmdArgs, options::OPT_bind__at__load);
-  if (getDarwinToolChain().isTargetIPhoneOS())
+  if (DarwinTC.isTargetIPhoneOS())
     Args.AddLastArg(CmdArgs, options::OPT_arch__errors__fatal);
   Args.AddLastArg(CmdArgs, options::OPT_dead__strip);
   Args.AddLastArg(CmdArgs, options::OPT_no__dead__strip__inits__and__terms);
@@ -2750,15 +2876,27 @@ void darwin::Link::AddLinkArgs(Compilation &C,
   Args.AddAllArgs(CmdArgs, options::OPT_image__base);
   Args.AddAllArgs(CmdArgs, options::OPT_init);
 
-  // Adding all arguments doesn't make sense here but this is what gcc does. One
-  // of this should always be present thanks to argument translation.
-  assert((Args.hasArg(options::OPT_mmacosx_version_min_EQ) ||
-          Args.hasArg(options::OPT_miphoneos_version_min_EQ)) &&
-         "Missing version argument (lost in translation)?");
-  Args.AddAllArgsTranslated(CmdArgs, options::OPT_mmacosx_version_min_EQ,
-                            "-macosx_version_min");
-  Args.AddAllArgsTranslated(CmdArgs, options::OPT_miphoneos_version_min_EQ,
-                            "-iphoneos_version_min");
+  // Add the deployment target.
+  unsigned TargetVersion[3];
+  DarwinTC.getTargetVersion(TargetVersion);
+
+  // If we had an explicit -mios-simulator-version-min argument, honor that,
+  // otherwise use the traditional deployment targets. We can't just check the
+  // is-sim attribute because existing code follows this path, and the linker
+  // may not handle the argument.
+  //
+  // FIXME: We may be able to remove this, once we can verify no one depends on
+  // it.
+  if (Args.hasArg(options::OPT_mios_simulator_version_min_EQ))
+    CmdArgs.push_back("-ios_simulator_version_min");
+  else if (DarwinTC.isTargetIPhoneOS())
+    CmdArgs.push_back("-iphoneos_version_min");
+  else
+    CmdArgs.push_back("-macosx_version_min");
+  CmdArgs.push_back(Args.MakeArgString(llvm::Twine(TargetVersion[0]) + "." +
+                                       llvm::Twine(TargetVersion[1]) + "." +
+                                       llvm::Twine(TargetVersion[2])));
+
   Args.AddLastArg(CmdArgs, options::OPT_nomultidefs);
   Args.AddLastArg(CmdArgs, options::OPT_multi__module);
   Args.AddLastArg(CmdArgs, options::OPT_single__module);
@@ -2792,12 +2930,17 @@ void darwin::Link::AddLinkArgs(Compilation &C,
   Args.AddAllArgs(CmdArgs, options::OPT_sub__library);
   Args.AddAllArgs(CmdArgs, options::OPT_sub__umbrella);
 
-  Args.AddAllArgsTranslated(CmdArgs, options::OPT_isysroot, "-syslibroot");
-  if (getDarwinToolChain().isTargetIPhoneOS()) {
-    if (!Args.hasArg(options::OPT_isysroot)) {
-      CmdArgs.push_back("-syslibroot");
-      CmdArgs.push_back("/Developer/SDKs/Extra");
-    }
+  // Give --sysroot= preference, over the Apple specific behavior to also use
+  // --isysroot as the syslibroot.
+  if (const Arg *A = Args.getLastArg(options::OPT__sysroot_EQ)) {
+    CmdArgs.push_back("-syslibroot");
+    CmdArgs.push_back(A->getValue(Args));
+  } else if (const Arg *A = Args.getLastArg(options::OPT_isysroot)) {
+    CmdArgs.push_back("-syslibroot");
+    CmdArgs.push_back(A->getValue(Args));
+  } else if (getDarwinToolChain().isTargetIPhoneOS()) {
+    CmdArgs.push_back("-syslibroot");
+    CmdArgs.push_back("/Developer/SDKs/Extra");
   }
 
   Args.AddLastArg(CmdArgs, options::OPT_twolevel__namespace);
@@ -3023,13 +3166,13 @@ void darwin::Dsymutil::ConstructJob(Compilation &C, const JobAction &JA,
                                     const char *LinkingOutput) const {
   ArgStringList CmdArgs;
 
+  CmdArgs.push_back("-o");
+  CmdArgs.push_back(Output.getFilename());
+
   assert(Inputs.size() == 1 && "Unable to handle multiple inputs.");
   const InputInfo &Input = Inputs[0];
   assert(Input.isFilename() && "Unexpected dsymutil input.");
   CmdArgs.push_back(Input.getFilename());
-
-  CmdArgs.push_back("-o");
-  CmdArgs.push_back(Output.getFilename());
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("dsymutil"));
@@ -3704,9 +3847,9 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
              ToolChain.getArch() == llvm::Triple::thumb)
       CmdArgs.push_back("/lib/ld-linux.so.3");
     else if (ToolChain.getArch() == llvm::Triple::ppc)
-      CmdArgs.push_back("/lib/ld.so");
+      CmdArgs.push_back("/lib/ld.so.1");
     else if (ToolChain.getArch() == llvm::Triple::ppc64)
-      CmdArgs.push_back("/lib64/ld64.so");
+      CmdArgs.push_back("/lib64/ld64.so.1");
     else
       CmdArgs.push_back("/lib64/ld-linux-x86-64.so.2");
   }

@@ -1,7 +1,7 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -verify %s
-// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -verify %s
-// RUN: %clang_cc1 -analyze -DVARIANT -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -verify %s
-// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -DVARIANT -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DVARIANT -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
+// RUN: %clang_cc1 -analyze -DUSE_BUILTINS -DVARIANT -analyzer-checker=core,cplusplus.experimental.CString -analyzer-store=region -Wno-null-dereference -verify %s
 
 //===----------------------------------------------------------------------===
 // Declarations
@@ -15,7 +15,7 @@
 // Some functions are implemented as builtins. These should be #defined as
 // BUILTIN(f), which will prepend "__builtin_" if USE_BUILTINS is defined.
 
-// Functions that have variants and are also availabe as builtins should be
+// Functions that have variants and are also available as builtins should be
 // declared carefully! See memcpy() for an example.
 
 #ifdef USE_BUILTINS

@@ -148,23 +148,11 @@ std::string Darwin::ComputeEffectiveClangTriple(const ArgList &Args) const {
     
   unsigned Version[3];
   getTargetVersion(Version);
-
-  // Mangle the target version into the OS triple component.  For historical
-  // reasons that make little sense, the version passed here is the "darwin"
-  // version, which drops the 10 and offsets by 4. See inverse code when
-  // setting the OS version preprocessor define.
-  if (!isTargetIPhoneOS()) {
-    Version[0] = Version[1] + 4;
-    Version[1] = Version[2];
-    Version[2] = 0;
-  } else {
-    // Use the environment to communicate that we are targetting iPhoneOS.
-    Triple.setEnvironmentName("iphoneos");
-  }
-
+  
   llvm::SmallString<16> Str;
-  llvm::raw_svector_ostream(Str) << "darwin" << Version[0]
-                                 << "." << Version[1] << "." << Version[2];
+  llvm::raw_svector_ostream(Str)
+    << (isTargetIPhoneOS() ? "ios" : "macosx")
+    << Version[0] << "." << Version[1] << "." << Version[2];
   Triple.setOSName(Str.str());
 
   return Triple.getTriple();
@@ -351,12 +339,13 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
   // Select the dynamic runtime library and the target specific static library.
   const char *DarwinStaticLib = 0;
   if (isTargetIPhoneOS()) {
-    CmdArgs.push_back("-lgcc_s.1");
+    // If we are compiling as iOS / simulator, don't attempt to link libgcc_s.1,
+    // it never went into the SDK.
+    if (!isTargetIOSSimulator())
+        CmdArgs.push_back("-lgcc_s.1");
 
-    // We may need some static functions for armv6/thumb which are required to
-    // be in the same linkage unit as their caller.
-    if (getDarwinArchName(Args) == "armv6")
-      DarwinStaticLib = "libclang_rt.armv6.a";
+    // We currently always need a static runtime library for iOS.
+    DarwinStaticLib = "libclang_rt.ios.a";
   } else {
     // The dynamic runtime library was merged with libSystem for 10.6 and
     // beyond; only 10.4 and 10.5 need an additional runtime library.
@@ -366,7 +355,7 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
       CmdArgs.push_back("-lgcc_s.10.5");
 
     // For OS X, we thought we would only need a static runtime library when
-    // targetting 10.4, to provide versions of the static functions which were
+    // targeting 10.4, to provide versions of the static functions which were
     // omitted from 10.4.dylib.
     //
     // Unfortunately, that turned out to not be true, because Darwin system
@@ -400,46 +389,69 @@ void Darwin::AddDeploymentTarget(DerivedArgList &Args) const {
   const OptTable &Opts = getDriver().getOpts();
 
   Arg *OSXVersion = Args.getLastArg(options::OPT_mmacosx_version_min_EQ);
-  Arg *iPhoneVersion = Args.getLastArg(options::OPT_miphoneos_version_min_EQ);
-  if (OSXVersion && iPhoneVersion) {
+  Arg *iOSVersion = Args.getLastArg(options::OPT_miphoneos_version_min_EQ);
+  Arg *iOSSimVersion = Args.getLastArg(
+    options::OPT_mios_simulator_version_min_EQ);
+  if (OSXVersion && (iOSVersion || iOSSimVersion)) {
     getDriver().Diag(clang::diag::err_drv_argument_not_allowed_with)
           << OSXVersion->getAsString(Args)
-          << iPhoneVersion->getAsString(Args);
-    iPhoneVersion = 0;
-  } else if (!OSXVersion && !iPhoneVersion) {
-    // If neither OS X nor iPhoneOS targets were specified, check for
+          << (iOSVersion ? iOSVersion : iOSSimVersion)->getAsString(Args);
+    iOSVersion = iOSSimVersion = 0;
+  } else if (iOSVersion && iOSSimVersion) {
+    getDriver().Diag(clang::diag::err_drv_argument_not_allowed_with)
+          << iOSVersion->getAsString(Args)
+          << iOSSimVersion->getAsString(Args);
+    iOSSimVersion = 0;
+  } else if (!OSXVersion && !iOSVersion && !iOSSimVersion) {
+    // If not deployment target was specified on the command line, check for
     // environment defines.
     const char *OSXTarget = ::getenv("MACOSX_DEPLOYMENT_TARGET");
-    const char *iPhoneOSTarget = ::getenv("IPHONEOS_DEPLOYMENT_TARGET");
+    const char *iOSTarget = ::getenv("IPHONEOS_DEPLOYMENT_TARGET");
+    const char *iOSSimTarget = ::getenv("IOS_SIMULATOR_DEPLOYMENT_TARGET");
 
     // Ignore empty strings.
     if (OSXTarget && OSXTarget[0] == '\0')
       OSXTarget = 0;
-    if (iPhoneOSTarget && iPhoneOSTarget[0] == '\0')
-      iPhoneOSTarget = 0;
+    if (iOSTarget && iOSTarget[0] == '\0')
+      iOSTarget = 0;
+    if (iOSSimTarget && iOSSimTarget[0] == '\0')
+      iOSSimTarget = 0;
 
-    // Diagnose conflicting deployment targets, and choose default platform
-    // based on the tool chain.
+    // Handle conflicting deployment targets
     //
     // FIXME: Don't hardcode default here.
-    if (OSXTarget && iPhoneOSTarget) {
-      // FIXME: We should see if we can get away with warning or erroring on
-      // this. Perhaps put under -pedantic?
+
+    // Do not allow conflicts with the iOS simulator target.
+    if (iOSSimTarget && (OSXTarget || iOSTarget)) {
+      getDriver().Diag(clang::diag::err_drv_conflicting_deployment_targets)
+        << "IOS_SIMULATOR_DEPLOYMENT_TARGET"
+        << (OSXTarget ? "MACOSX_DEPLOYMENT_TARGET" :
+            "IPHONEOS_DEPLOYMENT_TARGET");
+    }
+
+    // Allow conflicts among OSX and iOS for historical reasons, but choose the
+    // default platform.
+    if (OSXTarget && iOSTarget) {
       if (getTriple().getArch() == llvm::Triple::arm ||
           getTriple().getArch() == llvm::Triple::thumb)
         OSXTarget = 0;
       else
-        iPhoneOSTarget = 0;
+        iOSTarget = 0;
     }
 
     if (OSXTarget) {
       const Option *O = Opts.getOption(options::OPT_mmacosx_version_min_EQ);
       OSXVersion = Args.MakeJoinedArg(0, O, OSXTarget);
       Args.append(OSXVersion);
-    } else if (iPhoneOSTarget) {
+    } else if (iOSTarget) {
       const Option *O = Opts.getOption(options::OPT_miphoneos_version_min_EQ);
-      iPhoneVersion = Args.MakeJoinedArg(0, O, iPhoneOSTarget);
-      Args.append(iPhoneVersion);
+      iOSVersion = Args.MakeJoinedArg(0, O, iOSTarget);
+      Args.append(iOSVersion);
+    } else if (iOSSimTarget) {
+      const Option *O = Opts.getOption(
+        options::OPT_mios_simulator_version_min_EQ);
+      iOSSimVersion = Args.MakeJoinedArg(0, O, iOSSimTarget);
+      Args.append(iOSSimVersion);
     } else {
       // Otherwise, assume we are targeting OS X.
       const Option *O = Opts.getOption(options::OPT_mmacosx_version_min_EQ);
@@ -448,25 +460,44 @@ void Darwin::AddDeploymentTarget(DerivedArgList &Args) const {
     }
   }
 
+  // Reject invalid architecture combinations.
+  if (iOSSimVersion && (getTriple().getArch() != llvm::Triple::x86 &&
+                        getTriple().getArch() != llvm::Triple::x86_64)) {
+    getDriver().Diag(clang::diag::err_drv_invalid_arch_for_deployment_target)
+      << getTriple().getArchName() << iOSSimVersion->getAsString(Args);
+  }
+
   // Set the tool chain target information.
   unsigned Major, Minor, Micro;
   bool HadExtra;
   if (OSXVersion) {
-    assert(!iPhoneVersion && "Unknown target platform!");
+    assert((!iOSVersion && !iOSSimVersion) && "Unknown target platform!");
     if (!Driver::GetReleaseVersion(OSXVersion->getValue(Args), Major, Minor,
                                    Micro, HadExtra) || HadExtra ||
-        Major != 10 || Minor >= 10 || Micro >= 10)
+        Major != 10 || Minor >= 100 || Micro >= 100)
       getDriver().Diag(clang::diag::err_drv_invalid_version_number)
         << OSXVersion->getAsString(Args);
   } else {
-    assert(iPhoneVersion && "Unknown target platform!");
-    if (!Driver::GetReleaseVersion(iPhoneVersion->getValue(Args), Major, Minor,
+    const Arg *Version = iOSVersion ? iOSVersion : iOSSimVersion;
+    assert(Version && "Unknown target platform!");
+    if (!Driver::GetReleaseVersion(Version->getValue(Args), Major, Minor,
                                    Micro, HadExtra) || HadExtra ||
         Major >= 10 || Minor >= 100 || Micro >= 100)
       getDriver().Diag(clang::diag::err_drv_invalid_version_number)
-        << iPhoneVersion->getAsString(Args);
+        << Version->getAsString(Args);
   }
-  setTarget(iPhoneVersion, Major, Minor, Micro);
+
+  bool IsIOSSim = bool(iOSSimVersion);
+
+  // In GCC, the simulator historically was treated as being OS X in some
+  // contexts, like determining the link logic, despite generally being called
+  // with an iOS deployment target. For compatibility, we detect the
+  // simulator as iOS + x86, and treat it differently in a few contexts.
+  if (iOSVersion && (getTriple().getArch() == llvm::Triple::x86 ||
+                     getTriple().getArch() == llvm::Triple::x86_64))
+    IsIOSSim = true;
+
+  setTarget(/*IsIPhoneOS=*/ !OSXVersion, Major, Minor, Micro, IsIOSSim);
 }
 
 void DarwinClang::AddCXXStdlibLibArgs(const ArgList &Args,
@@ -569,9 +600,12 @@ DerivedArgList *Darwin::TranslateArgs(const DerivedArgList &Args,
       // driver behavior; that isn't going to work in our model. We
       // use isDriverOption() as an approximation, although things
       // like -O4 are going to slip through.
-      if (!XarchArg || Index > Prev + 1 ||
-          XarchArg->getOption().isDriverOption()) {
-       getDriver().Diag(clang::diag::err_drv_invalid_Xarch_argument)
+      if (!XarchArg || Index > Prev + 1) {
+        getDriver().Diag(clang::diag::err_drv_invalid_Xarch_argument_with_args)
+          << A->getAsString(Args);
+        continue;
+      } else if (XarchArg->getOption().isDriverOption()) {
+        getDriver().Diag(clang::diag::err_drv_invalid_Xarch_argument_isdriver)
           << A->getAsString(Args);
         continue;
       }
@@ -1308,6 +1342,9 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
     else if (!llvm::sys::fs::exists("/usr/lib/gcc/x86_64-manbo-linux-gnu",
              Exists) && Exists)
       GccTriple = "x86_64-manbo-linux-gnu";
+    else if (!llvm::sys::fs::exists("/usr/lib/x86_64-linux-gnu/gcc",
+             Exists) && Exists)
+      GccTriple = "x86_64-linux-gnu";
   } else if (Arch == llvm::Triple::x86) {
     if (!llvm::sys::fs::exists("/usr/lib/gcc/i686-linux-gnu", Exists) && Exists)
       GccTriple = "i686-linux-gnu";
@@ -1323,6 +1360,9 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
     else if (!llvm::sys::fs::exists("/usr/lib/gcc/i586-suse-linux", Exists) &&
              Exists)
       GccTriple = "i586-suse-linux";
+    else if (!llvm::sys::fs::exists("/usr/lib/gcc/i486-slackware-linux", Exists)
+            && Exists)
+      GccTriple = "i486-slackware-linux";
   } else if (Arch == llvm::Triple::ppc) {
     if (!llvm::sys::fs::exists("/usr/lib/powerpc-linux-gnu", Exists) && Exists)
       GccTriple = "powerpc-linux-gnu";
@@ -1390,7 +1430,7 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
   if (Arch == llvm::Triple::arm || Arch == llvm::Triple::thumb)
     ExtraOpts.push_back("-X");
 
-  if (IsFedora(Distro) || Distro == UbuntuMaverick)
+  if (IsFedora(Distro) || Distro == UbuntuMaverick || Distro == UbuntuNatty)
     ExtraOpts.push_back("--hash-style=gnu");
 
   if (IsDebian(Distro) || Distro == UbuntuLucid || Distro == UbuntuJaunty ||
@@ -1402,7 +1442,7 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
 
   if (Distro == DebianSqueeze || IsOpenSuse(Distro) ||
       IsFedora(Distro) || Distro == UbuntuLucid || Distro == UbuntuMaverick ||
-      Distro == UbuntuKarmic)
+      Distro == UbuntuKarmic || Distro == UbuntuNatty)
     ExtraOpts.push_back("--build-id");
 
   if (Distro == ArchLinux)

@@ -30,7 +30,7 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
 
   include(AddLLVM)
   include(TableGen)
-  include("${CLANG_PATH_TO_LLVM_BUILD}/share/llvm/cmake/LLVM.cmake")
+  include("${CLANG_PATH_TO_LLVM_BUILD}/share/llvm/cmake/LLVMConfig.cmake")
   include(HandleLLVMOptions)
 
   set(PACKAGE_VERSION "${LLVM_PACKAGE_VERSION}")
@@ -103,7 +103,7 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/include/clang/Basic/Version.inc)
 
 # Add appropriate flags for GCC
-if (CMAKE_COMPILER_IS_GNUCXX)
+if (LLVM_COMPILER_IS_GCC_COMPATIBLE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-common -Woverloaded-virtual -Wcast-qual -fno-strict-aliasing -pedantic -Wno-long-long -Wall -W -Wno-unused-parameter -Wwrite-strings")
 endif ()
 

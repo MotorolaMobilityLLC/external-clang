@@ -156,9 +156,20 @@ public:
     IDNS_NonMemberOperator   = 0x0400
   };
 
-  /// ObjCDeclQualifier - Qualifier used on types in method declarations
-  /// for remote messaging. They are meant for the arguments though and
-  /// applied to the Decls (ObjCMethodDecl and ParmVarDecl).
+  /// ObjCDeclQualifier - 'Qualifiers' written next to the return and
+  /// parameter types in method declarations.  Other than remembering
+  /// them and mangling them into the method's signature string, these
+  /// are ignored by the compiler; they are consumed by certain
+  /// remote-messaging frameworks.
+  ///
+  /// in, inout, and out are mutually exclusive and apply only to
+  /// method parameters.  bycopy and byref are mutually exclusive and
+  /// apply only to method parameters (?).  oneway applies only to
+  /// results.  All of these expect their corresponding parameter to
+  /// have a particular type.  None of this is currently enforced by
+  /// clang.
+  ///
+  /// This should be kept in sync with ObjCDeclSpec::ObjCDeclQualifier.
   enum ObjCDeclQualifier {
     OBJC_TQ_None = 0x0,
     OBJC_TQ_In = 0x1,
@@ -227,6 +238,12 @@ private:
   /// required.
   unsigned Used : 1;
 
+  /// \brief Whether this declaration was "referenced".
+  /// The difference with 'Used' is whether the reference appears in a
+  /// evaluated context or not, e.g. functions used in uninstantiated templates
+  /// are regarded as "referenced" but not "used".
+  unsigned Referenced : 1;
+
 protected:
   /// Access - Used by C++ decls for the access specifier.
   // NOTE: VC++ treats enums as signed, avoid using the AccessSpecifier enum
@@ -261,7 +278,7 @@ protected:
   Decl(Kind DK, DeclContext *DC, SourceLocation L)
     : NextDeclInContext(0), DeclCtx(DC),
       Loc(L), DeclKind(DK), InvalidDecl(0),
-      HasAttrs(false), Implicit(false), Used(false),
+      HasAttrs(false), Implicit(false), Used(false), Referenced(false),
       Access(AS_none), PCHLevel(0), ChangedAfterLoad(false),
       IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
       HasCachedLinkage(0) 
@@ -271,7 +288,7 @@ protected:
 
   Decl(Kind DK, EmptyShell Empty)
     : NextDeclInContext(0), DeclKind(DK), InvalidDecl(0),
-      HasAttrs(false), Implicit(false), Used(false),
+      HasAttrs(false), Implicit(false), Used(false), Referenced(false),
       Access(AS_none), PCHLevel(0), ChangedAfterLoad(false),
       IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
       HasCachedLinkage(0)
@@ -407,6 +424,11 @@ public:
   bool isUsed(bool CheckUsedAttr = true) const;
 
   void setUsed(bool U = true) { Used = U; }
+
+  /// \brief Whether this declaration was referenced.
+  bool isReferenced() const;
+
+  void setReferenced(bool R = true) { Referenced = R; }
 
   /// \brief Determine the availability of the given declaration.
   ///

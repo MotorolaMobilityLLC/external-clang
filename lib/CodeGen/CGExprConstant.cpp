@@ -344,16 +344,30 @@ bool ConstStructBuilder::Build(InitListExpr *ILE) {
 
   unsigned FieldNo = 0;
   unsigned ElementNo = 0;
+  const FieldDecl *LastFD = 0;
+  bool IsMsStruct = RD->hasAttr<MsStructAttr>();
+  
   for (RecordDecl::field_iterator Field = RD->field_begin(),
        FieldEnd = RD->field_end(); Field != FieldEnd; ++Field, ++FieldNo) {
+    if (IsMsStruct) {
+      // Zero-length bitfields following non-bitfield members are
+      // ignored:
+      if (CGM.getContext().ZeroBitfieldFollowsNonBitfield((*Field), LastFD)) {
+        --FieldNo;
+        continue;
+      }
+      LastFD = (*Field);
+    }
     
     // If this is a union, skip all the fields that aren't being initialized.
     if (RD->isUnion() && ILE->getInitializedFieldInUnion() != *Field)
       continue;
 
     // Don't emit anonymous bitfields, they just affect layout.
-    if (Field->isBitField() && !Field->getIdentifier())
+    if (Field->isBitField() && !Field->getIdentifier()) {
+      LastFD = (*Field);
       continue;
+    }
 
     // Get the initializer.  A struct can include fields without initializers,
     // we just use explicit null values for them.
@@ -457,6 +471,10 @@ public:
     return Visit(PE->getSubExpr());
   }
 
+  llvm::Constant *VisitGenericSelectionExpr(GenericSelectionExpr *GE) {
+    return Visit(GE->getResultExpr());
+  }
+
   llvm::Constant *VisitCompoundLiteralExpr(CompoundLiteralExpr *E) {
     return Visit(E->getInitializer());
   }
@@ -552,7 +570,6 @@ public:
     case CK_GetObjCProperty:
     case CK_ToVoid:
     case CK_Dynamic:
-    case CK_ResolveUnknownAnyType:
       return 0;
 
     // These might need to be supported for constexpr.
@@ -664,8 +681,16 @@ public:
 
     // Initialize remaining array elements.
     // FIXME: This doesn't handle member pointers correctly!
+    llvm::Constant *fillC;
+    if (Expr *filler = ILE->getArrayFiller())
+      fillC = CGM.EmitConstantExpr(filler, filler->getType(), CGF);
+    else
+      fillC = llvm::Constant::getNullValue(ElemTy);
+    if (!fillC)
+      return 0;
+    RewriteType |= (fillC->getType() != ElemTy);
     for (; i < NumElements; ++i)
-      Elts.push_back(llvm::Constant::getNullValue(ElemTy));
+      Elts.push_back(fillC);
 
     if (RewriteType) {
       // FIXME: Try to avoid packing the array

@@ -30,6 +30,7 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Target/TargetRegistry.h"
+#include "llvm/Transforms/Instrumentation.h"
 using namespace clang;
 using namespace llvm;
 
@@ -133,8 +134,10 @@ void EmitAssemblyHelper::CreatePasses() {
     //
     // FIXME: Derive these constants in a principled fashion.
     unsigned Threshold = 225;
-    if (CodeGenOpts.OptimizeSize)
+    if (CodeGenOpts.OptimizeSize == 1) //-Os
       Threshold = 75;
+    else if (CodeGenOpts.OptimizeSize == 2) //-Oz
+      Threshold = 25;
     else if (OptLevel > 2)
       Threshold = 275;
     InliningPass = createFunctionInliningPass(Threshold);
@@ -151,6 +154,13 @@ void EmitAssemblyHelper::CreatePasses() {
   if (!CodeGenOpts.SimplifyLibCalls)
     TLI->disableAllFunctions();
   MPM->add(TLI);
+
+  if (CodeGenOpts.EmitGcovArcs || CodeGenOpts.EmitGcovNotes) {
+    MPM->add(createGCOVProfilerPass(CodeGenOpts.EmitGcovNotes,
+                                    CodeGenOpts.EmitGcovArcs));
+    if (!CodeGenOpts.DebugInfo)
+      MPM->add(createStripSymbolsPass(true));
+  }
 
   // For now we always create per module passes.
   llvm::createStandardModulePasses(MPM, OptLevel,
@@ -270,6 +280,8 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
     TM->setMCRelaxAll(true);
   if (CodeGenOpts.SaveTempLabels)
     TM->setMCSaveTempLabels(true);
+  if (CodeGenOpts.NoDwarf2CFIAsm)
+    TM->setMCUseCFI(false);
 
   // Create the code generator passes.
   PassManager *PM = getCodeGenPasses();

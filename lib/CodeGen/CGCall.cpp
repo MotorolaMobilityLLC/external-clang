@@ -36,6 +36,8 @@ static unsigned ClangCallConvToLLVMCallConv(CallingConv CC) {
   case CC_X86StdCall: return llvm::CallingConv::X86_StdCall;
   case CC_X86FastCall: return llvm::CallingConv::X86_FastCall;
   case CC_X86ThisCall: return llvm::CallingConv::X86_ThisCall;
+  case CC_AAPCS: return llvm::CallingConv::ARM_AAPCS;
+  case CC_AAPCS_VFP: return llvm::CallingConv::ARM_AAPCS_VFP;
   // TODO: add support for CC_X86Pascal to llvm
   }
 }
@@ -103,6 +105,9 @@ static CallingConv getCallingConventionForDecl(const Decl *D) {
 
   if (D->hasAttr<PascalAttr>())
     return CC_X86Pascal;
+
+  if (PcsAttr *PCS = D->getAttr<PcsAttr>())
+    return (PCS->getPCS() == PcsAttr::AAPCS ? CC_AAPCS : CC_AAPCS_VFP);
 
   return CC_C;
 }
@@ -188,6 +193,7 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(const ObjCMethodDecl *MD) {
                          ArgTys,
                          FunctionType::ExtInfo(
                              /*NoReturn*/ false,
+                             /*HasRegParm*/ false,
                              /*RegParm*/ 0,
                              getCallingConventionForDecl(MD)));
 }
@@ -212,7 +218,7 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(QualType ResTy,
   llvm::SmallVector<CanQualType, 16> ArgTys;
   for (CallArgList::const_iterator i = Args.begin(), e = Args.end();
        i != e; ++i)
-    ArgTys.push_back(Context.getCanonicalParamType(i->second));
+    ArgTys.push_back(Context.getCanonicalParamType(i->Ty));
   return getFunctionInfo(GetReturnType(ResTy), ArgTys, Info);
 }
 
@@ -255,7 +261,7 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(CanQualType ResTy,
     return *FI;
 
   // Construct the function info.
-  FI = new CGFunctionInfo(CC, Info.getNoReturn(), Info.getRegParm(), ResTy,
+  FI = new CGFunctionInfo(CC, Info.getNoReturn(), Info.getHasRegParm(), Info.getRegParm(), ResTy,
                           ArgTys.data(), ArgTys.size());
   FunctionInfos.InsertNode(FI, InsertPos);
 
@@ -284,13 +290,13 @@ const CGFunctionInfo &CodeGenTypes::getFunctionInfo(CanQualType ResTy,
 }
 
 CGFunctionInfo::CGFunctionInfo(unsigned _CallingConvention,
-                               bool _NoReturn, unsigned _RegParm,
+                               bool _NoReturn, bool _HasRegParm, unsigned _RegParm,
                                CanQualType ResTy,
                                const CanQualType *ArgTys,
                                unsigned NumArgTys)
   : CallingConvention(_CallingConvention),
     EffectiveCallingConvention(_CallingConvention),
-    NoReturn(_NoReturn), RegParm(_RegParm)
+    NoReturn(_NoReturn), HasRegParm(_HasRegParm), RegParm(_RegParm)
 {
   NumArgs = NumArgTys;
 
@@ -762,8 +768,10 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
     PAL.push_back(llvm::AttributeWithIndex::get(0, RetAttrs));
 
   // FIXME: RegParm should be reduced in case of global register variable.
-  signed RegParm = FI.getRegParm();
-  if (!RegParm)
+  signed RegParm;
+  if (FI.getHasRegParm())
+    RegParm = FI.getRegParm();
+  else
     RegParm = CodeGenOpts.NumRegisterParameters;
 
   unsigned PointerWidth = getContext().Target.getPointerWidth(0);
@@ -1209,18 +1217,18 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   for (CallArgList::const_iterator I = CallArgs.begin(), E = CallArgs.end();
        I != E; ++I, ++info_it) {
     const ABIArgInfo &ArgInfo = info_it->info;
-    RValue RV = I->first;
+    RValue RV = I->RV;
 
     unsigned Alignment =
-      getContext().getTypeAlignInChars(I->second).getQuantity();
+      getContext().getTypeAlignInChars(I->Ty).getQuantity();
     switch (ArgInfo.getKind()) {
     case ABIArgInfo::Indirect: {
       if (RV.isScalar() || RV.isComplex()) {
         // Make a temporary alloca to pass the argument.
-        Args.push_back(CreateMemTemp(I->second));
+        Args.push_back(CreateMemTemp(I->Ty));
         if (RV.isScalar())
           EmitStoreOfScalar(RV.getScalarVal(), Args.back(), false,
-                            Alignment, I->second);
+                            Alignment, I->Ty);
         else
           StoreComplexToAddr(RV.getComplexVal(), Args.back(), false);
       } else {
@@ -1247,11 +1255,10 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       // FIXME: Avoid the conversion through memory if possible.
       llvm::Value *SrcPtr;
       if (RV.isScalar()) {
-        SrcPtr = CreateMemTemp(I->second, "coerce");
-        EmitStoreOfScalar(RV.getScalarVal(), SrcPtr, false, Alignment,
-                          I->second);
+        SrcPtr = CreateMemTemp(I->Ty, "coerce");
+        EmitStoreOfScalar(RV.getScalarVal(), SrcPtr, false, Alignment, I->Ty);
       } else if (RV.isComplex()) {
-        SrcPtr = CreateMemTemp(I->second, "coerce");
+        SrcPtr = CreateMemTemp(I->Ty, "coerce");
         StoreComplexToAddr(RV.getComplexVal(), SrcPtr, false);
       } else
         SrcPtr = RV.getAggregateAddr();
@@ -1289,7 +1296,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
 
     case ABIArgInfo::Expand:
-      ExpandTypeToArgs(I->second, RV, Args);
+      ExpandTypeToArgs(I->Ty, RV, Args);
       break;
     }
   }

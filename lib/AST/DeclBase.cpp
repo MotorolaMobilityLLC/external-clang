@@ -30,7 +30,6 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cstdio>
-#include <vector>
 using namespace clang;
 
 //===----------------------------------------------------------------------===//
@@ -242,6 +241,18 @@ bool Decl::isUsed(bool CheckUsedAttr) const {
   return false; 
 }
 
+bool Decl::isReferenced() const { 
+  if (Referenced)
+    return true;
+
+  // Check redeclarations.
+  for (redecl_iterator I = redecls_begin(), E = redecls_end(); I != E; ++I)
+    if (I->Referenced)
+      return true;
+
+  return false; 
+}
+
 /// \brief Determine the availability of the given declaration based on
 /// the target platform.
 ///
@@ -427,6 +438,8 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
       return IDNS_Ordinary | IDNS_Type;
 
     case Typedef:
+    case TypeAlias:
+    case TypeAliasTemplate:
     case UnresolvedUsingTypename:
     case TemplateTypeParm:
       return IDNS_Ordinary | IDNS_Type;
@@ -1153,10 +1166,10 @@ void DeclContext::makeDeclVisibleInContextImpl(NamedDecl *D) {
   if (!D->getDeclName())
     return;
 
-  // FIXME: This feels like a hack. Should DeclarationName support
-  // template-ids, or is there a better way to keep specializations
-  // from being visible?
-  if (isa<ClassTemplateSpecializationDecl>(D) || D->isTemplateParameter())
+  // Skip entities that can't be found by name lookup into a particular
+  // context.
+  if ((D->getIdentifierNamespace() == 0 && !isa<UsingDirectiveDecl>(D)) ||
+      D->isTemplateParameter())
     return;
 
   ASTContext *C = 0;

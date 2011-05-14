@@ -241,7 +241,7 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
           CGM.getModule().getOrInsertNamedMetadata("opencl.kernels");
           
         llvm::Value *Op = Fn;
-        OpenCLMetadata->addOperand(llvm::MDNode::get(Context, &Op, 1));
+        OpenCLMetadata->addOperand(llvm::MDNode::get(Context, Op));
       }
   }
 
@@ -469,8 +469,7 @@ ConstantFoldsToSimpleInteger(const Expr *Cond, llvm::APInt &ResultInt) {
 void CodeGenFunction::EmitBranchOnBoolExpr(const Expr *Cond,
                                            llvm::BasicBlock *TrueBlock,
                                            llvm::BasicBlock *FalseBlock) {
-  if (const ParenExpr *PE = dyn_cast<ParenExpr>(Cond))
-    return EmitBranchOnBoolExpr(PE->getSubExpr(), TrueBlock, FalseBlock);
+  Cond = Cond->IgnoreParens();
 
   if (const BinaryOperator *CondBOp = dyn_cast<BinaryOperator>(Cond)) {
     // Handle X && Y in a condition.
@@ -655,15 +654,16 @@ CodeGenFunction::EmitNullInitialization(llvm::Value *DestPtr, QualType Ty) {
     DestPtr = Builder.CreateBitCast(DestPtr, BP, "tmp");
 
   // Get size and alignment info for this aggregate.
-  std::pair<uint64_t, unsigned> TypeInfo = getContext().getTypeInfo(Ty);
-  uint64_t Size = TypeInfo.first / 8;
-  unsigned Align = TypeInfo.second / 8;
+  std::pair<CharUnits, CharUnits> TypeInfo = 
+    getContext().getTypeInfoInChars(Ty);
+  CharUnits Size = TypeInfo.first;
+  CharUnits Align = TypeInfo.second;
 
   llvm::Value *SizeVal;
   const VariableArrayType *vla;
 
   // Don't bother emitting a zero-byte memset.
-  if (Size == 0) {
+  if (Size.isZero()) {
     // But note that getTypeInfo returns 0 for a VLA.
     if (const VariableArrayType *vlaType =
           dyn_cast_or_null<VariableArrayType>(
@@ -674,7 +674,7 @@ CodeGenFunction::EmitNullInitialization(llvm::Value *DestPtr, QualType Ty) {
       return;
     }
   } else {
-    SizeVal = llvm::ConstantInt::get(IntPtrTy, Size);
+    SizeVal = llvm::ConstantInt::get(IntPtrTy, Size.getQuantity());
     vla = 0;
   }
 
@@ -699,14 +699,15 @@ CodeGenFunction::EmitNullInitialization(llvm::Value *DestPtr, QualType Ty) {
     if (vla) return emitNonZeroVLAInit(*this, Ty, DestPtr, SrcPtr, SizeVal);
 
     // Get and call the appropriate llvm.memcpy overload.
-    Builder.CreateMemCpy(DestPtr, SrcPtr, SizeVal, Align, false);
+    Builder.CreateMemCpy(DestPtr, SrcPtr, SizeVal, Align.getQuantity(), false);
     return;
   } 
   
   // Otherwise, just memset the whole thing to zero.  This is legal
   // because in LLVM, all default initializers (other than the ones we just
   // handled above) are guaranteed to have a bit pattern of all zeros.
-  Builder.CreateMemSet(DestPtr, Builder.getInt8(0), SizeVal, Align, false);
+  Builder.CreateMemSet(DestPtr, Builder.getInt8(0), SizeVal, 
+                       Align.getQuantity(), false);
 }
 
 llvm::BlockAddress *CodeGenFunction::GetAddrOfLabel(const LabelDecl *L) {

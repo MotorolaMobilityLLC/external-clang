@@ -459,7 +459,7 @@ class ObjCInterfaceDecl : public ObjCContainerDecl {
   ///
   /// Categories are stored as a linked list in the AST, since the categories
   /// and class extensions come long after the initial interface declaration,
-  /// and we avoid dynamically-resized arrays in the AST whereever possible.
+  /// and we avoid dynamically-resized arrays in the AST wherever possible.
   ObjCCategoryDecl *CategoryList;
   
   /// IvarList - List of all ivars defined by this class; including class
@@ -629,27 +629,6 @@ public:
     return false;
   }
 
-  /// getImmSubClassOf - Returns Immediate sub-class of the specified interface class
-  /// if 'Super' is a superclass of this class. null if no such super class.
-  /// So in this example if 'this' is 'BClass' and 'Super' is 'AClass' then 'BClass'
-  /// is returned.
-  /// \code
-  /// @interface BClass : AClass <SubFooable>
-  /// @end
-  /// \endcode
-  
-  ObjCInterfaceDecl *getImmSubClassOf(const ObjCInterfaceDecl *Super) {
-    ObjCInterfaceDecl *ImmSubClass = this;
-    ObjCInterfaceDecl *I = this->getSuperClass();
-    while (I != NULL) {
-      if (Super == I)
-        return ImmSubClass;
-      ImmSubClass = I;
-      I = I->getSuperClass();
-    }
-    return NULL;
-  }
-
   ObjCIvarDecl *lookupInstanceVariable(IdentifierInfo *IVarName,
                                        ObjCInterfaceDecl *&ClassDeclared);
   ObjCIvarDecl *lookupInstanceVariable(IdentifierInfo *IVarName) {
@@ -804,7 +783,7 @@ public:
 
 /// ObjCProtocolDecl - Represents a protocol declaration. ObjC protocols
 /// declare a pure abstract type (i.e no instance variables are permitted).
-/// Protocols orginally drew inspiration from C++ pure virtual functions (a C++
+/// Protocols originally drew inspiration from C++ pure virtual functions (a C++
 /// feature with nice semantics and lousy syntax:-). Here is an example:
 ///
 /// @protocol NSDraggingInfo <refproto1, refproto2>

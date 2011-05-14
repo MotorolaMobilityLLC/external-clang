@@ -235,14 +235,9 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
     // We have to load the lvalue.
     RV = CGF.EmitLoadOfLValue(LV, E->getType());
   } else {
-    QualType ResultTy = E->getType();
-
     llvm::SmallVector<SubobjectAdjustment, 2> Adjustments;
     while (true) {
-      if (const ParenExpr *PE = dyn_cast<ParenExpr>(E)) {
-        E = PE->getSubExpr();
-        continue;
-      } 
+      E = E->IgnoreParens();
 
       if (const CastExpr *CE = dyn_cast<CastExpr>(E)) {
         if ((CE->getCastKind() == CK_DerivedToBase ||
@@ -545,6 +540,8 @@ LValue CodeGenFunction::EmitLValue(const Expr *E) {
   case Expr::DeclRefExprClass:
     return EmitDeclRefLValue(cast<DeclRefExpr>(E));
   case Expr::ParenExprClass:return EmitLValue(cast<ParenExpr>(E)->getSubExpr());
+  case Expr::GenericSelectionExprClass:
+    return EmitLValue(cast<GenericSelectionExpr>(E)->getResultExpr());
   case Expr::PredefinedExprClass:
     return EmitPredefinedLValue(cast<PredefinedExpr>(E));
   case Expr::StringLiteralClass:
@@ -727,9 +724,10 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV,
       Ptr = Builder.CreateStructGEP(Ptr, AI.FieldIndex, "bf.field");
 
     // Offset by the byte offset, if used.
-    if (AI.FieldByteOffset) {
+    if (!AI.FieldByteOffset.isZero()) {
       Ptr = EmitCastToVoidPtr(Ptr);
-      Ptr = Builder.CreateConstGEP1_32(Ptr, AI.FieldByteOffset,"bf.field.offs");
+      Ptr = Builder.CreateConstGEP1_32(Ptr, AI.FieldByteOffset.getQuantity(),
+                                       "bf.field.offs");
     }
 
     // Cast to the access type.
@@ -740,8 +738,8 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV,
 
     // Perform the load.
     llvm::LoadInst *Load = Builder.CreateLoad(Ptr, LV.isVolatileQualified());
-    if (AI.AccessAlignment)
-      Load->setAlignment(AI.AccessAlignment);
+    if (!AI.AccessAlignment.isZero())
+      Load->setAlignment(AI.AccessAlignment.getQuantity());
 
     // Shift out unused low bits and mask out unused high bits.
     llvm::Value *Val = Load;
@@ -930,9 +928,10 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
       Ptr = Builder.CreateStructGEP(Ptr, AI.FieldIndex, "bf.field");
 
     // Offset by the byte offset, if used.
-    if (AI.FieldByteOffset) {
+    if (!AI.FieldByteOffset.isZero()) {
       Ptr = EmitCastToVoidPtr(Ptr);
-      Ptr = Builder.CreateConstGEP1_32(Ptr, AI.FieldByteOffset,"bf.field.offs");
+      Ptr = Builder.CreateConstGEP1_32(Ptr, AI.FieldByteOffset.getQuantity(),
+                                       "bf.field.offs");
     }
 
     // Cast to the access type.
@@ -963,8 +962,8 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
     // If necessary, load and OR in bits that are outside of the bit-field.
     if (AI.TargetBitWidth != AI.AccessWidth) {
       llvm::LoadInst *Load = Builder.CreateLoad(Ptr, Dst.isVolatileQualified());
-      if (AI.AccessAlignment)
-        Load->setAlignment(AI.AccessAlignment);
+      if (!AI.AccessAlignment.isZero())
+        Load->setAlignment(AI.AccessAlignment.getQuantity());
 
       // Compute the mask for zeroing the bits that are part of the bit-field.
       llvm::APInt InvMask =
@@ -978,8 +977,8 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
     // Write the value.
     llvm::StoreInst *Store = Builder.CreateStore(Val, Ptr,
                                                  Dst.isVolatileQualified());
-    if (AI.AccessAlignment)
-      Store->setAlignment(AI.AccessAlignment);
+    if (!AI.AccessAlignment.isZero())
+      Store->setAlignment(AI.AccessAlignment.getQuantity());
   }
 }
 
@@ -1099,6 +1098,12 @@ static void setObjCGCLValueClass(const ASTContext &Ctx, const Expr *E,
     }
     return;
   }
+
+  if (const GenericSelectionExpr *Exp = dyn_cast<GenericSelectionExpr>(E)) {
+    setObjCGCLValueClass(Ctx, Exp->getResultExpr(), LV);
+    return;
+  }
+
   if (const ImplicitCastExpr *Exp = dyn_cast<ImplicitCastExpr>(E)) {
     setObjCGCLValueClass(Ctx, Exp->getSubExpr(), LV);
     return;
@@ -1929,12 +1934,6 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
     llvm::Value *V = Builder.CreateBitCast(LV.getAddress(), 
                                            ConvertType(ToType));
     return MakeAddrLValue(V, E->getType());
-  }
-  case CK_ResolveUnknownAnyType: {
-    const DeclRefExpr *declRef = cast<DeclRefExpr>(E->getSubExpr());
-    llvm::Constant *addr = CGM.getAddrOfUnknownAnyDecl(declRef->getDecl(),
-                                                       E->getType());
-    return MakeAddrLValue(addr, E->getType());
   }
   }
   

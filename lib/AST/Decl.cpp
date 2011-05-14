@@ -51,7 +51,7 @@ static llvm::Optional<Visibility> getVisibilityOf(const Decl *D) {
 
   // If we're on Mac OS X, an 'availability' for Mac OS X attribute
   // implies visibility(default).
-  if (D->getASTContext().Target.getTriple().getOS() == llvm::Triple::Darwin) {
+  if (D->getASTContext().Target.getTriple().isOSDarwin()) {
     for (specific_attr_iterator<AvailabilityAttr> 
               A = D->specific_attr_begin<AvailabilityAttr>(),
            AEnd = D->specific_attr_end<AvailabilityAttr>();
@@ -405,7 +405,7 @@ static LinkageInfo getLVForNamespaceScopeDecl(const NamedDecl *D, LVFlags F) {
   //       has the typedef name for linkage purposes (7.1.3); or
   } else if (const TagDecl *Tag = dyn_cast<TagDecl>(D)) {
     // Unnamed tags have no linkage.
-    if (!Tag->getDeclName() && !Tag->getTypedefForAnonDecl())
+    if (!Tag->getDeclName() && !Tag->getTypedefNameForAnonDecl())
       return LinkageInfo::none();
 
     // If this is a class template specialization, consider the
@@ -477,7 +477,7 @@ static LinkageInfo getLVForClassMember(const NamedDecl *D, LVFlags F) {
         isa<VarDecl>(D) ||
         isa<FieldDecl>(D) ||
         (isa<TagDecl>(D) &&
-         (D->getDeclName() || cast<TagDecl>(D)->getTypedefForAnonDecl()))))
+         (D->getDeclName() || cast<TagDecl>(D)->getTypedefNameForAnonDecl()))))
     return LinkageInfo::none();
 
   LinkageInfo LV;
@@ -1116,7 +1116,7 @@ void VarDecl::setStorageClass(StorageClass SC) {
   if (getStorageClass() != SC)
     ClearLinkageCache();
   
-  SClass = SC;
+  VarDeclBits.SClass = SC;
 }
 
 SourceRange VarDecl::getSourceRange() const {
@@ -1413,8 +1413,19 @@ bool FunctionDecl::isVariadic() const {
 
 bool FunctionDecl::hasBody(const FunctionDecl *&Definition) const {
   for (redecl_iterator I = redecls_begin(), E = redecls_end(); I != E; ++I) {
-    if (I->Body) {
+    if (I->Body || I->IsLateTemplateParsed) {
       Definition = *I;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool FunctionDecl::isDefined(const FunctionDecl *&Definition) const {
+  for (redecl_iterator I = redecls_begin(), E = redecls_end(); I != E; ++I) {
+    if (I->IsDeleted || I->Body || I->IsLateTemplateParsed) {
+      Definition = I->IsDeleted ? I->getCanonicalDecl() : *I;
       return true;
     }
   }
@@ -1427,6 +1438,9 @@ Stmt *FunctionDecl::getBody(const FunctionDecl *&Definition) const {
     if (I->Body) {
       Definition = *I;
       return I->Body.get(getASTContext().getExternalSource());
+    } else if (I->IsLateTemplateParsed) {
+      Definition = *I;
+      return 0;
     }
   }
 
@@ -1687,7 +1701,7 @@ bool FunctionDecl::isInlined() const {
 /// an externally visible symbol, but "extern inline" will not create an 
 /// externally visible symbol.
 bool FunctionDecl::isInlineDefinitionExternallyVisible() const {
-  assert(isThisDeclarationADefinition() && "Must have the function definition");
+  assert(doesThisDeclarationHaveABody() && "Must have the function definition");
   assert(isInlined() && "Function must be inline");
   ASTContext &Context = getASTContext();
   
@@ -1893,7 +1907,7 @@ FunctionDecl::setFunctionTemplateSpecialization(ASTContext &C,
   // Insert this function template specialization into the set of known
   // function template specializations.
   if (InsertPos)
-    Template->getSpecializations().InsertNode(Info, InsertPos);
+    Template->addSpecialization(Info, InsertPos);
   else {
     // Try to insert the new node. If there is an existing node, leave it, the
     // set will contain the canonical decls while
@@ -2044,13 +2058,24 @@ unsigned FieldDecl::getFieldIndex() const {
   if (CachedFieldIndex) return CachedFieldIndex - 1;
 
   unsigned index = 0;
-  RecordDecl::field_iterator
-    i = getParent()->field_begin(), e = getParent()->field_end();
+  const RecordDecl *RD = getParent();
+  const FieldDecl *LastFD = 0;
+  bool IsMsStruct = RD->hasAttr<MsStructAttr>();
+  
+  RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
   while (true) {
     assert(i != e && "failed to find field in parent!");
     if (*i == this)
       break;
 
+    if (IsMsStruct) {
+      // Zero-length bitfields following non-bitfield members are ignored.
+      if (getASTContext().ZeroBitfieldFollowsNonBitfield((*i), LastFD)) {
+        ++i;
+        continue;
+      }
+      LastFD = (*i);
+    }
     ++i;
     ++index;
   }
@@ -2082,8 +2107,8 @@ TagDecl* TagDecl::getCanonicalDecl() {
   return getFirstDeclaration();
 }
 
-void TagDecl::setTypedefForAnonDecl(TypedefDecl *TDD) { 
-  TypedefDeclOrQualifier = TDD; 
+void TagDecl::setTypedefNameForAnonDecl(TypedefNameDecl *TDD) { 
+  TypedefNameDeclOrQualifier = TDD; 
   if (TypeForDecl)
     const_cast<Type*>(TypeForDecl)->ClearLinkageCache();
   ClearLinkageCache();
@@ -2131,7 +2156,7 @@ void TagDecl::setQualifierInfo(NestedNameSpecifierLoc QualifierLoc) {
   if (QualifierLoc) {
     // Make sure the extended qualifier info is allocated.
     if (!hasExtInfo())
-      TypedefDeclOrQualifier = new (getASTContext()) ExtInfo;
+      TypedefNameDeclOrQualifier = new (getASTContext()) ExtInfo;
     // Set qualifier info.
     getExtInfo()->QualifierLoc = QualifierLoc;
   }
@@ -2140,7 +2165,7 @@ void TagDecl::setQualifierInfo(NestedNameSpecifierLoc QualifierLoc) {
     if (hasExtInfo()) {
       if (getExtInfo()->NumTemplParamLists == 0) {
         getASTContext().Deallocate(getExtInfo());
-        TypedefDeclOrQualifier = (TypedefDecl*) 0;
+        TypedefNameDeclOrQualifier = (TypedefNameDecl*) 0;
       }
       else
         getExtInfo()->QualifierLoc = QualifierLoc;
@@ -2155,7 +2180,7 @@ void TagDecl::setTemplateParameterListsInfo(ASTContext &Context,
   // Make sure the extended decl info is allocated.
   if (!hasExtInfo())
     // Allocate external info struct.
-    TypedefDeclOrQualifier = new (getASTContext()) ExtInfo;
+    TypedefNameDeclOrQualifier = new (getASTContext()) ExtInfo;
   // Set the template parameter lists info.
   getExtInfo()->setTemplateParameterListsInfo(Context, NumTPLists, TPLists);
 }
@@ -2393,12 +2418,26 @@ TypedefDecl *TypedefDecl::Create(ASTContext &C, DeclContext *DC,
   return new (C) TypedefDecl(DC, StartLoc, IdLoc, Id, TInfo);
 }
 
+TypeAliasDecl *TypeAliasDecl::Create(ASTContext &C, DeclContext *DC,
+                                     SourceLocation StartLoc,
+                                     SourceLocation IdLoc, IdentifierInfo *Id,
+                                     TypeSourceInfo *TInfo) {
+  return new (C) TypeAliasDecl(DC, StartLoc, IdLoc, Id, TInfo);
+}
+
 SourceRange TypedefDecl::getSourceRange() const {
   SourceLocation RangeEnd = getLocation();
   if (TypeSourceInfo *TInfo = getTypeSourceInfo()) {
     if (typeIsPostfix(TInfo->getType()))
       RangeEnd = TInfo->getTypeLoc().getSourceRange().getEnd();
   }
+  return SourceRange(getLocStart(), RangeEnd);
+}
+
+SourceRange TypeAliasDecl::getSourceRange() const {
+  SourceLocation RangeEnd = getLocStart();
+  if (TypeSourceInfo *TInfo = getTypeSourceInfo())
+    RangeEnd = TInfo->getTypeLoc().getSourceRange().getEnd();
   return SourceRange(getLocStart(), RangeEnd);
 }
 
