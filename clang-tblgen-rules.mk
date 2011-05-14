@@ -75,6 +75,13 @@ $(intermediates)/include/clang/Basic/DiagnosticGroups.inc: $(CLANG_ROOT_PATH)/in
 	$(call transform-host-td-to-out,clang-diag-groups)
 endif
 
+ifneq ($(findstring DiagnosticIndexName.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Basic/DiagnosticIndexName.inc
+$(intermediates)/include/clang/Basic/DiagnosticIndexName.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Diagnostic.td $(TBLGEN)
+	@echo "Building Clang diagnostic name index with tblgen"
+	$(call transform-host-td-to-out,clang-diag-groups)
+endif
+
 ifneq ($(findstring DeclNodes.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/DeclNodes.inc
 $(intermediates)/include/clang/AST/DeclNodes.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/DeclNodes.td $(TBLGEN)

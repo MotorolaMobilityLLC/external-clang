@@ -10,11 +10,12 @@ TBLGEN_TABLES :=    \
 	DiagnosticASTKinds.inc	\
 	DiagnosticLexKinds.inc	\
 	DiagnosticSemaKinds.inc	\
-    DiagnosticCommonKinds.inc	\
+	DiagnosticCommonKinds.inc	\
 	DiagnosticDriverKinds.inc	\
 	DiagnosticParseKinds.inc	\
 	DiagnosticAnalysisKinds.inc	\
 	DiagnosticFrontendKinds.inc	\
+	DiagnosticIndexName.inc \
 	arm_neon.inc
 
 clang_basic_SRC_FILES :=	\
