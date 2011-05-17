@@ -2532,7 +2532,12 @@ Decl *Sema::BuildAnonymousStructOrUnion(Scope *S, DeclSpec &DS,
           Invalid = true;
         }
 
-        if (CheckNontrivialField(FD))
+        // C++ [class.union]p1
+        //   An object of a class with a non-trivial constructor, a non-trivial
+        //   copy constructor, a non-trivial destructor, or a non-trivial copy
+        //   assignment operator cannot be a member of a union, nor can an
+        //   array of such objects.
+        if (!getLangOptions().CPlusPlus0x && CheckNontrivialField(FD))
           Invalid = true;
       } else if ((*Mem)->isImplicit()) {
         // Any implicit members are fine.
@@ -4569,7 +4574,7 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
         NewFD->setInvalidDecl();
     } else if (isFunctionTemplateSpecialization) {
       if (CurContext->isDependentContext() && CurContext->isRecord() 
-          && !isFriend) {
+          && !isFriend && !getLangOptions().Microsoft) {
         Diag(NewFD->getLocation(), diag::err_function_specialization_in_class)
           << NewFD->getDeclName();
         NewFD->setInvalidDecl();
@@ -7612,8 +7617,7 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
           // destructor, or a non-trivial copy assignment operator
           // cannot be a member of a union, nor can an array of such
           // objects.
-          // TODO: C++0x alters this restriction significantly.
-          if (CheckNontrivialField(NewFD))
+          if (!getLangOptions().CPlusPlus0x && CheckNontrivialField(NewFD))
             NewFD->setInvalidDecl();
         }
       }

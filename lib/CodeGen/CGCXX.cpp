@@ -28,17 +28,6 @@
 using namespace clang;
 using namespace CodeGen;
 
-/// Determines whether the given function has a trivial body that does
-/// not require any specific codegen.
-static bool HasTrivialBody(const FunctionDecl *FD) {
-  Stmt *S = FD->getBody();
-  if (!S)
-    return true;
-  if (isa<CompoundStmt>(S) && cast<CompoundStmt>(S)->body_empty())
-    return true;
-  return false;
-}
-
 /// Try to emit a base destructor as an alias to its primary
 /// base-class destructor.
 bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
@@ -47,7 +36,7 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
 
   // If the destructor doesn't have a trivial body, we have to emit it
   // separately.
-  if (!HasTrivialBody(D))
+  if (!D->hasTrivialBody())
     return true;
 
   const CXXRecordDecl *Class = D->getParent();
@@ -187,8 +176,9 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
 void CodeGenModule::EmitCXXConstructors(const CXXConstructorDecl *D) {
   // The constructor used for constructing this as a complete class;
   // constucts the virtual bases, then calls the base constructor.
-  if (!D->getParent()->isAbstract()) {
+  if (!D->getParent()->isAbstract() || getLangOptions().AppleKext) {
     // We don't need to emit the complete ctor if the class is abstract.
+    // But kexts somehow manage to violate this assumption.
     EmitGlobal(GlobalDecl(D, Ctor_Complete));
   }
 

@@ -43,18 +43,6 @@ using namespace clang;
 using namespace CodeGen;
 
 
-static void EmitNullReturnInitialization(CodeGenFunction &CGF,
-                                         ReturnValueSlot &returnSlot,
-                                         QualType resultType) {
-  // Force the return slot to exist.
-  if (!returnSlot.getValue())
-    returnSlot = ReturnValueSlot(CGF.CreateMemTemp(resultType), false);
-  CGF.EmitNullInitialization(returnSlot.getValue(), resultType);
-}
-
-
-///
-
 namespace {
 
 typedef std::vector<llvm::Constant*> ConstantVector;
@@ -67,89 +55,89 @@ protected:
   llvm::LLVMContext &VMContext;
 
 private:
+  // The types of these functions don't really matter because we
+  // should always bitcast before calling them.
+
+  /// id objc_msgSend (id, SEL, ...)
+  /// 
+  /// The default messenger, used for sends whose ABI is unchanged from
+  /// the all-integer/pointer case.
   llvm::Constant *getMessageSendFn() const {
-    // id objc_msgSend (id, SEL, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ObjectPtrTy);
-    Params.push_back(SelectorPtrTy);
-    return
-      CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                        Params, true),
-                                "objc_msgSend");
+    const llvm::Type *params[] = { ObjectPtrTy, SelectorPtrTy };
+    return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
+                                                             params, true),
+                                     "objc_msgSend");
   }
 
+  /// void objc_msgSend_stret (id, SEL, ...)
+  ///
+  /// The messenger used when the return value is an aggregate returned
+  /// by indirect reference in the first argument, and therefore the
+  /// self and selector parameters are shifted over by one.
   llvm::Constant *getMessageSendStretFn() const {
-    // id objc_msgSend_stret (id, SEL, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ObjectPtrTy);
-    Params.push_back(SelectorPtrTy);
-    return
-      CGM.CreateRuntimeFunction(llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
-                                                        Params, true),
-                                "objc_msgSend_stret");
+    const llvm::Type *params[] = { ObjectPtrTy, SelectorPtrTy };
+    return CGM.CreateRuntimeFunction(llvm::FunctionType::get(CGM.VoidTy,
+                                                             params, true),
+                                     "objc_msgSend_stret");
 
   }
 
+  /// [double | long double] objc_msgSend_fpret(id self, SEL op, ...)
+  ///
+  /// The messenger used when the return value is returned on the x87
+  /// floating-point stack; without a special entrypoint, the nil case
+  /// would be unbalanced.
   llvm::Constant *getMessageSendFpretFn() const {
-    // FIXME: This should be long double on x86_64?
-    // [double | long double] objc_msgSend_fpret(id self, SEL op, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ObjectPtrTy);
-    Params.push_back(SelectorPtrTy);
-    return
-      CGM.CreateRuntimeFunction(llvm::FunctionType::get(
+    const llvm::Type *params[] = { ObjectPtrTy, SelectorPtrTy };
+    return CGM.CreateRuntimeFunction(llvm::FunctionType::get(
                                              llvm::Type::getDoubleTy(VMContext),
-                                                        Params,
-                                                        true),
-                                "objc_msgSend_fpret");
+                                                        params, true),
+                                     "objc_msgSend_fpret");
 
   }
 
+  /// id objc_msgSendSuper(struct objc_super *super, SEL op, ...)
+  ///
+  /// The messenger used for super calls, which have different dispatch
+  /// semantics.  The class passed is the superclass of the current
+  /// class.
   llvm::Constant *getMessageSendSuperFn() const {
-    // id objc_msgSendSuper(struct objc_super *super, SEL op, ...)
-    const char *SuperName = "objc_msgSendSuper";
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(SuperPtrTy);
-    Params.push_back(SelectorPtrTy);
+    const llvm::Type *params[] = { SuperPtrTy, SelectorPtrTy };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                             Params, true),
-                                     SuperName);
+                                                             params, true),
+                                     "objc_msgSendSuper");
   }
 
+  /// id objc_msgSendSuper2(struct objc_super *super, SEL op, ...)
+  ///
+  /// A slightly different messenger used for super calls.  The class
+  /// passed is the current class.
   llvm::Constant *getMessageSendSuperFn2() const {
-    // id objc_msgSendSuper2(struct objc_super *super, SEL op, ...)
-    const char *SuperName = "objc_msgSendSuper2";
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(SuperPtrTy);
-    Params.push_back(SelectorPtrTy);
+    const llvm::Type *params[] = { SuperPtrTy, SelectorPtrTy };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                             Params, true),
-                                     SuperName);
+                                                             params, true),
+                                     "objc_msgSendSuper2");
   }
 
+  /// void objc_msgSendSuper_stret(void *stretAddr, struct objc_super *super,
+  ///                              SEL op, ...)
+  ///
+  /// The messenger used for super calls which return an aggregate indirectly.
   llvm::Constant *getMessageSendSuperStretFn() const {
-    // void objc_msgSendSuper_stret(void * stretAddr, struct objc_super *super,
-    //                              SEL op, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(Int8PtrTy);
-    Params.push_back(SuperPtrTy);
-    Params.push_back(SelectorPtrTy);
+    const llvm::Type *params[] = { Int8PtrTy, SuperPtrTy, SelectorPtrTy };
     return CGM.CreateRuntimeFunction(
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
-                              Params, true),
+      llvm::FunctionType::get(CGM.VoidTy, params, true),
       "objc_msgSendSuper_stret");
   }
 
+  /// void objc_msgSendSuper2_stret(void * stretAddr, struct objc_super *super,
+  ///                               SEL op, ...)
+  ///
+  /// objc_msgSendSuper_stret with the super2 semantics.
   llvm::Constant *getMessageSendSuperStretFn2() const {
-    // void objc_msgSendSuper2_stret(void * stretAddr, struct objc_super *super,
-    //                               SEL op, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(Int8PtrTy);
-    Params.push_back(SuperPtrTy);
-    Params.push_back(SelectorPtrTy);
+    const llvm::Type *params[] = { Int8PtrTy, SuperPtrTy, SelectorPtrTy };
     return CGM.CreateRuntimeFunction(
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
-                              Params, true),
+      llvm::FunctionType::get(CGM.VoidTy, params, true),
       "objc_msgSendSuper2_stret");
   }
 
@@ -282,111 +270,97 @@ public:
   /// GcReadWeakFn -- LLVM objc_read_weak (id *src) function.
   llvm::Constant *getGcReadWeakFn() {
     // id objc_read_weak (id *)
-    std::vector<const llvm::Type*> Args;
-    Args.push_back(ObjectPtrTy->getPointerTo());
+    const llvm::Type *args[] = { ObjectPtrTy->getPointerTo() };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(ObjectPtrTy, Args, false);
+      llvm::FunctionType::get(ObjectPtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_read_weak");
   }
 
   /// GcAssignWeakFn -- LLVM objc_assign_weak function.
   llvm::Constant *getGcAssignWeakFn() {
     // id objc_assign_weak (id, id *)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
-    Args.push_back(ObjectPtrTy->getPointerTo());
+    const llvm::Type *args[] = { ObjectPtrTy, ObjectPtrTy->getPointerTo() };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(ObjectPtrTy, Args, false);
+      llvm::FunctionType::get(ObjectPtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_assign_weak");
   }
 
   /// GcAssignGlobalFn -- LLVM objc_assign_global function.
   llvm::Constant *getGcAssignGlobalFn() {
     // id objc_assign_global(id, id *)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
-    Args.push_back(ObjectPtrTy->getPointerTo());
+    const llvm::Type *args[] = { ObjectPtrTy, ObjectPtrTy->getPointerTo() };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(ObjectPtrTy, Args, false);
+      llvm::FunctionType::get(ObjectPtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_assign_global");
   }
 
   /// GcAssignThreadLocalFn -- LLVM objc_assign_threadlocal function.
   llvm::Constant *getGcAssignThreadLocalFn() {
     // id objc_assign_threadlocal(id src, id * dest)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
-    Args.push_back(ObjectPtrTy->getPointerTo());
+    const llvm::Type *args[] = { ObjectPtrTy, ObjectPtrTy->getPointerTo() };
     llvm::FunctionType *FTy =
-    llvm::FunctionType::get(ObjectPtrTy, Args, false);
+      llvm::FunctionType::get(ObjectPtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_assign_threadlocal");
   }
   
   /// GcAssignIvarFn -- LLVM objc_assign_ivar function.
   llvm::Constant *getGcAssignIvarFn() {
     // id objc_assign_ivar(id, id *, ptrdiff_t)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
-    Args.push_back(ObjectPtrTy->getPointerTo());
-    const llvm::Type *PtrDiffTy =
-      CGM.getTypes().ConvertType(
-        CGM.getContext().getPointerDiffType()->getCanonicalTypeUnqualified());
-
-    Args.push_back(PtrDiffTy);
+    const llvm::Type *args[] = { ObjectPtrTy, ObjectPtrTy->getPointerTo(),
+                                 CGM.PtrDiffTy };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(ObjectPtrTy, Args, false);
+      llvm::FunctionType::get(ObjectPtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_assign_ivar");
   }
 
   /// GcMemmoveCollectableFn -- LLVM objc_memmove_collectable function.
   llvm::Constant *GcMemmoveCollectableFn() {
     // void *objc_memmove_collectable(void *dst, const void *src, size_t size)
-    std::vector<const llvm::Type*> Args(1, Int8PtrTy);
-    Args.push_back(Int8PtrTy);
-    Args.push_back(LongTy);
-    llvm::FunctionType *FTy = llvm::FunctionType::get(Int8PtrTy, Args, false);
+    const llvm::Type *args[] = { Int8PtrTy, Int8PtrTy, LongTy };
+    llvm::FunctionType *FTy = llvm::FunctionType::get(Int8PtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_memmove_collectable");
   }
 
   /// GcAssignStrongCastFn -- LLVM objc_assign_strongCast function.
   llvm::Constant *getGcAssignStrongCastFn() {
     // id objc_assign_strongCast(id, id *)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
-    Args.push_back(ObjectPtrTy->getPointerTo());
+    const llvm::Type *args[] = { ObjectPtrTy, ObjectPtrTy->getPointerTo() };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(ObjectPtrTy, Args, false);
+      llvm::FunctionType::get(ObjectPtrTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_assign_strongCast");
   }
 
   /// ExceptionThrowFn - LLVM objc_exception_throw function.
   llvm::Constant *getExceptionThrowFn() {
     // void objc_exception_throw(id)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
+    const llvm::Type *args[] = { ObjectPtrTy };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Args, false);
+      llvm::FunctionType::get(CGM.VoidTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_exception_throw");
   }
 
   /// ExceptionRethrowFn - LLVM objc_exception_rethrow function.
   llvm::Constant *getExceptionRethrowFn() {
     // void objc_exception_rethrow(void)
-    std::vector<const llvm::Type*> Args;
-    llvm::FunctionType *FTy =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Args, false);
+    llvm::FunctionType *FTy = llvm::FunctionType::get(CGM.VoidTy, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_exception_rethrow");
   }
   
   /// SyncEnterFn - LLVM object_sync_enter function.
   llvm::Constant *getSyncEnterFn() {
     // void objc_sync_enter (id)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
+    const llvm::Type *args[] = { ObjectPtrTy };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Args, false);
+      llvm::FunctionType::get(CGM.VoidTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_sync_enter");
   }
 
   /// SyncExitFn - LLVM object_sync_exit function.
   llvm::Constant *getSyncExitFn() {
     // void objc_sync_exit (id)
-    std::vector<const llvm::Type*> Args(1, ObjectPtrTy);
+    const llvm::Type *args[] = { ObjectPtrTy };
     llvm::FunctionType *FTy =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), Args, false);
+      llvm::FunctionType::get(CGM.VoidTy, args, false);
     return CGM.CreateRuntimeFunction(FTy, "objc_sync_exit");
   }
 
@@ -478,55 +452,44 @@ public:
 
   /// ExceptionTryEnterFn - LLVM objc_exception_try_enter function.
   llvm::Constant *getExceptionTryEnterFn() {
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(llvm::PointerType::getUnqual(ExceptionDataTy));
+    const llvm::Type *params[] = { ExceptionDataTy->getPointerTo() };
     return CGM.CreateRuntimeFunction(
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
-                              Params, false),
+      llvm::FunctionType::get(CGM.VoidTy, params, false),
       "objc_exception_try_enter");
   }
 
   /// ExceptionTryExitFn - LLVM objc_exception_try_exit function.
   llvm::Constant *getExceptionTryExitFn() {
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(llvm::PointerType::getUnqual(ExceptionDataTy));
+    const llvm::Type *params[] = { ExceptionDataTy->getPointerTo() };
     return CGM.CreateRuntimeFunction(
-      llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
-                              Params, false),
+      llvm::FunctionType::get(CGM.VoidTy, params, false),
       "objc_exception_try_exit");
   }
 
   /// ExceptionExtractFn - LLVM objc_exception_extract function.
   llvm::Constant *getExceptionExtractFn() {
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(llvm::PointerType::getUnqual(ExceptionDataTy));
+    const llvm::Type *params[] = { ExceptionDataTy->getPointerTo() };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                             Params, false),
+                                                             params, false),
                                      "objc_exception_extract");
-
   }
 
   /// ExceptionMatchFn - LLVM objc_exception_match function.
   llvm::Constant *getExceptionMatchFn() {
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ClassPtrTy);
-    Params.push_back(ObjectPtrTy);
+    const llvm::Type *params[] = { ClassPtrTy, ObjectPtrTy };
     return CGM.CreateRuntimeFunction(
-      llvm::FunctionType::get(llvm::Type::getInt32Ty(VMContext),
-                              Params, false),
+      llvm::FunctionType::get(CGM.Int32Ty, params, false),
       "objc_exception_match");
 
   }
 
   /// SetJmpFn - LLVM _setjmp function.
   llvm::Constant *getSetJmpFn() {
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(llvm::Type::getInt32PtrTy(VMContext));
-    return
-      CGM.CreateRuntimeFunction(llvm::FunctionType::get(llvm::Type::getInt32Ty(VMContext),
-                                                        Params, false),
-                                "_setjmp");
-
+    // This is specifically the prototype for x86.
+    const llvm::Type *params[] = { CGM.Int32Ty->getPointerTo() };
+    return CGM.CreateRuntimeFunction(llvm::FunctionType::get(CGM.Int32Ty,
+                                                             params, false),
+                                     "_setjmp");
   }
 
 public:
@@ -612,68 +575,56 @@ public:
 
   llvm::Constant *getMessageSendFixupFn() {
     // id objc_msgSend_fixup(id, struct message_ref_t*, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ObjectPtrTy);
-    Params.push_back(MessageRefPtrTy);
+    const llvm::Type *params[] = { ObjectPtrTy, MessageRefPtrTy };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                             Params, true),
+                                                             params, true),
                                      "objc_msgSend_fixup");
   }
 
   llvm::Constant *getMessageSendFpretFixupFn() {
     // id objc_msgSend_fpret_fixup(id, struct message_ref_t*, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ObjectPtrTy);
-    Params.push_back(MessageRefPtrTy);
+    const llvm::Type *params[] = { ObjectPtrTy, MessageRefPtrTy };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                             Params, true),
+                                                             params, true),
                                      "objc_msgSend_fpret_fixup");
   }
 
   llvm::Constant *getMessageSendStretFixupFn() {
     // id objc_msgSend_stret_fixup(id, struct message_ref_t*, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(ObjectPtrTy);
-    Params.push_back(MessageRefPtrTy);
+    const llvm::Type *params[] = { ObjectPtrTy, MessageRefPtrTy };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                             Params, true),
+                                                             params, true),
                                      "objc_msgSend_stret_fixup");
   }
 
   llvm::Constant *getMessageSendSuper2FixupFn() {
     // id objc_msgSendSuper2_fixup (struct objc_super *,
     //                              struct _super_message_ref_t*, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(SuperPtrTy);
-    Params.push_back(SuperMessageRefPtrTy);
+    const llvm::Type *params[] = { SuperPtrTy, SuperMessageRefPtrTy };
     return  CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                              Params, true),
+                                                              params, true),
                                       "objc_msgSendSuper2_fixup");
   }
 
   llvm::Constant *getMessageSendSuper2StretFixupFn() {
     // id objc_msgSendSuper2_stret_fixup(struct objc_super *,
     //                                   struct _super_message_ref_t*, ...)
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(SuperPtrTy);
-    Params.push_back(SuperMessageRefPtrTy);
+    const llvm::Type *params[] = { SuperPtrTy, SuperMessageRefPtrTy };
     return  CGM.CreateRuntimeFunction(llvm::FunctionType::get(ObjectPtrTy,
-                                                              Params, true),
+                                                              params, true),
                                       "objc_msgSendSuper2_stret_fixup");
   }
 
   llvm::Constant *getObjCEndCatchFn() {
-    return CGM.CreateRuntimeFunction(llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext),
-                                                             false),
+    return CGM.CreateRuntimeFunction(llvm::FunctionType::get(CGM.VoidTy, false),
                                      "objc_end_catch");
 
   }
 
   llvm::Constant *getObjCBeginCatchFn() {
-    std::vector<const llvm::Type*> Params;
-    Params.push_back(Int8PtrTy);
+    const llvm::Type *params[] = { Int8PtrTy };
     return CGM.CreateRuntimeFunction(llvm::FunctionType::get(Int8PtrTy,
-                                                             Params, false),
+                                                             params, false),
                                      "objc_begin_catch");
   }
 
@@ -1351,6 +1302,46 @@ public:
                                       const ObjCIvarDecl *Ivar);
 };
 
+/// A helper class for performing the null-initialization of a return
+/// value.
+struct NullReturnState {
+  llvm::BasicBlock *NullBB;
+
+  NullReturnState() : NullBB(0) {}
+
+  void init(CodeGenFunction &CGF, llvm::Value *receiver) {
+    // Make blocks for the null-init and call edges.
+    NullBB = CGF.createBasicBlock("msgSend.nullinit");
+    llvm::BasicBlock *callBB = CGF.createBasicBlock("msgSend.call");
+
+    // Check for a null receiver and, if there is one, jump to the
+    // null-init test.
+    llvm::Value *isNull = CGF.Builder.CreateIsNull(receiver);
+    CGF.Builder.CreateCondBr(isNull, NullBB, callBB);
+
+    // Otherwise, start performing the call.
+    CGF.EmitBlock(callBB);
+  }
+
+  RValue complete(CodeGenFunction &CGF, RValue result, QualType resultType) {
+    if (!NullBB) return result;
+
+    // Finish the call path.
+    llvm::BasicBlock *contBB = CGF.createBasicBlock("msgSend.cont");
+    if (CGF.HaveInsertPoint()) CGF.Builder.CreateBr(contBB);
+
+    // Emit the null-init block and perform the null-initialization there.
+    CGF.EmitBlock(NullBB);
+    assert(result.isAggregate() && "null init of non-aggregate result?");
+    CGF.EmitNullInitialization(result.getAggregateAddr(), resultType);
+
+    // Jump to the continuation block.
+    CGF.EmitBlock(contBB);
+
+    return result;
+  }
+};
+
 } // end anonymous namespace
 
 /* *** Helper Functions *** */
@@ -1541,9 +1532,11 @@ CGObjCCommonMac::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
            CGM.getContext().getCanonicalType(ResultType) &&
            "Result type mismatch!");
 
+  NullReturnState nullReturn;
+
   llvm::Constant *Fn = NULL;
   if (CGM.ReturnTypeUsesSRet(FnInfo)) {
-    EmitNullReturnInitialization(CGF, Return, ResultType);
+    if (!IsSuper) nullReturn.init(CGF, Arg0);
     Fn = (ObjCABI == 2) ?  ObjCTypes.getSendStretFn2(IsSuper)
       : ObjCTypes.getSendStretFn(IsSuper);
   } else if (CGM.ReturnTypeUsesFPRet(ResultType)) {
@@ -1554,7 +1547,8 @@ CGObjCCommonMac::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
       : ObjCTypes.getSendFn(IsSuper);
   }
   Fn = llvm::ConstantExpr::getBitCast(Fn, llvm::PointerType::getUnqual(FTy));
-  return CGF.EmitCall(FnInfo, Fn, Return, ActualArgs);
+  RValue rvalue = CGF.EmitCall(FnInfo, Fn, Return, ActualArgs);
+  return nullReturn.complete(CGF, rvalue, ResultType);
 }
 
 static Qualifiers::GC GetGCAttrTypeForType(ASTContext &Ctx, QualType FQT) {
@@ -2734,10 +2728,10 @@ void FragileHazards::collectLocals() {
 }
 
 llvm::FunctionType *FragileHazards::GetAsmFnType() {
-  std::vector<const llvm::Type *> Tys(Locals.size());
-  for (unsigned I = 0, E = Locals.size(); I != E; ++I)
-    Tys[I] = Locals[I]->getType();
-  return llvm::FunctionType::get(CGF.Builder.getVoidTy(), Tys, false);
+  llvm::SmallVector<const llvm::Type *, 16> tys(Locals.size());
+  for (unsigned i = 0, e = Locals.size(); i != e; ++i)
+    tys[i] = Locals[i]->getType();
+  return llvm::FunctionType::get(CGF.VoidTy, tys, false);
 }
 
 /*
@@ -4484,11 +4478,9 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
                               ClassRonfABITy);
 
   // ImpnfABITy - LLVM for id (*)(id, SEL, ...)
-  std::vector<const llvm::Type*> Params;
-  Params.push_back(ObjectPtrTy);
-  Params.push_back(SelectorPtrTy);
-  ImpnfABITy = llvm::PointerType::getUnqual(
-    llvm::FunctionType::get(ObjectPtrTy, Params, false));
+  const llvm::Type *params[] = { ObjectPtrTy, SelectorPtrTy };
+  ImpnfABITy = llvm::FunctionType::get(ObjectPtrTy, params, false)
+                 ->getPointerTo();
 
   // struct _class_t {
   //   struct _class_t *isa;
@@ -5590,6 +5582,8 @@ CGObjCNonFragileABIMac::EmitVTableMessageSend(CodeGenFunction &CGF,
     CGM.getTypes().getFunctionInfo(resultType, args,
                                    FunctionType::ExtInfo());
 
+  NullReturnState nullReturn;
+
   // Find the function to call and the mangled name for the message
   // ref structure.  Using a different mangled name wouldn't actually
   // be a problem; it would just be a waste.
@@ -5600,11 +5594,11 @@ CGObjCNonFragileABIMac::EmitVTableMessageSend(CodeGenFunction &CGF,
   llvm::Constant *fn = 0;
   std::string messageRefName("\01l_");
   if (CGM.ReturnTypeUsesSRet(fnInfo)) {
-    EmitNullReturnInitialization(CGF, returnSlot, resultType);
     if (isSuper) {
       fn = ObjCTypes.getMessageSendSuper2StretFixupFn();
       messageRefName += "objc_msgSendSuper2_stret_fixup";
     } else {
+      nullReturn.init(CGF, arg0);
       fn = ObjCTypes.getMessageSendStretFixupFn();
       messageRefName += "objc_msgSend_stret_fixup";
     }
@@ -5660,7 +5654,8 @@ CGObjCNonFragileABIMac::EmitVTableMessageSend(CodeGenFunction &CGF,
   callee = CGF.Builder.CreateBitCast(callee,
                                      llvm::PointerType::getUnqual(fnType));
 
-  return CGF.EmitCall(fnInfo, callee, returnSlot, args);
+  RValue result = CGF.EmitCall(fnInfo, callee, returnSlot, args);
+  return nullReturn.complete(CGF, result, resultType);
 }
 
 /// Generate code for a message send expression in the nonfragile abi.
