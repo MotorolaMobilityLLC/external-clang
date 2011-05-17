@@ -1513,8 +1513,13 @@ Sema::MatchTemplateParametersToScopeSpecifier(SourceLocation DeclStartLoc,
   // by the nested-name-specifier and walking out until we run out of types.
   llvm::SmallVector<QualType, 4> NestedTypes;
   QualType T;
-  if (SS.getScopeRep())
-    T = QualType(SS.getScopeRep()->getAsType(), 0);
+  if (SS.getScopeRep()) {
+    if (CXXRecordDecl *Record 
+              = dyn_cast_or_null<CXXRecordDecl>(computeDeclContext(SS, true)))
+      T = Context.getTypeDeclType(Record);
+    else
+      T = QualType(SS.getScopeRep()->getAsType(), 0);
+  }
   
   // If we found an explicit specialization that prevents us from needing
   // 'template<>' headers, this will be set to the location of that
@@ -1859,10 +1864,10 @@ QualType Sema::CheckTemplateIdType(TemplateName Name,
 
     // Only substitute for the innermost template argument list.
     MultiLevelTemplateArgumentList TemplateArgLists;
+    TemplateArgLists.addOuterTemplateArguments(&TemplateArgs);
     unsigned Depth = AliasTemplate->getTemplateParameters()->getDepth();
     for (unsigned I = 0; I < Depth; ++I)
       TemplateArgLists.addOuterTemplateArguments(0, 0);
-    TemplateArgLists.addOuterTemplateArguments(&TemplateArgs);
 
     InstantiatingTemplate Inst(*this, TemplateLoc, Template);
     CanonType = SubstType(Pattern->getUnderlyingType(),

@@ -9857,7 +9857,7 @@ void Sema::MarkDeclarationReferenced(SourceLocation Loc, Decl *D) {
         return;
       if (!Constructor->isUsed(false))
         DefineImplicitDefaultConstructor(Loc, Constructor);
-    } else if (Constructor->isImplicit() &&
+    } else if (Constructor->isDefaulted() &&
                Constructor->isCopyConstructor()) {
       if (!Constructor->isUsed(false))
         DefineImplicitCopyConstructor(Loc, Constructor);
@@ -9870,7 +9870,7 @@ void Sema::MarkDeclarationReferenced(SourceLocation Loc, Decl *D) {
     if (Destructor->isVirtual())
       MarkVTableUsed(Loc, Destructor->getParent());
   } else if (CXXMethodDecl *MethodDecl = dyn_cast<CXXMethodDecl>(D)) {
-    if (MethodDecl->isImplicit() && MethodDecl->isOverloadedOperator() &&
+    if (MethodDecl->isDefaulted() && MethodDecl->isOverloadedOperator() &&
         MethodDecl->getOverloadedOperator() == OO_Equal) {
       if (!MethodDecl->isUsed(false))
         DefineImplicitCopyAssignment(Loc, MethodDecl);
