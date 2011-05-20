@@ -3187,17 +3187,21 @@ void Sema::CheckExplicitlyDefaultedCopyAssignment(CXXMethodDecl *MD) {
                           *ExceptionType = Context.getFunctionType(
                          Context.VoidTy, 0, 0, EPI)->getAs<FunctionProtoType>();
 
-  // Check for parameter type matching.
-  // This is a copy ctor so we know it's a cv-qualified reference to T.
   QualType ArgType = OperType->getArgType(0);
-  if (ArgType->getPointeeType().isVolatileQualified()) {
-    Diag(MD->getLocation(), diag::err_defaulted_copy_assign_volatile_param);
+  if (!ArgType->isReferenceType()) {
+    Diag(MD->getLocation(), diag::err_defaulted_copy_assign_not_ref);
     HadError = true;
+  } else {
+    if (ArgType->getPointeeType().isVolatileQualified()) {
+      Diag(MD->getLocation(), diag::err_defaulted_copy_assign_volatile_param);
+      HadError = true;
+    }
+    if (ArgType->getPointeeType().isConstQualified() && !Const) {
+      Diag(MD->getLocation(), diag::err_defaulted_copy_assign_const_param);
+      HadError = true;
+    }
   }
-  if (ArgType->getPointeeType().isConstQualified() && !Const) {
-    Diag(MD->getLocation(), diag::err_defaulted_copy_assign_const_param);
-    HadError = true;
-  }
+
   if (OperType->getTypeQuals()) {
     Diag(MD->getLocation(), diag::err_defaulted_copy_assign_quals);
     HadError = true;
@@ -3283,6 +3287,8 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
   if (!LangOpts.CPlusPlus0x)
     return false;
 
+  SourceLocation Loc = CD->getLocation();
+
   // Do access control from the constructor
   ContextRAII CtorContext(*this, CD);
 
@@ -3314,7 +3320,7 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
     CXXDestructorDecl *BaseDtor = LookupDestructor(BaseDecl);
     if (BaseDtor->isDeleted())
       return true;
-    if (CheckDestructorAccess(SourceLocation(), BaseDtor, PDiag()) !=
+    if (CheckDestructorAccess(Loc, BaseDtor, PDiag()) !=
         AR_accessible)
       return true;
 
@@ -3325,8 +3331,7 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
     InitializedEntity BaseEntity =
       InitializedEntity::InitializeBase(Context, BI, 0);
     InitializationKind Kind =
-      InitializationKind::CreateDirect(SourceLocation(), SourceLocation(),
-                                       SourceLocation());
+      InitializationKind::CreateDirect(Loc, Loc, Loc);
 
     InitializationSequence InitSeq(*this, BaseEntity, Kind, 0, 0);
 
@@ -3345,7 +3350,7 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
     CXXDestructorDecl *BaseDtor = LookupDestructor(BaseDecl);
     if (BaseDtor->isDeleted())
       return true;
-    if (CheckDestructorAccess(SourceLocation(), BaseDtor, PDiag()) !=
+    if (CheckDestructorAccess(Loc, BaseDtor, PDiag()) !=
         AR_accessible)
       return true;
 
@@ -3356,8 +3361,7 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
     InitializedEntity BaseEntity =
       InitializedEntity::InitializeBase(Context, BI, BI);
     InitializationKind Kind =
-      InitializationKind::CreateDirect(SourceLocation(), SourceLocation(),
-                                       SourceLocation());
+      InitializationKind::CreateDirect(Loc, Loc, Loc);
 
     InitializationSequence InitSeq(*this, BaseEntity, Kind, 0, 0);
 
@@ -3390,7 +3394,7 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
       CXXDestructorDecl *FieldDtor = LookupDestructor(FieldRecord);
       if (FieldDtor->isDeleted())
         return true;
-      if (CheckDestructorAccess(SourceLocation(), FieldDtor, PDiag()) !=
+      if (CheckDestructorAccess(Loc, FieldDtor, PDiag()) !=
           AR_accessible)
         return true;
 
@@ -3434,8 +3438,7 @@ bool Sema::ShouldDeleteDefaultConstructor(CXXConstructorDecl *CD) {
     InitializedEntity MemberEntity =
       InitializedEntity::InitializeMember(*FI, 0);
     InitializationKind Kind = 
-      InitializationKind::CreateDirect(SourceLocation(), SourceLocation(),
-                                       SourceLocation());
+      InitializationKind::CreateDirect(Loc, Loc, Loc);
     
     InitializationSequence InitSeq(*this, MemberEntity, Kind, 0, 0);
 
@@ -3454,6 +3457,8 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
   assert(!RD->isDependentType() && "do deletion after instantiation");
   if (!LangOpts.CPlusPlus0x)
     return false;
+
+  SourceLocation Loc = CD->getLocation();
 
   // Do access control from the constructor
   ContextRAII CtorContext(*this, CD);
@@ -3491,7 +3496,7 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
     CXXDestructorDecl *BaseDtor = LookupDestructor(BaseDecl);
     if (BaseDtor->isDeleted())
       return true;
-    if (CheckDestructorAccess(SourceLocation(), BaseDtor, PDiag()) !=
+    if (CheckDestructorAccess(Loc, BaseDtor, PDiag()) !=
         AR_accessible)
       return true;
 
@@ -3502,15 +3507,13 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
     InitializedEntity BaseEntity =
       InitializedEntity::InitializeBase(Context, BI, 0);
     InitializationKind Kind =
-      InitializationKind::CreateDirect(SourceLocation(), SourceLocation(),
-                                       SourceLocation());
+      InitializationKind::CreateDirect(Loc, Loc, Loc);
 
     // Construct a fake expression to perform the copy overloading.
     QualType ArgType = BaseType.getUnqualifiedType();
     if (ConstArg)
       ArgType.addConst();
-    Expr *Arg = new (Context) OpaqueValueExpr(SourceLocation(), ArgType,
-                                              VK_LValue);
+    Expr *Arg = new (Context) OpaqueValueExpr(Loc, ArgType, VK_LValue);
 
     InitializationSequence InitSeq(*this, BaseEntity, Kind, &Arg, 1);
 
@@ -3530,7 +3533,7 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
     CXXDestructorDecl *BaseDtor = LookupDestructor(BaseDecl);
     if (BaseDtor->isDeleted())
       return true;
-    if (CheckDestructorAccess(SourceLocation(), BaseDtor, PDiag()) !=
+    if (CheckDestructorAccess(Loc, BaseDtor, PDiag()) !=
         AR_accessible)
       return true;
 
@@ -3541,15 +3544,13 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
     InitializedEntity BaseEntity =
       InitializedEntity::InitializeBase(Context, BI, BI);
     InitializationKind Kind =
-      InitializationKind::CreateDirect(SourceLocation(), SourceLocation(),
-                                       SourceLocation());
+      InitializationKind::CreateDirect(Loc, Loc, Loc);
 
     // Construct a fake expression to perform the copy overloading.
     QualType ArgType = BaseType.getUnqualifiedType();
     if (ConstArg)
       ArgType.addConst();
-    Expr *Arg = new (Context) OpaqueValueExpr(SourceLocation(), ArgType,
-                                              VK_LValue);
+    Expr *Arg = new (Context) OpaqueValueExpr(Loc, ArgType, VK_LValue);
 
     InitializationSequence InitSeq(*this, BaseEntity, Kind, &Arg, 1);
 
@@ -3602,7 +3603,7 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
         CXXDestructorDecl *FieldDtor = LookupDestructor(FieldRecord);
         if (FieldDtor->isDeleted())
           return true;
-        if (CheckDestructorAccess(SourceLocation(), FieldDtor, PDiag()) !=
+        if (CheckDestructorAccess(Loc, FieldDtor, PDiag()) !=
             AR_accessible)
           return true;
       }
@@ -3618,8 +3619,7 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
     }
 
     InitializationKind Kind = 
-      InitializationKind::CreateDirect(SourceLocation(), SourceLocation(),
-                                       SourceLocation());
+      InitializationKind::CreateDirect(Loc, Loc, Loc);
  
     // Construct a fake expression to perform the copy overloading.
     QualType ArgType = FieldType;
@@ -3627,8 +3627,7 @@ bool Sema::ShouldDeleteCopyConstructor(CXXConstructorDecl *CD) {
       ArgType = ArgType->getPointeeType();
     else if (ConstArg)
       ArgType.addConst();
-    Expr *Arg = new (Context) OpaqueValueExpr(SourceLocation(), ArgType,
-                                              VK_LValue);
+    Expr *Arg = new (Context) OpaqueValueExpr(Loc, ArgType, VK_LValue);
    
     InitializationSequence InitSeq(*this, Entities.back(), Kind, &Arg, 1);
 
@@ -3645,6 +3644,8 @@ bool Sema::ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD) {
   if (!LangOpts.CPlusPlus0x)
     return false;
 
+  SourceLocation Loc = MD->getLocation();
+
   // Do access control from the constructor
   ContextRAII MethodContext(*this, MD);
 
@@ -3660,7 +3661,7 @@ bool Sema::ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD) {
 
   DeclarationName OperatorName =
     Context.DeclarationNames.getCXXOperatorName(OO_Equal);
-  LookupResult R(*this, OperatorName, SourceLocation(), LookupOrdinaryName);
+  LookupResult R(*this, OperatorName, Loc, LookupOrdinaryName);
   R.suppressDiagnostics();
 
   // FIXME: We should put some diagnostic logic right into this function.
@@ -3704,18 +3705,16 @@ bool Sema::ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD) {
     QualType ThisType = BaseType;
     if (ConstArg)
       ArgType.addConst();
-    Expr *Args[] = { new (Context) OpaqueValueExpr(SourceLocation(), ThisType,
-                                                   VK_LValue)
-                   , new (Context) OpaqueValueExpr(SourceLocation(), ArgType,
-                                                   VK_LValue)
+    Expr *Args[] = { new (Context) OpaqueValueExpr(Loc, ThisType, VK_LValue)
+                   , new (Context) OpaqueValueExpr(Loc, ArgType, VK_LValue)
                    };
 
-    OverloadCandidateSet OCS((SourceLocation()));
+    OverloadCandidateSet OCS((Loc));
     OverloadCandidateSet::iterator Best;
 
     AddFunctionCandidates(R.asUnresolvedSet(), Args, 2, OCS);
 
-    if (OCS.BestViableFunction(*this, SourceLocation(), Best, false) !=
+    if (OCS.BestViableFunction(*this, Loc, Best, false) !=
         OR_Success)
       return true;
   }
@@ -3751,18 +3750,16 @@ bool Sema::ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD) {
     QualType ThisType = BaseType;
     if (ConstArg)
       ArgType.addConst();
-    Expr *Args[] = { new (Context) OpaqueValueExpr(SourceLocation(), ThisType,
-                                                   VK_LValue)
-                   , new (Context) OpaqueValueExpr(SourceLocation(), ArgType,
-                                                   VK_LValue)
+    Expr *Args[] = { new (Context) OpaqueValueExpr(Loc, ThisType, VK_LValue)
+                   , new (Context) OpaqueValueExpr(Loc, ArgType, VK_LValue)
                    };
 
-    OverloadCandidateSet OCS((SourceLocation()));
+    OverloadCandidateSet OCS((Loc));
     OverloadCandidateSet::iterator Best;
 
     AddFunctionCandidates(R.asUnresolvedSet(), Args, 2, OCS);
 
-    if (OCS.BestViableFunction(*this, SourceLocation(), Best, false) !=
+    if (OCS.BestViableFunction(*this, Loc, Best, false) !=
         OR_Success)
       return true;
   }
@@ -3829,18 +3826,16 @@ bool Sema::ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD) {
       QualType ThisType = FieldType;
       if (ConstArg)
         ArgType.addConst();
-      Expr *Args[] = { new (Context) OpaqueValueExpr(SourceLocation(), ThisType,
-                                                     VK_LValue)
-                     , new (Context) OpaqueValueExpr(SourceLocation(), ArgType,
-                                                     VK_LValue)
+      Expr *Args[] = { new (Context) OpaqueValueExpr(Loc, ThisType, VK_LValue)
+                     , new (Context) OpaqueValueExpr(Loc, ArgType, VK_LValue)
                      };
 
-      OverloadCandidateSet OCS((SourceLocation()));
+      OverloadCandidateSet OCS((Loc));
       OverloadCandidateSet::iterator Best;
 
       AddFunctionCandidates(R.asUnresolvedSet(), Args, 2, OCS);
 
-      if (OCS.BestViableFunction(*this, SourceLocation(), Best, false) !=
+      if (OCS.BestViableFunction(*this, Loc, Best, false) !=
           OR_Success)
         return true;
     }
@@ -3854,6 +3849,8 @@ bool Sema::ShouldDeleteDestructor(CXXDestructorDecl *DD) {
   assert(!RD->isDependentType() && "do deletion after instantiation");
   if (!LangOpts.CPlusPlus0x)
     return false;
+
+  SourceLocation Loc = DD->getLocation();
 
   // Do access control from the destructor
   ContextRAII CtorContext(*this, DD);
@@ -3882,7 +3879,7 @@ bool Sema::ShouldDeleteDestructor(CXXDestructorDecl *DD) {
     //    a destructor that is inaccessible from the defaulted destructor
     if (BaseDtor->isDeleted())
       return true;
-    if (CheckDestructorAccess(SourceLocation(), BaseDtor, PDiag()) !=
+    if (CheckDestructorAccess(Loc, BaseDtor, PDiag()) !=
         AR_accessible)
       return true;
   }
@@ -3898,7 +3895,7 @@ bool Sema::ShouldDeleteDestructor(CXXDestructorDecl *DD) {
     //    a destructor that is inaccessible from the defaulted destructor
     if (BaseDtor->isDeleted())
       return true;
-    if (CheckDestructorAccess(SourceLocation(), BaseDtor, PDiag()) !=
+    if (CheckDestructorAccess(Loc, BaseDtor, PDiag()) !=
         AR_accessible)
       return true;
   }
@@ -3932,7 +3929,7 @@ bool Sema::ShouldDeleteDestructor(CXXDestructorDecl *DD) {
         //    inaccessible from the defaulted destructor
         if (FieldDtor->isDeleted())
           return true;
-        if (CheckDestructorAccess(SourceLocation(), FieldDtor, PDiag()) !=
+        if (CheckDestructorAccess(Loc, FieldDtor, PDiag()) !=
           AR_accessible)
         return true;
         
@@ -3948,7 +3945,7 @@ bool Sema::ShouldDeleteDestructor(CXXDestructorDecl *DD) {
     FunctionDecl *OperatorDelete = 0;
     DeclarationName Name =
       Context.DeclarationNames.getCXXOperatorName(OO_Delete);
-    if (FindDeallocationFunction(SourceLocation(), RD, Name, OperatorDelete,
+    if (FindDeallocationFunction(Loc, RD, Name, OperatorDelete,
           false))
       return true;
   }
@@ -5985,15 +5982,13 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
   
   // Note that we have declared this constructor.
   ++ASTContext::NumImplicitDefaultConstructorsDeclared;
-
-  // Do not delete this yet if we're in a template
-  if (!ClassDecl->isDependentType() &&
-      ShouldDeleteDefaultConstructor(DefaultCon))
-    DefaultCon->setDeletedAsWritten();
   
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(DefaultCon, S, false);
   ClassDecl->addDecl(DefaultCon);
+
+  if (ShouldDeleteDefaultConstructor(DefaultCon))
+    DefaultCon->setDeletedAsWritten();
   
   return DefaultCon;
 }
@@ -6219,18 +6214,18 @@ Sema::ComputeDefaultedDtorExceptionSpec(CXXRecordDecl *ClassDecl) {
     
     if (const RecordType *BaseType = B->getType()->getAs<RecordType>())
       ExceptSpec.CalledDecl(
-                    LookupDestructor(cast<CXXRecordDecl>(BaseType->getDecl())));
+                   LookupDestructor(cast<CXXRecordDecl>(BaseType->getDecl())));
   }
-  
+
   // Virtual base-class destructors.
   for (CXXRecordDecl::base_class_iterator B = ClassDecl->vbases_begin(),
                                        BEnd = ClassDecl->vbases_end();
        B != BEnd; ++B) {
     if (const RecordType *BaseType = B->getType()->getAs<RecordType>())
       ExceptSpec.CalledDecl(
-                    LookupDestructor(cast<CXXRecordDecl>(BaseType->getDecl())));
+                  LookupDestructor(cast<CXXRecordDecl>(BaseType->getDecl())));
   }
-  
+
   // Field destructors.
   for (RecordDecl::field_iterator F = ClassDecl->field_begin(),
                                FEnd = ClassDecl->field_end();
@@ -6238,7 +6233,7 @@ Sema::ComputeDefaultedDtorExceptionSpec(CXXRecordDecl *ClassDecl) {
     if (const RecordType *RecordTy
         = Context.getBaseElementType(F->getType())->getAs<RecordType>())
       ExceptSpec.CalledDecl(
-                    LookupDestructor(cast<CXXRecordDecl>(RecordTy->getDecl())));
+                  LookupDestructor(cast<CXXRecordDecl>(RecordTy->getDecl())));
   }
 
   return ExceptSpec;
@@ -6251,7 +6246,7 @@ CXXDestructorDecl *Sema::DeclareImplicitDestructor(CXXRecordDecl *ClassDecl) {
   //   inline public member of its class.
   
   ImplicitExceptionSpecification Spec =
-   ComputeDefaultedDtorExceptionSpec(ClassDecl); 
+      ComputeDefaultedDtorExceptionSpec(ClassDecl); 
   FunctionProtoType::ExtProtoInfo EPI = Spec.getEPI();
 
   // Create the actual destructor declaration.
@@ -6324,6 +6319,35 @@ void Sema::DefineImplicitDestructor(SourceLocation CurrentLocation,
   if (ASTMutationListener *L = getASTMutationListener()) {
     L->CompletedImplicitDefinition(Destructor);
   }
+}
+
+void Sema::AdjustDestructorExceptionSpec(CXXRecordDecl *classDecl,
+                                         CXXDestructorDecl *destructor) {
+  // C++11 [class.dtor]p3:
+  //   A declaration of a destructor that does not have an exception-
+  //   specification is implicitly considered to have the same exception-
+  //   specification as an implicit declaration.
+  const FunctionProtoType *dtorType = destructor->getType()->
+                                        getAs<FunctionProtoType>();
+  if (dtorType->hasExceptionSpec())
+    return;
+
+  ImplicitExceptionSpecification exceptSpec =
+      ComputeDefaultedDtorExceptionSpec(classDecl);
+
+  // Replace the destructor's type.
+  FunctionProtoType::ExtProtoInfo epi;
+  epi.ExceptionSpecType = exceptSpec.getExceptionSpecType();
+  epi.NumExceptions = exceptSpec.size();
+  epi.Exceptions = exceptSpec.data();
+  QualType ty = Context.getFunctionType(Context.VoidTy, 0, 0, epi);
+
+  destructor->setType(ty);
+
+  // FIXME: If the destructor has a body that could throw, and the newly created
+  // spec doesn't allow exceptions, we should emit a warning, because this
+  // change in behavior can break conforming C++03 programs at runtime.
+  // However, we don't have a body yet, so it needs to be done somewhere else.
 }
 
 /// \brief Builds a statement that copies the given entity from \p From to
@@ -6694,13 +6718,13 @@ CXXMethodDecl *Sema::DeclareImplicitCopyAssignment(CXXRecordDecl *ClassDecl) {
   
   // Note that we have added this copy-assignment operator.
   ++ASTContext::NumImplicitCopyAssignmentOperatorsDeclared;
-  
-  if (ShouldDeleteCopyAssignmentOperator(CopyAssignment))
-    CopyAssignment->setDeletedAsWritten();
 
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(CopyAssignment, S, false);
   ClassDecl->addDecl(CopyAssignment);
+  
+  if (ShouldDeleteCopyAssignmentOperator(CopyAssignment))
+    CopyAssignment->setDeletedAsWritten();
   
   AddOverriddenMethods(ClassDecl, CopyAssignment);
   return CopyAssignment;
@@ -7175,12 +7199,12 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
                                                SC_None, 0);
   CopyConstructor->setParams(&FromParam, 1);
 
-  if (ShouldDeleteCopyConstructor(CopyConstructor))
-    CopyConstructor->setDeletedAsWritten();
-
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(CopyConstructor, S, false);
   ClassDecl->addDecl(CopyConstructor);
+
+  if (ShouldDeleteCopyConstructor(CopyConstructor))
+    CopyConstructor->setDeletedAsWritten();
   
   return CopyConstructor;
 }

@@ -603,9 +603,10 @@ def ext_rvalue_to_reference_access_ctor : ExtWarn<
   AccessControl, InGroup<BindToTemporaryCopy>;
 def err_access_base_ctor : Error<
   "%select{base class|inherited virtual base class}0 %1 has %select{private|"
-  "protected}2 constructor">, AccessControl;
+  "protected}3 %select{|copy }2constructor">, AccessControl;
 def err_access_field_ctor : Error<
-  "field of type %0 has %select{private|protected}1 constructor">, AccessControl;
+  "field of type %0 has %select{private|protected}2 "
+  "%select{|copy }1constructor">, AccessControl;
 
 def err_access_ctor_field :
     Error<"field of type %1 has %select{private|protected}2 constructor">,
@@ -1015,6 +1016,10 @@ def err_enum_redeclare_fixed_mismatch : Error<
   "enumeration previously declared with %select{non|}0fixed underlying type">;
 def err_enum_redeclare_scoped_mismatch : Error<
   "enumeration previously declared as %select{un|}0scoped">;
+def err_only_enums_have_underlying_types : Error<
+  "only enumeration types have underlying types">;
+def err_incomplete_type_no_underlying_type : Error<
+  "an incomplete enumeration type has no underlying type yet">;
 
 // C++0x delegating constructors
 def err_delegation_0x_only : Error<
@@ -3644,6 +3649,9 @@ def err_defaulted_copy_assign_params : Error<
 def err_defaulted_copy_assign_return_type : Error<
   "an explicitly-defaulted copy assignment operator must return an unqualified "
   "lvalue reference to its class type">;
+def err_defaulted_copy_assign_not_ref : Error<
+  "the parameter for an explicitly-defaulted copy assignment operator must be an "
+  "lvalue reference type">;
 def err_defaulted_copy_assign_volatile_param : Error<
   "the parameter for an explicitly-defaulted copy assignment operator may not "
   "be volatile">;

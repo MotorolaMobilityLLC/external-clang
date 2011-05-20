@@ -1768,24 +1768,26 @@ CodeGenModule::GetAddrOfConstantString(const StringLiteral *Literal) {
   if (!ConstantStringClassRef) {
     std::string StringClass(getLangOptions().ObjCConstantStringClass);
     const llvm::Type *Ty = getTypes().ConvertType(getContext().IntTy);
-    Ty = llvm::ArrayType::get(Ty, 0);
     llvm::Constant *GV;
-    if (StringClass.empty())
-      GV = CreateRuntimeVariable(Ty, 
-                                 Features.ObjCNonFragileABI ?
-                                 "OBJC_CLASS_$_NSConstantString" :
-                                 "_NSConstantStringClassReference");
-    else {
-      std::string str;
-      if (Features.ObjCNonFragileABI)
-        str = "OBJC_CLASS_$_" + StringClass;
-      else
-        str = "_" + StringClass + "ClassReference";
-      GV = CreateRuntimeVariable(Ty, str);
+    if (Features.ObjCNonFragileABI) {
+      std::string str = 
+        StringClass.empty() ? "OBJC_CLASS_$_NSConstantString" 
+                            : "OBJC_CLASS_$_" + StringClass;
+      GV = getObjCRuntime().GetClassGlobal(str);
+      // Make sure the result is of the correct type.
+      const llvm::Type *PTy = llvm::PointerType::getUnqual(Ty);
+      ConstantStringClassRef =
+        llvm::ConstantExpr::getBitCast(GV, PTy);
+    } else {
+      std::string str =
+        StringClass.empty() ? "_NSConstantStringClassReference"
+                            : "_" + StringClass + "ClassReference";
+      const llvm::Type *PTy = llvm::ArrayType::get(Ty, 0);
+      GV = CreateRuntimeVariable(PTy, str);
+      // Decay array -> ptr
+      ConstantStringClassRef = 
+        llvm::ConstantExpr::getGetElementPtr(GV, Zeros, 2);
     }
-    // Decay array -> ptr
-    ConstantStringClassRef = 
-    llvm::ConstantExpr::getGetElementPtr(GV, Zeros, 2);
   }
   
   QualType NSTy = getContext().getNSConstantStringType();
