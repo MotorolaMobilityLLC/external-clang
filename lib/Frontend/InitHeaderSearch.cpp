@@ -744,6 +744,13 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple) {
                                 "x86_64-redhat-linux", "", "", triple);
     AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.1.2",
                                 "i386-redhat-linux", "", "", triple);
+      
+    // RHEL 5
+    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.1.1",
+                                "x86_64-redhat-linux", "32", "", triple);
+    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.1.1",
+                                "i386-redhat-linux", "", "", triple);
+
 
     //===------------------------------------------------------------------===//
 
@@ -771,6 +778,11 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple) {
     AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.5",
                                 "x86_64-suse-linux", "", "", triple);
 
+    // openSUSE 12.1
+    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.6",
+                                "i586-suse-linux", "", "", triple);
+    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.6",
+                                "x86_64-suse-linux", "", "", triple);
     // Arch Linux 2008-06-24
     AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.3.1",
                                 "i686-pc-linux-gnu", "", "", triple);

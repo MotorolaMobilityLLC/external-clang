@@ -2864,7 +2864,8 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   switch (DS.getTypeSpecType()) {
   case DeclSpec::TST_typename:
   case DeclSpec::TST_typeofType:
-  case DeclSpec::TST_decltype: {
+  case DeclSpec::TST_decltype:
+  case DeclSpec::TST_underlying_type: {
     // Grab the type from the parser.
     TypeSourceInfo *TSI = 0;
     QualType T = S.GetTypeFromParser(DS.getRepAsType(), &TSI);
@@ -4143,14 +4144,25 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
       // This is a C++ destructor declaration.
       if (DC->isRecord()) {
         R = CheckDestructorDeclarator(D, R, SC);
+        CXXRecordDecl *Record = cast<CXXRecordDecl>(DC);
 
-        NewFD = CXXDestructorDecl::Create(Context,
-                                          cast<CXXRecordDecl>(DC),
+        CXXDestructorDecl *NewDD = CXXDestructorDecl::Create(Context, Record,
                                           D.getSourceRange().getBegin(),
                                           NameInfo, R, TInfo,
                                           isInline,
                                           /*isImplicitlyDeclared=*/false);
+        NewFD = NewDD;
         isVirtualOkay = true;
+
+        // If the class is complete, then we now create the implicit exception
+        // specification. If the class is incomplete or dependent, we can't do
+        // it yet.
+        if (getLangOptions().CPlusPlus0x && !Record->isDependentType() &&
+            Record->getDefinition() && !Record->isBeingDefined() &&
+            R->getAs<FunctionProtoType>()->getExceptionSpecType() == EST_None) {
+          AdjustDestructorExceptionSpec(Record, NewDD);
+        }
+
       } else {
         Diag(D.getIdentifierLoc(), diag::err_destructor_not_member);
 
@@ -8128,6 +8140,11 @@ void Sema::ActOnFields(Scope* S,
           Convs->setAccess(I, (*I)->getAccess());
         
         if (!CXXRecord->isDependentType()) {
+          // Adjust user-defined destructor exception spec.
+          if (getLangOptions().CPlusPlus0x &&
+              CXXRecord->hasUserDeclaredDestructor())
+            AdjustDestructorExceptionSpec(CXXRecord,CXXRecord->getDestructor());
+
           // Add any implicitly-declared members to this class.
           AddImplicitlyDeclaredMembersToClass(CXXRecord);
 
@@ -8176,6 +8193,21 @@ void Sema::ActOnFields(Scope* S,
     
     if (!Completed)
       Record->completeDefinition();
+
+    // Now that the record is complete, do any delayed exception spec checks
+    // we were missing.
+    if (!DelayedDestructorExceptionSpecChecks.empty()) {
+      const CXXDestructorDecl *Dtor =
+              DelayedDestructorExceptionSpecChecks.back().first;
+      if (Dtor->getParent() == Record) {
+        assert(!Dtor->getParent()->isDependentType() &&
+            "Should not ever add destructors of templates into the list.");
+        CheckOverridingFunctionExceptionSpec(Dtor,
+            DelayedDestructorExceptionSpecChecks.back().second);
+        DelayedDestructorExceptionSpecChecks.pop_back();
+      }
+    }
+
   } else {
     ObjCIvarDecl **ClsFields =
       reinterpret_cast<ObjCIvarDecl**>(RecFields.data());
