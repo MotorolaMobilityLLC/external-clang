@@ -502,6 +502,8 @@ def err_static_assert_expression_is_not_constant : Error<
   "static_assert expression is not an integral constant expression">;
 def err_static_assert_failed : Error<"static_assert failed \"%0\"">;
 
+def warn_inline_namespace_reopened_noninline : Warning<
+  "inline namespace cannot be re-opened as a non-inline namespace">;
 def err_inline_namespace_mismatch : Error<
   "%select{|non-}0inline namespace "
   "cannot be reopened as %select{non-|}0inline">;
@@ -580,6 +582,9 @@ def warn_mismatched_exception_spec : ExtWarn<
 def err_override_exception_spec : Error<
   "exception specification of overriding function is more lax than "
   "base version">;
+def warn_override_exception_spec : ExtWarn<
+  "exception specification of overriding function is more lax than "
+  "base version">, InGroup<Microsoft>;
 def err_incompatible_exception_specs : Error<
   "target exception specification is not superset of source">;
 def err_deep_exception_specs_differ : Error<
@@ -594,6 +599,10 @@ def err_class_redeclared_with_different_access : Error<
   "%0 redeclared with '%1' access">;
 def err_access : Error<
   "%1 is a %select{private|protected}0 member of %3">, AccessControl;
+def war_ms_using_declaration_inaccessible : ExtWarn<
+  "using declaration refers to inaccessible member '%0', which refers "
+  "to accessible member '%1', accepted for Microsoft compatibility">,
+    AccessControl, InGroup<Microsoft>;
 def err_access_ctor : Error<
   "calling a %select{private|protected}0 constructor of class %2">, 
   AccessControl;
@@ -1825,6 +1834,8 @@ def err_not_class_template_specialization : Error<
   "parameter}0">;
 def err_function_specialization_in_class : Error<
   "cannot specialize a function %0 within class scope">;
+def err_explicit_specialization_storage_class : Error<
+  "explicit specialization cannot have a storage class">;
 
 // C++ class template specializations and out-of-line definitions
 def err_template_spec_needs_header : Error<
@@ -1981,6 +1992,8 @@ def err_explicit_instantiation_requires_name : Error<
   "explicit instantiation declaration requires a name">;
 def err_explicit_instantiation_of_typedef : Error<
   "explicit instantiation of typedef %0">;
+def err_explicit_instantiation_storage_class : Error<
+  "explicit instantiation cannot have a storage class">;
 def err_explicit_instantiation_not_known : Error<
   "explicit instantiation of %0 does not refer to a function template, member "
   "function, member class, or static data member">;
@@ -3322,8 +3335,8 @@ def err_cannot_pass_objc_interface_to_vararg : Error<
   "%select{function|block|method}1">;
 
 def warn_cannot_pass_non_pod_arg_to_vararg : Warning<
-  "cannot pass object of non-POD type %0 through variadic "
-  "%select{function|block|method|constructor}1; call will abort at runtime">,
+  "cannot pass object of %select{non-POD|non-trivial}0 type %1 through variadic"
+  " %select{function|block|method|constructor}2; call will abort at runtime">,
   InGroup<DiagGroup<"non-pod-varargs">>, DefaultError;
 
 def err_typecheck_call_invalid_ordered_compare : Error<

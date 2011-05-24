@@ -4595,6 +4595,16 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
                                   (HasExplicitTemplateArgs ? &TemplateArgs : 0),
                                                      Previous))
         NewFD->setInvalidDecl();
+      
+      // C++ [dcl.stc]p1:
+      //   A storage-class-specifier shall not be specified in an explicit
+      //   specialization (14.7.3)
+      if (SC != SC_None) {
+        Diag(NewFD->getLocation(), 
+             diag::err_explicit_specialization_storage_class)
+          << FixItHint::CreateRemoval(D.getDeclSpec().getStorageClassSpecLoc());
+      }
+      
     } else if (isExplicitSpecialization && isa<CXXMethodDecl>(NewFD)) {
       if (CheckMemberSpecialization(NewFD, Previous))
           NewFD->setInvalidDecl();
@@ -5616,55 +5626,53 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
       return;
     }
 
-    const RecordType *Record
-      = Context.getBaseElementType(Type)->getAs<RecordType>();
-    if (Record && getLangOptions().CPlusPlus && !getLangOptions().CPlusPlus0x &&
-        cast<CXXRecordDecl>(Record->getDecl())->isPOD()) {
-      // C++03 [dcl.init]p9:
-      //   If no initializer is specified for an object, and the
-      //   object is of (possibly cv-qualified) non-POD class type (or
-      //   array thereof), the object shall be default-initialized; if
-      //   the object is of const-qualified type, the underlying class
-      //   type shall have a user-declared default
-      //   constructor. Otherwise, if no initializer is specified for
-      //   a non- static object, the object and its subobjects, if
-      //   any, have an indeterminate initial value); if the object
-      //   or any of its subobjects are of const-qualified type, the
-      //   program is ill-formed.
-      // C++0x [dcl.init]p11:
-      //   If no initializer is specified for an object, the object is
-      //   default-initialized; [...].
-    } else {
-      // Check for jumps past the implicit initializer.  C++0x
-      // clarifies that this applies to a "variable with automatic
-      // storage duration", not a "local variable".
-      // C++0x [stmt.dcl]p3
-      //   A program that jumps from a point where a variable with automatic
-      //   storage duration is not ins cope to a point where it is in scope is
-      //   ill-formed unless the variable has scalar type, class type with a
-      //   trivial defautl constructor and a trivial destructor, a cv-qualified
-      //   version of one of these types, or an array of one of the preceding
-      //   types and is declared without an initializer.
-      if (getLangOptions().CPlusPlus && Var->hasLocalStorage() && Record) {
+    // Check for jumps past the implicit initializer.  C++0x
+    // clarifies that this applies to a "variable with automatic
+    // storage duration", not a "local variable".
+    // C++0x [stmt.dcl]p3
+    //   A program that jumps from a point where a variable with automatic
+    //   storage duration is not in scope to a point where it is in scope is
+    //   ill-formed unless the variable has scalar type, class type with a
+    //   trivial default constructor and a trivial destructor, a cv-qualified
+    //   version of one of these types, or an array of one of the preceding
+    //   types and is declared without an initializer.
+    if (getLangOptions().CPlusPlus && Var->hasLocalStorage()) {
+      if (const RecordType *Record
+            = Context.getBaseElementType(Type)->getAs<RecordType>()) {
         CXXRecordDecl *CXXRecord = cast<CXXRecordDecl>(Record->getDecl());
-        if (!getLangOptions().CPlusPlus0x ||
-            !CXXRecord->hasTrivialDefaultConstructor() ||
-            !CXXRecord->hasTrivialDestructor())
+        if ((!getLangOptions().CPlusPlus0x && !CXXRecord->isPOD()) ||
+            (getLangOptions().CPlusPlus0x &&
+             (!CXXRecord->hasTrivialDefaultConstructor() ||
+              (!CXXRecord->hasTrivialDestructor()))))
           getCurFunction()->setHasBranchProtectedScope();
       }
-
-      InitializedEntity Entity = InitializedEntity::InitializeVariable(Var);
-      InitializationKind Kind
-        = InitializationKind::CreateDefault(Var->getLocation());
-    
-      InitializationSequence InitSeq(*this, Entity, Kind, 0, 0);
-      ExprResult Init = InitSeq.Perform(*this, Entity, Kind,
-                                        MultiExprArg(*this, 0, 0));
-      if (Init.isInvalid())
-        Var->setInvalidDecl();
-      else if (Init.get())
-        Var->setInit(MaybeCreateExprWithCleanups(Init.get()));
     }
+    
+    // C++03 [dcl.init]p9:
+    //   If no initializer is specified for an object, and the
+    //   object is of (possibly cv-qualified) non-POD class type (or
+    //   array thereof), the object shall be default-initialized; if
+    //   the object is of const-qualified type, the underlying class
+    //   type shall have a user-declared default
+    //   constructor. Otherwise, if no initializer is specified for
+    //   a non- static object, the object and its subobjects, if
+    //   any, have an indeterminate initial value); if the object
+    //   or any of its subobjects are of const-qualified type, the
+    //   program is ill-formed.
+    // C++0x [dcl.init]p11:
+    //   If no initializer is specified for an object, the object is
+    //   default-initialized; [...].
+    InitializedEntity Entity = InitializedEntity::InitializeVariable(Var);
+    InitializationKind Kind
+      = InitializationKind::CreateDefault(Var->getLocation());
+    
+    InitializationSequence InitSeq(*this, Entity, Kind, 0, 0);
+    ExprResult Init = InitSeq.Perform(*this, Entity, Kind,
+                                      MultiExprArg(*this, 0, 0));
+    if (Init.isInvalid())
+      Var->setInvalidDecl();
+    else if (Init.get())
+      Var->setInit(MaybeCreateExprWithCleanups(Init.get()));
 
     CheckCompleteVariableDeclaration(Var);
   }
@@ -8262,7 +8270,7 @@ static bool isRepresentableIntegerValue(ASTContext &Context,
   unsigned BitWidth = Context.getIntWidth(T);
   
   if (Value.isUnsigned() || Value.isNonNegative()) {
-    if (T->isSignedIntegerType()) 
+    if (T->isSignedIntegerOrEnumerationType()) 
       --BitWidth;
     return Value.getActiveBits() <= BitWidth;
   }  
@@ -8285,8 +8293,8 @@ static QualType getNextLargerIntegralType(ASTContext &Context, QualType T) {
   };
   
   unsigned BitWidth = Context.getTypeSize(T);
-  QualType *Types = T->isSignedIntegerType()? SignedIntegralTypes
-                                            : UnsignedIntegralTypes;
+  QualType *Types = T->isSignedIntegerOrEnumerationType()? SignedIntegralTypes
+                                                        : UnsignedIntegralTypes;
   for (unsigned I = 0; I != NumTypes; ++I)
     if (Context.getTypeSize(Types[I]) > BitWidth)
       return Types[I];
@@ -8420,7 +8428,7 @@ EnumConstantDecl *Sema::CheckEnumConstant(EnumDecl *Enum,
         // type that is supposed to be large enough to represent the incremented
         // value, then increment.
         EnumVal = LastEnumConst->getInitVal();
-        EnumVal.setIsSigned(EltTy->isSignedIntegerType());
+        EnumVal.setIsSigned(EltTy->isSignedIntegerOrEnumerationType());
         EnumVal = EnumVal.zextOrTrunc(Context.getIntWidth(EltTy));
         ++EnumVal;        
         
@@ -8444,7 +8452,7 @@ EnumConstantDecl *Sema::CheckEnumConstant(EnumDecl *Enum,
     // Make the enumerator value match the signedness and size of the 
     // enumerator's type.
     EnumVal = EnumVal.zextOrTrunc(Context.getIntWidth(EltTy));
-    EnumVal.setIsSigned(EltTy->isSignedIntegerType());
+    EnumVal.setIsSigned(EltTy->isSignedIntegerOrEnumerationType());
   }
   
   return EnumConstantDecl::Create(Context, Enum, IdLoc, Id, EltTy,
@@ -8702,7 +8710,7 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceLocation LBraceLoc,
     } else {
       NewTy = BestType;
       NewWidth = BestWidth;
-      NewSign = BestType->isSignedIntegerType();
+      NewSign = BestType->isSignedIntegerOrEnumerationType();
     }
 
     // Adjust the APSInt value.

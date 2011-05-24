@@ -1330,10 +1330,11 @@ void Sema::CheckCompatibleReinterpretCast(QualType SrcType, QualType DestType,
     return;
   }
   // or one of the types is a tag type.
-  if (isa<TagType>(SrcTy) || isa<TagType>(DestTy)) {
+  if (SrcTy->getAs<TagType>() || DestTy->getAs<TagType>()) {
     return;
   }
 
+  // FIXME: Scoped enums?
   if ((SrcTy->isUnsignedIntegerType() && DestTy->isSignedIntegerType()) ||
       (SrcTy->isSignedIntegerType() && DestTy->isUnsignedIntegerType())) {
     if (Context.getTypeSize(DestTy) == Context.getTypeSize(SrcTy)) {
