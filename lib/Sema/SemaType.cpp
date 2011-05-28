@@ -836,26 +836,15 @@ static QualType ConvertDeclSpecToType(Sema &S, TypeProcessingState &state) {
     }
     break;
   }
-  case DeclSpec::TST_underlying_type:
-    // FIXME: Preserve type source info?
+  case DeclSpec::TST_underlyingType:
     Result = S.GetTypeFromParser(DS.getRepAsType());
     assert(!Result.isNull() && "Didn't get a type for __underlying_type?");
-    if (!Result->isDependentType()) {
-      if (Result->isEnumeralType()) {
-        EnumDecl *ED = Result->getAs<EnumType>()->getDecl();
-        S.DiagnoseUseOfDecl(ED, DS.getTypeSpecTypeLoc());
-        QualType UnderlyingType = ED->getIntegerType();
-        if (UnderlyingType.isNull()) {
-          declarator.setInvalidType(true);
-          Result = Context.IntTy;
-        } else {
-          Result = UnderlyingType;
-        }
-      } else {
-        S.Diag(DS.getTypeSpecTypeLoc(),
-               diag::err_only_enums_have_underlying_types);
-        Result = Context.IntTy;
-      }
+    Result = S.BuildUnaryTransformType(Result,
+                                       UnaryTransformType::EnumUnderlyingType,
+                                       DS.getTypeSpecTypeLoc());
+    if (Result.isNull()) {
+      Result = Context.IntTy;
+      declarator.setInvalidType(true);
     }
     break; 
 
@@ -2397,6 +2386,16 @@ namespace {
       Sema::GetTypeFromParser(DS.getRepAsType(), &TInfo);
       TL.setUnderlyingTInfo(TInfo);
     }
+    void VisitUnaryTransformTypeLoc(UnaryTransformTypeLoc TL) {
+      // FIXME: This holds only because we only have one unary transform.
+      assert(DS.getTypeSpecType() == DeclSpec::TST_underlyingType);
+      TL.setKWLoc(DS.getTypeSpecTypeLoc());
+      TL.setParensRange(DS.getTypeofParensRange());
+      assert(DS.getRepAsType());
+      TypeSourceInfo *TInfo = 0;
+      Sema::GetTypeFromParser(DS.getRepAsType(), &TInfo);
+      TL.setUnderlyingTInfo(TInfo);
+    }
     void VisitBuiltinTypeLoc(BuiltinTypeLoc TL) {
       // By default, use the source location of the type specifier.
       TL.setBuiltinLoc(DS.getTypeSpecTypeLoc());
@@ -3247,6 +3246,61 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
   } while ((attrs = next));
 }
 
+/// \brief Ensure that the type of the given expression is complete.
+///
+/// This routine checks whether the expression \p E has a complete type. If the
+/// expression refers to an instantiable construct, that instantiation is
+/// performed as needed to complete its type. Furthermore
+/// Sema::RequireCompleteType is called for the expression's type (or in the
+/// case of a reference type, the referred-to type).
+///
+/// \param E The expression whose type is required to be complete.
+/// \param PD The partial diagnostic that will be printed out if the type cannot
+/// be completed.
+///
+/// \returns \c true if the type of \p E is incomplete and diagnosed, \c false
+/// otherwise.
+bool Sema::RequireCompleteExprType(Expr *E, const PartialDiagnostic &PD,
+                                   std::pair<SourceLocation,
+                                             PartialDiagnostic> Note) {
+  QualType T = E->getType();
+
+  // Fast path the case where the type is already complete.
+  if (!T->isIncompleteType())
+    return false;
+
+  // Incomplete array types may be completed by the initializer attached to
+  // their definitions. For static data members of class templates we need to
+  // instantiate the definition to get this initializer and complete the type.
+  if (T->isIncompleteArrayType()) {
+    if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParens())) {
+      if (VarDecl *Var = dyn_cast<VarDecl>(DRE->getDecl())) {
+        if (Var->isStaticDataMember() &&
+            Var->getInstantiatedFromStaticDataMember()) {
+          InstantiateStaticDataMemberDefinition(E->getExprLoc(), Var);
+          // Update the type to the newly instantiated definition's type both
+          // here and within the expression.
+          T = Var->getDefinition()->getType();
+          E->setType(T);
+
+          // We still go on to try to complete the type independently, as it
+          // may also require instantiations or diagnostics if it remains
+          // incomplete.
+        }
+      }
+    }
+  }
+
+  // FIXME: Are there other cases which require instantiating something other
+  // than the type to complete the type of an expression?
+
+  // Look through reference types and complete the referred type.
+  if (const ReferenceType *Ref = T->getAs<ReferenceType>())
+    T = Ref->getPointeeType();
+
+  return RequireCompleteType(E->getExprLoc(), T, PD, Note);
+}
+
 /// @brief Ensure that the type T is a complete type.
 ///
 /// This routine checks whether the type @p T is complete in any
@@ -3396,4 +3450,28 @@ QualType Sema::BuildDecltypeType(Expr *E, SourceLocation Loc) {
   E = ER.take();
   
   return Context.getDecltypeType(E);
+}
+
+QualType Sema::BuildUnaryTransformType(QualType BaseType,
+                                       UnaryTransformType::UTTKind UKind,
+                                       SourceLocation Loc) {
+  switch (UKind) {
+  case UnaryTransformType::EnumUnderlyingType:
+    if (!BaseType->isDependentType() && !BaseType->isEnumeralType()) {
+      Diag(Loc, diag::err_only_enums_have_underlying_types);
+      return QualType();
+    } else {
+      QualType Underlying = BaseType;
+      if (!BaseType->isDependentType()) {
+        EnumDecl *ED = BaseType->getAs<EnumType>()->getDecl();
+        assert(ED && "EnumType has no EnumDecl");
+        DiagnoseUseOfDecl(ED, Loc);
+        Underlying = ED->getIntegerType();
+      }
+      assert(!Underlying.isNull());
+      return Context.getUnaryTransformType(BaseType, Underlying,
+                                        UnaryTransformType::EnumUnderlyingType);
+    }
+  }
+  llvm_unreachable("unknown unary transform type");
 }

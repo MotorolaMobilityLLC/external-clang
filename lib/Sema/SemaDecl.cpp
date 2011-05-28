@@ -1505,18 +1505,19 @@ struct GNUCompatibleParamWarning {
 /// getSpecialMember - get the special member enum for a method.
 Sema::CXXSpecialMember Sema::getSpecialMember(const CXXMethodDecl *MD) {
   if (const CXXConstructorDecl *Ctor = dyn_cast<CXXConstructorDecl>(MD)) {
-    if (Ctor->isCopyConstructor())
-      return Sema::CXXCopyConstructor;
-    
     if (Ctor->isDefaultConstructor())
       return Sema::CXXDefaultConstructor;
-  } 
-  
-  if (isa<CXXDestructorDecl>(MD))
+
+    if (Ctor->isCopyConstructor())
+      return Sema::CXXCopyConstructor;
+
+    if (Ctor->isMoveConstructor())
+      return Sema::CXXMoveConstructor;
+  } else if (isa<CXXDestructorDecl>(MD)) {
     return Sema::CXXDestructor;
-  
-  if (MD->isCopyAssignmentOperator())
+  } else if (MD->isCopyAssignmentOperator()) {
     return Sema::CXXCopyAssignment;
+  }
 
   return Sema::CXXInvalid;
 }
@@ -2865,7 +2866,7 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   case DeclSpec::TST_typename:
   case DeclSpec::TST_typeofType:
   case DeclSpec::TST_decltype:
-  case DeclSpec::TST_underlying_type: {
+  case DeclSpec::TST_underlyingType: {
     // Grab the type from the parser.
     TypeSourceInfo *TSI = 0;
     QualType T = S.GetTypeFromParser(DS.getRepAsType(), &TSI);
@@ -5149,9 +5150,11 @@ namespace {
       if (OrigDecl != ReferenceDecl) return;
       LookupResult Result(S, DRE->getNameInfo(), Sema::LookupOrdinaryName,
                           Sema::NotForRedeclaration);
-      S.Diag(SubExpr->getLocStart(), diag::warn_uninit_self_reference_in_init)
-        << Result.getLookupName() << OrigDecl->getLocation()
-        << SubExpr->getSourceRange();
+      S.DiagRuntimeBehavior(SubExpr->getLocStart(), SubExpr,
+                            S.PDiag(diag::warn_uninit_self_reference_in_init)
+                              << Result.getLookupName() 
+                              << OrigDecl->getLocation()
+                              << SubExpr->getSourceRange());
     }
   };
 }
@@ -5643,7 +5646,7 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
         if ((!getLangOptions().CPlusPlus0x && !CXXRecord->isPOD()) ||
             (getLangOptions().CPlusPlus0x &&
              (!CXXRecord->hasTrivialDefaultConstructor() ||
-              (!CXXRecord->hasTrivialDestructor()))))
+              !CXXRecord->hasTrivialDestructor())))
           getCurFunction()->setHasBranchProtectedScope();
       }
     }
@@ -7734,7 +7737,15 @@ void Sema::DiagnoseNontrivial(const RecordType* T, CXXSpecialMember member) {
   case CXXCopyConstructor:
     if (RD->hasUserDeclaredCopyConstructor()) {
       SourceLocation CtorLoc =
-        RD->getCopyConstructor(Context, 0)->getLocation();
+        RD->getCopyConstructor(0)->getLocation();
+      Diag(CtorLoc, diag::note_nontrivial_user_defined) << QT << member;
+      return;
+    }
+    break;
+
+  case CXXMoveConstructor:
+    if (RD->hasUserDeclaredMoveConstructor()) {
+      SourceLocation CtorLoc = RD->getMoveConstructor()->getLocation();
       Diag(CtorLoc, diag::note_nontrivial_user_defined) << QT << member;
       return;
     }
@@ -7746,6 +7757,14 @@ void Sema::DiagnoseNontrivial(const RecordType* T, CXXSpecialMember member) {
       // assignment, not the type.
       SourceLocation TyLoc = RD->getSourceRange().getBegin();
       Diag(TyLoc, diag::note_nontrivial_user_defined) << QT << member;
+      return;
+    }
+    break;
+
+  case CXXMoveAssignment:
+    if (RD->hasUserDeclaredMoveAssignment()) {
+      SourceLocation AssignLoc = RD->getMoveAssignmentOperator()->getLocation();
+      Diag(AssignLoc, diag::note_nontrivial_user_defined) << QT << member;
       return;
     }
     break;

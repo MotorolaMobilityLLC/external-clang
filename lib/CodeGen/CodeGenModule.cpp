@@ -452,6 +452,9 @@ void CodeGenModule::SetLLVMFunctionAttributes(const Decl *D,
 
 void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
                                                            llvm::Function *F) {
+  if (CodeGenOpts.UnwindTables)
+    F->setHasUWTable();
+
   if (!Features.Exceptions && !Features.ObjCNonFragileABI)
     F->addFnAttr(llvm::Attribute::NoUnwind);
 
@@ -1896,6 +1899,7 @@ static llvm::Constant *GenerateStringLiteral(llvm::StringRef str,
     new llvm::GlobalVariable(CGM.getModule(), C->getType(), constant,
                              llvm::GlobalValue::PrivateLinkage,
                              C, GlobalName);
+  GV->setAlignment(1);
   GV->setUnnamedAddr(true);
   return GV;
 }

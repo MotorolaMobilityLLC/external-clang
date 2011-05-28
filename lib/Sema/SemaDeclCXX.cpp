@@ -457,6 +457,15 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old) {
              diag::err_param_default_argument_member_template_redecl)
           << WhichKind
           << NewParam->getDefaultArgRange();
+      } else if (CXXConstructorDecl *Ctor = dyn_cast<CXXConstructorDecl>(New)) {
+        CXXSpecialMember NewSM = getSpecialMember(Ctor),
+                         OldSM = getSpecialMember(cast<CXXConstructorDecl>(Old));
+        if (NewSM != OldSM) {
+          Diag(NewParam->getLocation(),diag::warn_default_arg_makes_ctor_special)
+            << NewParam->getDefaultArgRange() << NewSM;
+          Diag(Old->getLocation(), diag::note_previous_declaration_special)
+            << OldSM;
+        }
       }
     }
   }
@@ -3024,6 +3033,11 @@ void Sema::CheckExplicitlyDefaultedMethods(CXXRecordDecl *Record) {
         CheckExplicitlyDefaultedCopyAssignment(*MI);
         break;
 
+      case CXXMoveConstructor:
+      case CXXMoveAssignment:
+        Diag(MI->getLocation(), diag::err_defaulted_move_unsupported);
+        break;
+
       default:
         // FIXME: Do moves once they exist
         llvm_unreachable("non-special member explicitly defaulted!");
@@ -3059,7 +3073,7 @@ void Sema::CheckExplicitlyDefaultedDefaultConstructor(CXXConstructorDecl *CD) {
   if (CtorType->hasExceptionSpec()) {
     if (CheckEquivalentExceptionSpec(
           PDiag(diag::err_incorrect_defaulted_exception_spec)
-            << 0 /* default constructor */,
+            << CXXDefaultConstructor,
           PDiag(),
           ExceptionType, SourceLocation(),
           CtorType, CD->getLocation())) {
@@ -3082,7 +3096,7 @@ void Sema::CheckExplicitlyDefaultedDefaultConstructor(CXXConstructorDecl *CD) {
       CD->setDeletedAsWritten();
     } else {
       Diag(CD->getLocation(), diag::err_out_of_line_default_deletes)
-        << 0 /* default constructor */;
+        << CXXDefaultConstructor;
       CD->setInvalidDecl();
     }
   }
@@ -3126,7 +3140,7 @@ void Sema::CheckExplicitlyDefaultedCopyConstructor(CXXConstructorDecl *CD) {
   if (CtorType->hasExceptionSpec()) {
     if (CheckEquivalentExceptionSpec(
           PDiag(diag::err_incorrect_defaulted_exception_spec)
-            << 1 /* copy constructor */,
+            << CXXCopyConstructor,
           PDiag(),
           ExceptionType, SourceLocation(),
           CtorType, CD->getLocation())) {
@@ -3149,7 +3163,7 @@ void Sema::CheckExplicitlyDefaultedCopyConstructor(CXXConstructorDecl *CD) {
       CD->setDeletedAsWritten();
     } else {
       Diag(CD->getLocation(), diag::err_out_of_line_default_deletes)
-        << 1 /* copy constructor */;
+        << CXXCopyConstructor;
       CD->setInvalidDecl();
     }
   }
@@ -3211,7 +3225,7 @@ void Sema::CheckExplicitlyDefaultedCopyAssignment(CXXMethodDecl *MD) {
   if (OperType->hasExceptionSpec()) {
     if (CheckEquivalentExceptionSpec(
           PDiag(diag::err_incorrect_defaulted_exception_spec)
-            << 2 /* copy assignment operator */,
+            << CXXCopyAssignment,
           PDiag(),
           ExceptionType, SourceLocation(),
           OperType, MD->getLocation())) {
@@ -3235,7 +3249,7 @@ void Sema::CheckExplicitlyDefaultedCopyAssignment(CXXMethodDecl *MD) {
       MD->setDeletedAsWritten();
     } else {
       Diag(MD->getLocation(), diag::err_out_of_line_default_deletes)
-        << 2 /* copy assignment operator  */;
+        << CXXCopyAssignment;
       MD->setInvalidDecl();
     }
   }
@@ -3257,7 +3271,7 @@ void Sema::CheckExplicitlyDefaultedDestructor(CXXDestructorDecl *DD) {
   if (DtorType->hasExceptionSpec()) {
     if (CheckEquivalentExceptionSpec(
           PDiag(diag::err_incorrect_defaulted_exception_spec)
-            << 3 /* destructor */,
+            << CXXDestructor,
           PDiag(),
           ExceptionType, SourceLocation(),
           DtorType, DD->getLocation())) {
@@ -3276,7 +3290,7 @@ void Sema::CheckExplicitlyDefaultedDestructor(CXXDestructorDecl *DD) {
       DD->setDeletedAsWritten();
     } else {
       Diag(DD->getLocation(), diag::err_out_of_line_default_deletes)
-        << 3 /* destructor */;
+        << CXXDestructor;
       DD->setInvalidDecl();
     }
   }
@@ -7069,8 +7083,7 @@ Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
     if (!BaseClassDecl->hasDeclaredCopyConstructor())
       DeclareImplicitCopyConstructor(BaseClassDecl);
   
-    HasConstCopyConstructor
-      = BaseClassDecl->hasConstCopyConstructor(Context);
+    HasConstCopyConstructor = BaseClassDecl->hasConstCopyConstructor();
   }
 
   for (CXXRecordDecl::base_class_iterator Base = ClassDecl->vbases_begin(),
@@ -7082,8 +7095,7 @@ Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
     if (!BaseClassDecl->hasDeclaredCopyConstructor())
       DeclareImplicitCopyConstructor(BaseClassDecl);
     
-    HasConstCopyConstructor
-      = BaseClassDecl->hasConstCopyConstructor(Context);
+    HasConstCopyConstructor= BaseClassDecl->hasConstCopyConstructor();
   }
   
   //     -- for all the nonstatic data members of X that are of a
@@ -7101,8 +7113,7 @@ Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
       if (!FieldClassDecl->hasDeclaredCopyConstructor())
         DeclareImplicitCopyConstructor(FieldClassDecl);
 
-      HasConstCopyConstructor
-        = FieldClassDecl->hasConstCopyConstructor(Context);
+      HasConstCopyConstructor = FieldClassDecl->hasConstCopyConstructor();
     }
   }
   //   Otherwise, the implicitly declared copy constructor will have
@@ -7129,7 +7140,7 @@ Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
       DeclareImplicitCopyConstructor(BaseClassDecl);
 
     if (CXXConstructorDecl *CopyConstructor
-                          = BaseClassDecl->getCopyConstructor(Context, Quals))
+                          = BaseClassDecl->getCopyConstructor(Quals))
       ExceptSpec.CalledDecl(CopyConstructor);
   }
   for (CXXRecordDecl::base_class_iterator Base = ClassDecl->vbases_begin(),
@@ -7142,7 +7153,7 @@ Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
       DeclareImplicitCopyConstructor(BaseClassDecl);
 
     if (CXXConstructorDecl *CopyConstructor
-                          = BaseClassDecl->getCopyConstructor(Context, Quals))
+                          = BaseClassDecl->getCopyConstructor(Quals))
       ExceptSpec.CalledDecl(CopyConstructor);
   }
   for (CXXRecordDecl::field_iterator Field = ClassDecl->field_begin(),
@@ -7157,7 +7168,7 @@ Sema::ComputeDefaultedCopyCtorExceptionSpecAndConst(CXXRecordDecl *ClassDecl) {
         DeclareImplicitCopyConstructor(FieldClassDecl);
 
       if (CXXConstructorDecl *CopyConstructor
-                          = FieldClassDecl->getCopyConstructor(Context, Quals))
+                          = FieldClassDecl->getCopyConstructor(Quals))
         ExceptSpec.CalledDecl(CopyConstructor);
     }
   }
@@ -8717,6 +8728,11 @@ void Sema::SetDeclDefaulted(Decl *Dcl, SourceLocation DefaultLoc) {
         DefineImplicitDestructor(DefaultLoc, DD);
       break;
     }
+
+    case CXXMoveConstructor:
+    case CXXMoveAssignment:
+      Diag(Dcl->getLocation(), diag::err_defaulted_move_unsupported);
+      break;
 
     default:
       // FIXME: Do the rest once we have move functions

@@ -60,12 +60,20 @@ Decl *Parser::ParseNamespace(unsigned Context,
 
   SourceLocation IdentLoc;
   IdentifierInfo *Ident = 0;
+  std::vector<SourceLocation> ExtraIdentLoc;
+  std::vector<IdentifierInfo*> ExtraIdent;
+  std::vector<SourceLocation> ExtraNamespaceLoc;
 
   Token attrTok;
 
   if (Tok.is(tok::identifier)) {
     Ident = Tok.getIdentifierInfo();
     IdentLoc = ConsumeToken();  // eat the identifier.
+    while (Tok.is(tok::coloncolon) && NextToken().is(tok::identifier)) {
+      ExtraNamespaceLoc.push_back(ConsumeToken());
+      ExtraIdent.push_back(Tok.getIdentifierInfo());
+      ExtraIdentLoc.push_back(ConsumeToken());
+    }
   }
 
   // Read label attributes, if present.
@@ -85,7 +93,12 @@ Decl *Parser::ParseNamespace(unsigned Context,
     return ParseNamespaceAlias(NamespaceLoc, IdentLoc, Ident, DeclEnd);
   }
 
+
   if (Tok.isNot(tok::l_brace)) {
+    if (!ExtraIdent.empty()) {
+      Diag(ExtraNamespaceLoc[0], diag::err_nested_namespaces_with_double_colon)
+          << SourceRange(ExtraNamespaceLoc.front(), ExtraIdentLoc.back());
+    }
     Diag(Tok, Ident ? diag::err_expected_lbrace :
          diag::err_expected_ident_lbrace);
     return 0;
@@ -96,9 +109,42 @@ Decl *Parser::ParseNamespace(unsigned Context,
   if (getCurScope()->isClassScope() || getCurScope()->isTemplateParamScope() || 
       getCurScope()->isInObjcMethodScope() || getCurScope()->getBlockParent() || 
       getCurScope()->getFnParent()) {
+    if (!ExtraIdent.empty()) {
+      Diag(ExtraNamespaceLoc[0], diag::err_nested_namespaces_with_double_colon)
+          << SourceRange(ExtraNamespaceLoc.front(), ExtraIdentLoc.back());
+    }
     Diag(LBrace, diag::err_namespace_nonnamespace_scope);
     SkipUntil(tok::r_brace, false);
     return 0;
+  }
+
+  if (!ExtraIdent.empty()) {
+    TentativeParsingAction TPA(*this);
+    SkipUntil(tok::r_brace, /*StopAtSemi*/false, /*DontConsume*/true);
+    Token rBraceToken = Tok;
+    TPA.Revert();
+
+    if (!rBraceToken.is(tok::r_brace)) {
+      Diag(ExtraNamespaceLoc[0], diag::err_nested_namespaces_with_double_colon)
+          << SourceRange(ExtraNamespaceLoc.front(), ExtraIdentLoc.back());
+    } else {
+      std::string NamespaceFix;
+      for (std::vector<IdentifierInfo*>::iterator I = ExtraIdent.begin(),
+           E = ExtraIdent.end(); I != E; ++I) {
+        NamespaceFix += " { namespace ";
+        NamespaceFix += (*I)->getName();
+      }
+
+      std::string RBraces;
+      for (unsigned i = 0, e = ExtraIdent.size(); i != e; ++i)
+        RBraces +=  "} ";
+
+      Diag(ExtraNamespaceLoc[0], diag::err_nested_namespaces_with_double_colon)
+          << FixItHint::CreateReplacement(SourceRange(ExtraNamespaceLoc.front(),
+                                                      ExtraIdentLoc.back()),
+                                          NamespaceFix)
+          << FixItHint::CreateInsertion(rBraceToken.getLocation(), RBraces);
+    }
   }
 
   // If we're still good, complain about inline namespaces in non-C++0x now.
@@ -115,21 +161,54 @@ Decl *Parser::ParseNamespace(unsigned Context,
   PrettyDeclStackTraceEntry CrashInfo(Actions, NamespcDecl, NamespaceLoc,
                                       "parsing namespace");
 
-  while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
-    ParsedAttributesWithRange attrs(AttrFactory);
-    MaybeParseCXX0XAttributes(attrs);
-    MaybeParseMicrosoftAttributes(attrs);
-    ParseExternalDeclaration(attrs);
-  }
+  SourceLocation RBraceLoc;
+  // Parse the contents of the namespace.  This includes parsing recovery on 
+  // any improperly nested namespaces.
+  ParseInnerNamespace(ExtraIdentLoc, ExtraIdent, ExtraNamespaceLoc, 0,
+                      InlineLoc, LBrace, attrs, RBraceLoc);
 
   // Leave the namespace scope.
   NamespaceScope.Exit();
 
-  SourceLocation RBraceLoc = MatchRHSPunctuation(tok::r_brace, LBrace);
   Actions.ActOnFinishNamespaceDef(NamespcDecl, RBraceLoc);
 
   DeclEnd = RBraceLoc;
   return NamespcDecl;
+}
+
+/// ParseInnerNamespace - Parse the contents of a namespace.
+void Parser::ParseInnerNamespace(std::vector<SourceLocation>& IdentLoc,
+                                 std::vector<IdentifierInfo*>& Ident,
+                                 std::vector<SourceLocation>& NamespaceLoc,
+                                 unsigned int index, SourceLocation& InlineLoc,
+                                 SourceLocation& LBrace,
+                                 ParsedAttributes& attrs,
+                                 SourceLocation& RBraceLoc) {
+  if (index == Ident.size()) {
+    while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
+      ParsedAttributesWithRange attrs(AttrFactory);
+      MaybeParseCXX0XAttributes(attrs);
+      MaybeParseMicrosoftAttributes(attrs);
+      ParseExternalDeclaration(attrs);
+    }
+    RBraceLoc = MatchRHSPunctuation(tok::r_brace, LBrace);
+
+    return;
+  }
+
+  // Parse improperly nested namespaces.
+  ParseScope NamespaceScope(this, Scope::DeclScope);
+  Decl *NamespcDecl =
+    Actions.ActOnStartNamespaceDef(getCurScope(), SourceLocation(),
+                                   NamespaceLoc[index], IdentLoc[index],
+                                   Ident[index], LBrace, attrs.getList());
+
+  ParseInnerNamespace(IdentLoc, Ident, NamespaceLoc, ++index, InlineLoc,
+                      LBrace, attrs, RBraceLoc);
+
+  NamespaceScope.Exit();
+
+  Actions.ActOnFinishNamespaceDef(NamespcDecl, RBraceLoc);
 }
 
 /// ParseNamespaceAlias - Parse the part after the '=' in a namespace
@@ -603,7 +682,7 @@ void Parser::ParseUnderlyingTypeSpecifier(DeclSpec &DS) {
 
   const char *PrevSpec = 0;
   unsigned DiagID;
-  if (DS.SetTypeSpecType(DeclSpec::TST_underlying_type, StartLoc, PrevSpec,
+  if (DS.SetTypeSpecType(DeclSpec::TST_underlyingType, StartLoc, PrevSpec,
                          DiagID, Result.release()))
     Diag(StartLoc, DiagID) << PrevSpec;
 }
@@ -1929,6 +2008,12 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
     while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
       // Each iteration of this loop reads one member-declaration.
 
+      if (getLang().Microsoft && (Tok.is(tok::kw___if_exists) ||
+          Tok.is(tok::kw___if_not_exists))) {
+        ParseMicrosoftIfExistsClassDeclaration((DeclSpec::TST)TagType, CurAS);
+        continue;
+      }
+
       // Check for extraneous top-level semicolon.
       if (Tok.is(tok::semi)) {
         Diag(Tok, diag::ext_extra_struct_semi)
@@ -2527,4 +2612,65 @@ void Parser::ParseMicrosoftAttributes(ParsedAttributes &attrs,
     if (endLoc) *endLoc = Tok.getLocation();
     ExpectAndConsume(tok::r_square, diag::err_expected_rsquare);
   }
+}
+
+void Parser::ParseMicrosoftIfExistsClassDeclaration(DeclSpec::TST TagType,
+                                                    AccessSpecifier& CurAS) {
+  bool Result;
+  if (ParseMicrosoftIfExistsCondition(Result))
+    return;
+  
+  if (Tok.isNot(tok::l_brace)) {
+    Diag(Tok, diag::err_expected_lbrace);
+    return;
+  }
+  ConsumeBrace();
+
+  // Condition is false skip all inside the {}.
+  if (!Result) {
+    SkipUntil(tok::r_brace, false);
+    return;
+  }
+
+  // Condition is true, parse the declaration.
+  while (Tok.isNot(tok::r_brace)) {
+
+    // __if_exists, __if_not_exists can nest.
+    if ((Tok.is(tok::kw___if_exists) || Tok.is(tok::kw___if_not_exists))) {
+      ParseMicrosoftIfExistsClassDeclaration((DeclSpec::TST)TagType, CurAS);
+      continue;
+    }
+
+    // Check for extraneous top-level semicolon.
+    if (Tok.is(tok::semi)) {
+      Diag(Tok, diag::ext_extra_struct_semi)
+        << DeclSpec::getSpecifierName((DeclSpec::TST)TagType)
+        << FixItHint::CreateRemoval(Tok.getLocation());
+      ConsumeToken();
+      continue;
+    }
+
+    AccessSpecifier AS = getAccessSpecifierIfPresent();
+    if (AS != AS_none) {
+      // Current token is a C++ access specifier.
+      CurAS = AS;
+      SourceLocation ASLoc = Tok.getLocation();
+      ConsumeToken();
+      if (Tok.is(tok::colon))
+        Actions.ActOnAccessSpecifier(AS, ASLoc, Tok.getLocation());
+      else
+        Diag(Tok, diag::err_expected_colon);
+      ConsumeToken();
+      continue;
+    }
+
+    // Parse all the comma separated declarators.
+    ParseCXXClassMemberDeclaration(CurAS);
+  }
+
+  if (Tok.isNot(tok::r_brace)) {
+    Diag(Tok, diag::err_expected_rbrace);
+    return;
+  }
+  ConsumeBrace();
 }
