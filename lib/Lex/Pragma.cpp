@@ -824,9 +824,17 @@ struct PragmaDebugHandler : public PragmaHandler {
     }
   }
 
+// Disable MSVC warning about runtime stack overflow.
+#ifdef _MSC_VER
+    #pragma warning(disable : 4717)
+#endif
   void DebugOverflowStack() {
     DebugOverflowStack();
   }
+#ifdef _MSC_VER
+    #pragma warning(default : 4717)
+#endif
+
 };
 
 /// PragmaDiagnosticHandler - e.g. '#pragma GCC diagnostic ignored "-Wformat"'
@@ -898,8 +906,7 @@ public:
       return;
     }
 
-    std::string WarningName(Literal.GetString(),
-                            Literal.GetString()+Literal.GetStringLength());
+    llvm::StringRef WarningName(Literal.GetString(), Literal.GetStringLength());
 
     if (WarningName.size() < 3 || WarningName[0] != '-' ||
         WarningName[1] != 'W') {
@@ -908,7 +915,7 @@ public:
       return;
     }
 
-    if (PP.getDiagnostics().setDiagnosticGroupMapping(WarningName.c_str()+2,
+    if (PP.getDiagnostics().setDiagnosticGroupMapping(WarningName.substr(2),
                                                       Map, DiagLoc))
       PP.Diag(StrToks[0].getLocation(),
               diag::warn_pragma_diagnostic_unknown_warning) << WarningName;

@@ -1310,7 +1310,9 @@ private:
   StmtResult FuzzyParseMicrosoftAsmStatement(SourceLocation AsmLoc);
   bool ParseMicrosoftIfExistsCondition(bool& Result);
   void ParseMicrosoftIfExistsStatement(StmtVector &Stmts);
-  void ParseMicrosoftIfExistsDeclaration();
+  void ParseMicrosoftIfExistsExternalDeclaration();
+  void ParseMicrosoftIfExistsClassDeclaration(DeclSpec::TST TagType,
+                                              AccessSpecifier& CurAS);
 bool ParseAsmOperandsOpt(llvm::SmallVectorImpl<IdentifierInfo *> &Names,
                            llvm::SmallVectorImpl<ExprTy *> &Constraints,
                            llvm::SmallVectorImpl<ExprTy *> &Exprs);
@@ -1718,6 +1720,12 @@ bool ParseAsmOperandsOpt(llvm::SmallVectorImpl<IdentifierInfo *> &Names,
   
   Decl *ParseNamespace(unsigned Context, SourceLocation &DeclEnd,
                        SourceLocation InlineLoc = SourceLocation());
+  void ParseInnerNamespace(std::vector<SourceLocation>& IdentLoc,
+                           std::vector<IdentifierInfo*>& Ident,
+                           std::vector<SourceLocation>& NamespaceLoc,
+                           unsigned int index, SourceLocation& InlineLoc,
+                           SourceLocation& LBrace, ParsedAttributes& attrs,
+                           SourceLocation& RBraceLoc);
   Decl *ParseLinkage(ParsingDeclSpec &DS, unsigned Context);
   Decl *ParseUsingDirectiveOrDeclaration(unsigned Context,
                                          const ParsedTemplateInfo &TemplateInfo,

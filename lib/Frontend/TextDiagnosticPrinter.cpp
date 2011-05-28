@@ -343,7 +343,7 @@ void TextDiagnosticPrinter::EmitCaretDiagnostic(Diagnostic::Level Level,
       // "included from" lines.
       if (LastWarningLoc != PLoc.getIncludeLoc()) {
         LastWarningLoc = PLoc.getIncludeLoc();
-        PrintIncludeStack(Level, LastWarningLoc, SM);
+        PrintIncludeStack(Diagnostic::Note, LastWarningLoc, SM);
       }
 
       if (DiagOpts->ShowLocation) {
@@ -939,8 +939,8 @@ void TextDiagnosticPrinter::HandleDiagnostic(Diagnostic::Level Level,
         OptionName += "-Werror";
     }
 
-    if (const char *
-          Opt = DiagnosticIDs::getWarningOptionForDiag(Info.getID())) {
+    llvm::StringRef Opt = DiagnosticIDs::getWarningOptionForDiag(Info.getID());
+    if (!Opt.empty()) {
       if (!OptionName.empty())
         OptionName += ',';
       OptionName += "-W";

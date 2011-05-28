@@ -808,12 +808,19 @@ public:
                            const PartialDiagnostic &PD);
   bool RequireCompleteType(SourceLocation Loc, QualType T,
                            unsigned DiagID);
+  bool RequireCompleteExprType(Expr *E, const PartialDiagnostic &PD,
+                               std::pair<SourceLocation,
+                                         PartialDiagnostic> Note);
+
 
   QualType getElaboratedType(ElaboratedTypeKeyword Keyword,
                              const CXXScopeSpec &SS, QualType T);
 
   QualType BuildTypeofExprType(Expr *E, SourceLocation Loc);
   QualType BuildDecltypeType(Expr *E, SourceLocation Loc);
+  QualType BuildUnaryTransformType(QualType BaseType,
+                                   UnaryTransformType::UTTKind UKind,
+                                   SourceLocation Loc);
 
   //===--------------------------------------------------------------------===//
   // Symbol table / Decl tracking callbacks: SemaDecl.cpp.
@@ -1111,11 +1118,13 @@ public:
                             Declarator *D = 0);
 
   enum CXXSpecialMember {
-    CXXInvalid = -1,
-    CXXDefaultConstructor = 0,
-    CXXCopyConstructor = 1,
-    CXXCopyAssignment = 2,
-    CXXDestructor = 3
+    CXXDefaultConstructor,
+    CXXCopyConstructor,
+    CXXMoveConstructor,
+    CXXCopyAssignment,
+    CXXMoveAssignment,
+    CXXDestructor,
+    CXXInvalid
   };
   bool CheckNontrivialField(FieldDecl *FD);
   void DiagnoseNontrivial(const RecordType* Record, CXXSpecialMember mem);
@@ -2206,9 +2215,8 @@ public:
                                             SourceLocation OpLoc,
                                             UnaryExprOrTypeTrait ExprKind,
                                             SourceRange R);
-  ExprResult CreateUnaryExprOrTypeTraitExpr(Expr *E, SourceLocation OpLoc,
-                                            UnaryExprOrTypeTrait ExprKind,
-                                            SourceRange R);
+  ExprResult CreateUnaryExprOrTypeTraitExpr(Expr *E,
+                                            UnaryExprOrTypeTrait ExprKind);
   ExprResult
     ActOnUnaryExprOrTypeTraitExpr(SourceLocation OpLoc,
                                   UnaryExprOrTypeTrait ExprKind,
@@ -2216,8 +2224,9 @@ public:
                                   const SourceRange &ArgRange);
 
   ExprResult CheckPlaceholderExpr(Expr *E);
-  bool CheckVecStepExpr(Expr *E, SourceLocation OpLoc, SourceRange R);
+  bool CheckVecStepExpr(Expr *E);
 
+  bool CheckUnaryExprOrTypeTraitOperand(Expr *E, UnaryExprOrTypeTrait ExprKind);
   bool CheckUnaryExprOrTypeTraitOperand(QualType type, SourceLocation OpLoc,
                                         SourceRange R,
                                         UnaryExprOrTypeTrait ExprKind);
