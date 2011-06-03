@@ -2215,7 +2215,7 @@ public:
                                             SourceLocation OpLoc,
                                             UnaryExprOrTypeTrait ExprKind,
                                             SourceRange R);
-  ExprResult CreateUnaryExprOrTypeTraitExpr(Expr *E,
+  ExprResult CreateUnaryExprOrTypeTraitExpr(Expr *E, SourceLocation OpLoc,
                                             UnaryExprOrTypeTrait ExprKind);
   ExprResult
     ActOnUnaryExprOrTypeTraitExpr(SourceLocation OpLoc,
@@ -4658,7 +4658,7 @@ public:
   /// types, static variables, enumerators, etc.
   std::deque<PendingImplicitInstantiation> PendingLocalImplicitInstantiations;
 
-  bool PerformPendingInstantiations(bool LocalOnly = false);
+  void PerformPendingInstantiations(bool LocalOnly = false);
 
   TypeSourceInfo *SubstType(TypeSourceInfo *T,
                             const MultiLevelTemplateArgumentList &TemplateArgs,

@@ -3262,7 +3262,8 @@ Sema::CreateUnaryExprOrTypeTraitExpr(TypeSourceInfo *TInfo,
 /// \brief Build a sizeof or alignof expression given an expression
 /// operand.
 ExprResult
-Sema::CreateUnaryExprOrTypeTraitExpr(Expr *E, UnaryExprOrTypeTrait ExprKind) {
+Sema::CreateUnaryExprOrTypeTraitExpr(Expr *E, SourceLocation OpLoc,
+                                     UnaryExprOrTypeTrait ExprKind) {
   // Verify that the operand is valid.
   bool isInvalid = false;
   if (E->isTypeDependent()) {
@@ -3277,7 +3278,7 @@ Sema::CreateUnaryExprOrTypeTraitExpr(Expr *E, UnaryExprOrTypeTrait ExprKind) {
   } else if (E->getType()->isPlaceholderType()) {
     ExprResult PE = CheckPlaceholderExpr(E);
     if (PE.isInvalid()) return ExprError();
-    return CreateUnaryExprOrTypeTraitExpr(PE.take(), ExprKind);
+    return CreateUnaryExprOrTypeTraitExpr(PE.take(), OpLoc, ExprKind);
   } else {
     isInvalid = CheckUnaryExprOrTypeTraitOperand(E, UETT_SizeOf);
   }
@@ -3287,7 +3288,7 @@ Sema::CreateUnaryExprOrTypeTraitExpr(Expr *E, UnaryExprOrTypeTrait ExprKind) {
 
   // C99 6.5.3.4p4: the type (an unsigned integer type) is size_t.
   return Owned(new (Context) UnaryExprOrTypeTraitExpr(
-      ExprKind, E, Context.getSizeType(), E->getExprLoc(),
+      ExprKind, E, Context.getSizeType(), OpLoc,
       E->getSourceRange().getEnd()));
 }
 
@@ -3308,13 +3309,7 @@ Sema::ActOnUnaryExprOrTypeTraitExpr(SourceLocation OpLoc,
   }
 
   Expr *ArgEx = (Expr *)TyOrEx;
-
-  // Make sure the location is accurately represented in the Expr node.
-  // FIXME: Is this really needed?
-  assert(ArgEx->getExprLoc() != OpLoc && "Mismatched locations");
-
-  ExprResult Result = CreateUnaryExprOrTypeTraitExpr(ArgEx, ExprKind);
-
+  ExprResult Result = CreateUnaryExprOrTypeTraitExpr(ArgEx, OpLoc, ExprKind);
   return move(Result);
 }
 
@@ -7541,7 +7536,7 @@ QualType Sema::CheckCompareOperands(ExprResult &lex, ExprResult &rex, SourceLoca
     // Comparison of pointers with null pointer constants and equality
     // comparisons of member pointers to null pointer constants.
     if (RHSIsNull &&
-        ((lType->isPointerType() || lType->isNullPtrType()) ||
+        ((lType->isAnyPointerType() || lType->isNullPtrType()) ||
          (!isRelational && lType->isMemberPointerType()))) {
       rex = ImpCastExprToType(rex.take(), lType, 
                         lType->isMemberPointerType()
@@ -7550,7 +7545,7 @@ QualType Sema::CheckCompareOperands(ExprResult &lex, ExprResult &rex, SourceLoca
       return ResultTy;
     }
     if (LHSIsNull &&
-        ((rType->isPointerType() || rType->isNullPtrType()) ||
+        ((rType->isAnyPointerType() || rType->isNullPtrType()) ||
          (!isRelational && rType->isMemberPointerType()))) {
       lex = ImpCastExprToType(lex.take(), rType, 
                         rType->isMemberPointerType()
@@ -7802,13 +7797,15 @@ inline QualType Sema::CheckLogicalOperands( // C99 6.5.[13,14]
     // If the RHS can be constant folded, and if it constant folds to something
     // that isn't 0 or 1 (which indicate a potential logical operation that
     // happened to fold to true/false) then warn.
+    // Parens on the RHS are ignored.
     Expr::EvalResult Result;
-    if (rex.get()->Evaluate(Result, Context) && !Result.HasSideEffects &&
-        Result.Val.getInt() != 0 && Result.Val.getInt() != 1) {
-      Diag(Loc, diag::warn_logical_instead_of_bitwise)
-       << rex.get()->getSourceRange()
-        << (Opc == BO_LAnd ? "&&" : "||")
-        << (Opc == BO_LAnd ? "&" : "|");
+    if (rex.get()->Evaluate(Result, Context) && !Result.HasSideEffects)
+      if ((getLangOptions().Bool && !rex.get()->getType()->isBooleanType()) ||
+          (Result.Val.getInt() != 0 && Result.Val.getInt() != 1)) {
+        Diag(Loc, diag::warn_logical_instead_of_bitwise)
+          << rex.get()->getSourceRange()
+          << (Opc == BO_LAnd ? "&&" : "||")
+          << (Opc == BO_LAnd ? "&" : "|");
     }
   }
   

@@ -1378,7 +1378,7 @@ public:
                                          UnaryExprOrTypeTrait ExprKind,
                                          SourceRange R) {
     ExprResult Result
-      = getSema().CreateUnaryExprOrTypeTraitExpr(SubExpr, ExprKind);
+      = getSema().CreateUnaryExprOrTypeTraitExpr(SubExpr, OpLoc, ExprKind);
     if (Result.isInvalid())
       return ExprError();
 
@@ -7516,6 +7516,7 @@ TreeTransform<Derived>::TransformUnresolvedMemberExpr(UnresolvedMemberExpr *Old)
 template<typename Derived>
 ExprResult
 TreeTransform<Derived>::TransformCXXNoexceptExpr(CXXNoexceptExpr *E) {
+  EnterExpressionEvaluationContext Unevaluated(SemaRef, Sema::Unevaluated);
   ExprResult SubExpr = getDerived().TransformExpr(E->getOperand());
   if (SubExpr.isInvalid())
     return ExprError();
