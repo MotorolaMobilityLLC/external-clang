@@ -1178,6 +1178,8 @@ def warn_attribute_void_function_method : Warning<
   "%select{functions|Objective-C method}1 without return value">;
 def warn_attribute_weak_on_field : Warning<
   "__weak attribute cannot be specified on a field declaration">;
+def warn_gc_attribute_weak_on_local : Warning<
+  "Objective-C GC does not allow weak variables on the stack">;
 def warn_attribute_weak_on_local : Warning<
   "__weak attribute cannot be specified on an automatic variable">;
 def warn_weak_identifier_undeclared : Warning<
@@ -1416,7 +1418,7 @@ def err_uninitialized_member_in_ctor : Error<
   "the %select{reference|const}2 member %3">;
 def warn_default_arg_makes_ctor_special : Warning<
   "addition of default argument on redeclaration makes this constructor a "
-  "%select{default|copy|move}0 constructor">;
+  "%select{default|copy|move}0 constructor">, InGroup<DefaultArgSpecialMember>;
 def note_previous_declaration_special : Note<
   // The ERRORs are in hopes that if they occur, they'll get reported.
   "previous declaration was %select{*ERROR*|a copy constructor|a move "
@@ -1892,6 +1894,9 @@ def note_explicit_template_spec_does_not_need_header : Note<
 def err_template_qualified_declarator_no_match : Error<
   "nested name specifier '%0' for declaration does not refer into a class, "
   "class template or class template partial specialization">;
+def err_specialize_member_of_template : Error<
+  "cannot specialize (with 'template<>') a member of an unspecialized "
+  "template">;
 
 // C++ Class Template Partial Specialization
 def err_default_arg_in_partial_spec : Error<
@@ -2044,7 +2049,7 @@ def note_explicit_instantiation_candidate : Note<
   "explicit instantiation candidate function template here %0">;
 def err_explicit_instantiation_inline : Error<
   "explicit instantiation cannot be 'inline'">;
-def ext_explicit_instantiation_without_qualified_id : ExtWarn<
+def ext_explicit_instantiation_without_qualified_id : Extension<
   "qualifier in explicit instantiation of %q0 requires a template-id "
   "(a typedef is not permitted)">;
 def err_explicit_instantiation_unqualified_wrong_namespace : Error<
@@ -2172,6 +2177,10 @@ def err_unexpected_namespace : Error<
 def err_undeclared_var_use : Error<"use of undeclared identifier %0">;
 def note_dependent_var_use : Note<"must qualify identifier to find this "
     "declaration in dependent base class">;
+def err_not_found_by_two_phase_lookup : Error<"call to function %0 that is neither "
+    "visible in the template definition nor found by argument dependent lookup">;
+def note_not_found_by_two_phase_lookup : Note<"%0 should be declared prior to the "
+    "call site%select{| or in %2| or in an associated namespace of one of its arguments}1">;
 def err_undeclared_use : Error<"use of undeclared %0">;
 def warn_deprecated : Warning<"%0 is deprecated">,
     InGroup<DeprecatedDeclarations>;
@@ -2259,9 +2268,15 @@ def err_nested_redefinition : Error<"nested redefinition of %0">;
 def err_use_with_wrong_tag : Error<
   "use of %0 with tag type that does not match previous declaration">;
 def warn_struct_class_tag_mismatch : Warning<
-    "%select{struct|class}0 %select{|template}1 %2 was previously declared "
-    "as a %select{class|struct}0 %select{|template}1">,
+    "%select{struct|class}0%select{| template}1 %2 was previously declared "
+    "as a %select{class|struct}0%select{| template}1">,
     InGroup<MismatchedTags>, DefaultIgnore;
+def warn_struct_class_previous_tag_mismatch : Warning<
+    "%2 defined as a %select{struct|class}0%select{| template}1 here but "
+    "previously declared as a %select{class|struct}0%select{| template}1">,
+     InGroup<MismatchedTags>, DefaultIgnore;
+def note_struct_class_suggestion : Note<
+    "did you mean %select{struct|class}0 here?">;
 def ext_forward_ref_enum : Extension<
   "ISO C forbids forward references to 'enum' types">;
 def err_forward_ref_enum : Error<
@@ -2559,6 +2574,14 @@ def warn_precedence_bitwise_rel : Warning<
 def note_precedence_bitwise_first : Note<
   "place parentheses around the %0 expression to evaluate it first">;
 def note_precedence_bitwise_silence : Note<
+  "place parentheses around the %0 expression to silence this warning">;
+
+def warn_precedence_conditional : Warning<
+  "?: has lower precedence than %0; %0 will be evaluated first">,
+  InGroup<Parentheses>;
+def note_precedence_conditional_first : Note<
+  "place parentheses around the ?: expression to evaluate it first">;
+def note_precedence_conditional_silence : Note<
   "place parentheses around the %0 expression to silence this warning">;
 
 def warn_logical_instead_of_bitwise : Warning<
@@ -4087,6 +4110,10 @@ def err_unknown_any_var_function_type : Error<
 
 def err_filter_expression_integral : Error<
   "filter expression type should be an integral value not %0">;
+
+// OpenCL warnings and errors.
+def err_invalid_astype_of_different_size : Error<
+  "invalid reinterpretation: sizes of %0 and %1 must match">;
 
 } // end of sema category
 

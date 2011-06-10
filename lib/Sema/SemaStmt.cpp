@@ -1531,12 +1531,11 @@ Sema::PerformMoveOrCopyInitialization(const InitializedEntity &Entity,
     //   parameter of the selected constructor is not an rvalue reference
     //   to the object's type (possibly cv-qualified), overload resolution
     //   is performed again, considering the object as an lvalue.
-    if (Seq.getKind() != InitializationSequence::FailedSequence) {
+    if (Seq) {
       for (InitializationSequence::step_iterator Step = Seq.step_begin(),
            StepEnd = Seq.step_end();
            Step != StepEnd; ++Step) {
-        if (Step->Kind
-            != InitializationSequence::SK_ConstructorInitialization)
+        if (Step->Kind != InitializationSequence::SK_ConstructorInitialization)
           continue;
 
         CXXConstructorDecl *Constructor
@@ -1589,14 +1588,18 @@ Sema::ActOnBlockReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
       if (Result.isInvalid())
         return StmtError();
       RetValExp = Result.take();
-      CurBlock->ReturnType = RetValExp->getType();
-      if (BlockDeclRefExpr *CDRE = dyn_cast<BlockDeclRefExpr>(RetValExp)) {
-        // We have to remove a 'const' added to copied-in variable which was
-        // part of the implementation spec. and not the actual qualifier for
-        // the variable.
-        if (CDRE->isConstQualAdded())
-          CurBlock->ReturnType.removeLocalConst(); // FIXME: local???
-      }
+
+      if (!RetValExp->isTypeDependent()) {
+        CurBlock->ReturnType = RetValExp->getType();
+        if (BlockDeclRefExpr *CDRE = dyn_cast<BlockDeclRefExpr>(RetValExp)) {
+          // We have to remove a 'const' added to copied-in variable which was
+          // part of the implementation spec. and not the actual qualifier for
+          // the variable.
+          if (CDRE->isConstQualAdded())
+            CurBlock->ReturnType.removeLocalConst(); // FIXME: local???
+        }
+      } else
+        CurBlock->ReturnType = Context.DependentTy;
     } else
       CurBlock->ReturnType = Context.VoidTy;
   }
@@ -1613,13 +1616,17 @@ Sema::ActOnBlockReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
   // compatibility to worry about here.
   ReturnStmt *Result = 0;
   if (CurBlock->ReturnType->isVoidType()) {
-    if (RetValExp) {
+    if (RetValExp && !RetValExp->isTypeDependent() &&
+        (!getLangOptions().CPlusPlus || !RetValExp->getType()->isVoidType())) {
       Diag(ReturnLoc, diag::err_return_block_has_expr);
       RetValExp = 0;
     }
     Result = new (Context) ReturnStmt(ReturnLoc, RetValExp, 0);
   } else if (!RetValExp) {
-    return StmtError(Diag(ReturnLoc, diag::err_block_return_missing_expr));
+    if (!CurBlock->ReturnType->isDependentType())
+      return StmtError(Diag(ReturnLoc, diag::err_block_return_missing_expr));
+
+    Result = new (Context) ReturnStmt(ReturnLoc, 0, 0);
   } else {
     const VarDecl *NRVOCandidate = 0;
 
@@ -1658,7 +1665,7 @@ Sema::ActOnBlockReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
 
   // If we need to check for the named return value optimization, save the
   // return statement in our scope for later processing.
-  if (getLangOptions().CPlusPlus && FnRetType->isRecordType() &&
+  if (getLangOptions().CPlusPlus && FnRetType->isRecordType() && 
       !CurContext->isDependentContext())
     FunctionScopes.back()->Returns.push_back(Result);
 

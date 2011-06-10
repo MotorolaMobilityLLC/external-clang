@@ -3850,8 +3850,12 @@ void Sema::CheckVariableDeclaration(VarDecl *NewVD,
   }
 
   if (NewVD->hasLocalStorage() && T.isObjCGCWeak()
-      && !NewVD->hasAttr<BlocksAttr>())
-    Diag(NewVD->getLocation(), diag::warn_attribute_weak_on_local);
+      && !NewVD->hasAttr<BlocksAttr>()) {
+    if (getLangOptions().getGCMode() != LangOptions::NonGC)
+      Diag(NewVD->getLocation(), diag::warn_gc_attribute_weak_on_local);
+    else
+      Diag(NewVD->getLocation(), diag::warn_attribute_weak_on_local);
+  }
   
   bool isVM = T->isVariablyModifiedType();
   if (isVM || NewVD->hasAttr<CleanupAttr>() ||
@@ -4516,8 +4520,8 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
 
   if (!getLangOptions().CPlusPlus) {
     // Perform semantic checking on the function declaration.
-    bool isExplctSpecialization=false;
-    CheckFunctionDeclaration(S, NewFD, Previous, isExplctSpecialization,
+    bool isExplicitSpecialization=false;
+    CheckFunctionDeclaration(S, NewFD, Previous, isExplicitSpecialization,
                              Redeclaration);
     assert((NewFD->isInvalidDecl() || !Redeclaration ||
             Previous.getResultKind() != LookupResult::FoundOverloaded) &&
@@ -4540,7 +4544,9 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
     
       HasExplicitTemplateArgs = true;
     
-      if (FunctionTemplate) {
+      if (NewFD->isInvalidDecl()) {
+        HasExplicitTemplateArgs = false;
+      } else if (FunctionTemplate) {
         // Function template with explicit template arguments.
         Diag(D.getIdentifierLoc(), diag::err_function_template_partial_spec)
           << SourceRange(TemplateId->LAngleLoc, TemplateId->RAngleLoc);
@@ -6593,7 +6599,7 @@ TypedefDecl *Sema::ParseTypedefDecl(Scope *S, Declarator &D, QualType T,
 ///
 /// \returns true if the new tag kind is acceptable, false otherwise.
 bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
-                                        TagTypeKind NewTag,
+                                        TagTypeKind NewTag, bool isDefinition,
                                         SourceLocation NewTagLoc,
                                         const IdentifierInfo &Name) {
   // C++ [dcl.type.elab]p3:
@@ -6610,8 +6616,9 @@ bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
   //   struct class-key shall be used to refer to a class (clause 9)
   //   declared using the class or struct class-key.
   TagTypeKind OldTag = Previous->getTagKind();
-  if (OldTag == NewTag)
-    return true;
+  if (!isDefinition || (NewTag != TTK_Class && NewTag != TTK_Struct))
+    if (OldTag == NewTag)
+      return true;
 
   if ((OldTag == TTK_Struct || OldTag == TTK_Class) &&
       (NewTag == TTK_Struct || NewTag == TTK_Class)) {
@@ -6620,12 +6627,63 @@ bool Sema::isAcceptableTagRedeclaration(const TagDecl *Previous,
     if (const CXXRecordDecl *Record = dyn_cast<CXXRecordDecl>(Previous))
       isTemplate = Record->getDescribedClassTemplate();
 
+    if (!ActiveTemplateInstantiations.empty()) {
+      // In a template instantiation, do not offer fix-its for tag mismatches
+      // since they usually mess up the template instead of fixing the problem.
+      Diag(NewTagLoc, diag::warn_struct_class_tag_mismatch)
+        << (NewTag == TTK_Class) << isTemplate << &Name;
+      return true;
+    }
+
+    if (isDefinition) {
+      // On definitions, check previous tags and issue a fix-it for each
+      // one that doesn't match the current tag.
+      if (Previous->getDefinition()) {
+        // Don't suggest fix-its for redefinitions.
+        return true;
+      }
+
+      bool previousMismatch = false;
+      for (TagDecl::redecl_iterator I(Previous->redecls_begin()),
+           E(Previous->redecls_end()); I != E; ++I) {
+        if (I->getTagKind() != NewTag) {
+          if (!previousMismatch) {
+            previousMismatch = true;
+            Diag(NewTagLoc, diag::warn_struct_class_previous_tag_mismatch)
+              << (NewTag == TTK_Class) << isTemplate << &Name;
+          }
+          Diag(I->getInnerLocStart(), diag::note_struct_class_suggestion)
+            << (NewTag == TTK_Class)
+            << FixItHint::CreateReplacement(I->getInnerLocStart(),
+                                            NewTag == TTK_Class?
+                                            "class" : "struct");
+        }
+      }
+      return true;
+    }
+
+    // Check for a previous definition.  If current tag and definition
+    // are same type, do nothing.  If no definition, but disagree with
+    // with previous tag type, give a warning, but no fix-it.
+    const TagDecl *Redecl = Previous->getDefinition() ?
+                            Previous->getDefinition() : Previous;
+    if (Redecl->getTagKind() == NewTag) {
+      return true;
+    }
+
     Diag(NewTagLoc, diag::warn_struct_class_tag_mismatch)
       << (NewTag == TTK_Class)
-      << isTemplate << &Name
-      << FixItHint::CreateReplacement(SourceRange(NewTagLoc),
-                              OldTag == TTK_Class? "class" : "struct");
-    Diag(Previous->getLocation(), diag::note_previous_use);
+      << isTemplate << &Name;
+    Diag(Redecl->getLocation(), diag::note_previous_use);
+
+    // If there is a previous defintion, suggest a fix-it.
+    if (Previous->getDefinition()) {
+        Diag(NewTagLoc, diag::note_struct_class_suggestion)
+          << (Redecl->getTagKind() == TTK_Class)
+          << FixItHint::CreateReplacement(SourceRange(NewTagLoc),
+                        Redecl->getTagKind() == TTK_Class? "class" : "struct");
+    }
+
     return true;
   }
   return false;
@@ -6951,7 +7009,9 @@ Decl *Sema::ActOnTag(Scope *S, unsigned TagSpec, TagUseKind TUK,
           isDeclInScope(PrevDecl, SearchDC, S, isExplicitSpecialization)) {
         // Make sure that this wasn't declared as an enum and now used as a
         // struct or something similar.
-        if (!isAcceptableTagRedeclaration(PrevTagDecl, Kind, KWLoc, *Name)) {
+        if (!isAcceptableTagRedeclaration(PrevTagDecl, Kind,
+                                          TUK == TUK_Definition, KWLoc,
+                                          *Name)) {
           bool SafeToContinue
             = (PrevTagDecl->getTagKind() != TTK_Enum &&
                Kind != TTK_Enum);
