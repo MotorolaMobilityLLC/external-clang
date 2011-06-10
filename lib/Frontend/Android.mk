@@ -28,7 +28,6 @@ clang_frontend_SRC_FILES := \
   CompilerInvocation.cpp \
   CreateInvocationFromCommandLine.cpp \
   DependencyFile.cpp \
-  DiagChecker.cpp \
   FrontendAction.cpp \
   FrontendActions.cpp \
   FrontendOptions.cpp \
