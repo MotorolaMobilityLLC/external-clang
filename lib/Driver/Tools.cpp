@@ -3460,6 +3460,8 @@ void freebsd::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
   if (getToolChain().getArchName() == "i386")
     CmdArgs.push_back("--32");
 
+  if (getToolChain().getArchName() == "powerpc")
+    CmdArgs.push_back("-a32");
 
   // Set byte order explicitly
   if (getToolChain().getArchName() == "mips")
@@ -3514,6 +3516,11 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
   if (getToolChain().getArchName() == "i386") {
     CmdArgs.push_back("-m");
     CmdArgs.push_back("elf_i386_fbsd");
+  }
+
+  if (getToolChain().getArchName() == "powerpc") {
+    CmdArgs.push_back("-m");
+    CmdArgs.push_back("elf32ppc");
   }
 
   if (Output.isFilename()) {
@@ -3744,7 +3751,6 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
     }
     // FIXME: For some reason GCC passes -lgcc and -lgcc_s before adding
     // the default system libraries. Just mimic this for now.
-    CmdArgs.push_back("-lgcc");
     if (Args.hasArg(options::OPT_static)) {
       CmdArgs.push_back("-lgcc_eh");
     } else {
@@ -3752,6 +3758,7 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
       CmdArgs.push_back("-lgcc_s");
       CmdArgs.push_back("--no-as-needed");
     }
+    CmdArgs.push_back("-lgcc");
 
     if (Args.hasArg(options::OPT_pthread))
       CmdArgs.push_back("-lpthread");
@@ -3945,10 +3952,10 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back("-lm");
   }
 
-  if (Args.hasArg(options::OPT_static))
-    CmdArgs.push_back("--start-group");
-
   if (!Args.hasArg(options::OPT_nostdlib)) {
+    if (Args.hasArg(options::OPT_static))
+      CmdArgs.push_back("--start-group");
+
     if (!D.CCCIsCXX)
       CmdArgs.push_back("-lgcc");
 

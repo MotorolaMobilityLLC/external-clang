@@ -1396,27 +1396,30 @@ bool Sema::FindAllocationOverload(SourceLocation StartLoc, SourceRange Range,
   }
 
   case OR_No_Viable_Function:
-    if (Diagnose)
+    if (Diagnose) {
       Diag(StartLoc, diag::err_ovl_no_viable_function_in_call)
         << Name << Range;
-    Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
+      Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
+    }
     return true;
 
   case OR_Ambiguous:
-    if (Diagnose)
+    if (Diagnose) {
       Diag(StartLoc, diag::err_ovl_ambiguous_call)
         << Name << Range;
-    Candidates.NoteCandidates(*this, OCD_ViableCandidates, Args, NumArgs);
+      Candidates.NoteCandidates(*this, OCD_ViableCandidates, Args, NumArgs);
+    }
     return true;
 
   case OR_Deleted: {
-    if (Diagnose)
+    if (Diagnose) {
       Diag(StartLoc, diag::err_ovl_deleted_call)
         << Best->Function->isDeleted()
         << Name 
         << getDeletedOrUnavailableSuffix(Best->Function)
         << Range;
-    Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
+      Candidates.NoteCandidates(*this, OCD_AllCandidates, Args, NumArgs);
+    }
     return true;
   }
   }
@@ -2889,7 +2892,7 @@ static bool EvaluateBinaryTypeTrait(Sema &Self, BinaryTypeTrait BTT,
     Sema::SFINAETrap SFINAE(Self, /*AccessCheckingSFINAE=*/true);
     Sema::ContextRAII TUContext(Self, Self.Context.getTranslationUnitDecl());
     InitializationSequence Init(Self, To, Kind, &FromPtr, 1);
-    if (Init.getKind() == InitializationSequence::FailedSequence)
+    if (Init.Failed())
       return false;
 
     ExprResult Result = Init.Perform(Self, To, Kind, MultiExprArg(&FromPtr, 1));
@@ -3250,7 +3253,7 @@ static bool TryClassUnification(Sema &Self, Expr *From, Expr *To,
       if (TTy.isAtLeastAsQualifiedAs(FTy)) {
         InitializedEntity Entity = InitializedEntity::InitializeTemporary(TTy);
         InitializationSequence InitSeq(Self, Entity, Kind, &From, 1);
-        if (InitSeq.getKind() != InitializationSequence::FailedSequence) {
+        if (InitSeq) {
           HaveConversion = true;
           return false;
         }
@@ -3275,7 +3278,7 @@ static bool TryClassUnification(Sema &Self, Expr *From, Expr *To,
 
   InitializedEntity Entity = InitializedEntity::InitializeTemporary(TTy);
   InitializationSequence InitSeq(Self, Entity, Kind, &From, 1);
-  HaveConversion = InitSeq.getKind() != InitializationSequence::FailedSequence;
+  HaveConversion = !InitSeq.Failed();
   ToType = TTy;
   if (InitSeq.isAmbiguous())
     return InitSeq.Diagnose(Self, Entity, Kind, &From, 1);

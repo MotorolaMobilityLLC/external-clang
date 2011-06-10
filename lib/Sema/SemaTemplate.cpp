@@ -920,7 +920,8 @@ Sema::CheckClassTemplate(Scope *S, unsigned TagSpec, TagUseKind TUK,
     //   the class-key shall agree in kind with the original class
     //   template declaration (7.1.5.3).
     RecordDecl *PrevRecordDecl = PrevClassTemplate->getTemplatedDecl();
-    if (!isAcceptableTagRedeclaration(PrevRecordDecl, Kind, KWLoc, *Name)) {
+    if (!isAcceptableTagRedeclaration(PrevRecordDecl, Kind,
+                                      TUK == TUK_Definition,  KWLoc, *Name)) {
       Diag(KWLoc, diag::err_use_with_wrong_tag)
         << Name
         << FixItHint::CreateReplacement(KWLoc, PrevRecordDecl->getKindName());
@@ -1610,6 +1611,7 @@ Sema::MatchTemplateParametersToScopeSpecifier(SourceLocation DeclStartLoc,
   //   such a member, the member declaration shall be preceded by a
   //   template<> for each enclosing class template that is
   //   explicitly specialized.
+  bool SawNonEmptyTemplateParameterList = false;
   unsigned ParamIdx = 0;
   for (unsigned TypeIdx = 0, NumTypes = NestedTypes.size(); TypeIdx != NumTypes;
        ++TypeIdx) {
@@ -1670,6 +1672,26 @@ Sema::MatchTemplateParametersToScopeSpecifier(SourceLocation DeclStartLoc,
       // against the corresponding template parameter list.
       NeedNonemptyTemplateHeader = false;
     } 
+    
+    // C++ [temp.expl.spec]p16:
+    //   In an explicit specialization declaration for a member of a class 
+    //   template or a member template that ap- pears in namespace scope, the 
+    //   member template and some of its enclosing class templates may remain 
+    //   unspecialized, except that the declaration shall not explicitly 
+    //   specialize a class member template if its en- closing class templates 
+    //   are not explicitly specialized as well.
+    if (ParamIdx < NumParamLists) {
+      if (ParamLists[ParamIdx]->size() == 0) {
+        if (SawNonEmptyTemplateParameterList) {
+          Diag(DeclLoc, diag::err_specialize_member_of_template)
+            << ParamLists[ParamIdx]->getSourceRange();
+          Invalid = true;
+          IsExplicitSpecialization = false;
+          return 0;
+        }
+      } else
+        SawNonEmptyTemplateParameterList = true;
+    }
     
     if (NeedEmptyTemplateHeader) {
       // If we're on the last of the types, and we need a 'template<>' header
@@ -1787,6 +1809,22 @@ Sema::MatchTemplateParametersToScopeSpecifier(SourceLocation DeclStartLoc,
       Invalid = true;
   }
 
+  // C++ [temp.expl.spec]p16:
+  //   In an explicit specialization declaration for a member of a class 
+  //   template or a member template that ap- pears in namespace scope, the 
+  //   member template and some of its enclosing class templates may remain 
+  //   unspecialized, except that the declaration shall not explicitly 
+  //   specialize a class member template if its en- closing class templates 
+  //   are not explicitly specialized as well.
+  if (ParamLists[NumParamLists - 1]->size() == 0 && 
+      SawNonEmptyTemplateParameterList) {
+    Diag(DeclLoc, diag::err_specialize_member_of_template)
+      << ParamLists[ParamIdx]->getSourceRange();
+    Invalid = true;
+    IsExplicitSpecialization = false;
+    return 0;
+  }
+  
   // Return the last template parameter list, which corresponds to the
   // entity being declared.
   return ParamLists[NumParamLists - 1];
@@ -2093,7 +2131,8 @@ TypeResult Sema::ActOnTagTemplateIdType(TagUseKind TUK,
     IdentifierInfo *Id = D->getIdentifier();
     assert(Id && "templated class must have an identifier");
     
-    if (!isAcceptableTagRedeclaration(D, TagKind, TagLoc, *Id)) {
+    if (!isAcceptableTagRedeclaration(D, TagKind, TUK == TUK_Definition,
+                                      TagLoc, *Id)) {
       Diag(TagLoc, diag::err_use_with_wrong_tag)
         << Result
         << FixItHint::CreateReplacement(SourceRange(TagLoc), D->getKindName());
@@ -4738,7 +4777,7 @@ Sema::ActOnClassTemplateSpecialization(Scope *S, unsigned TagSpec,
   TagTypeKind Kind = TypeWithKeyword::getTagTypeKindForTypeSpec(TagSpec);
   assert(Kind != TTK_Enum && "Invalid enum tag in class template spec!");
   if (!isAcceptableTagRedeclaration(ClassTemplate->getTemplatedDecl(),
-                                    Kind, KWLoc,
+                                    Kind, TUK == TUK_Definition, KWLoc,
                                     *ClassTemplate->getIdentifier())) {
     Diag(KWLoc, diag::err_use_with_wrong_tag)
       << ClassTemplate
@@ -5709,7 +5748,7 @@ Sema::ActOnExplicitInstantiation(Scope *S,
   assert(Kind != TTK_Enum &&
          "Invalid enum tag in class template explicit instantiation!");
   if (!isAcceptableTagRedeclaration(ClassTemplate->getTemplatedDecl(),
-                                    Kind, KWLoc,
+                                    Kind, /*isDefinition*/false, KWLoc,
                                     *ClassTemplate->getIdentifier())) {
     Diag(KWLoc, diag::err_use_with_wrong_tag)
       << ClassTemplate

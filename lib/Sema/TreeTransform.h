@@ -879,7 +879,8 @@ public:
       return QualType();
     }
 
-    if (!SemaRef.isAcceptableTagRedeclaration(Tag, Kind, IdLoc, *Id)) {
+    if (!SemaRef.isAcceptableTagRedeclaration(Tag, Kind, /*isDefinition*/false,
+                                              IdLoc, *Id)) {
       SemaRef.Diag(KeywordLoc, diag::err_use_with_wrong_tag) << Id;
       SemaRef.Diag(Tag->getLocation(), diag::note_previous_use);
       return QualType();
@@ -7877,6 +7878,13 @@ TreeTransform<Derived>::TransformBlockDeclRefExpr(BlockDeclRefExpr *E) {
                                          ND, NameInfo, 0);
 }
 
+template<typename Derived>
+ExprResult
+TreeTransform<Derived>::TransformAsTypeExpr(AsTypeExpr *E) {
+  assert(false && "Cannot transform asType expressions yet");
+  return SemaRef.Owned(E);
+}
+  
 //===----------------------------------------------------------------------===//
 // Type reconstruction
 //===----------------------------------------------------------------------===//
