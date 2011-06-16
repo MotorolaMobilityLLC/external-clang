@@ -1527,7 +1527,8 @@ Sema::CXXSpecialMember Sema::getSpecialMember(const CXXMethodDecl *MD) {
 /// GNU89 mode.
 static bool canRedefineFunction(const FunctionDecl *FD,
                                 const LangOptions& LangOpts) {
-  return (LangOpts.GNUInline && !LangOpts.CPlusPlus &&
+  return ((FD->hasAttr<GNUInlineAttr>() || LangOpts.GNUInline) &&
+          !LangOpts.CPlusPlus &&
           FD->isInlineSpecified() &&
           FD->getStorageClass() == SC_Extern);
 }
@@ -1927,6 +1928,7 @@ bool Sema::MergeCompatibleFunctionDecls(FunctionDecl *New, FunctionDecl *Old) {
   return false;
 }
 
+
 void Sema::mergeObjCMethodDecls(ObjCMethodDecl *newMethod,
                                 const ObjCMethodDecl *oldMethod) {
   // Merge the attributes.
@@ -1936,7 +1938,9 @@ void Sema::mergeObjCMethodDecls(ObjCMethodDecl *newMethod,
   for (ObjCMethodDecl::param_iterator oi = oldMethod->param_begin(),
          ni = newMethod->param_begin(), ne = newMethod->param_end();
        ni != ne; ++ni, ++oi)
-    mergeParamDeclAttributes(*ni, *oi, Context);    
+    mergeParamDeclAttributes(*ni, *oi, Context);
+  
+  CheckObjCMethodOverride(newMethod, oldMethod, true);
 }
 
 /// MergeVarDeclTypes - We parsed a variable 'New' which has the same name and
@@ -2608,7 +2612,8 @@ Decl *Sema::BuildAnonymousStructOrUnion(Scope *S, DeclSpec &DS,
                              /*IdentifierInfo=*/0,
                              Context.getTypeDeclType(Record),
                              TInfo,
-                             /*BitWidth=*/0, /*Mutable=*/false);
+                             /*BitWidth=*/0, /*Mutable=*/false,
+                             /*HasInit=*/false);
     Anon->setAccess(AS);
     if (getLangOptions().CPlusPlus)
       FieldCollector->Add(cast<FieldDecl>(Anon));
@@ -2698,7 +2703,8 @@ Decl *Sema::BuildMicrosoftCAnonymousStruct(Scope *S, DeclSpec &DS,
                              /*IdentifierInfo=*/0,
                              Context.getTypeDeclType(Record),
                              TInfo,
-                             /*BitWidth=*/0, /*Mutable=*/false);
+                             /*BitWidth=*/0, /*Mutable=*/false,
+                             /*HasInit=*/false);
   Anon->setImplicit();
 
   // Add the anonymous struct object to the current context.
@@ -3468,6 +3474,50 @@ static void SetNestedNameSpecifier(DeclaratorDecl *DD, Declarator &D) {
   DD->setQualifierInfo(SS.getWithLocInContext(DD->getASTContext()));
 }
 
+bool Sema::inferObjCARCLifetime(ValueDecl *decl) {
+  QualType type = decl->getType();
+  Qualifiers::ObjCLifetime lifetime = type.getObjCLifetime();
+  if (lifetime == Qualifiers::OCL_Autoreleasing) {
+    // Various kinds of declaration aren't allowed to be __autoreleasing.
+    unsigned kind = -1U;
+    if (VarDecl *var = dyn_cast<VarDecl>(decl)) {
+      if (var->hasAttr<BlocksAttr>())
+        kind = 0; // __block
+      else if (!var->hasLocalStorage())
+        kind = 1; // global
+    } else if (isa<ObjCIvarDecl>(decl)) {
+      kind = 3; // ivar
+    } else if (isa<FieldDecl>(decl)) {
+      kind = 2; // field
+    }
+
+    if (kind != -1U) {
+      Diag(decl->getLocation(), diag::err_arc_autoreleasing_var)
+        << kind;
+    }
+  } else if (lifetime == Qualifiers::OCL_None) {
+    // Try to infer lifetime.
+    if (!type->isObjCLifetimeType())
+      return false;
+
+    lifetime = type->getObjCARCImplicitLifetime();
+    type = Context.getLifetimeQualifiedType(type, lifetime);
+    decl->setType(type);
+  }
+  
+  if (VarDecl *var = dyn_cast<VarDecl>(decl)) {
+    // Thread-local variables cannot have lifetime.
+    if (lifetime && lifetime != Qualifiers::OCL_ExplicitNone &&
+        var->isThreadSpecified()) {
+      Diag(var->getLocation(), diag::err_arc_thread_lifetime)
+        << var->getType();
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 NamedDecl*
 Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
                               QualType R, TypeSourceInfo *TInfo,
@@ -3625,6 +3675,11 @@ Sema::ActOnVariableDeclarator(Scope *S, Declarator &D, DeclContext *DC,
 
   // Handle attributes prior to checking for duplicates in MergeVarDecl
   ProcessDeclAttributes(S, NewVD, D);
+
+  // In auto-retain/release, infer strong retension for variables of
+  // retainable type.
+  if (getLangOptions().ObjCAutoRefCount && inferObjCARCLifetime(NewVD))
+    NewVD->setInvalidDecl();
 
   // Handle GNU asm-label extension (encoded as an attribute).
   if (Expr *E = (Expr*)D.getAsmLabel()) {
@@ -5204,12 +5259,8 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
 
   VarDecl *VDecl = dyn_cast<VarDecl>(RealDecl);
   if (!VDecl) {
-    if (getLangOptions().CPlusPlus &&
-        RealDecl->getLexicalDeclContext()->isRecord() &&
-        isa<NamedDecl>(RealDecl))
-      Diag(RealDecl->getLocation(), diag::err_member_initialization);
-    else
-      Diag(RealDecl->getLocation(), diag::err_illegal_initializer);
+    assert(!isa<FieldDecl>(RealDecl) && "field init shouldn't get here");
+    Diag(RealDecl->getLocation(), diag::err_illegal_initializer);
     RealDecl->setInvalidDecl();
     return;
   }
@@ -5227,6 +5278,10 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     }
     VDecl->setTypeSourceInfo(DeducedType);
     VDecl->setType(DeducedType->getType());
+
+    // In ARC, infer lifetime.
+    if (getLangOptions().ObjCAutoRefCount && inferObjCARCLifetime(VDecl))
+      VDecl->setInvalidDecl();
 
     // If this is a redeclaration, check that the type we just deduced matches
     // the previously declared type.
@@ -5368,15 +5423,23 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
 
     // We allow integer constant expressions in all cases.
     } else if (T->isIntegralOrEnumerationType()) {
-      if (!Init->isValueDependent()) {
-        // Check whether the expression is a constant expression.
-        llvm::APSInt Value;
-        SourceLocation Loc;
-        if (!Init->isIntegerConstantExpr(Value, Context, &Loc)) {
-          Diag(Loc, diag::err_in_class_initializer_non_constant)
-            << Init->getSourceRange();
-          VDecl->setInvalidDecl();
-        }
+      // Check whether the expression is a constant expression.
+      SourceLocation Loc;
+      if (Init->isValueDependent())
+        ; // Nothing to check.
+      else if (Init->isIntegerConstantExpr(Context, &Loc))
+        ; // Ok, it's an ICE!
+      else if (Init->isEvaluatable(Context)) {
+        // If we can constant fold the initializer through heroics, accept it,
+        // but report this as a use of an extension for -pedantic.
+        Diag(Loc, diag::ext_in_class_initializer_non_constant)
+          << Init->getSourceRange();
+      } else {
+        // Otherwise, this is some crazy unknown case.  Report the issue at the
+        // location provided by the isIntegerConstantExpr failed check.
+        Diag(Loc, diag::err_in_class_initializer_non_constant)
+          << Init->getSourceRange();
+        VDecl->setInvalidDecl();
       }
 
     // We allow floating-point constants as an extension in C++03, and
@@ -5462,7 +5525,10 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
   
   // Check any implicit conversions within the expression.
   CheckImplicitConversions(Init, VDecl->getLocation());
-
+  
+  if (!VDecl->isInvalidDecl())
+    checkUnsafeAssigns(VDecl->getLocation(), VDecl->getType(), Init);
+  
   Init = MaybeCreateExprWithCleanups(Init);
   // Attach the initializer to the decl.
   VDecl->setInit(Init);
@@ -5730,6 +5796,23 @@ void Sema::ActOnCXXForRangeDecl(Decl *D) {
 
 void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
   if (var->isInvalidDecl()) return;
+
+  // In ARC, don't allow jumps past the implicit initialization of a
+  // local retaining variable.
+  if (getLangOptions().ObjCAutoRefCount &&
+      var->hasLocalStorage()) {
+    switch (var->getType().getObjCLifetime()) {
+    case Qualifiers::OCL_None:
+    case Qualifiers::OCL_ExplicitNone:
+    case Qualifiers::OCL_Autoreleasing:
+      break;
+
+    case Qualifiers::OCL_Weak:
+    case Qualifiers::OCL_Strong:
+      getCurFunction()->setHasBranchProtectedScope();
+      break;
+    }
+  }
 
   // All the following checks are C++ only.
   if (!getLangOptions().CPlusPlus) return;
@@ -5999,7 +6082,7 @@ void Sema::DiagnoseSizeOfParametersAndReturnValue(ParmVarDecl * const *Param,
 
   // Warn if the return value is pass-by-value and larger than the specified
   // threshold.
-  if (ReturnTy->isPODType()) {
+  if (ReturnTy.isPODType(Context)) {
     unsigned Size = Context.getTypeSizeInChars(ReturnTy).getQuantity();
     if (Size > LangOpts.NumLargeByValueCopy)
       Diag(D->getLocation(), diag::warn_return_value_size)
@@ -6010,7 +6093,7 @@ void Sema::DiagnoseSizeOfParametersAndReturnValue(ParmVarDecl * const *Param,
   // threshold.
   for (; Param != ParamEnd; ++Param) {
     QualType T = (*Param)->getType();
-    if (!T->isPODType())
+    if (!T.isPODType(Context))
       continue;
     unsigned Size = Context.getTypeSizeInChars(T).getQuantity();
     if (Size > LangOpts.NumLargeByValueCopy)
@@ -6024,6 +6107,28 @@ ParmVarDecl *Sema::CheckParameter(DeclContext *DC, SourceLocation StartLoc,
                                   QualType T, TypeSourceInfo *TSInfo,
                                   VarDecl::StorageClass StorageClass,
                                   VarDecl::StorageClass StorageClassAsWritten) {
+  // In ARC, infer a lifetime qualifier for appropriate parameter types.
+  if (getLangOptions().ObjCAutoRefCount &&
+      T.getObjCLifetime() == Qualifiers::OCL_None &&
+      T->isObjCLifetimeType()) {
+
+    Qualifiers::ObjCLifetime lifetime;
+
+    // Special cases for arrays:
+    //   - if it's const, use __unsafe_unretained
+    //   - otherwise, it's an error
+    if (T->isArrayType()) {
+      if (!T.isConstQualified()) {
+        Diag(NameLoc, diag::err_arc_array_param_no_lifetime)
+          << TSInfo->getTypeLoc().getSourceRange();
+      }
+      lifetime = Qualifiers::OCL_ExplicitNone;
+    } else {
+      lifetime = T->getObjCARCImplicitLifetime();
+    }
+    T = Context.getLifetimeQualifiedType(T, lifetime);
+  }
+
   ParmVarDecl *New = ParmVarDecl::Create(Context, DC, StartLoc, NameLoc, Name,
                                          adjustParameterType(T), TSInfo,
                                          StorageClass, StorageClassAsWritten,
@@ -6360,7 +6465,7 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
     // Verify that that gotos and switch cases don't jump into scopes illegally.
     if (getCurFunction()->NeedsScopeChecking() &&
         !dcl->isInvalidDecl() &&
-        !hasAnyErrorsInThisFunction())
+        !hasAnyUnrecoverableErrorsInThisFunction())
       DiagnoseInvalidJumps(Body);
 
     if (CXXDestructorDecl *Destructor = dyn_cast<CXXDestructorDecl>(dcl)) {
@@ -6375,15 +6480,17 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
     // been leftover. This ensures that these temporaries won't be picked up for
     // deletion in some later function.
     if (PP.getDiagnostics().hasErrorOccurred() ||
-        PP.getDiagnostics().getSuppressAllDiagnostics())
+        PP.getDiagnostics().getSuppressAllDiagnostics()) {
       ExprTemporaries.clear();
-    else if (!isa<FunctionTemplateDecl>(dcl)) {
+      ExprNeedsCleanups = false;
+    } else if (!isa<FunctionTemplateDecl>(dcl)) {
       // Since the body is valid, issue any analysis-based warnings that are
       // enabled.
       ActivePolicy = &WP;
     }
 
     assert(ExprTemporaries.empty() && "Leftover temporaries in function");
+    assert(!ExprNeedsCleanups && "Unaccounted cleanups in function");
   }
   
   if (!IsInstantiation)
@@ -6394,8 +6501,10 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
   // If any errors have occurred, clear out any temporaries that may have
   // been leftover. This ensures that these temporaries won't be picked up for
   // deletion in some later function.
-  if (getDiagnostics().hasErrorOccurred())
+  if (getDiagnostics().hasErrorOccurred()) {
     ExprTemporaries.clear();
+    ExprNeedsCleanups = false;
+  }
 
   return dcl;
 }
@@ -6462,6 +6571,9 @@ NamedDecl *Sema::ImplicitlyDefineFunction(SourceLocation Loc,
 /// These attributes can apply both to implicitly-declared builtins
 /// (like __builtin___printf_chk) or to library-declared functions
 /// like NSLog or printf.
+///
+/// We need to check for duplicate attributes both here and where user-written
+/// attributes are applied to declarations.
 void Sema::AddKnownFunctionAttributes(FunctionDecl *FD) {
   if (FD->isInvalidDecl())
     return;
@@ -6495,9 +6607,9 @@ void Sema::AddKnownFunctionAttributes(FunctionDecl *FD) {
         FD->addAttr(::new (Context) ConstAttr(FD->getLocation(), Context));
     }
 
-    if (Context.BuiltinInfo.isNoThrow(BuiltinID))
+    if (Context.BuiltinInfo.isNoThrow(BuiltinID) && !FD->getAttr<NoThrowAttr>())
       FD->addAttr(::new (Context) NoThrowAttr(FD->getLocation(), Context));
-    if (Context.BuiltinInfo.isConst(BuiltinID))
+    if (Context.BuiltinInfo.isConst(BuiltinID) && !FD->getAttr<ConstAttr>())
       FD->addAttr(::new (Context) ConstAttr(FD->getLocation(), Context));
   }
 
@@ -7510,14 +7622,13 @@ bool Sema::VerifyBitField(SourceLocation FieldLoc, IdentifierInfo *FieldName,
   return false;
 }
 
-/// ActOnField - Each field of a struct/union/class is passed into this in order
+/// ActOnField - Each field of a C struct/union is passed into this in order
 /// to create a FieldDecl object for it.
-Decl *Sema::ActOnField(Scope *S, Decl *TagD,
-                                 SourceLocation DeclStart,
-                                 Declarator &D, ExprTy *BitfieldWidth) {
+Decl *Sema::ActOnField(Scope *S, Decl *TagD, SourceLocation DeclStart,
+                       Declarator &D, ExprTy *BitfieldWidth) {
   FieldDecl *Res = HandleField(S, cast_or_null<RecordDecl>(TagD),
                                DeclStart, D, static_cast<Expr*>(BitfieldWidth),
-                               AS_public);
+                               /*HasInit=*/false, AS_public);
   return Res;
 }
 
@@ -7525,7 +7636,7 @@ Decl *Sema::ActOnField(Scope *S, Decl *TagD,
 ///
 FieldDecl *Sema::HandleField(Scope *S, RecordDecl *Record,
                              SourceLocation DeclStart,
-                             Declarator &D, Expr *BitWidth,
+                             Declarator &D, Expr *BitWidth, bool HasInit,
                              AccessSpecifier AS) {
   IdentifierInfo *II = D.getIdentifier();
   SourceLocation Loc = DeclStart;
@@ -7574,8 +7685,8 @@ FieldDecl *Sema::HandleField(Scope *S, RecordDecl *Record,
     = (D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_mutable);
   SourceLocation TSSL = D.getSourceRange().getBegin();
   FieldDecl *NewFD
-    = CheckFieldDecl(II, T, TInfo, Record, Loc, Mutable, BitWidth, TSSL,
-                     AS, PrevDecl, &D);
+    = CheckFieldDecl(II, T, TInfo, Record, Loc, Mutable, BitWidth, HasInit,
+                     TSSL, AS, PrevDecl, &D);
 
   if (NewFD->isInvalidDecl())
     Record->setInvalidDecl();
@@ -7604,7 +7715,7 @@ FieldDecl *Sema::HandleField(Scope *S, RecordDecl *Record,
 FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
                                 TypeSourceInfo *TInfo,
                                 RecordDecl *Record, SourceLocation Loc,
-                                bool Mutable, Expr *BitWidth,
+                                bool Mutable, Expr *BitWidth, bool HasInit,
                                 SourceLocation TSSL,
                                 AccessSpecifier AS, NamedDecl *PrevDecl,
                                 Declarator *D) {
@@ -7684,7 +7795,7 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
   }
 
   FieldDecl *NewFD = FieldDecl::Create(Context, Record, TSSL, Loc, II, T, TInfo,
-                                       BitWidth, Mutable);
+                                       BitWidth, Mutable, HasInit);
   if (InvalidDecl)
     NewFD->setInvalidDecl();
 
@@ -7725,6 +7836,11 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
     // FIXME: What to pass instead of TUScope?
     ProcessDeclAttributes(TUScope, NewFD, *D);
 
+  // In auto-retain/release, infer strong retension for fields of
+  // retainable type.
+  if (getLangOptions().ObjCAutoRefCount && inferObjCARCLifetime(NewFD))
+    NewFD->setInvalidDecl();
+
   if (T.isObjCGCWeak())
     Diag(Loc, diag::warn_attribute_weak_on_field);
 
@@ -7758,6 +7874,21 @@ bool Sema::CheckNontrivialField(FieldDecl *FD) {
         member = CXXDestructor;
 
       if (member != CXXInvalid) {
+        if (getLangOptions().ObjCAutoRefCount && RDecl->hasObjectMember()) {
+          // Objective-C++ ARC: it is an error to have a non-trivial field of
+          // a union. However, system headers in Objective-C programs 
+          // occasionally have Objective-C lifetime objects within unions,
+          // and rather than cause the program to fail, we make those 
+          // members unavailable.
+          SourceLocation Loc = FD->getLocation();
+          if (getSourceManager().isInSystemHeader(Loc)) {
+            if (!FD->hasAttr<UnavailableAttr>())
+              FD->addAttr(new (Context) UnavailableAttr(Loc, Context,
+                                  "this system field has retaining lifetime"));
+            return false;
+          }
+        }
+        
         Diag(FD->getLocation(), diag::err_illegal_union_or_anon_struct_member)
               << (int)FD->getParent()->isUnion() << FD->getDeclName() << member;
         DiagnoseNontrivial(RT, member);
@@ -7910,6 +8041,21 @@ void Sema::DiagnoseNontrivial(const RecordType* T, CXXSpecialMember member) {
         return;
       }
     }
+    
+    if (EltTy->isObjCLifetimeType()) {
+      switch (EltTy.getObjCLifetime()) {
+      case Qualifiers::OCL_None:
+      case Qualifiers::OCL_ExplicitNone:
+        break;
+          
+      case Qualifiers::OCL_Autoreleasing:
+      case Qualifiers::OCL_Weak:
+      case Qualifiers::OCL_Strong:
+        Diag((*fi)->getLocation(), diag::note_nontrivial_objc_lifetime)
+          << QT << EltTy.getObjCLifetime();
+        return;
+      }
+    }
   }
 
   assert(0 && "found no explanation for non-trivial member");
@@ -8019,6 +8165,10 @@ Decl *Sema::ActOnIvar(Scope *S,
   if (D.isInvalidType())
     NewID->setInvalidDecl();
 
+  // In ARC, infer 'retaining' for ivars of retainable type.
+  if (getLangOptions().ObjCAutoRefCount && inferObjCARCLifetime(NewID))
+    NewID->setInvalidDecl();
+
   if (II) {
     // FIXME: When interfaces are DeclContexts, we'll need to add
     // these to the interface.
@@ -8090,6 +8240,7 @@ void Sema::ActOnFields(Scope* S,
   llvm::SmallVector<FieldDecl*, 32> RecFields;
 
   RecordDecl *Record = dyn_cast<RecordDecl>(EnclosingDecl);
+  bool ARCErrReported = false;
   for (unsigned i = 0; i != NumFields; ++i) {
     FieldDecl *FD = cast<FieldDecl>(Fields[i]);
 
@@ -8155,7 +8306,7 @@ void Sema::ActOnFields(Scope* S,
         continue;
       }
       if (!FD->getType()->isDependentType() &&
-          !Context.getBaseElementType(FD->getType())->isPODType()) {
+          !Context.getBaseElementType(FD->getType()).isPODType(Context)) {
         Diag(FD->getLocation(), diag::err_flexible_array_has_nonpod_type)
           << FD->getDeclName() << FD->getType();
         FD->setInvalidDecl();
@@ -8202,17 +8353,45 @@ void Sema::ActOnFields(Scope* S,
       FD->setInvalidDecl();
       EnclosingDecl->setInvalidDecl();
       continue;
-    } else if (getLangOptions().ObjC1 &&
+    } 
+    else if (!getLangOptions().CPlusPlus) {
+      if (getLangOptions().ObjCAutoRefCount && Record && !ARCErrReported) {
+        // It's an error in ARC if a field has lifetime.
+        // We don't want to report this in a system header, though,
+        // so we just make the field unavailable.
+        // FIXME: that's really not sufficient; we need to make the type
+        // itself invalid to, say, initialize or copy.
+        QualType T = FD->getType();
+        Qualifiers::ObjCLifetime lifetime = T.getObjCLifetime();
+        if (lifetime && lifetime != Qualifiers::OCL_ExplicitNone) {
+          SourceLocation loc = FD->getLocation();
+          if (getSourceManager().isInSystemHeader(loc)) {
+            if (!FD->hasAttr<UnavailableAttr>()) {
+              FD->addAttr(new (Context) UnavailableAttr(loc, Context,
+                                "this system field has retaining lifetime"));
+            }
+          } else {
+            Diag(FD->getLocation(), diag::err_arc_objc_object_in_struct);
+          }
+          ARCErrReported = true;
+        }
+      }
+      else if (getLangOptions().ObjC1 &&
                getLangOptions().getGCMode() != LangOptions::NonGC &&
-               Record &&
-               (FD->getType()->isObjCObjectPointerType() ||
-                FD->getType().isObjCGCStrong()))
-      Record->setHasObjectMember(true);
-    else if (Context.getAsArrayType(FD->getType())) {
-      QualType BaseType = Context.getBaseElementType(FD->getType());
-      if (Record && BaseType->isRecordType() && 
-          BaseType->getAs<RecordType>()->getDecl()->hasObjectMember())
-        Record->setHasObjectMember(true);
+               Record && !Record->hasObjectMember()) {
+        if (FD->getType()->isObjCObjectPointerType() ||
+            FD->getType().isObjCGCStrong())
+          Record->setHasObjectMember(true);
+        else if (Context.getAsArrayType(FD->getType())) {
+          QualType BaseType = Context.getBaseElementType(FD->getType());
+          if (BaseType->isRecordType() && 
+              BaseType->getAs<RecordType>()->getDecl()->hasObjectMember())
+            Record->setHasObjectMember(true);
+          else if (BaseType->isObjCObjectPointerType() ||
+                   BaseType.isObjCGCStrong())
+                 Record->setHasObjectMember(true);
+        }
+      }
     }
     // Keep track of the number of named members.
     if (FD->getIdentifier())
@@ -8231,6 +8410,42 @@ void Sema::ActOnFields(Scope* S,
           Convs->setAccess(I, (*I)->getAccess());
         
         if (!CXXRecord->isDependentType()) {
+          // Objective-C Automatic Reference Counting:
+          //   If a class has a non-static data member of Objective-C pointer
+          //   type (or array thereof), it is a non-POD type and its
+          //   default constructor (if any), copy constructor, copy assignment
+          //   operator, and destructor are non-trivial.
+          //
+          // This rule is also handled by CXXRecordDecl::completeDefinition(). 
+          // However, here we check whether this particular class is only 
+          // non-POD because of the presence of an Objective-C pointer member. 
+          // If so, objects of this type cannot be shared between code compiled 
+          // with instant objects and code compiled with manual retain/release.
+          if (getLangOptions().ObjCAutoRefCount &&
+              CXXRecord->hasObjectMember() && 
+              CXXRecord->getLinkage() == ExternalLinkage) {
+            if (CXXRecord->isPOD()) {
+              Diag(CXXRecord->getLocation(), 
+                   diag::warn_arc_non_pod_class_with_object_member)
+               << CXXRecord;
+            } else {
+              // FIXME: Fix-Its would be nice here, but finding a good location
+              // for them is going to be tricky.
+              if (CXXRecord->hasTrivialCopyConstructor())
+                Diag(CXXRecord->getLocation(), 
+                     diag::warn_arc_trivial_member_function_with_object_member)
+                  << CXXRecord << 0;
+              if (CXXRecord->hasTrivialCopyAssignment())
+                Diag(CXXRecord->getLocation(), 
+                     diag::warn_arc_trivial_member_function_with_object_member)
+                << CXXRecord << 1;
+              if (CXXRecord->hasTrivialDestructor())
+                Diag(CXXRecord->getLocation(), 
+                     diag::warn_arc_trivial_member_function_with_object_member)
+                << CXXRecord << 2;
+            }
+          }
+          
           // Adjust user-defined destructor exception spec.
           if (getLangOptions().CPlusPlus0x &&
               CXXRecord->hasUserDeclaredDestructor())
@@ -8287,16 +8502,17 @@ void Sema::ActOnFields(Scope* S,
 
     // Now that the record is complete, do any delayed exception spec checks
     // we were missing.
-    if (!DelayedDestructorExceptionSpecChecks.empty()) {
+    while (!DelayedDestructorExceptionSpecChecks.empty()) {
       const CXXDestructorDecl *Dtor =
               DelayedDestructorExceptionSpecChecks.back().first;
-      if (Dtor->getParent() == Record) {
-        assert(!Dtor->getParent()->isDependentType() &&
-            "Should not ever add destructors of templates into the list.");
-        CheckOverridingFunctionExceptionSpec(Dtor,
-            DelayedDestructorExceptionSpecChecks.back().second);
-        DelayedDestructorExceptionSpecChecks.pop_back();
-      }
+      if (Dtor->getParent() != Record)
+        break;
+
+      assert(!Dtor->getParent()->isDependentType() &&
+          "Should not ever add destructors of templates into the list.");
+      CheckOverridingFunctionExceptionSpec(Dtor,
+          DelayedDestructorExceptionSpecChecks.back().second);
+      DelayedDestructorExceptionSpecChecks.pop_back();
     }
 
   } else {
