@@ -6,6 +6,7 @@ include $(CLEAR_VARS)
 subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/Analysis \
   lib/AST \
+  lib/ARCMigrate \
   lib/Basic \
   lib/CodeGen \
   lib/Driver \

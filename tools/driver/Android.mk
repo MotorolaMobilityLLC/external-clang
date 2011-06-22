@@ -28,6 +28,7 @@ LOCAL_SRC_FILES := $(clang_SRC_FILES)
 LOCAL_STATIC_LIBRARIES := \
   libclangFrontendTool \
   libclangFrontend \
+  libclangARCMigrate \
   libclangDriver \
   libclangSerialization \
   libclangCodeGen \
