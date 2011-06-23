@@ -1535,7 +1535,13 @@ def note_ovl_candidate_arity : Note<"candidate "
 
 def note_ovl_candidate_deleted : Note<
     "candidate %select{function|function|constructor|"
-    "function |function |constructor ||||constructor (inherited)}0%1 "
+    "function |function |constructor |"
+    "constructor (the implicit default constructor)|"
+    "constructor (the implicit copy constructor)|"
+    "constructor (the implicit move constructor)|"
+    "function (the implicit copy assignment operator)|"
+    "function (the implicit move assignment operator)|"
+    "constructor (inherited)}0%1 "
     "has been explicitly %select{made unavailable|deleted}2">;
 
 // Giving the index of the bad argument really clutters this message, and
@@ -1912,8 +1918,11 @@ def err_not_class_template_specialization : Error<
   "parameter}0">;
 def err_function_specialization_in_class : Error<
   "cannot specialize a function %0 within class scope">;
-def err_explicit_specialization_storage_class : Error<
+def ext_explicit_specialization_storage_class : ExtWarn<
   "explicit specialization cannot have a storage class">;
+def err_explicit_specialization_inconsistent_storage_class : Error<
+  "explicit specialization has extraneous, inconsistent storage class "
+  "'%select{none|extern|static|__private_extern__|auto|register}0'">;
 
 // C++ class template specializations and out-of-line definitions
 def err_template_spec_needs_header : Error<
@@ -2278,6 +2287,8 @@ def err_inline_declaration_block_scope : Error<
   "inline declaration of %0 not allowed in block scope">;
 def err_static_non_static : Error<
   "static declaration of %0 follows non-static declaration">;
+def warn_weak_import : Warning <
+  "an already-declared variable is made a weak_import declaration %0">;
 def warn_static_non_static : ExtWarn<
   "static declaration of %0 follows non-static declaration">;
 def err_non_static_static : Error<
@@ -2588,7 +2599,8 @@ def warn_arc_non_pod_class_with_object_member : Warning<
   "to make it ABI-compatible">, InGroup<AutomaticReferenceCountingABI>,
   DefaultIgnore;
 def warn_arc_retained_assign : Warning<
-  "cannot assign retained object to %select{weak|unsafe_unretained}0 variable">;
+  "assigning retained object to %select{weak|unsafe_unretained}0 variable">,
+  InGroup<ARCUnsafeRetainedAssign>;
 def warn_arc_trivial_member_function_with_object_member : Warning<
   "%0 cannot be shared between ARC and non-ARC "
   "code; add a non-trivial %select{copy constructor|copy assignment operator|"
@@ -2632,7 +2644,7 @@ def err_arc_multiple_method_decl : Error<
   "parameter type or attributes">;
 def warn_arc_retain_cycle : Warning<
   "capturing %0 strongly in this block is likely to lead to a retain cycle">,
-  InGroup<DiagGroup<"retain-cycles">>;
+  InGroup<ARCRetainCycles>;
 def note_arc_retain_cycle_owner : Note<
   "block will be retained by %select{the captured object|an object strongly "
   "retained by the captured object}0">;
@@ -2641,7 +2653,7 @@ def note_nontrivial_objc_lifetime : Note<
   "lifetime">;
 def warn_arc_object_memaccess : Warning<
   "%select{destination for|source of}0 this %1 call is a pointer to "
-  "lifetime-qualified type %2">, InGroup<DiagGroup<"non-pod-memaccess">>;
+  "lifetime-qualified type %2">, InGroup<ARCNonPodMemAccess>;
 
 def err_arc_strong_property_lifetime : Error<
   "existing ivar %1 for strong property %0 may not be "
@@ -2774,6 +2786,11 @@ def warn_logical_instead_of_bitwise : Warning<
   "use of logical %0 with constant operand; switch to bitwise %1 or "
   "remove constant">, InGroup<DiagGroup<"constant-logical-operand">>;
 
+def warn_bitwise_and_in_bitwise_or : Warning<
+  "'&' within '|'">, InGroup<BitwiseOpParentheses>;
+def note_bitwise_and_in_bitwise_or_silence : Note<
+  "place parentheses around the '&' expression to silence this warning">;
+
 def warn_logical_and_in_logical_or : Warning<
   "'&&' within '||'">, InGroup<LogicalOpParentheses>;
 def note_logical_and_in_logical_or_silence : Note<
@@ -2815,6 +2832,9 @@ def err_typecheck_member_reference_struct_union : Error<
   "member reference base type %0 is not a structure or union">;
 def err_typecheck_member_reference_ivar : Error<
   "%0 does not have a member named %1">;
+def error_arc_weak_ivar_access : Error<
+  "dereferencing a __weak pointer is not allowed due to possible "
+  "null value caused by race condition, assign it to strong variable first">;
 def err_typecheck_member_reference_arrow : Error<
   "member reference type %0 is not a pointer">;
 def err_typecheck_member_reference_suggestion : Error<
@@ -2991,6 +3011,9 @@ def warn_runsigned_always_true_comparison : Warning<
 def warn_comparison_of_mixed_enum_types : Warning<
   "comparison of two values with different enumeration types (%0 and %1)">,
   InGroup<DiagGroup<"enum-compare">>;
+def warn_null_in_arithmetic_operation : Warning<
+  "use of NULL in arithmetic operation">,
+  InGroup<DiagGroup<"null-arithmetic">>;
 
 def err_invalid_this_use : Error<
   "invalid use of 'this' outside of a nonstatic member function">;
@@ -3130,9 +3153,12 @@ def err_qualified_objc_catch_parm : Error<
   "@catch parameter declarator cannot be qualified">;
 def err_objc_pointer_cxx_catch_gnu : Error<
   "can't catch Objective C exceptions in C++ in the GNU runtime">;
-def err_objc_pointer_cxx_catch_fragile : Error<
-  "can't catch Objective C exceptions in C++ in the non-unified "
+def warn_objc_pointer_cxx_catch_fragile : Warning<
+  "catching Objective C id's exceptions in C++ in the non-unified "
   "exception model">;
+def err_objc_pointer_cxx_catch_fragile : Error<
+"can't catch Objective C exceptions in C++ in the non-unified "
+"exception model">;
 def err_objc_object_catch : Error<
   "can't catch an Objective C object by value">;
 def err_incomplete_type_objc_at_encode : Error<

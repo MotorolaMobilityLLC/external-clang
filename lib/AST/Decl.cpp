@@ -231,6 +231,14 @@ static LinkageInfo getLVForNamespaceScopeDecl(const NamedDecl *D, LVFlags F) {
       if (!FoundExtern)
         return LinkageInfo::internal();
     }
+    if (Var->getStorageClass() == SC_None) {
+      const VarDecl *PrevVar = Var->getPreviousDeclaration();
+      for (; PrevVar; PrevVar = PrevVar->getPreviousDeclaration())
+        if (PrevVar->getStorageClass() == SC_PrivateExtern)
+          break;
+        if (PrevVar)
+          return PrevVar->getLinkageAndVisibility();
+    }
   } else if (isa<FunctionDecl>(D) || isa<FunctionTemplateDecl>(D)) {
     // C++ [temp]p4:
     //   A non-member function template can have internal linkage; any
@@ -1302,6 +1310,19 @@ void VarDecl::setInit(Expr *I) {
   }
 
   Init = I;
+}
+
+bool VarDecl::extendsLifetimeOfTemporary() const {
+  assert(getType()->isReferenceType() &&"Non-references never extend lifetime");
+  
+  const Expr *E = getInit();
+  if (!E)
+    return false;
+  
+  if (const ExprWithCleanups *Cleanups = dyn_cast<ExprWithCleanups>(E))
+    E = Cleanups->getSubExpr();
+  
+  return isa<MaterializeTemporaryExpr>(E);
 }
 
 VarDecl *VarDecl::getInstantiatedFromStaticDataMember() const {

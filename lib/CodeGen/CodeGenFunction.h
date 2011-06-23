@@ -223,6 +223,16 @@ public:
     }
   };
 
+  template <class T, class A0, class A1, class A2>
+  class UnconditionalCleanup3 : public Cleanup {
+    A0 a0; A1 a1; A2 a2;
+  public:
+    UnconditionalCleanup3(A0 a0, A1 a1, A2 a2) : a0(a0), a1(a1), a2(a2) {}
+    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+      T::Emit(CGF, IsForEHCleanup, a0, a1, a2);
+    }
+  };
+
   /// ConditionalCleanupN stores the saved form of its N parameters,
   /// then restores them and performs the cleanup.
   template <class T, class A0>
@@ -256,6 +266,27 @@ public:
   public:
     ConditionalCleanup2(A0_saved a0, A1_saved a1)
       : a0_saved(a0), a1_saved(a1) {}
+  };
+
+  template <class T, class A0, class A1, class A2>
+  class ConditionalCleanup3 : public Cleanup {
+    typedef typename DominatingValue<A0>::saved_type A0_saved;
+    typedef typename DominatingValue<A1>::saved_type A1_saved;
+    typedef typename DominatingValue<A2>::saved_type A2_saved;
+    A0_saved a0_saved;
+    A1_saved a1_saved;
+    A2_saved a2_saved;
+    
+    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+      A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
+      A1 a1 = DominatingValue<A1>::restore(CGF, a1_saved);
+      A2 a2 = DominatingValue<A2>::restore(CGF, a2_saved);
+      T::Emit(CGF, IsForEHCleanup, a0, a1, a2);
+    }
+    
+  public:
+    ConditionalCleanup3(A0_saved a0, A1_saved a1, A2_saved a2)
+    : a0_saved(a0), a1_saved(a1), a2_saved(a2) {}
   };
 
 private:
@@ -635,16 +666,28 @@ public:
   /// rethrows.
   llvm::SmallVector<llvm::Value*, 8> ObjCEHValueStack;
 
-  // A struct holding information about a finally block's IR
-  // generation.  For now, doesn't actually hold anything.
-  struct FinallyInfo {
-  };
+  /// A class controlling the emission of a finally block.
+  class FinallyInfo {
+    /// Where the catchall's edge through the cleanup should go.
+    JumpDest RethrowDest;
 
-  FinallyInfo EnterFinallyBlock(const Stmt *Stmt,
-                                llvm::Constant *BeginCatchFn,
-                                llvm::Constant *EndCatchFn,
-                                llvm::Constant *RethrowFn);
-  void ExitFinallyBlock(FinallyInfo &FinallyInfo);
+    /// A function to call to enter the catch.
+    llvm::Constant *BeginCatchFn;
+
+    /// An i1 variable indicating whether or not the @finally is
+    /// running for an exception.
+    llvm::AllocaInst *ForEHVar;
+
+    /// An i8* variable into which the exception pointer to rethrow
+    /// has been saved.
+    llvm::AllocaInst *SavedExnVar;
+
+  public:
+    void enter(CodeGenFunction &CGF, const Stmt *Finally,
+               llvm::Constant *beginCatchFn, llvm::Constant *endCatchFn,
+               llvm::Constant *rethrowFn);
+    void exit(CodeGenFunction &CGF);
+  };
 
   /// pushFullExprCleanup - Push a cleanup to be run at the end of the
   /// current full-expression.  Safe against the possibility that
@@ -682,6 +725,27 @@ public:
 
     typedef EHScopeStack::ConditionalCleanup2<T, A0, A1> CleanupType;
     EHStack.pushCleanup<CleanupType>(kind, a0_saved, a1_saved);
+    initFullExprCleanup();
+  }
+
+  /// pushFullExprCleanup - Push a cleanup to be run at the end of the
+  /// current full-expression.  Safe against the possibility that
+  /// we're currently inside a conditionally-evaluated expression.
+  template <class T, class A0, class A1, class A2>
+  void pushFullExprCleanup(CleanupKind kind, A0 a0, A1 a1, A2 a2) {
+    // If we're not in a conditional branch, or if none of the
+    // arguments requires saving, then use the unconditional cleanup.
+    if (!isInConditionalBranch()) {
+      typedef EHScopeStack::UnconditionalCleanup3<T, A0, A1, A2> CleanupType;
+      return EHStack.pushCleanup<CleanupType>(kind, a0, a1, a2);
+    }
+    
+    typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
+    typename DominatingValue<A1>::saved_type a1_saved = saveValueInCond(a1);
+    typename DominatingValue<A2>::saved_type a2_saved = saveValueInCond(a2);
+    
+    typedef EHScopeStack::ConditionalCleanup3<T, A0, A1, A2> CleanupType;
+    EHStack.pushCleanup<CleanupType>(kind, a0_saved, a1_saved, a2_saved);
     initFullExprCleanup();
   }
 
@@ -1597,6 +1661,7 @@ public:
 
   void EmitScalarInit(const Expr *init, const ValueDecl *D,
                       LValue lvalue, bool capturedByInit);
+  void EmitScalarInit(llvm::Value *init, LValue lvalue);
 
   typedef void SpecialInitFn(CodeGenFunction &Init, const VarDecl &D,
                              llvm::Value *Address);
@@ -1849,6 +1914,7 @@ public:
   LValue EmitConditionalOperatorLValue(const AbstractConditionalOperator *E);
   LValue EmitCastLValue(const CastExpr *E);
   LValue EmitNullInitializationLValue(const CXXScalarValueInitExpr *E);
+  LValue EmitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *E);
   LValue EmitOpaqueValueLValue(const OpaqueValueExpr *e);
 
   llvm::Value *EmitIvarOffset(const ObjCInterfaceDecl *Interface,
@@ -2022,9 +2088,10 @@ public:
   llvm::Value *EmitARCRetainAutoreleaseScalarExpr(const Expr *expr);
 
   void PushARCReleaseCleanup(CleanupKind kind, QualType type,
-                             llvm::Value *addr, bool precise);
+                             llvm::Value *addr, bool precise,
+                             bool forFullExpr = false);
   void PushARCWeakReleaseCleanup(CleanupKind kind, QualType type,
-                                 llvm::Value *addr);
+                                 llvm::Value *addr, bool forFullExpr = false);
   void PushARCFieldReleaseCleanup(CleanupKind cleanupKind,
                                   const FieldDecl *Field);
   void PushARCFieldWeakReleaseCleanup(CleanupKind cleanupKind,

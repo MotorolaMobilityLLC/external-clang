@@ -205,8 +205,22 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
                             const CXXDestructorDecl *&ReferenceTemporaryDtor,
                             QualType &ObjCARCReferenceLifetimeType,
                             const NamedDecl *InitializedDecl) {
-  ObjCARCReferenceLifetimeType = QualType();
-  
+  // Look through expressions for materialized temporaries (for now).
+  if (const MaterializeTemporaryExpr *M 
+                                      = dyn_cast<MaterializeTemporaryExpr>(E)) {
+    // Objective-C++ ARC:
+    //   If we are binding a reference to a temporary that has ownership, we 
+    //   need to perform retain/release operations on the temporary.
+    if (CGF.getContext().getLangOptions().ObjCAutoRefCount &&        
+        E->getType()->isObjCLifetimeType() &&
+        (E->getType().getObjCLifetime() == Qualifiers::OCL_Strong ||
+         E->getType().getObjCLifetime() == Qualifiers::OCL_Weak ||
+         E->getType().getObjCLifetime() == Qualifiers::OCL_Autoreleasing))
+      ObjCARCReferenceLifetimeType = E->getType();
+    
+    E = M->GetTemporaryExpr();
+  }
+
   if (const CXXDefaultArgExpr *DAE = dyn_cast<CXXDefaultArgExpr>(E))
     E = DAE->getExpr();
   
@@ -239,6 +253,57 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
     // We have to load the lvalue.
     RV = CGF.EmitLoadOfLValue(LV, E->getType());
   } else {
+    if (!ObjCARCReferenceLifetimeType.isNull()) {
+      ReferenceTemporary = CreateReferenceTemporary(CGF, 
+                                                  ObjCARCReferenceLifetimeType, 
+                                                    InitializedDecl);
+      
+      
+      LValue RefTempDst = CGF.MakeAddrLValue(ReferenceTemporary, 
+                                             ObjCARCReferenceLifetimeType);
+
+      CGF.EmitScalarInit(E, dyn_cast_or_null<ValueDecl>(InitializedDecl),
+                         RefTempDst, false);
+      
+      bool ExtendsLifeOfTemporary = false;
+      if (const VarDecl *Var = dyn_cast_or_null<VarDecl>(InitializedDecl)) {
+        if (Var->extendsLifetimeOfTemporary())
+          ExtendsLifeOfTemporary = true;
+      } else if (InitializedDecl && isa<FieldDecl>(InitializedDecl)) {
+        ExtendsLifeOfTemporary = true;
+      }
+      
+      if (!ExtendsLifeOfTemporary) {
+        // Since the lifetime of this temporary isn't going to be extended,
+        // we need to clean it up ourselves at the end of the full expression.
+        switch (ObjCARCReferenceLifetimeType.getObjCLifetime()) {
+        case Qualifiers::OCL_None:
+        case Qualifiers::OCL_ExplicitNone:
+        case Qualifiers::OCL_Autoreleasing:
+          break;
+            
+        case Qualifiers::OCL_Strong:
+          CGF.PushARCReleaseCleanup(CGF.getARCCleanupKind(), 
+                                    ObjCARCReferenceLifetimeType, 
+                                    ReferenceTemporary,
+                                    /*Precise lifetime=*/false, 
+                                    /*For full expression=*/true);
+          break;
+          
+        case Qualifiers::OCL_Weak:
+          CGF.PushARCWeakReleaseCleanup(NormalAndEHCleanup, 
+                                        ObjCARCReferenceLifetimeType, 
+                                        ReferenceTemporary,
+                                        /*For full expression=*/true);
+          break;
+        }
+        
+        ObjCARCReferenceLifetimeType = QualType();
+      }
+      
+      return ReferenceTemporary;
+    }
+    
     llvm::SmallVector<SubobjectAdjustment, 2> Adjustments;
     while (true) {
       E = E->IgnoreParens();
@@ -293,34 +358,6 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
         CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(RT->getDecl());
         if (!ClassDecl->hasTrivialDestructor())
           ReferenceTemporaryDtor = ClassDecl->getDestructor();
-      }
-      else if (CGF.getContext().getLangOptions().ObjCAutoRefCount) {
-        if (const ValueDecl *InitVD = dyn_cast<ValueDecl>(InitializedDecl)) {
-          if (const ReferenceType *RefType
-                                  = InitVD->getType()->getAs<ReferenceType>()) {
-            QualType PointeeType = RefType->getPointeeType();
-            if (PointeeType->isObjCLifetimeType() &&
-                PointeeType.getObjCLifetime() != Qualifiers::OCL_ExplicitNone) {
-              // Objective-C++ ARC: We're binding a reference to 
-              // lifetime-qualified type to a temporary, so we need to extend 
-              // the lifetime of the temporary with appropriate retain/release/
-              // autorelease calls.
-              ObjCARCReferenceLifetimeType = PointeeType;
-              
-              // Create a temporary variable that we can bind the reference to.
-              ReferenceTemporary = CreateReferenceTemporary(CGF, PointeeType, 
-                                                            InitializedDecl);
-
-              unsigned Alignment =
-                CGF.getContext().getTypeAlignInChars(PointeeType).getQuantity();
-              LValue lvalue =
-                CGF.MakeAddrLValue(ReferenceTemporary, PointeeType, Alignment);
-
-              CGF.EmitScalarInit(E, InitVD, lvalue, false);
-              return ReferenceTemporary;
-            }
-          }
-        }
       }
     }
 
@@ -667,6 +704,9 @@ LValue CodeGenFunction::EmitLValue(const Expr *E) {
   case Expr::CXXConstCastExprClass:
   case Expr::ObjCBridgedCastExprClass:
     return EmitCastLValue(cast<CastExpr>(E));
+      
+  case Expr::MaterializeTemporaryExprClass:
+    return EmitMaterializeTemporaryExpr(cast<MaterializeTemporaryExpr>(E));
   }
 }
 
@@ -2067,10 +2107,17 @@ LValue CodeGenFunction::EmitOpaqueValueLValue(const OpaqueValueExpr *e) {
   return getOpaqueLValueMapping(e);
 }
 
+LValue CodeGenFunction::EmitMaterializeTemporaryExpr(
+                                           const MaterializeTemporaryExpr *E) {
+  RValue RV = EmitReferenceBindingToExpr(E->GetTemporaryExpr(),
+                                         /*InitializedDecl=*/0);
+  return MakeAddrLValue(RV.getScalarVal(), E->getType());
+}
+
+
 //===--------------------------------------------------------------------===//
 //                             Expression Emission
 //===--------------------------------------------------------------------===//
-
 
 RValue CodeGenFunction::EmitCallExpr(const CallExpr *E, 
                                      ReturnValueSlot ReturnValue) {
@@ -2108,23 +2155,20 @@ RValue CodeGenFunction::EmitCallExpr(const CallExpr *E,
         DestroyedType->isObjCLifetimeType() &&
         (DestroyedType.getObjCLifetime() == Qualifiers::OCL_Strong ||
          DestroyedType.getObjCLifetime() == Qualifiers::OCL_Weak)) {
-          // Automatic Reference Counting:
-          //   If the pseudo-expression names a retainable object with weak or strong
-          //   lifetime, the object shall be released.
-      bool isNonGC = false;
+      // Automatic Reference Counting:
+      //   If the pseudo-expression names a retainable object with weak or
+      //   strong lifetime, the object shall be released.
       Expr *BaseExpr = PseudoDtor->getBase();
       llvm::Value *BaseValue = NULL;
       Qualifiers BaseQuals;
       
-      // If this is s.x, emit s as an lvalue.  If it is s->x, emit s as a scalar.
+      // If this is s.x, emit s as an lvalue. If it is s->x, emit s as a scalar.
       if (PseudoDtor->isArrow()) {
         BaseValue = EmitScalarExpr(BaseExpr);
         const PointerType *PTy = BaseExpr->getType()->getAs<PointerType>();
         BaseQuals = PTy->getPointeeType().getQualifiers();
       } else {
         LValue BaseLV = EmitLValue(BaseExpr);
-        if (BaseLV.isNonGC())
-          isNonGC = true;
         BaseValue = BaseLV.getAddress();
         QualType BaseTy = BaseExpr->getType();
         BaseQuals = BaseTy.getQualifiers();
@@ -2138,7 +2182,7 @@ RValue CodeGenFunction::EmitCallExpr(const CallExpr *E,
         
       case Qualifiers::OCL_Strong:
         EmitARCRelease(Builder.CreateLoad(BaseValue, 
-                          PseudoDtor->getDestroyedType().isVolatileQualified()), 
+                          PseudoDtor->getDestroyedType().isVolatileQualified()),
                        /*precise*/ true);
         break;
 

@@ -104,6 +104,7 @@ static void getDarwinDefines(MacroBuilder &Builder, const LangOptions &Opts,
     Builder.defineMacro("__bridge", "");
     Builder.defineMacro("__bridge_transfer", "");
     Builder.defineMacro("__bridge_retained", "");
+    Builder.defineMacro("__bridge_retain", "");
   }
   
   if (Opts.Static)
@@ -525,7 +526,6 @@ class PPCTargetInfo : public TargetInfo {
   static const Builtin::Info BuiltinInfo[];
   static const char * const GCCRegNames[];
   static const TargetInfo::GCCRegAlias GCCRegAliases[];
-
 public:
   PPCTargetInfo(const std::string& triple) : TargetInfo(triple) {}
 
@@ -1084,18 +1084,18 @@ static const char* const GCCRegNames[] = {
   "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
   "mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7",
   "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-  "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"
+  "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
 };
 
-const TargetInfo::GCCRegAlias GCCRegAliases[] = {
-  { { "al", "ah", "eax", "rax" }, "ax" },
-  { { "bl", "bh", "ebx", "rbx" }, "bx" },
-  { { "cl", "ch", "ecx", "rcx" }, "cx" },
-  { { "dl", "dh", "edx", "rdx" }, "dx" },
-  { { "esi", "rsi" }, "si" },
-  { { "edi", "rdi" }, "di" },
-  { { "esp", "rsp" }, "sp" },
-  { { "ebp", "rbp" }, "bp" },
+const TargetInfo::AddlRegName AddlRegNames[] = {
+  { { "al", "ah", "eax", "rax" }, 0 },
+  { { "bl", "bh", "ebx", "rbx" }, 3 },
+  { { "cl", "ch", "ecx", "rcx" }, 2 },
+  { { "dl", "dh", "edx", "rdx" }, 1 },
+  { { "esi", "rsi" }, 4 },
+  { { "edi", "rdi" }, 5 },
+  { { "esp", "rsp" }, 7 },
+  { { "ebp", "rbp" }, 6 },
 };
 
 // X86 target abstract base class; x86-32 and x86-64 are very close, so
@@ -1129,8 +1129,13 @@ public:
   }
   virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
                                 unsigned &NumAliases) const {
-    Aliases = GCCRegAliases;
-    NumAliases = llvm::array_lengthof(GCCRegAliases);
+    Aliases = 0;
+    NumAliases = 0;
+  }
+  virtual void getGCCAddlRegNames(const AddlRegName *&Names,
+				  unsigned &NumNames) const {
+    Names = AddlRegNames;
+    NumNames = llvm::array_lengthof(AddlRegNames);
   }
   virtual bool validateAsmConstraint(const char *&Name,
                                      TargetInfo::ConstraintInfo &info) const;
@@ -2058,6 +2063,12 @@ public:
       case 'q': // ...ARMV4 ldrsb
       case 'v': // ...VFP load/store (reg+constant offset)
       case 'y': // ...iWMMXt load/store
+      case 't': // address valid for load/store opaque types wider
+	        // than 128-bits
+      case 'n': // valid address for Neon doubleword vector load/store
+      case 'm': // valid address for Neon element and structure load/store
+      case 's': // valid address for non-offset loads/stores of quad-word
+	        // values in four ARM registers
         Info.setAllowsMemory();
         Name++;
         return true;
@@ -2065,13 +2076,15 @@ public:
     }
     return false;
   }
-  std::string
-  virtual convertConstraint(const char *&Constraint) const {
+  virtual std::string convertConstraint(const char *&Constraint) const {
     std::string R;
     switch (*Constraint) {
     case 'U':   // Two-character constraint; add "^" hint for later parsing.
       R = std::string("^") + std::string(Constraint, 2);
       Constraint++;
+      break;
+    case 'p': // 'p' should be translated to 'r' by default.
+      R = std::string("r");
       break;
     default:
       return std::string(1, *Constraint);

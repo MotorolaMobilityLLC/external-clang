@@ -1472,7 +1472,6 @@ void CXXNameMangler::mangleQualifiers(Qualifiers Quals) {
   //   <type> ::= U "__strong"
   //   <type> ::= U "__weak"
   //   <type> ::= U "__autoreleasing"
-  //   <type> ::= U "__unsafe_unretained"
   case Qualifiers::OCL_None:
     break;
     
@@ -1489,7 +1488,13 @@ void CXXNameMangler::mangleQualifiers(Qualifiers Quals) {
     break;
     
   case Qualifiers::OCL_ExplicitNone:
-    LifetimeName = "__unsafe_unretained";
+    // The __unsafe_unretained qualifier is *not* mangled, so that
+    // __unsafe_unretained types in ARC produce the same manglings as the
+    // equivalent (but, naturally, unqualified) types in non-ARC, providing
+    // better ABI compatibility.
+    //
+    // It's safe to do this because unqualified 'id' won't show up
+    // in any type signatures that need to be mangled.
     break;
   }
   if (!LifetimeName.empty())
@@ -2239,6 +2244,10 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
   case Expr::UnresolvedLookupExprClass: {
     const UnresolvedLookupExpr *ULE = cast<UnresolvedLookupExpr>(E);
     mangleUnresolvedName(ULE->getQualifier(), 0, ULE->getName(), Arity);
+
+    // All the <unresolved-name> productions end in a
+    // base-unresolved-name, where <template-args> are just tacked
+    // onto the end.
     if (ULE->hasExplicitTemplateArgs())
       mangleTemplateArgs(ULE->getExplicitTemplateArgs());
     break;
@@ -2452,29 +2461,13 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
       
   case Expr::DependentScopeDeclRefExprClass: {
     const DependentScopeDeclRefExpr *DRE = cast<DependentScopeDeclRefExpr>(E);
-    NestedNameSpecifier *NNS = DRE->getQualifier();
-    const Type *QTy = NNS->getAsType();
+    mangleUnresolvedName(DRE->getQualifier(), 0, DRE->getDeclName(), Arity);
 
-    // When we're dealing with a nested-name-specifier that has just a
-    // dependent identifier in it, mangle that as a typename.  FIXME:
-    // It isn't clear that we ever actually want to have such a
-    // nested-name-specifier; why not just represent it as a typename type?
-    if (!QTy && NNS->getAsIdentifier() && NNS->getPrefix()) {
-      QTy = getASTContext().getDependentNameType(ETK_Typename,
-                                                 NNS->getPrefix(),
-                                                 NNS->getAsIdentifier())
-              .getTypePtr();
-    }
-    assert(QTy && "Qualifier was not type!");
-
-    // ::= sr <type> <unqualified-name>                  # dependent name
-    // ::= sr <type> <unqualified-name> <template-args>  # dependent template-id
-    Out << "sr";
-    mangleType(QualType(QTy, 0));
-    mangleUnqualifiedName(0, DRE->getDeclName(), Arity);
+    // All the <unresolved-name> productions end in a
+    // base-unresolved-name, where <template-args> are just tacked
+    // onto the end.
     if (DRE->hasExplicitTemplateArgs())
       mangleTemplateArgs(DRE->getExplicitTemplateArgs());
-
     break;
   }
 
@@ -2584,6 +2577,11 @@ void CXXNameMangler::mangleExpression(const Expr *E, unsigned Arity) {
       Diags.Report(DiagID);
       return;
     }
+    break;
+  }
+      
+  case Expr::MaterializeTemporaryExprClass: {
+    mangleExpression(cast<MaterializeTemporaryExpr>(E)->GetTemporaryExpr());
     break;
   }
   }

@@ -241,7 +241,7 @@ id test9(Test9 *v) {
 // Test that the inference rules are different for fast enumeration variables.
 void test10(id collection) {
   for (id x in collection) {
-    __strong id *ptr = &x; // expected-error {{initializing '__strong id *' with an expression of type 'const __unsafe_unretained id *' changes retain/release properties of pointer}}
+    __strong id *ptr = &x; // expected-warning {{initializing '__strong id *' with an expression of type 'const __strong id *' discards qualifiers}}
   }
 
   for (__strong id x in collection) {
@@ -525,11 +525,11 @@ typedef struct Bark Bark;
 @implementation Test30
 - (id) new { return 0; }
 - (void) Meth {
-  __weak id x = [Test30 new]; // expected-warning {{cannot assign retained object to weak variable}}
-  id __unsafe_unretained u = [Test30 new]; // expected-warning {{cannot assign retained object to unsafe_unretained variable}}
+  __weak id x = [Test30 new]; // expected-warning {{assigning retained object to weak variable}}
+  id __unsafe_unretained u = [Test30 new]; // expected-warning {{assigning retained object to unsafe_unretained variable}}
   id y = [Test30 new];
-  x = [Test30 new]; // expected-warning {{cannot assign retained object to weak variable}}
-  u = [Test30 new]; // expected-warning {{cannot assign retained object to unsafe_unretained variable}}
+  x = [Test30 new]; // expected-warning {{assigning retained object to weak variable}}
+  u = [Test30 new]; // expected-warning {{assigning retained object to unsafe_unretained variable}}
   y = [Test30 new];
 }
 @end
@@ -548,3 +548,27 @@ int Test31() {
     int k = (pcls->isa ? i : j); // expected-error {{member reference base type 'Class<PTest31>' is not a structure or union}}
     return cls->isa ? i : j; // expected-error {{member reference base type 'Class' is not a structure or union}}
 }
+
+// rdar://9612030
+@interface ITest32 {
+@public
+ id ivar;
+}
+@end
+
+id Test32(__weak ITest32 *x) {
+  __weak ITest32 *y;
+  x->ivar = 0; // expected-error {{dereferencing a __weak pointer is not allowed}}
+  return y ? y->ivar     // expected-error {{dereferencing a __weak pointer is not allowed}}
+           : (*x).ivar;  // expected-error {{dereferencing a __weak pointer is not allowed}}
+}
+
+// rdar://9619861
+extern int printf(const char*, ...);
+typedef long intptr_t;
+
+int Test33(id someid) {
+  printf( "Hello%ld", (intptr_t)someid);
+  return (int)someid;
+}
+
