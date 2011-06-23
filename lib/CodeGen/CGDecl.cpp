@@ -463,7 +463,6 @@ void CodeGenFunction::EmitScalarInit(const Expr *init,
                                      const ValueDecl *D,
                                      LValue lvalue,
                                      bool capturedByInit) {
-  QualType type = lvalue.getType();
   Qualifiers::ObjCLifetime lifetime = lvalue.getObjCLifetime();
   if (!lifetime) {
     llvm::Value *value = EmitScalarExpr(init);
@@ -560,6 +559,37 @@ void CodeGenFunction::EmitScalarInit(const Expr *init,
   }
 
   EmitStoreOfScalar(value, lvalue);
+}
+
+/// EmitScalarInit - Initialize the given lvalue with the given object.
+void CodeGenFunction::EmitScalarInit(llvm::Value *init, LValue lvalue) {
+  Qualifiers::ObjCLifetime lifetime = lvalue.getObjCLifetime();
+  if (!lifetime)
+    return EmitStoreThroughLValue(RValue::get(init), lvalue, lvalue.getType());
+
+  switch (lifetime) {
+  case Qualifiers::OCL_None:
+    llvm_unreachable("present but none");
+
+  case Qualifiers::OCL_ExplicitNone:
+    // nothing to do
+    break;
+
+  case Qualifiers::OCL_Strong:
+    init = EmitARCRetain(lvalue.getType(), init);
+    break;
+
+  case Qualifiers::OCL_Weak:
+    // Initialize and then skip the primitive store.
+    EmitARCInitWeak(lvalue.getAddress(), init);
+    return;
+
+  case Qualifiers::OCL_Autoreleasing:
+    init = EmitARCRetainAutorelease(lvalue.getType(), init);
+    break;
+  }
+
+  EmitStoreOfScalar(init, lvalue);  
 }
 
 /// canEmitInitWithFewStoresAfterMemset - Decide whether we can emit the
@@ -995,8 +1025,10 @@ void CodeGenFunction::EmitAutoVarCleanups(const AutoVarEmission &emission) {
 
   if (Qualifiers::ObjCLifetime lifetime
         = D.getType().getQualifiers().getObjCLifetime()) {
-    llvm::Value *loc = emission.getObjectAddress(*this);
-    EmitAutoVarWithLifetime(*this, D, loc, lifetime);
+    if (!D.isARCPseudoStrong()) {
+      llvm::Value *loc = emission.getObjectAddress(*this);
+      EmitAutoVarWithLifetime(*this, D, loc, lifetime);
+    }
   }
 
   // Handle the cleanup attribute.
@@ -1081,10 +1113,11 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
 
       // 'self' is always formally __strong, but if this is not an
       // init method then we don't want to retain it.
-      if (lt == Qualifiers::OCL_Strong && qs.hasConst() &&
-          isa<ImplicitParamDecl>(D)) {
+      if (D.isARCPseudoStrong()) {
         const ObjCMethodDecl *method = cast<ObjCMethodDecl>(CurCodeDecl);
         assert(&D == method->getSelfDecl());
+        assert(lt == Qualifiers::OCL_Strong);
+        assert(qs.hasConst());
         assert(method->getMethodFamily() != OMF_init);
         (void) method;
         lt = Qualifiers::OCL_ExplicitNone;

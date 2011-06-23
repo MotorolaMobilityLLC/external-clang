@@ -4,9 +4,6 @@ set(LLVM_USED_LIBS
   clangSerialization
   clangIndex
   clangSema
-  clangARCMigrate
-  clangAnalysis
-  clangRewrite
   clangAST
   clangLex
   clangBasic)

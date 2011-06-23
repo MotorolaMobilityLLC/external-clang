@@ -2039,6 +2039,17 @@ void Sema::MergeVarDecl(VarDecl *New, LookupResult &Previous) {
   }
   
   mergeDeclAttributes(New, Old, Context);
+  // Warn if an already-declared variable is made a weak_import in a subsequent declaration
+  if (New->getAttr<WeakImportAttr>() &&
+      Old->getStorageClass() == SC_None &&
+      !Old->getAttr<WeakImportAttr>()) {
+    Diag(New->getLocation(), diag::warn_weak_import) << New->getDeclName();
+    Diag(Old->getLocation(), diag::note_previous_definition);
+    // Remove weak_import attribute on new declaration.
+    // I am just dropping all attributes in curernt decl. We have
+    // already issued a warning, so we are OK.
+    New->dropAttrs();
+  }
 
   // Merge the types.
   MergeVarDeclTypes(New, Old);
@@ -4662,9 +4673,18 @@ Sema::ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
       //   A storage-class-specifier shall not be specified in an explicit
       //   specialization (14.7.3)
       if (SC != SC_None) {
-        Diag(NewFD->getLocation(), 
-             diag::err_explicit_specialization_storage_class)
-          << FixItHint::CreateRemoval(D.getDeclSpec().getStorageClassSpecLoc());
+        if (SC != NewFD->getStorageClass())
+          Diag(NewFD->getLocation(),
+               diag::err_explicit_specialization_inconsistent_storage_class)
+            << SC
+            << FixItHint::CreateRemoval(
+                                      D.getDeclSpec().getStorageClassSpecLoc());
+            
+        else
+          Diag(NewFD->getLocation(), 
+               diag::ext_explicit_specialization_storage_class)
+            << FixItHint::CreateRemoval(
+                                      D.getDeclSpec().getStorageClassSpecLoc());
       }
       
     } else if (isExplicitSpecialization && isa<CXXMethodDecl>(NewFD)) {

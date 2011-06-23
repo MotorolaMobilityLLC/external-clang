@@ -320,12 +320,41 @@ bool Sema::CheckFunctionCall(FunctionDecl *FDecl, CallExpr *TheCall) {
   }
 
   // Memset/memcpy/memmove handling
-  if (FDecl->getLinkage() == ExternalLinkage &&
-      (!getLangOptions().CPlusPlus || FDecl->isExternC())) {
-    if (FnInfo->isStr("memset") || FnInfo->isStr("memcpy") || 
-        FnInfo->isStr("memmove"))
-      CheckMemsetcpymoveArguments(TheCall, FnInfo);
+  int CMF = -1;
+  switch (FDecl->getBuiltinID()) {
+  case Builtin::BI__builtin_memset:
+  case Builtin::BI__builtin___memset_chk:
+  case Builtin::BImemset:
+    CMF = CMF_Memset;
+    break;
+    
+  case Builtin::BI__builtin_memcpy:
+  case Builtin::BI__builtin___memcpy_chk:
+  case Builtin::BImemcpy:
+    CMF = CMF_Memcpy;
+    break;
+    
+  case Builtin::BI__builtin_memmove:
+  case Builtin::BI__builtin___memmove_chk:
+  case Builtin::BImemmove:
+    CMF = CMF_Memmove;
+    break;
+    
+  default:
+    if (FDecl->getLinkage() == ExternalLinkage &&
+        (!getLangOptions().CPlusPlus || FDecl->isExternC())) {
+      if (FnInfo->isStr("memset"))
+        CMF = CMF_Memset;
+      else if (FnInfo->isStr("memcpy"))
+        CMF = CMF_Memcpy;
+      else if (FnInfo->isStr("memmove"))
+        CMF = CMF_Memmove;
+    }
+    break;
   }
+   
+  if (CMF != -1)
+    CheckMemsetcpymoveArguments(TheCall, CheckedMemoryFunction(CMF), FnInfo);
 
   return false;
 }
@@ -1828,7 +1857,7 @@ static bool isDynamicClassType(QualType T) {
   return false;
 }
 
-/// \brief If E is a sizeof expression returns the argument expression,
+/// \brief If E is a sizeof expression, returns its argument expression,
 /// otherwise returns NULL.
 static const Expr *getSizeOfExprArg(const Expr* E) {
   if (const UnaryExprOrTypeTraitExpr *SizeOf =
@@ -1839,7 +1868,7 @@ static const Expr *getSizeOfExprArg(const Expr* E) {
   return 0;
 }
 
-/// \brief If E is a sizeof expression returns the argument type.
+/// \brief If E is a sizeof expression, returns its argument type.
 static QualType getSizeOfArgType(const Expr* E) {
   if (const UnaryExprOrTypeTraitExpr *SizeOf =
       dyn_cast<UnaryExprOrTypeTraitExpr>(E))
@@ -1856,14 +1885,14 @@ static QualType getSizeOfArgType(const Expr* E) {
 ///
 /// \param Call The call expression to diagnose.
 void Sema::CheckMemsetcpymoveArguments(const CallExpr *Call,
-                                       const IdentifierInfo *FnName) {
+                                       CheckedMemoryFunction CMF,
+                                       IdentifierInfo *FnName) {
   // It is possible to have a non-standard definition of memset.  Validate
-  // we have the proper number of arguments, and if not, abort further
-  // checking.
-  if (Call->getNumArgs() != 3)
+  // we have enough arguments, and if not, abort further checking.
+  if (Call->getNumArgs() < 3)
     return;
 
-  unsigned LastArg = FnName->isStr("memset")? 1 : 2;
+  unsigned LastArg = (CMF == CMF_Memset? 1 : 2);
   const Expr *LenExpr = Call->getArg(2)->IgnoreParenImpCasts();
 
   // We have special checking when the length is a sizeof expression.
@@ -1934,8 +1963,7 @@ void Sema::CheckMemsetcpymoveArguments(const CallExpr *Call,
       // Always complain about dynamic classes.
       if (isDynamicClassType(PointeeTy))
         DiagID = diag::warn_dyn_class_memaccess;
-      else if (PointeeTy.hasNonTrivialObjCLifetime() && 
-               !FnName->isStr("memset"))
+      else if (PointeeTy.hasNonTrivialObjCLifetime() && CMF != CMF_Memset)
         DiagID = diag::warn_arc_object_memaccess;
       else
         continue;
@@ -2177,6 +2205,14 @@ static Expr *EvalAddr(Expr *E, llvm::SmallVectorImpl<DeclRefExpr *> &refVars) {
         return NULL;
   }
 
+  case Stmt::MaterializeTemporaryExprClass:
+    if (Expr *Result = EvalAddr(
+                         cast<MaterializeTemporaryExpr>(E)->GetTemporaryExpr(),
+                                refVars))
+      return Result;
+      
+    return E;
+      
   // Everything else: we simply don't reason about them.
   default:
     return NULL;
@@ -2277,6 +2313,14 @@ do {
 
     return EvalVal(M->getBase(), refVars);
   }
+
+  case Stmt::MaterializeTemporaryExprClass:
+    if (Expr *Result = EvalVal(
+                          cast<MaterializeTemporaryExpr>(E)->GetTemporaryExpr(),
+                               refVars))
+      return Result;
+      
+    return E;
 
   default:
     // Check that we don't return or take the address of a reference to a

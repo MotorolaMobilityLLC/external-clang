@@ -955,8 +955,7 @@ ExprResult Parser::ParseCastExpression(bool isUnaryExpression,
 
     Token Next = NextToken();
     if (Next.is(tok::annot_template_id)) {
-      TemplateIdAnnotation *TemplateId
-        = static_cast<TemplateIdAnnotation *>(Next.getAnnotationValue());
+      TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Next);
       if (TemplateId->Kind == TNK_Type_template) {
         // We have a qualified template-id that we know refers to a
         // type, translate it into a type and continue parsing as a
@@ -975,8 +974,7 @@ ExprResult Parser::ParseCastExpression(bool isUnaryExpression,
   }
 
   case tok::annot_template_id: { // [C++]          template-id
-    TemplateIdAnnotation *TemplateId
-      = static_cast<TemplateIdAnnotation *>(Tok.getAnnotationValue());
+    TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
     if (TemplateId->Kind == TNK_Type_template) {
       // We have a template-id that we know refers to a type,
       // translate it into a type and continue parsing as a cast
@@ -1780,17 +1778,30 @@ Parser::ParseParenExpression(ParenParseOption &ExprType, bool stopIfCastExpr,
   } else if (ExprType >= CompoundLiteral && 
              (Tok.is(tok::kw___bridge) || 
               Tok.is(tok::kw___bridge_transfer) ||
-              Tok.is(tok::kw___bridge_retained))) {
+              Tok.is(tok::kw___bridge_retained) ||
+              Tok.is(tok::kw___bridge_retain))) {
+    tok::TokenKind tokenKind = Tok.getKind();
+    SourceLocation BridgeKeywordLoc = ConsumeToken();
+
     // Parse an Objective-C ARC ownership cast expression.
     ObjCBridgeCastKind Kind;
-    if (Tok.is(tok::kw___bridge))
+    if (tokenKind == tok::kw___bridge)
       Kind = OBC_Bridge;
-    else if (Tok.is(tok::kw___bridge_transfer))
+    else if (tokenKind == tok::kw___bridge_transfer)
       Kind = OBC_BridgeTransfer;
-    else 
+    else if (tokenKind == tok::kw___bridge_retained)
       Kind = OBC_BridgeRetained;
+    else {
+      // As a hopefully temporary workaround, allow __bridge_retain as
+      // a synonym for __bridge_retained, but only in system headers.
+      assert(tokenKind == tok::kw___bridge_retain);
+      Kind = OBC_BridgeRetained;
+      if (!PP.getSourceManager().isInSystemHeader(BridgeKeywordLoc))
+        Diag(BridgeKeywordLoc, diag::err_arc_bridge_retain)
+          << FixItHint::CreateReplacement(BridgeKeywordLoc,
+                                          "__bridge_retained");
+    }
              
-    SourceLocation BridgeKeywordLoc = ConsumeToken();
     TypeResult Ty = ParseTypeName();
     SourceLocation RParenLoc = MatchRHSPunctuation(tok::r_paren, OpenLoc);
     ExprResult SubExpr = ParseCastExpression(false, false, ParsedType());

@@ -736,6 +736,15 @@ bool Sema::IsOverload(FunctionDecl *New, FunctionDecl *Old,
   return false;
 }
 
+/// \brief Checks availability of the function depending on the current
+/// function context. Inside an unavailable function, unavailability is ignored.
+///
+/// \returns true if \arg FD is unavailable and current context is inside
+/// an available function, false otherwise.
+bool Sema::isFunctionConsideredUnavailable(FunctionDecl *FD) {
+  return FD->isUnavailable() && !cast<Decl>(CurContext)->isUnavailable();
+}
+
 /// TryImplicitConversion - Attempt to perform an implicit conversion
 /// from the given expression (Expr) to the given type (ToType). This
 /// function returns an implicit conversion sequence that can be used
@@ -924,8 +933,8 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
 
 /// \brief Determine whether the conversion from FromType to ToType is a valid
 /// conversion that strips "noreturn" off the nested function type.
-static bool IsNoReturnConversion(ASTContext &Context, QualType FromType,
-                                 QualType ToType, QualType &ResultTy) {
+bool Sema::IsNoReturnConversion(QualType FromType, QualType ToType,
+                                QualType &ResultTy) {
   if (Context.hasSameUnqualifiedType(FromType, ToType))
     return false;
 
@@ -1066,7 +1075,7 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
                       S.ExtractUnqualifiedFunctionType(ToType), FromType)) {
         QualType resultTy;
         // if the function type matches except for [[noreturn]], it's ok
-        if (!IsNoReturnConversion(S.Context, FromType, 
+        if (!S.IsNoReturnConversion(FromType,
               S.ExtractUnqualifiedFunctionType(ToType), resultTy))
           // otherwise, only a boolean conversion is standard   
           if (!ToType->isBooleanType()) 
@@ -1234,7 +1243,7 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
     // Compatible conversions (Clang extension for C function overloading)
     SCS.Second = ICK_Compatible_Conversion;
     FromType = ToType.getUnqualifiedType();
-  } else if (IsNoReturnConversion(S.Context, FromType, ToType, FromType)) {
+  } else if (S.IsNoReturnConversion(FromType, ToType, FromType)) {
     // Treat a conversion that strips "noreturn" as an identity conversion.
     SCS.Second = ICK_NoReturn_Adjustment;
   } else if (IsTransparentUnionStandardConversion(S, From, ToType,
@@ -6592,7 +6601,8 @@ OverloadCandidateSet::BestViableFunction(Sema &S, SourceLocation Loc,
 
   // Best is the best viable function.
   if (Best->Function &&
-      (Best->Function->isDeleted() || Best->Function->isUnavailable()))
+      (Best->Function->isDeleted() ||
+       S.isFunctionConsideredUnavailable(Best->Function)))
     return OR_Deleted;
 
   return OR_Success;
@@ -7087,7 +7097,8 @@ void NoteFunctionCandidate(Sema &S, OverloadCandidate *Cand,
   FunctionDecl *Fn = Cand->Function;
 
   // Note deleted candidates, but only if they're viable.
-  if (Cand->Viable && (Fn->isDeleted() || Fn->isUnavailable())) {
+  if (Cand->Viable && (Fn->isDeleted() ||
+      S.isFunctionConsideredUnavailable(Fn))) {
     std::string FnDesc;
     OverloadCandidateKind FnKind = ClassifyOverloadCandidate(S, Fn, FnDesc);
 
@@ -7597,8 +7608,8 @@ private:
       QualType ResultTy;
       if (Context.hasSameUnqualifiedType(TargetFunctionType, 
                                          FunDecl->getType()) ||
-          IsNoReturnConversion(Context, FunDecl->getType(), TargetFunctionType, 
-                               ResultTy)) {
+          S.IsNoReturnConversion(FunDecl->getType(), TargetFunctionType,
+                                 ResultTy)) {
         Matches.push_back(std::make_pair(CurAccessFunPair,
           cast<FunctionDecl>(FunDecl->getCanonicalDecl())));
         FoundNonTemplateFunction = true;
