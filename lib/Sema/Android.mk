@@ -39,6 +39,7 @@ clang_sema_SRC_FILES :=	\
 	SemaExceptionSpec.cpp	\
 	SemaExpr.cpp	\
 	SemaExprCXX.cpp	\
+	SemaExprMember.cpp \
 	SemaExprObjC.cpp	\
 	SemaInit.cpp	\
 	SemaLookup.cpp	\

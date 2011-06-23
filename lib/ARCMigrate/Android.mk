@@ -18,8 +18,18 @@ clang_arc_migrate_SRC_FILES := \
         ARCMT.cpp \
         ARCMTActions.cpp \
         FileRemapper.cpp \
+        TransARCAssign.cpp \
+        TransAllocCopyWithZone.cpp \
+        TransAutoreleasePool.cpp \
+        TransBlockObjCVariable.cpp \
+        TransEmptyStatementsAndDealloc.cpp \
         TransformActions.cpp \
-        Transforms.cpp
+        Transforms.cpp \
+        TransProperties.cpp \
+        TransRetainReleaseDealloc.cpp \
+        TransUnbridgedCasts.cpp \
+        TransUnusedInitDelegate.cpp \
+        TransZeroOutPropsInDealloc.cpp \
 
 LOCAL_SRC_FILES := $(clang_arc_migrate_SRC_FILES)
 
