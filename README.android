@@ -17,6 +17,10 @@
 * For Honeycomb MR2: Synced to upstream r119349
 * For Ice Cream Sandwich: Synced to upstream r133721
 
+* Recent update #1: From r133163 to r133721
+* Recent update #2: From r129173 to r133163
+* Recent update #3: From r127120 to r129173
+
 * We add Android's *.mk files that are specific to Android's build system.
 
 * Changes for enabling both host and device builds.
