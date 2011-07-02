@@ -19,7 +19,6 @@ clang_arc_migrate_SRC_FILES := \
         ARCMTActions.cpp \
         FileRemapper.cpp \
         TransARCAssign.cpp \
-        TransAllocCopyWithZone.cpp \
         TransAutoreleasePool.cpp \
         TransBlockObjCVariable.cpp \
         TransEmptyStatementsAndDealloc.cpp \
