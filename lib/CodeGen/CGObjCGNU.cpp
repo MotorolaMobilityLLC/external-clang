@@ -392,6 +392,9 @@ private:
   /// Emits a reference to a class.  This allows the linker to object if there
   /// is no class of the matching name.
   void EmitClassRef(const std::string &className);
+  /// Emits a pointer to the named class
+  llvm::Value *GetClassNamed(CGBuilderTy &Builder, const std::string &Name,
+                             bool isWeak);
 protected:
   /// Looks up the method for sending a message to the specified object.  This
   /// mechanism differs between the GCC and GNU runtimes, so this method must be
@@ -438,7 +441,7 @@ public:
                                    bool lval = false);
   virtual llvm::Value *GetSelector(CGBuilderTy &Builder, const ObjCMethodDecl
       *Method);
-  virtual llvm::Constant *GetEHType(QualType T, const CodeGenFunction *CGF=0);
+  virtual llvm::Constant *GetEHType(QualType T);
 
   virtual llvm::Function *GenerateMethod(const ObjCMethodDecl *OMD,
                                          const ObjCContainerDecl *CD);
@@ -484,6 +487,7 @@ public:
   virtual llvm::Value *EmitIvarOffset(CodeGenFunction &CGF,
                                       const ObjCInterfaceDecl *Interface,
                                       const ObjCIvarDecl *Ivar);
+  virtual llvm::Value *EmitNSAutoreleasePoolClassRef(CGBuilderTy &Builder);
   virtual llvm::Constant *BuildGCBlockLayout(CodeGenModule &CGM,
                                              const CGBlockInfo &blockInfo) {
     return NULLPtr;
@@ -772,22 +776,35 @@ CGObjCGNU::CGObjCGNU(CodeGenModule &cgm, unsigned runtimeABIVersion,
   }
 }
 
-// This has to perform the lookup every time, since posing and related
-// techniques can modify the name -> class mapping.
-llvm::Value *CGObjCGNU::GetClass(CGBuilderTy &Builder,
-                                 const ObjCInterfaceDecl *OID) {
-  llvm::Value *ClassName = CGM.GetAddrOfConstantCString(OID->getNameAsString());
+llvm::Value *CGObjCGNU::GetClassNamed(CGBuilderTy &Builder,
+                                      const std::string &Name,
+                                      bool isWeak) {
+  llvm::Value *ClassName = CGM.GetAddrOfConstantCString(Name);
   // With the incompatible ABI, this will need to be replaced with a direct
   // reference to the class symbol.  For the compatible nonfragile ABI we are
   // still performing this lookup at run time but emitting the symbol for the
   // class externally so that we can make the switch later.
-  EmitClassRef(OID->getNameAsString());
+  //
+  // Libobjc2 contains an LLVM pass that replaces calls to objc_lookup_class
+  // with memoized versions or with static references if it's safe to do so.
+  if (!isWeak)
+    EmitClassRef(Name);
   ClassName = Builder.CreateStructGEP(ClassName, 0);
 
   llvm::Constant *ClassLookupFn =
     CGM.CreateRuntimeFunction(llvm::FunctionType::get(IdTy, PtrToInt8Ty, true),
                               "objc_lookup_class");
   return Builder.CreateCall(ClassLookupFn, ClassName);
+}
+
+// This has to perform the lookup every time, since posing and related
+// techniques can modify the name -> class mapping.
+llvm::Value *CGObjCGNU::GetClass(CGBuilderTy &Builder,
+                                 const ObjCInterfaceDecl *OID) {
+  return GetClassNamed(Builder, OID->getNameAsString(), OID->isWeakImported());
+}
+llvm::Value *CGObjCGNU::EmitNSAutoreleasePoolClassRef(CGBuilderTy &Builder) {
+  return GetClassNamed(Builder, "NSAutoreleasePool", false);
 }
 
 llvm::Value *CGObjCGNU::GetSelector(CGBuilderTy &Builder, Selector Sel,
@@ -832,7 +849,7 @@ llvm::Value *CGObjCGNU::GetSelector(CGBuilderTy &Builder, const ObjCMethodDecl
   return GetSelector(Builder, Method->getSelector(), SelTypes, false);
 }
 
-llvm::Constant *CGObjCGNU::GetEHType(QualType T, const CodeGenFunction *CGF) {
+llvm::Constant *CGObjCGNU::GetEHType(QualType T) {
   if (!CGM.getLangOptions().CPlusPlus) {
       if (T->isObjCIdType()
           || T->isObjCQualifiedIdType()) {

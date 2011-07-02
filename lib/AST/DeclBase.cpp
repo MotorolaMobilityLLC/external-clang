@@ -520,20 +520,6 @@ void Decl::dropAttrs() {
   getASTContext().eraseDeclAttrs(this);
 }
 
-void Decl::dropWeakImportAttr() {
-  if (!HasAttrs) return;
-  AttrVec &Attrs = getASTContext().getDeclAttrs(this);
-  for (llvm::SmallVectorImpl<Attr*>::iterator A = Attrs.begin();
-       A != Attrs.end(); ++A) {
-    if (isa<WeakImportAttr>(*A)) {
-      Attrs.erase(A);
-      break;
-    }
-  }
-  if (Attrs.empty())
-    HasAttrs = false;
-}
-
 const AttrVec &Decl::getAttrs() const {
   assert(HasAttrs && "No attrs to get!");
   return getASTContext().getDeclAttrs(this);
@@ -655,12 +641,8 @@ DeclContext *Decl::getNonClosureContext() {
   // This is basically "while (DC->isClosure()) DC = DC->getParent();"
   // except that it's significantly more efficient to cast to a known
   // decl type and call getDeclContext() than to call getParent().
-  do {
-    if (isa<BlockDecl>(DC)) {
-      DC = cast<BlockDecl>(DC)->getDeclContext();
-      continue;
-    }
-  } while (false);
+  while (isa<BlockDecl>(DC))
+    DC = cast<BlockDecl>(DC)->getDeclContext();
 
   assert(!DC->isClosure());
   return DC;
