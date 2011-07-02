@@ -538,7 +538,14 @@ ExprResult Parser::ParseCXXCasts() {
   if (ExpectAndConsume(tok::less, diag::err_expected_less_after, CastName))
     return ExprError();
 
-  TypeResult CastTy = ParseTypeName();
+  // Parse the common declaration-specifiers piece.
+  DeclSpec DS(AttrFactory);
+  ParseSpecifierQualifierList(DS);
+
+  // Parse the abstract-declarator, if present.
+  Declarator DeclaratorInfo(DS, Declarator::TypeNameContext);
+  ParseDeclarator(DeclaratorInfo);
+
   SourceLocation RAngleBracketLoc = Tok.getLocation();
 
   if (ExpectAndConsume(tok::greater, diag::err_expected_greater))
@@ -554,9 +561,9 @@ ExprResult Parser::ParseCXXCasts() {
   // Match the ')'.
   RParenLoc = MatchRHSPunctuation(tok::r_paren, LParenLoc);
 
-  if (!Result.isInvalid() && !CastTy.isInvalid())
+  if (!Result.isInvalid() && !DeclaratorInfo.isInvalidType())
     Result = Actions.ActOnCXXNamedCast(OpLoc, Kind,
-                                       LAngleBracketLoc, CastTy.get(),
+                                       LAngleBracketLoc, DeclaratorInfo,
                                        RAngleBracketLoc,
                                        LParenLoc, Result.take(), RParenLoc);
 
@@ -1748,7 +1755,7 @@ Parser::ParseCXXNewExpression(bool UseGlobal, SourceLocation Start) {
 
   SourceRange TypeIdParens;
   DeclSpec DS(AttrFactory);
-  Declarator DeclaratorInfo(DS, Declarator::TypeNameContext);
+  Declarator DeclaratorInfo(DS, Declarator::CXXNewContext);
   if (Tok.is(tok::l_paren)) {
     // If it turns out to be a placement, we change the type location.
     PlacementLParen = ConsumeParen();
@@ -2193,7 +2200,8 @@ Parser::ParseCXXAmbiguousParenExpression(ParenParseOption &ExprType,
       Result = ParseCastExpression(false/*isUnaryExpression*/,
                                    false/*isAddressofOperand*/,
                                    NotCastExpr,
-                                   ParsedType()/*TypeOfCast*/);
+                                   // type-id has priority.
+                                   true/*isTypeCast*/);
     }
 
     // If we parsed a cast-expression, it's really a type-id, otherwise it's
@@ -2212,7 +2220,11 @@ Parser::ParseCXXAmbiguousParenExpression(ParenParseOption &ExprType,
   ConsumeAnyToken();
 
   if (ParseAs >= CompoundLiteral) {
-    TypeResult Ty = ParseTypeName();
+    // Parse the type declarator.
+    DeclSpec DS(AttrFactory);
+    ParseSpecifierQualifierList(DS);
+    Declarator DeclaratorInfo(DS, Declarator::TypeNameContext);
+    ParseDeclarator(DeclaratorInfo);
 
     // Match the ')'.
     if (Tok.is(tok::r_paren))
@@ -2222,21 +2234,21 @@ Parser::ParseCXXAmbiguousParenExpression(ParenParseOption &ExprType,
 
     if (ParseAs == CompoundLiteral) {
       ExprType = CompoundLiteral;
+      TypeResult Ty = ParseTypeName();
       return ParseCompoundLiteralExpression(Ty.get(), LParenLoc, RParenLoc);
     }
 
     // We parsed '(' type-id ')' and the thing after it wasn't a '{'.
     assert(ParseAs == CastExpr);
 
-    if (Ty.isInvalid())
+    if (DeclaratorInfo.isInvalidType())
       return ExprError();
-
-    CastTy = Ty.get();
 
     // Result is what ParseCastExpression returned earlier.
     if (!Result.isInvalid())
-      Result = Actions.ActOnCastExpr(getCurScope(), LParenLoc, CastTy, RParenLoc,
-                                     Result.take());
+      Result = Actions.ActOnCastExpr(getCurScope(), LParenLoc,
+                                     DeclaratorInfo, CastTy,
+                                     RParenLoc, Result.take());
     return move(Result);
   }
 

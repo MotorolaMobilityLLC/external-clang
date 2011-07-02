@@ -155,19 +155,30 @@ static bool isObjCAutoRefCount(const ArgList &Args) {
 }
 
 static void addProfileRT(const ToolChain &TC, const ArgList &Args,
-                         ArgStringList &CmdArgs) {
-  if (Args.hasArg(options::OPT_fprofile_arcs) ||
-      Args.hasArg(options::OPT_fprofile_generate) ||
-      Args.hasArg(options::OPT_fcreate_profile) ||
-      Args.hasArg(options::OPT_coverage)) {
-    // GCC links libgcov.a by adding -L<inst>/gcc/lib/gcc/<triple>/<ver> -lgcov
-    // to the link line. We cannot do the same thing because unlike gcov
-    // there is a libprofile_rt.so. We used to use the -l:libprofile_rt.a
-    // syntax, but that is not supported by old linkers.
-    const char *lib = Args.MakeArgString(TC.getDriver().Dir + "/../lib/" +
-                                         "libprofile_rt.a");
-    CmdArgs.push_back(lib);
+                         ArgStringList &CmdArgs,
+                         llvm::Triple Triple) {
+  if (!(Args.hasArg(options::OPT_fprofile_arcs) ||
+        Args.hasArg(options::OPT_fprofile_generate) ||
+        Args.hasArg(options::OPT_fcreate_profile) ||
+        Args.hasArg(options::OPT_coverage)))
+    return;
+
+  // GCC links libgcov.a by adding -L<inst>/gcc/lib/gcc/<triple>/<ver> -lgcov to
+  // the link line. We cannot do the same thing because unlike gcov there is a
+  // libprofile_rt.so. We used to use the -l:libprofile_rt.a syntax, but that is
+  // not supported by old linkers.
+  llvm::Twine ProfileRT =
+    llvm::Twine(TC.getDriver().Dir) + "/../lib/" + "libprofile_rt.a";
+
+  if (Triple.getOS() == llvm::Triple::Darwin) {
+    // On Darwin, if the static library doesn't exist try the dylib.
+    bool Exists;
+    if (llvm::sys::fs::exists(ProfileRT.str(), Exists) || !Exists)
+      ProfileRT =
+        llvm::Twine(TC.getDriver().Dir) + "/../lib/" + "libprofile_rt.dylib";
   }
+
+  CmdArgs.push_back(Args.MakeArgString(ProfileRT));
 }
 
 void Clang::AddPreprocessingOptions(const Driver &D,
@@ -828,6 +839,14 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
     CmdArgs.push_back(CPUName);
   }
 
+  // The required algorithm here is slightly strange: the options are applied
+  // in order (so -mno-sse -msse2 disables SSE3), but any option that gets
+  // directly overridden later is ignored (so "-mno-sse -msse2 -mno-sse2 -msse"
+  // is equivalent to "-mno-sse2 -msse"). The -cc1 handling deals with the
+  // former correctly, but not the latter; handle directly-overridden
+  // attributes here.
+  llvm::StringMap<unsigned> PrevFeature;
+  std::vector<const char*> Features;
   for (arg_iterator it = Args.filtered_begin(options::OPT_m_x86_Features_Group),
          ie = Args.filtered_end(); it != ie; ++it) {
     llvm::StringRef Name = (*it)->getOption().getName();
@@ -841,8 +860,17 @@ void Clang::AddX86TargetArgs(const ArgList &Args,
     if (IsNegative)
       Name = Name.substr(3);
 
-    CmdArgs.push_back("-target-feature");
-    CmdArgs.push_back(Args.MakeArgString((IsNegative ? "-" : "+") + Name));
+    unsigned& Prev = PrevFeature[Name];
+    if (Prev)
+      Features[Prev - 1] = 0;
+    Prev = Features.size() + 1;
+    Features.push_back(Args.MakeArgString((IsNegative ? "-" : "+") + Name));
+  }
+  for (unsigned i = 0; i < Features.size(); i++) {
+    if (Features[i]) {
+      CmdArgs.push_back("-target-feature");
+      CmdArgs.push_back(Features[i]);
+    }
   }
 }
 
@@ -859,7 +887,7 @@ shouldUseExceptionTablesForObjCExceptions(unsigned objcABIVersion,
   if (Triple.getOS() != llvm::Triple::Darwin)
     return false;
 
-  return (Triple.getDarwinMajorNumber() >= 9 &&
+  return (!Triple.isMacOSXVersionLT(10,5) &&
           (Triple.getArch() == llvm::Triple::x86_64 ||
            Triple.getArch() == llvm::Triple::arm));  
 }
@@ -2985,7 +3013,7 @@ void darwin::Link::AddLinkArgs(Compilation &C,
   Args.AddLastArg(CmdArgs, options::OPT_dynamic);
   Args.AddAllArgs(CmdArgs, options::OPT_exported__symbols__list);
   Args.AddLastArg(CmdArgs, options::OPT_flat__namespace);
-  Args.AddLastArg(CmdArgs, options::OPT_force__load);
+  Args.AddAllArgs(CmdArgs, options::OPT_force__load);
   Args.AddAllArgs(CmdArgs, options::OPT_headerpad__max__install__names);
   Args.AddAllArgs(CmdArgs, options::OPT_image__base);
   Args.AddAllArgs(CmdArgs, options::OPT_init);
@@ -3241,7 +3269,7 @@ void darwin::Link::ConstructJob(Compilation &C, const JobAction &JA,
     // endfile_spec is empty.
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   Args.AddAllArgs(CmdArgs, options::OPT_T_Group);
   Args.AddAllArgs(CmdArgs, options::OPT_F);
@@ -3400,7 +3428,7 @@ void auroraux::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                 getToolChain().GetFilePath("crtend.o")));
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("ld"));
@@ -3708,7 +3736,7 @@ void freebsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                                                     "crtn.o")));
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("ld"));
@@ -3863,7 +3891,7 @@ void netbsd::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                                                     "crtn.o")));
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   const char *Exec = Args.MakeArgString(FindTargetProgramPath(getToolChain(),
                                                       ToolTriple.getTriple(),
@@ -4087,7 +4115,7 @@ void linuxtools::Link::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   if (Args.hasArg(options::OPT_use_gold_plugin)) {
     CmdArgs.push_back("-plugin");
@@ -4171,7 +4199,7 @@ void minix::Link::ConstructJob(Compilation &C, const JobAction &JA,
                                               "/usr/gnu/lib/libend.a")));
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("/usr/gnu/bin/gld"));
@@ -4328,7 +4356,7 @@ void dragonfly::Link::ConstructJob(Compilation &C, const JobAction &JA,
                               getToolChain().GetFilePath("crtn.o")));
   }
 
-  addProfileRT(getToolChain(), Args, CmdArgs);
+  addProfileRT(getToolChain(), Args, CmdArgs, getToolChain().getTriple());
 
   const char *Exec =
     Args.MakeArgString(getToolChain().GetProgramPath("ld"));

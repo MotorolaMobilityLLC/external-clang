@@ -20,6 +20,8 @@
 #include "clang/Sema/IdentifierResolver.h"
 #include "clang/Sema/ObjCMethodList.h"
 #include "clang/Sema/DeclSpec.h"
+#include "clang/Sema/LocInfoType.h"
+#include "clang/Sema/TypoCorrection.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/DeclarationName.h"
 #include "clang/AST/ExternalASTSource.h"
@@ -45,6 +47,8 @@ namespace clang {
   class ASTConsumer;
   class ASTContext;
   class ASTMutationListener;
+  class ASTReader;
+  class ASTWriter;
   class ArrayType;
   class AttributeList;
   class BlockDecl;
@@ -156,43 +160,6 @@ namespace sema {
   class FunctionScopeInfo;
   class TemplateDeductionInfo;
 }
-
-/// \brief Holds a QualType and a TypeSourceInfo* that came out of a declarator
-/// parsing.
-///
-/// LocInfoType is a "transient" type, only needed for passing to/from Parser
-/// and Sema, when we want to preserve type source info for a parsed type.
-/// It will not participate in the type system semantics in any way.
-class LocInfoType : public Type {
-  enum {
-    // The last number that can fit in Type's TC.
-    // Avoids conflict with an existing Type class.
-    LocInfo = Type::TypeLast + 1
-  };
-
-  TypeSourceInfo *DeclInfo;
-
-  LocInfoType(QualType ty, TypeSourceInfo *TInfo)
-    : Type((TypeClass)LocInfo, ty, ty->isDependentType(), 
-           ty->isVariablyModifiedType(),
-           ty->containsUnexpandedParameterPack()), 
-      DeclInfo(TInfo) {
-    assert(getTypeClass() == (TypeClass)LocInfo && "LocInfo didn't fit in TC?");
-  }
-  friend class Sema;
-
-public:
-  QualType getType() const { return getCanonicalTypeInternal(); }
-  TypeSourceInfo *getTypeSourceInfo() const { return DeclInfo; }
-
-  void getAsStringInternal(std::string &Str,
-                                   const PrintingPolicy &Policy) const;
-
-  static bool classof(const Type *T) {
-    return T->getTypeClass() == (TypeClass)LocInfo;
-  }
-  static bool classof(const LocInfoType *) { return true; }
-};
 
 // FIXME: No way to easily map from TemplateTypeParmTypes to
 // TemplateTypeParmDecls, so we have this horrible PointerUnion.
@@ -815,9 +782,8 @@ public:
                                  SourceLocation Loc, DeclarationName Entity);
   QualType BuildParenType(QualType T);
 
-  TypeSourceInfo *GetTypeForDeclarator(Declarator &D, Scope *S,
-                                       TagDecl **OwnedDecl = 0,
-                                       bool AllowAutoInTypeName = false);
+  TypeSourceInfo *GetTypeForDeclarator(Declarator &D, Scope *S);
+  TypeSourceInfo *GetTypeForDeclaratorCast(Declarator &D, QualType FromTy);
   TypeSourceInfo *GetTypeSourceInfoForDeclarator(Declarator &D, QualType T,
                                                TypeSourceInfo *ReturnTypeInfo);
   /// \brief Package the given type and TSI into a ParsedType.
@@ -874,7 +840,7 @@ public:
   // Symbol table / Decl tracking callbacks: SemaDecl.cpp.
   //
 
-  DeclGroupPtrTy ConvertDeclToDeclGroup(Decl *Ptr);
+  DeclGroupPtrTy ConvertDeclToDeclGroup(Decl *Ptr, Decl *OwnedType = 0);
 
   void DiagnoseUseOfUnimplementedSelectors();
 
@@ -1661,6 +1627,16 @@ private:
                                                    bool ConstThis,
                                                    bool VolatileThis);
 
+  // \brief The set of known/encountered (unique, canonicalized) NamespaceDecls.
+  //
+  // The boolean value will be true to indicate that the namespace was loaded
+  // from an AST/PCH file, or false otherwise.
+  llvm::DenseMap<NamespaceDecl*, bool> KnownNamespaces;
+
+  /// \brief Whether we have already loaded known namespaces from an extenal
+  /// source.
+  bool LoadedExternalKnownNamespaces;
+  
 public:
   /// \brief Look up a name, looking for a single declaration.  Return
   /// null if the results were absent, ambiguous, or overloaded.
@@ -1737,11 +1713,13 @@ public:
     CTC_ObjCMessageReceiver
   };
 
-  DeclarationName CorrectTypo(LookupResult &R, Scope *S, CXXScopeSpec *SS,
-                              DeclContext *MemberContext = 0,
-                              bool EnteringContext = false,
-                              CorrectTypoContext CTC = CTC_Unknown,
-                              const ObjCObjectPointerType *OPT = 0);
+  TypoCorrection CorrectTypo(const DeclarationNameInfo &Typo,
+                             Sema::LookupNameKind LookupKind,
+                             Scope *S, CXXScopeSpec *SS,
+                             DeclContext *MemberContext = NULL,
+                             bool EnteringContext = false,
+                             CorrectTypoContext CTC = CTC_Unknown,
+                             const ObjCObjectPointerType *OPT = NULL);
 
   void FindAssociatedClassesAndNamespaces(Expr **Args, unsigned NumArgs,
                                    AssociatedNamespaceSet &AssociatedNamespaces,
@@ -2275,8 +2253,7 @@ public:
   ExprResult ActOnParenExpr(SourceLocation L, SourceLocation R, Expr *Val);
   ExprResult ActOnParenOrParenListExpr(SourceLocation L,
                                        SourceLocation R,
-                                       MultiExprArg Val,
-                                       ParsedType TypeOfCast = ParsedType());
+                                       MultiExprArg Val);
 
   /// ActOnStringLiteral - The specified tokens were lexed as pasted string
   /// fragments (e.g. "foo" "bar" L"baz").
@@ -2399,21 +2376,19 @@ public:
                                 MultiExprArg ExecConfig, SourceLocation GGGLoc);
 
   ExprResult ActOnCastExpr(Scope *S, SourceLocation LParenLoc,
-                           ParsedType Ty, SourceLocation RParenLoc,
-                           Expr *Op);
+                           Declarator &D, ParsedType &Ty,
+                           SourceLocation RParenLoc, Expr *Op);
   ExprResult BuildCStyleCastExpr(SourceLocation LParenLoc,
                                  TypeSourceInfo *Ty,
                                  SourceLocation RParenLoc,
                                  Expr *Op);
 
-  bool TypeIsVectorType(ParsedType Ty) {
-    return GetTypeFromParser(Ty)->isVectorType();
-  }
+  /// \brief Build an altivec or OpenCL literal.
+  ExprResult BuildVectorLiteral(SourceLocation LParenLoc,
+                                SourceLocation RParenLoc, Expr *E,
+                                TypeSourceInfo *TInfo);
 
   ExprResult MaybeConvertParenListExprToParenExpr(Scope *S, Expr *ME);
-  ExprResult ActOnCastOfParenListExpr(Scope *S, SourceLocation LParenLoc,
-                                      SourceLocation RParenLoc, Expr *E,
-                                      TypeSourceInfo *TInfo);
 
   ExprResult ActOnCompoundLiteral(SourceLocation LParenLoc,
                                   ParsedType Ty,
@@ -2848,7 +2823,7 @@ public:
   ExprResult ActOnCXXNamedCast(SourceLocation OpLoc,
                                tok::TokenKind Kind,
                                SourceLocation LAngleBracketLoc,
-                               ParsedType Ty,
+                               Declarator &D,
                                SourceLocation RAngleBracketLoc,
                                SourceLocation LParenLoc,
                                Expr *E,
@@ -4759,7 +4734,7 @@ public:
   /// \brief The number of typos corrected by CorrectTypo.
   unsigned TyposCorrected;
 
-  typedef llvm::DenseMap<IdentifierInfo *, std::pair<llvm::StringRef, bool> >
+  typedef llvm::DenseMap<IdentifierInfo *, TypoCorrection>
     UnqualifiedTyposCorrectedMap;
   
   /// \brief A cache containing the results of typo correction for unqualified
@@ -5092,6 +5067,7 @@ public:
   ExprResult
   HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
                             Expr *BaseExpr,
+                            SourceLocation OpLoc,
                             DeclarationName MemberName,
                             SourceLocation MemberLoc,
                             SourceLocation SuperLoc, QualType SuperType,
@@ -5559,7 +5535,8 @@ public:
                                   SourceLocation QuestionLoc);
 
   /// type checking for vector binary operators.
-  QualType CheckVectorOperands(SourceLocation l, ExprResult &lex, ExprResult &rex);
+  QualType CheckVectorOperands(ExprResult &lex, ExprResult &rex,
+                               SourceLocation Loc, bool isCompAssign);
   QualType CheckVectorCompareOperands(ExprResult &lex, ExprResult &rx,
                                       SourceLocation l, bool isRel);
 
@@ -5643,9 +5620,13 @@ public:
   void checkRetainCycles(ObjCMessageExpr *msg);
   void checkRetainCycles(Expr *receiver, Expr *argument);
 
-  /// checkWeakUnsafeAssigns - Check whether +1 expr is being assigned
-  /// to weak/__unsafe_unretained.
-  void checkUnsafeAssigns(SourceLocation Loc, QualType LHS, Expr *RHS);
+  /// checkUnsafeAssigns - Check whether +1 expr is being assigned
+  /// to weak/__unsafe_unretained type.
+  bool checkUnsafeAssigns(SourceLocation Loc, QualType LHS, Expr *RHS);
+
+  /// checkUnsafeExprAssigns - Check whether +1 expr is being assigned
+  /// to weak/__unsafe_unretained expression.
+  void checkUnsafeExprAssigns(SourceLocation Loc, Expr *LHS, Expr *RHS);
 
   /// CheckMessageArgumentTypes - Check types in an Obj-C message send.
   /// \param Method - May be null.
@@ -5950,6 +5931,8 @@ private:
 protected:
   friend class Parser;
   friend class InitializationSequence;  
+  friend class ASTReader;
+  friend class ASTWriter;
   
 public:
   /// \brief Retrieve the parser's current scope.
