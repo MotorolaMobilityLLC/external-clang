@@ -22,7 +22,6 @@ clang_frontend_SRC_FILES := \
   ASTConsumers.cpp \
   ASTMerge.cpp \
   ASTUnit.cpp \
-  BoostConAction.cpp \
   CacheTokens.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
