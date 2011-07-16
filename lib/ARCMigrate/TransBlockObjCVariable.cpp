@@ -98,12 +98,12 @@ public:
         BlocksAttr *attr = var->getAttr<BlocksAttr>();
         if(!attr)
           continue;
-        bool hasARCRuntime = !Pass.Ctx.getLangOptions().ObjCNoAutoRefCountRuntime;
+        bool useWeak = canApplyWeak(Pass.Ctx, var->getType());
         SourceManager &SM = Pass.Ctx.getSourceManager();
         Transaction Trans(Pass.TA);
         Pass.TA.replaceText(SM.getInstantiationLoc(attr->getLocation()),
                             "__block",
-                            hasARCRuntime ? "__weak" : "__unsafe_unretained");
+                            useWeak ? "__weak" : "__unsafe_unretained");
       }
 
     }

@@ -1349,7 +1349,7 @@ RetainSummaryManager::getCommonMethodSummary(const ObjCMethodDecl* MD,
   if (cocoa::isCocoaObjectRef(RetTy)) {
     // EXPERIMENTAL: assume the Cocoa conventions for all objects returned
     //  by instance methods.
-    RetEffect E = cocoa::followsFundamentalRule(S)
+    RetEffect E = cocoa::followsFundamentalRule(S, MD)
                   ? ObjCAllocRetE : RetEffect::MakeNotOwned(RetEffect::ObjC);
 
     return getPersistentSummary(E, ReceiverEff, MayEscape);
@@ -1357,7 +1357,7 @@ RetainSummaryManager::getCommonMethodSummary(const ObjCMethodDecl* MD,
 
   // Look for methods that return an owned core foundation object.
   if (cocoa::isCFObjectRef(RetTy)) {
-    RetEffect E = cocoa::followsFundamentalRule(S)
+    RetEffect E = cocoa::followsFundamentalRule(S, MD)
       ? RetEffect::MakeOwned(RetEffect::CF, true)
       : RetEffect::MakeNotOwned(RetEffect::CF);
 
@@ -1428,7 +1428,7 @@ RetainSummaryManager::getInstanceMethodSummary(Selector S,
     assert(ScratchArgs.isEmpty());
 
     // "initXXX": pass-through for receiver.
-    if (cocoa::deriveNamingConvention(S) == cocoa::InitRule)
+    if (cocoa::deriveNamingConvention(S, MD) == cocoa::InitRule)
       Summ = getInitMethodSummary(RetTy);
     else
       Summ = getCommonMethodSummary(MD, S, RetTy);
@@ -1925,7 +1925,7 @@ namespace {
       CFRefBug(tf, "Method should return an owned object") {}
 
     const char *getDescription() const {
-      return "Object with +0 retain counts returned to caller where a +1 "
+      return "Object with a +0 retain count returned to caller where a +1 "
              "(owning) retain count is expected";
     }
   };
@@ -2112,7 +2112,7 @@ PathDiagnosticPiece* CFRefReport::VisitNode(const ExplodedNode* N,
 
       if (static_cast<CFRefBug&>(getBugType()).getTF().isGCEnabled()) {
         assert(CurrV.getObjKind() == RetEffect::CF);
-        os << "  "
+        os << ".  "
         "Core Foundation objects are not automatically garbage collected.";
       }
     }
@@ -2434,14 +2434,14 @@ CFRefLeakReport::getEndPath(BugReporterContext& BRC,
 
   if (RV->getKind() == RefVal::ErrorLeakReturned) {
     // FIXME: Per comments in rdar://6320065, "create" only applies to CF
-    // ojbects.  Only "copy", "alloc", "retain" and "new" transfer ownership
+    // objects.  Only "copy", "alloc", "retain" and "new" transfer ownership
     // to the caller for NS objects.
     const Decl *D = &EndN->getCodeDecl();
     if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D)) {
       os << " is returned from a method whose name ('"
          << MD->getSelector().getAsString()
          << "') does not start with 'copy', 'mutableCopy', 'alloc' or 'new'."
-            "  This violates the naming convention rules "
+            "  This violates the naming convention rules"
             " given in the Memory Management Guide for Cocoa";
     }
     else {
@@ -2449,7 +2449,7 @@ CFRefLeakReport::getEndPath(BugReporterContext& BRC,
       os << " is return from a function whose name ('"
          << FD->getNameAsString()
          << "') does not contain 'Copy' or 'Create'.  This violates the naming"
-            " convention rules given the Memory Management Guide for Core "
+            " convention rules given the Memory Management Guide for Core"
             " Foundation";
     }    
   }
@@ -3306,15 +3306,10 @@ CFRefCount::HandleAutoreleaseCounts(const GRState * state,
 
     std::string sbuf;
     llvm::raw_string_ostream os(sbuf);
-    os << "Object over-autoreleased: object was sent -autorelease";
+    os << "Object over-autoreleased: object was sent -autorelease ";
     if (V.getAutoreleaseCount() > 1)
-      os << V.getAutoreleaseCount() << " times";
-    os << " but the object has ";
-    if (V.getCount() == 0)
-      os << "zero (locally visible)";
-    else
-      os << "+" << V.getCount();
-    os << " retain counts";
+      os << V.getAutoreleaseCount() << " times ";
+    os << "but the object has a +" << V.getCount() << " retain count";
 
     CFRefReport *report =
       new CFRefReport(*static_cast<CFRefBug*>(overAutorelease),

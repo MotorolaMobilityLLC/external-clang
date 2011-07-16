@@ -480,23 +480,63 @@ Sema::ActOnCXXNullPtrLiteral(SourceLocation Loc) {
 
 /// ActOnCXXThrow - Parse throw expressions.
 ExprResult
-Sema::ActOnCXXThrow(SourceLocation OpLoc, Expr *Ex) {
+Sema::ActOnCXXThrow(Scope *S, SourceLocation OpLoc, Expr *Ex) {
+  bool IsThrownVarInScope = false;
+  if (Ex) {
+    // C++0x [class.copymove]p31:
+    //   When certain criteria are met, an implementation is allowed to omit the 
+    //   copy/move construction of a class object [...]
+    //
+    //     - in a throw-expression, when the operand is the name of a 
+    //       non-volatile automatic object (other than a function or catch-
+    //       clause parameter) whose scope does not extend beyond the end of the 
+    //       innermost enclosing try-block (if there is one), the copy/move 
+    //       operation from the operand to the exception object (15.1) can be 
+    //       omitted by constructing the automatic object directly into the 
+    //       exception object
+    if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Ex->IgnoreParens()))
+      if (VarDecl *Var = dyn_cast<VarDecl>(DRE->getDecl())) {
+        if (Var->hasLocalStorage() && !Var->getType().isVolatileQualified()) {
+          for( ; S; S = S->getParent()) {
+            if (S->isDeclScope(Var)) {
+              IsThrownVarInScope = true;
+              break;
+            }
+            
+            if (S->getFlags() &
+                (Scope::FnScope | Scope::ClassScope | Scope::BlockScope |
+                 Scope::FunctionPrototypeScope | Scope::ObjCMethodScope |
+                 Scope::TryScope))
+              break;
+          }
+        }
+      }
+  }
+  
+  return BuildCXXThrow(OpLoc, Ex, IsThrownVarInScope);
+}
+
+ExprResult Sema::BuildCXXThrow(SourceLocation OpLoc, Expr *Ex, 
+                               bool IsThrownVarInScope) {
   // Don't report an error if 'throw' is used in system headers.
   if (!getLangOptions().CXXExceptions &&
       !getSourceManager().isInSystemHeader(OpLoc))
     Diag(OpLoc, diag::err_exceptions_disabled) << "throw";
-
+  
   if (Ex && !Ex->isTypeDependent()) {
-    ExprResult ExRes = CheckCXXThrowOperand(OpLoc, Ex);
+    ExprResult ExRes = CheckCXXThrowOperand(OpLoc, Ex, IsThrownVarInScope);
     if (ExRes.isInvalid())
       return ExprError();
     Ex = ExRes.take();
   }
-  return Owned(new (Context) CXXThrowExpr(Ex, Context.VoidTy, OpLoc));
+  
+  return Owned(new (Context) CXXThrowExpr(Ex, Context.VoidTy, OpLoc,
+                                          IsThrownVarInScope));
 }
 
 /// CheckCXXThrowOperand - Validate the operand of a throw.
-ExprResult Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *E) {
+ExprResult Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *E,
+                                      bool IsThrownVarInScope) {
   // C++ [except.throw]p3:
   //   A throw-expression initializes a temporary object, called the exception
   //   object, the type of which is determined by removing any top-level
@@ -535,14 +575,28 @@ ExprResult Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *E) {
 
   // Initialize the exception result.  This implicitly weeds out
   // abstract types or types with inaccessible copy constructors.
-  const VarDecl *NRVOVariable = getCopyElisionCandidate(QualType(), E, false);
-
-  // FIXME: Determine whether we can elide this copy per C++0x [class.copy]p32.
+  
+  // C++0x [class.copymove]p31:
+  //   When certain criteria are met, an implementation is allowed to omit the 
+  //   copy/move construction of a class object [...]
+  //
+  //     - in a throw-expression, when the operand is the name of a 
+  //       non-volatile automatic object (other than a function or catch-clause 
+  //       parameter) whose scope does not extend beyond the end of the 
+  //       innermost enclosing try-block (if there is one), the copy/move 
+  //       operation from the operand to the exception object (15.1) can be 
+  //       omitted by constructing the automatic object directly into the 
+  //       exception object
+  const VarDecl *NRVOVariable = 0;
+  if (IsThrownVarInScope)
+    NRVOVariable = getCopyElisionCandidate(QualType(), E, false);
+  
   InitializedEntity Entity =
       InitializedEntity::InitializeException(ThrowLoc, E->getType(),
-                                             /*NRVO=*/false);
+                                             /*NRVO=*/NRVOVariable != 0);
   Res = PerformMoveOrCopyInitialization(Entity, NRVOVariable,
-                                        QualType(), E);
+                                        QualType(), E,
+                                        IsThrownVarInScope);
   if (Res.isInvalid())
     return ExprError();
   E = Res.take();
@@ -1094,7 +1148,17 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
   if (OperatorDelete)
     MarkDeclarationReferenced(StartLoc, OperatorDelete);
 
-  // FIXME: Also check that the destructor is accessible. (C++ 5.3.4p16)
+  // C++0x [expr.new]p17:
+  //   If the new expression creates an array of objects of class type,
+  //   access and ambiguity control are done for the destructor.
+  if (ArraySize && Constructor) {
+    if (CXXDestructorDecl *dtor = LookupDestructor(Constructor->getParent())) {
+      MarkDeclarationReferenced(StartLoc, dtor);
+      CheckDestructorAccess(StartLoc, dtor, 
+                            PDiag(diag::err_access_dtor)
+                              << Context.getBaseElementType(AllocType));
+    }
+  }
 
   PlacementArgs.release();
   ConstructorArgs.release();
@@ -2286,8 +2350,20 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
       if (From->getType()->isObjCObjectPointerType() &&
           ToType->isObjCObjectPointerType())
         EmitRelatedResultTypeNote(From);
-    }
-
+    } 
+    else if (getLangOptions().ObjCAutoRefCount &&
+             !CheckObjCARCUnavailableWeakConversion(ToType, 
+                                                    From->getType())) {
+           if (Action == AA_Initializing)
+             Diag(From->getSourceRange().getBegin(), 
+                  diag::err_arc_weak_unavailable_assign);
+           else
+             Diag(From->getSourceRange().getBegin(),
+                  diag::err_arc_convesion_of_weak_unavailable) 
+                  << (Action == AA_Casting) << From->getType() << ToType 
+                  << From->getSourceRange();
+         }
+             
     CastKind Kind = CK_Invalid;
     CXXCastPath BasePath;
     if (CheckPointerConversion(From, ToType, Kind, BasePath, CStyle))
@@ -3985,13 +4061,12 @@ ExprResult Sema::MaybeBindToTemporary(Expr *E) {
       ReturnsRetained = (D && D->hasAttr<NSReturnsRetainedAttr>());
     }
 
-    if (ReturnsRetained) {
-      ExprNeedsCleanups = true;
-      E = ImplicitCastExpr::Create(Context, E->getType(),
-                                   CK_ObjCConsumeObject, E, 0,
-                                   VK_RValue);
-    }
-    return Owned(E);
+    ExprNeedsCleanups = true;
+
+    CastKind ck = (ReturnsRetained ? CK_ObjCConsumeObject
+                                   : CK_ObjCReclaimReturnedObject);
+    return Owned(ImplicitCastExpr::Create(Context, E->getType(), ck, E, 0,
+                                          VK_RValue));
   }
 
   if (!getLangOptions().CPlusPlus)

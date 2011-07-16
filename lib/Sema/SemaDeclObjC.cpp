@@ -286,6 +286,11 @@ static bool CheckARCMethodDecl(Sema &S, ObjCMethodDecl *method) {
         method->hasAttr<NSReturnsAutoreleasedAttr>())
       return false;
     break;
+    
+  case OMF_performSelector:
+    // we don't annotate performSelector's
+    return true;
+      
   }
 
   method->addAttr(new (S.Context) NSReturnsRetainedAttr(SourceLocation(),
@@ -366,6 +371,7 @@ void Sema::ActOnStartOfObjCMethodDef(Scope *FnBodyScope, Decl *D) {
     case OMF_copy:
     case OMF_new:
     case OMF_self:
+    case OMF_performSelector:
       break;
     }
   }
@@ -1298,6 +1304,7 @@ static bool checkMethodFamilyMismatch(Sema &S, ObjCMethodDecl *impl,
   case OMF_dealloc:
   case OMF_retainCount:
   case OMF_self:
+  case OMF_performSelector:
     // Mismatches for these methods don't change ownership
     // conventions, so we don't care.
     return false;
@@ -1441,7 +1448,7 @@ void Sema::CheckProtocolMethodDefs(SourceLocation ImpLoc,
     CheckProtocolMethodDefs(ImpLoc, *PI, IncompleteImpl, InsMap, ClsMap, IDecl);
 }
 
-/// MatchAllMethodDeclarations - Check methods declaraed in interface or
+/// MatchAllMethodDeclarations - Check methods declared in interface
 /// or protocol against those declared in their implementations.
 ///
 void Sema::MatchAllMethodDeclarations(const llvm::DenseSet<Selector> &InsMap,
@@ -2317,7 +2324,7 @@ Decl *Sema::ActOnMethodDeclaration(
     } else {
       ArgType = GetTypeFromParser(ArgInfo[i].Type, &DI);
       // Perform the default array/function conversions (C99 6.7.5.3p[7,8]).
-      ArgType = adjustParameterType(ArgType);
+      ArgType = Context.getAdjustedParameterType(ArgType);
     }
 
     LookupResult R(*this, ArgInfo[i].Name, ArgInfo[i].NameLoc, 
@@ -2364,7 +2371,7 @@ Decl *Sema::ActOnMethodDeclaration(
       ArgType = Context.getObjCIdType();
     else
       // Perform the default array/function conversions (C99 6.7.5.3p[7,8]).
-      ArgType = adjustParameterType(ArgType);
+      ArgType = Context.getAdjustedParameterType(ArgType);
     if (ArgType->isObjCObjectType()) {
       Diag(Param->getLocation(),
            diag::err_object_cannot_be_passed_returned_by_value)
@@ -2467,6 +2474,7 @@ Decl *Sema::ActOnMethodDeclaration(
     case OMF_mutableCopy:
     case OMF_release:
     case OMF_retainCount:
+    case OMF_performSelector:
       break;
       
     case OMF_alloc:

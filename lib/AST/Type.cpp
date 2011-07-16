@@ -180,6 +180,26 @@ QualType QualType::getDesugaredType(QualType T, const ASTContext &Context) {
   return Context.getQualifiedType(split.first, split.second);
 }
 
+QualType QualType::getSingleStepDesugaredType(const ASTContext &Context) const {
+  QualifierCollector Qs;
+  
+  const Type *CurTy = Qs.strip(*this);
+  switch (CurTy->getTypeClass()) {
+#define ABSTRACT_TYPE(Class, Parent)
+#define TYPE(Class, Parent) \
+  case Type::Class: { \
+    const Class##Type *Ty = cast<Class##Type>(CurTy); \
+    if (!Ty->isSugared()) \
+      return *this; \
+    return Context.getQualifiedType(Ty->desugar(), Qs); \
+    break; \
+  }
+#include "clang/AST/TypeNodes.def"
+  }
+
+  return *this;
+}
+
 SplitQualType QualType::getSplitDesugaredType(QualType T) {
   QualifierCollector Qs;
 
@@ -895,8 +915,6 @@ bool QualType::isPODType(ASTContext &Context) const {
       return false;
 
     case Qualifiers::OCL_None:
-      if ((*this)->isObjCLifetimeType())
-        return false;
       break;
     }        
   }
@@ -1645,8 +1663,15 @@ TypeOfExprType::TypeOfExprType(Expr *E, QualType can)
     TOExpr(E) {
 }
 
+bool TypeOfExprType::isSugared() const {
+  return !TOExpr->isTypeDependent();
+}
+
 QualType TypeOfExprType::desugar() const {
-  return getUnderlyingExpr()->getType();
+  if (isSugared())
+    return getUnderlyingExpr()->getType();
+  
+  return QualType(this, 0);
 }
 
 void DependentTypeOfExprType::Profile(llvm::FoldingSetNodeID &ID,
@@ -1661,6 +1686,15 @@ DecltypeType::DecltypeType(Expr *E, QualType underlyingType, QualType can)
          E->containsUnexpandedParameterPack()), 
     E(E),
   UnderlyingType(underlyingType) {
+}
+
+bool DecltypeType::isSugared() const { return !E->isInstantiationDependent(); }
+
+QualType DecltypeType::desugar() const {
+  if (isSugared())
+    return getUnderlyingType();
+  
+  return QualType(this, 0);
 }
 
 DependentDecltypeType::DependentDecltypeType(const ASTContext &Context, Expr *E)
@@ -1980,8 +2014,8 @@ static CachedProperties computeCachedProperties(const Type *T) {
 #define DEPENDENT_TYPE(Class,Base) case Type::Class:
 #define NON_CANONICAL_UNLESS_DEPENDENT_TYPE(Class,Base) case Type::Class:
 #include "clang/AST/TypeNodes.def"
-    // Treat dependent types as external.
-    assert(T->isDependentType());
+    // Treat instantiation-dependent types as external.
+    assert(T->isInstantiationDependentType());
     return CachedProperties(ExternalLinkage, DefaultVisibility, false);
 
   case Type::Builtin:

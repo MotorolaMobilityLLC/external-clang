@@ -458,11 +458,20 @@ bool Driver::HandleImmediateArgs(const Compilation &C) {
     }
     llvm::outs() << "\n";
     llvm::outs() << "libraries: =";
+
+    std::string sysroot;
+    if (Arg *A = C.getArgs().getLastArg(options::OPT__sysroot_EQ))
+      sysroot = A->getValue(C.getArgs());
+
     for (ToolChain::path_list::const_iterator it = TC.getFilePaths().begin(),
            ie = TC.getFilePaths().end(); it != ie; ++it) {
       if (it != TC.getFilePaths().begin())
         llvm::outs() << ':';
-      llvm::outs() << *it;
+      const char *path = it->c_str();
+      if (path[0] == '=')
+        llvm::outs() << sysroot << path + 1;
+      else
+        llvm::outs() << path;
     }
     llvm::outs() << "\n";
     return false;
@@ -1250,6 +1259,15 @@ const char *Driver::GetNamedOutputPath(Compilation &C,
     Suffixed += '.';
     Suffixed += Suffix;
     NamedOutput = C.getArgs().MakeArgString(Suffixed.c_str());
+  }
+
+  // If we're saving temps and the temp filename conflicts with the input 
+  // filename, then avoid overwriting input file.
+  if (!AtTopLevel && C.getArgs().hasArg(options::OPT_save_temps) &&
+    NamedOutput == BaseName) {
+    std::string TmpName =
+      GetTemporaryPath(types::getTypeTempSuffix(JA.getType()));
+    return C.addTempFile(C.getArgs().MakeArgString(TmpName.c_str()));
   }
 
   // As an annoying special case, PCH generation doesn't strip the pathname.

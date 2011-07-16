@@ -183,6 +183,7 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
       
   case Stmt::DeclRefExprClass:           
   case Stmt::BlockDeclRefExprClass:
+  case Stmt::SubstNonTypeTemplateParmExprClass:
   case Stmt::SubstNonTypeTemplateParmPackExprClass:
     // FIXME: UnresolvedLookupExpr?
     // FIXME: DependentScopeDeclRefExpr?
@@ -378,15 +379,15 @@ MacroDefinition *cxcursor::getCursorMacroDefinition(CXCursor C) {
   return static_cast<MacroDefinition *>(C.data[0]);
 }
 
-CXCursor cxcursor::MakeMacroInstantiationCursor(MacroInstantiation *MI, 
-                                                CXTranslationUnit TU) {
-  CXCursor C = { CXCursor_MacroInstantiation, { MI, 0, TU } };
+CXCursor cxcursor::MakeMacroExpansionCursor(MacroExpansion *MI, 
+                                            CXTranslationUnit TU) {
+  CXCursor C = { CXCursor_MacroExpansion, { MI, 0, TU } };
   return C;
 }
 
-MacroInstantiation *cxcursor::getCursorMacroInstantiation(CXCursor C) {
-  assert(C.kind == CXCursor_MacroInstantiation);
-  return static_cast<MacroInstantiation *>(C.data[0]);
+MacroExpansion *cxcursor::getCursorMacroExpansion(CXCursor C) {
+  assert(C.kind == CXCursor_MacroExpansion);
+  return static_cast<MacroExpansion *>(C.data[0]);
 }
 
 CXCursor cxcursor::MakeInclusionDirectiveCursor(InclusionDirective *ID, 

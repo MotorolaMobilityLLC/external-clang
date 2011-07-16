@@ -59,7 +59,7 @@ bool TemplateDeclInstantiator::SubstQualifier(const TagDecl *OldDecl,
 
 // FIXME: Is this still too simple?
 void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
-                            Decl *Tmpl, Decl *New) {
+                            const Decl *Tmpl, Decl *New) {
   for (AttrVec::const_iterator i = Tmpl->attr_begin(), e = Tmpl->attr_end();
        i != e; ++i) {
     const Attr *TmplAttr = *i;
@@ -1090,7 +1090,7 @@ Decl *TemplateDeclInstantiator::VisitFunctionDecl(FunctionDecl *D,
   Function->setLexicalDeclContext(LexicalDC);
 
   // Attach the parameters
-  if (isa<FunctionProtoType>(Function->getType())) {
+  if (isa<FunctionProtoType>(Function->getType().IgnoreParens())) {
     // Adopt the already-instantiated parameters into our own context.
     for (unsigned P = 0; P < Params.size(); ++P)
       if (Params[P])
@@ -2283,7 +2283,12 @@ TemplateDeclInstantiator::InitFunctionInstantiation(FunctionDecl *New,
                                                  EPI));
   }
 
-  SemaRef.InstantiateAttrs(TemplateArgs, Tmpl, New);
+  const FunctionDecl* Definition = Tmpl;
+
+  // Get the definition. Leaves the variable unchanged if undefined.
+  Tmpl->isDefined(Definition);
+
+  SemaRef.InstantiateAttrs(TemplateArgs, Definition, New);
 
   return false;
 }

@@ -481,6 +481,11 @@ public:
     return Visit(PE->getSubExpr());
   }
 
+  llvm::Constant *
+  VisitSubstNonTypeTemplateParmExpr(SubstNonTypeTemplateParmExpr *PE) {
+    return Visit(PE->getReplacement());
+  }
+
   llvm::Constant *VisitGenericSelectionExpr(GenericSelectionExpr *GE) {
     return Visit(GE->getResultExpr());
   }
@@ -533,7 +538,7 @@ public:
       // Build a struct with the union sub-element as the first member,
       // and padded to the appropriate size
       std::vector<llvm::Constant*> Elts;
-      std::vector<const llvm::Type*> Types;
+      std::vector<llvm::Type*> Types;
       Elts.push_back(C);
       Types.push_back(C->getType());
       unsigned CurSize = CGM.getTargetData().getTypeAllocSize(C->getType());
@@ -541,7 +546,7 @@ public:
 
       assert(CurSize <= TotalSize && "Union size mismatch!");
       if (unsigned NumPadBytes = TotalSize - CurSize) {
-        const llvm::Type *Ty = llvm::Type::getInt8Ty(VMContext);
+        llvm::Type *Ty = llvm::Type::getInt8Ty(VMContext);
         if (NumPadBytes > 1)
           Ty = llvm::ArrayType::get(Ty, NumPadBytes);
 
@@ -582,6 +587,7 @@ public:
     case CK_Dynamic:
     case CK_ObjCProduceObject:
     case CK_ObjCConsumeObject:
+    case CK_ObjCReclaimReturnedObject:
       return 0;
 
     // These might need to be supported for constexpr.
@@ -710,7 +716,7 @@ public:
 
     if (RewriteType) {
       // FIXME: Try to avoid packing the array
-      std::vector<const llvm::Type*> Types;
+      std::vector<llvm::Type*> Types;
       for (unsigned i = 0; i < Elts.size(); ++i)
         Types.push_back(Elts[i]->getType());
       const llvm::StructType *SType = llvm::StructType::get(AType->getContext(),

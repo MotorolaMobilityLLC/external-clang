@@ -189,7 +189,7 @@ CompilerInvocation *createInvocationForMigration(CompilerInvocation &origCI) {
   CInvok->getDiagnosticOpts().ErrorLimit = 0;
   CInvok->getDiagnosticOpts().Warnings.push_back(
                                             "error=arc-unsafe-retained-assign");
-  CInvok->getLangOpts().ObjCNoAutoRefCountRuntime = !HasARCRuntime(origCI);
+  CInvok->getLangOpts().ObjCRuntimeHasWeak = HasARCRuntime(origCI);
 
   return CInvok.take();
 }
@@ -262,6 +262,10 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
 
   DiagClient->EndSourceFile();
 
+  // If we are migrating code that gets the '-fobjc-arc' flag, make sure
+  // to remove it so that we don't get errors from normal compilation.
+  origCI.getLangOpts().ObjCAutoRefCount = false;
+
   return capturedDiags.hasErrors();
 }
 
@@ -269,9 +273,10 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
 // applyTransformations.
 //===----------------------------------------------------------------------===//
 
-bool arcmt::applyTransformations(CompilerInvocation &origCI,
-                                 llvm::StringRef Filename, InputKind Kind,
-                                 DiagnosticClient *DiagClient) {
+static bool applyTransforms(CompilerInvocation &origCI,
+                            llvm::StringRef Filename, InputKind Kind,
+                            DiagnosticClient *DiagClient,
+                            llvm::StringRef outputDir) {
   if (!origCI.getLangOpts().ObjC1)
     return false;
 
@@ -284,7 +289,7 @@ bool arcmt::applyTransformations(CompilerInvocation &origCI,
   CInvok.getFrontendOpts().Inputs.clear();
   CInvok.getFrontendOpts().Inputs.push_back(std::make_pair(Kind, Filename));
   
-  MigrationProcess migration(CInvok, DiagClient);
+  MigrationProcess migration(CInvok, DiagClient, outputDir);
 
   std::vector<TransformFn> transforms = arcmt::getAllTransformations();
   assert(!transforms.empty());
@@ -294,12 +299,56 @@ bool arcmt::applyTransformations(CompilerInvocation &origCI,
     if (err) return true;
   }
 
-  origCI.getLangOpts().ObjCAutoRefCount = true;
+  llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
+                 new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+
+  if (outputDir.empty()) {
+    origCI.getLangOpts().ObjCAutoRefCount = true;
+    return migration.getRemapper().overwriteOriginal(*Diags);
+  } else {
+    // If we are migrating code that gets the '-fobjc-arc' flag, make sure
+    // to remove it so that we don't get errors from normal compilation.
+    origCI.getLangOpts().ObjCAutoRefCount = false;
+    return migration.getRemapper().flushToDisk(outputDir, *Diags);
+  }
+}
+
+bool arcmt::applyTransformations(CompilerInvocation &origCI,
+                                 llvm::StringRef Filename, InputKind Kind,
+                                 DiagnosticClient *DiagClient) {
+  return applyTransforms(origCI, Filename, Kind, DiagClient, llvm::StringRef());
+}
+
+bool arcmt::migrateWithTemporaryFiles(CompilerInvocation &origCI,
+                                      llvm::StringRef Filename, InputKind Kind,
+                                      DiagnosticClient *DiagClient,
+                                      llvm::StringRef outputDir) {
+  assert(!outputDir.empty() && "Expected output directory path");
+  return applyTransforms(origCI, Filename, Kind, DiagClient, outputDir);
+}
+
+bool arcmt::getFileRemappings(std::vector<std::pair<std::string,std::string> > &
+                                  remap,
+                              llvm::StringRef outputDir,
+                              DiagnosticClient *DiagClient) {
+  assert(!outputDir.empty());
 
   llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
   llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
                  new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
-  return migration.getRemapper().overwriteOriginal(*Diags);
+
+  FileRemapper remapper;
+  bool err = remapper.initFromDisk(outputDir, *Diags,
+                                   /*ignoreIfFilesChanged=*/true);
+  if (err)
+    return true;
+
+  CompilerInvocation CI;
+  remapper.applyMappings(CI);
+  remap = CI.getPreprocessorOpts().RemappedFiles;
+
+  return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -381,6 +430,18 @@ public:
 
 /// \brief Anchor for VTable.
 MigrationProcess::RewriteListener::~RewriteListener() { }
+
+MigrationProcess::MigrationProcess(const CompilerInvocation &CI,
+                                   DiagnosticClient *diagClient,
+                                   llvm::StringRef outputDir)
+  : OrigCI(CI), DiagClient(diagClient) {
+  if (!outputDir.empty()) {
+    llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
+    llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
+                 new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+    Remapper.initFromDisk(outputDir, *Diags, /*ignoreIfFilesChanges=*/true);
+  }
+}
 
 bool MigrationProcess::applyTransform(TransformFn trans,
                                       RewriteListener *listener) {
