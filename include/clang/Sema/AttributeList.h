@@ -158,6 +158,7 @@ public:
     AT_always_inline,
     AT_analyzer_noreturn,
     AT_annotate,
+    AT_arc_weakref_unavailable,
     AT_availability,      // Clang-specific
     AT_base_check,
     AT_blocks,

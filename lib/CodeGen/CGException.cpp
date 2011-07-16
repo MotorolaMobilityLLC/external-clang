@@ -29,10 +29,9 @@ using namespace CodeGen;
 static llvm::Constant *getAllocateExceptionFn(CodeGenFunction &CGF) {
   // void *__cxa_allocate_exception(size_t thrown_size);
 
-  const llvm::Type *SizeTy = CGF.ConvertType(CGF.getContext().getSizeType());
+  llvm::Type *ArgTys[] = { CGF.SizeTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getInt8PtrTy(CGF.getLLVMContext()),
-                            SizeTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.Int8PtrTy, ArgTys, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_allocate_exception");
 }
@@ -40,10 +39,9 @@ static llvm::Constant *getAllocateExceptionFn(CodeGenFunction &CGF) {
 static llvm::Constant *getFreeExceptionFn(CodeGenFunction &CGF) {
   // void __cxa_free_exception(void *thrown_exception);
 
-  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
+  llvm::Type *ArgTys[] = { CGF.Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()),
-                            Int8PtrTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.VoidTy, ArgTys, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_free_exception");
 }
@@ -52,11 +50,9 @@ static llvm::Constant *getThrowFn(CodeGenFunction &CGF) {
   // void __cxa_throw(void *thrown_exception, std::type_info *tinfo,
   //                  void (*dest) (void *));
 
-  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
-  const llvm::Type *Args[3] = { Int8PtrTy, Int8PtrTy, Int8PtrTy };
+  llvm::Type *Args[3] = { CGF.Int8PtrTy, CGF.Int8PtrTy, CGF.Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()),
-                            Args, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.VoidTy, Args, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_throw");
 }
@@ -65,8 +61,7 @@ static llvm::Constant *getReThrowFn(CodeGenFunction &CGF) {
   // void __cxa_rethrow();
 
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()), 
-                            /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.VoidTy, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_rethrow");
 }
@@ -74,9 +69,9 @@ static llvm::Constant *getReThrowFn(CodeGenFunction &CGF) {
 static llvm::Constant *getGetExceptionPtrFn(CodeGenFunction &CGF) {
   // void *__cxa_get_exception_ptr(void*);
 
-  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
+  llvm::Type *ArgTys[] = { CGF.Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(Int8PtrTy, Int8PtrTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.Int8PtrTy, ArgTys, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_get_exception_ptr");
 }
@@ -84,9 +79,9 @@ static llvm::Constant *getGetExceptionPtrFn(CodeGenFunction &CGF) {
 static llvm::Constant *getBeginCatchFn(CodeGenFunction &CGF) {
   // void *__cxa_begin_catch(void*);
 
-  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
+  llvm::Type *ArgTys[] = { CGF.Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(Int8PtrTy, Int8PtrTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.Int8PtrTy, ArgTys, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_begin_catch");
 }
@@ -95,8 +90,7 @@ static llvm::Constant *getEndCatchFn(CodeGenFunction &CGF) {
   // void __cxa_end_catch();
 
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()), 
-                            /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.VoidTy, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_end_catch");
 }
@@ -104,17 +98,17 @@ static llvm::Constant *getEndCatchFn(CodeGenFunction &CGF) {
 static llvm::Constant *getUnexpectedFn(CodeGenFunction &CGF) {
   // void __cxa_call_unexepcted(void *thrown_exception);
 
-  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
+  llvm::Type *ArgTys[] = { CGF.Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()),
-                            Int8PtrTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.VoidTy, ArgTys, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, "__cxa_call_unexpected");
 }
 
 llvm::Constant *CodeGenFunction::getUnwindResumeFn() {
+  llvm::Type *ArgTys[] = { Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(VoidTy, Int8PtrTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(VoidTy, ArgTys, /*IsVarArgs=*/false);
 
   if (CGM.getLangOptions().SjLjExceptions)
     return CGM.CreateRuntimeFunction(FTy, "_Unwind_SjLj_Resume");
@@ -122,8 +116,9 @@ llvm::Constant *CodeGenFunction::getUnwindResumeFn() {
 }
 
 llvm::Constant *CodeGenFunction::getUnwindResumeOrRethrowFn() {
+  llvm::Type *ArgTys[] = { Int8PtrTy };
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(VoidTy, Int8PtrTy, /*IsVarArgs=*/false);
+    llvm::FunctionType::get(VoidTy, ArgTys, /*IsVarArgs=*/false);
 
   if (CGM.getLangOptions().SjLjExceptions)
     return CGM.CreateRuntimeFunction(FTy, "_Unwind_SjLj_Resume_or_Rethrow");
@@ -134,20 +129,26 @@ static llvm::Constant *getTerminateFn(CodeGenFunction &CGF) {
   // void __terminate();
 
   const llvm::FunctionType *FTy =
-    llvm::FunctionType::get(llvm::Type::getVoidTy(CGF.getLLVMContext()), 
-                            /*IsVarArgs=*/false);
+    llvm::FunctionType::get(CGF.VoidTy, /*IsVarArgs=*/false);
 
-  return CGF.CGM.CreateRuntimeFunction(FTy, 
-      CGF.CGM.getLangOptions().CPlusPlus ? "_ZSt9terminatev" : "abort");
+  llvm::StringRef name;
+
+  // In C++, use std::terminate().
+  if (CGF.getLangOptions().CPlusPlus)
+    name = "_ZSt9terminatev"; // FIXME: mangling!
+  else if (CGF.getLangOptions().ObjC1 &&
+           CGF.CGM.getCodeGenOpts().ObjCRuntimeHasTerminate)
+    name = "objc_terminate";
+  else
+    name = "abort";
+  return CGF.CGM.CreateRuntimeFunction(FTy, name);
 }
 
 static llvm::Constant *getCatchallRethrowFn(CodeGenFunction &CGF,
                                             llvm::StringRef Name) {
-  const llvm::Type *Int8PtrTy =
-    llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
-  const llvm::Type *VoidTy = llvm::Type::getVoidTy(CGF.getLLVMContext());
-  const llvm::FunctionType *FTy = llvm::FunctionType::get(VoidTy, Int8PtrTy,
-                                                          /*IsVarArgs=*/false);
+  llvm::Type *ArgTys[] = { CGF.Int8PtrTy };
+  const llvm::FunctionType *FTy =
+    llvm::FunctionType::get(CGF.VoidTy, ArgTys, /*IsVarArgs=*/false);
 
   return CGF.CGM.CreateRuntimeFunction(FTy, Name);
 }
@@ -322,9 +323,10 @@ static llvm::Constant *getCleanupValue(CodeGenFunction &CGF) {
 namespace {
   /// A cleanup to free the exception object if its initialization
   /// throws.
-  struct FreeException {
-    static void Emit(CodeGenFunction &CGF, bool forEH,
-                     llvm::Value *exn) {
+  struct FreeException : EHScopeStack::Cleanup {
+    llvm::Value *exn;
+    FreeException(llvm::Value *exn) : exn(exn) {}
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       CGF.Builder.CreateCall(getFreeExceptionFn(CGF), exn)
         ->setDoesNotThrow();
     }
@@ -408,7 +410,6 @@ void CodeGenFunction::EmitCXXThrowExpr(const CXXThrowExpr *E) {
   EmitAnyExprToExn(*this, E->getSubExpr(), ExceptionPtr);
 
   // Now throw the exception.
-  const llvm::Type *Int8PtrTy = llvm::Type::getInt8PtrTy(getLLVMContext());
   llvm::Constant *TypeInfo = CGM.GetAddrOfRTTIDescriptor(ThrowType, 
                                                          /*ForEH=*/true);
 
@@ -787,7 +788,7 @@ llvm::BasicBlock *CodeGenFunction::EmitLandingPad() {
   // Tell the backend how to generate the landing pad.
   llvm::CallInst *Selection =
     Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::eh_selector),
-                       EHSelector.begin(), EHSelector.end(), "eh.selector");
+                       EHSelector, "eh.selector");
   Selection->setDoesNotThrow();
 
   // Save the selector value in mandatory-cleanup mode.
@@ -921,13 +922,13 @@ namespace {
     CallEndCatch(bool MightThrow) : MightThrow(MightThrow) {}
     bool MightThrow;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       if (!MightThrow) {
         CGF.Builder.CreateCall(getEndCatchFn(CGF))->setDoesNotThrow();
         return;
       }
 
-      CGF.EmitCallOrInvoke(getEndCatchFn(CGF), 0, 0);
+      CGF.EmitCallOrInvoke(getEndCatchFn(CGF));
     }
   };
 }
@@ -1139,8 +1140,8 @@ static void BeginCatch(CodeGenFunction &CGF, const CXXCatchStmt *S) {
 
 namespace {
   struct CallRethrow : EHScopeStack::Cleanup {
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
-      CGF.EmitCallOrInvoke(getReThrowFn(CGF), 0, 0);
+    void Emit(CodeGenFunction &CGF, Flags flags) {
+      CGF.EmitCallOrInvoke(getReThrowFn(CGF));
     }
   };
 }
@@ -1211,7 +1212,7 @@ namespace {
     CallEndCatchForFinally(llvm::Value *ForEHVar, llvm::Value *EndCatchFn)
       : ForEHVar(ForEHVar), EndCatchFn(EndCatchFn) {}
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       llvm::BasicBlock *EndCatchBB = CGF.createBasicBlock("finally.endcatch");
       llvm::BasicBlock *CleanupContBB =
         CGF.createBasicBlock("finally.cleanup.cont");
@@ -1220,7 +1221,7 @@ namespace {
         CGF.Builder.CreateLoad(ForEHVar, "finally.endcatch");
       CGF.Builder.CreateCondBr(ShouldEndCatch, EndCatchBB, CleanupContBB);
       CGF.EmitBlock(EndCatchBB);
-      CGF.EmitCallOrInvoke(EndCatchFn, 0, 0); // catch-all, so might throw
+      CGF.EmitCallOrInvoke(EndCatchFn); // catch-all, so might throw
       CGF.EmitBlock(CleanupContBB);
     }
   };
@@ -1238,7 +1239,7 @@ namespace {
       : Body(Body), ForEHVar(ForEHVar), EndCatchFn(EndCatchFn),
         RethrowFn(RethrowFn), SavedExnVar(SavedExnVar) {}
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       // Enter a cleanup to call the end-catch function if one was provided.
       if (EndCatchFn)
         CGF.EHStack.pushCleanup<CallEndCatchForFinally>(NormalAndEHCleanup,
@@ -1265,10 +1266,9 @@ namespace {
 
         CGF.EmitBlock(RethrowBB);
         if (SavedExnVar) {
-          llvm::Value *Args[] = { CGF.Builder.CreateLoad(SavedExnVar) };
-          CGF.EmitCallOrInvoke(RethrowFn, Args, Args+1);
+          CGF.EmitCallOrInvoke(RethrowFn, CGF.Builder.CreateLoad(SavedExnVar));
         } else {
-          CGF.EmitCallOrInvoke(RethrowFn, 0, 0);
+          CGF.EmitCallOrInvoke(RethrowFn);
         }
         CGF.Builder.CreateUnreachable();
 
@@ -1416,7 +1416,7 @@ llvm::BasicBlock *CodeGenFunction::getTerminateLandingPad() {
   llvm::Value *Args[3] = { Exn, getOpaquePersonalityFn(CGM, Personality),
                            getCatchAllValue(*this) };
   Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::eh_selector),
-                     Args, Args+3, "eh.selector")
+                     Args, "eh.selector")
     ->setDoesNotThrow();
 
   llvm::CallInst *TerminateCall = Builder.CreateCall(getTerminateFn(*this));

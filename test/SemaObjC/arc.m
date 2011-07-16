@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -triple x86_64-apple-darwin11 -fobjc-nonfragile-abi -fsyntax-only -fobjc-arc -fblocks -verify %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin11 -fobjc-nonfragile-abi -fobjc-runtime-has-weak -fsyntax-only -fobjc-arc -fblocks -verify %s
 
 typedef unsigned long NSUInteger;
 
@@ -484,8 +484,19 @@ void test26(id y) {
 
 // rdar://9525555
 @interface  Test27
-@property id x; // expected-error {{ARC forbids properties of Objective-C objects with unspecified storage attribute}}
+@property id x; // expected-warning {{no 'assign', 'retain', or 'copy' attribute is specified - 'assign' is assumed}} \
+                // expected-warning {{default property attribute 'assign' not appropriate for non-gc object}} \
+                // expected-note {{declared here}}
+@property (readonly) id ro; // expected-note {{declared here}}
+@property (readonly) id custom_ro;
 @property int y;
+@end
+
+@implementation Test27
+@synthesize x; // expected-error {{ARC forbids synthesizing a property of an Objective-C object with unspecified storage attribute}}
+@synthesize ro; // expected-error {{ARC forbids synthesizing a property of an Objective-C object with unspecified storage attribute}}
+@synthesize y;
+-(id)custom_ro { return 0; }
 @end
 
 // rdar://9569264
@@ -606,4 +617,12 @@ void test35(void) {
   ^{ test36_helper(&y); }();
 
   __strong int non_objc_type; // expected-warning {{'__strong' only applies to objective-c object or block pointer types}} 
+}
+
+void test36(int first, ...) {
+  // <rdar://problem/9758798>
+  __builtin_va_list arglist;
+  __builtin_va_start(arglist, first);
+  id obj = __builtin_va_arg(arglist, id);
+  __builtin_va_end(arglist);
 }

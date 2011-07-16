@@ -757,6 +757,13 @@ public:
     return getSplitDesugaredType(*this);
   }
 
+  /// \brief Return the specified type with one level of "sugar" removed from
+  /// the type. 
+  ///
+  /// This routine takes off the first typedef, typeof, etc. If the outer level
+  /// of the type is already concrete, it returns it unmodified.
+  QualType getSingleStepDesugaredType(const ASTContext &Context) const;
+  
   /// IgnoreParens - Returns the specified type after dropping any
   /// outer-level parentheses.
   QualType IgnoreParens() const {
@@ -2952,7 +2959,7 @@ public:
   QualType desugar() const;
 
   /// \brief Returns whether this type directly provides sugar.
-  bool isSugared() const { return true; }
+  bool isSugared() const;
 
   static bool classof(const Type *T) { return T->getTypeClass() == TypeOfExpr; }
   static bool classof(const TypeOfExprType *) { return true; }
@@ -2971,9 +2978,6 @@ class DependentTypeOfExprType
 public:
   DependentTypeOfExprType(const ASTContext &Context, Expr *E)
     : TypeOfExprType(E), Context(Context) { }
-
-  bool isSugared() const { return false; }
-  QualType desugar() const { return QualType(this, 0); }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, Context, getUnderlyingExpr());
@@ -3025,10 +3029,10 @@ public:
   QualType getUnderlyingType() const { return UnderlyingType; }
 
   /// \brief Remove a single level of sugar.
-  QualType desugar() const { return getUnderlyingType(); }
+  QualType desugar() const;
 
   /// \brief Returns whether this type directly provides sugar.
-  bool isSugared() const { return !isDependentType(); }
+  bool isSugared() const;
 
   static bool classof(const Type *T) { return T->getTypeClass() == Decltype; }
   static bool classof(const DecltypeType *) { return true; }
@@ -3045,9 +3049,6 @@ class DependentDecltypeType : public DecltypeType, public llvm::FoldingSetNode {
 
 public:
   DependentDecltypeType(const ASTContext &Context, Expr *E);
-
-  bool isSugared() const { return false; }
-  QualType desugar() const { return QualType(this, 0); }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, Context, getUnderlyingExpr());

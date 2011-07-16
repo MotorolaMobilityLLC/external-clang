@@ -34,7 +34,7 @@ void rewriteUnbridgedCasts(MigrationPass &pass);
 void makeAssignARCSafe(MigrationPass &pass);
 void removeRetainReleaseDealloc(MigrationPass &pass);
 void removeZeroOutPropsInDealloc(MigrationPass &pass);
-void changeIvarsOfAssignProperties(MigrationPass &pass);
+void rewriteProperties(MigrationPass &pass);
 void rewriteBlockObjCVariable(MigrationPass &pass);
 void rewriteUnusedInitDelegate(MigrationPass &pass);
 
@@ -44,6 +44,9 @@ void removeEmptyStatementsAndDealloc(MigrationPass &pass);
 // Helpers.
 //===----------------------------------------------------------------------===//
 
+/// \brief Determine whether we can add weak to the given type.
+bool canApplyWeak(ASTContext &Ctx, QualType type);
+
 /// \brief 'Loc' is the end of a statement range. This returns the location
 /// immediately after the semicolon following the statement.
 /// If no semicolon is found or the location is inside a macro, the returned
@@ -51,6 +54,8 @@ void removeEmptyStatementsAndDealloc(MigrationPass &pass);
 SourceLocation findLocationAfterSemi(SourceLocation loc, ASTContext &Ctx);
 
 bool hasSideEffects(Expr *E, ASTContext &Ctx);
+bool isGlobalVar(Expr *E);
+
 
 template <typename BODY_TRANS>
 class BodyTransform : public RecursiveASTVisitor<BodyTransform<BODY_TRANS> > {

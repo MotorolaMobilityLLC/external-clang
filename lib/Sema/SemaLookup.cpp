@@ -209,6 +209,7 @@ static inline unsigned getIDNS(Sema::LookupNameKind NameKind,
                                bool Redeclaration) {
   unsigned IDNS = 0;
   switch (NameKind) {
+  case Sema::LookupObjCImplicitSelfParam:
   case Sema::LookupOrdinaryName:
   case Sema::LookupRedeclarationWithLinkage:
     IDNS = Decl::IDNS_Ordinary;
@@ -1097,7 +1098,10 @@ bool Sema::LookupName(LookupResult &R, Scope *S, bool AllowBuiltinCreation) {
           if (LeftStartingScope && !((*I)->hasLinkage()))
             continue;
         }
-
+        else if (NameKind == LookupObjCImplicitSelfParam &&
+                 !isa<ImplicitParamDecl>(*I))
+          continue;
+        
         R.addDecl(*I);
 
         if ((*I)->getAttr<OverloadableAttr>()) {
@@ -1381,6 +1385,7 @@ bool Sema::LookupQualifiedName(LookupResult &R, DeclContext *LookupCtx,
   // Look for this member in our base classes
   CXXRecordDecl::BaseMatchesCallback *BaseCallback = 0;
   switch (R.getLookupKind()) {
+    case LookupObjCImplicitSelfParam:
     case LookupOrdinaryName:
     case LookupMemberName:
     case LookupRedeclarationWithLinkage:
@@ -3228,7 +3233,8 @@ class NamespaceSpecifierSet {
 
  public:
   explicit NamespaceSpecifierSet(ASTContext &Context, DeclContext *CurContext)
-      : Context(Context), CurContextChain(BuildContextChain(CurContext)) {}
+      : Context(Context), CurContextChain(BuildContextChain(CurContext)),
+        isSorted(true) {}
 
   /// \brief Add the namespace to the set, computing the corresponding
   /// NestedNameSpecifier and its distance in the process.
@@ -3743,6 +3749,8 @@ TypoCorrection Sema::CorrectTypo(const DeclarationNameInfo &TypoName,
       case LookupResult::FoundOverloaded:
       case LookupResult::FoundUnresolvedValue:
         I->second.setCorrectionDecl(TmpRes.getAsSingle<NamedDecl>());
+        // FIXME: This sets the CorrectionDecl to NULL for overloaded functions.
+        // It would be nice to find the right one with overload resolution.
         ++I;
         break;
       }
@@ -3834,7 +3842,6 @@ TypoCorrection Sema::CorrectTypo(const DeclarationNameInfo &TypoName,
     // wasn't actually in scope.
     if (ED == 0 && Result.isKeyword()) return TypoCorrection();
 
-    assert(Result.isResolved() && "correction has not been looked up");
     // Record the correction for unqualified lookup.
     if (IsUnqualifiedLookup)
       UnqualifiedTyposCorrected[Typo] = Result;

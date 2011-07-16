@@ -289,8 +289,8 @@ ASTContext::setExternalSource(llvm::OwningPtr<ExternalASTSource> &Source) {
 }
 
 void ASTContext::PrintStats() const {
-  fprintf(stderr, "*** AST Context Stats:\n");
-  fprintf(stderr, "  %d types total.\n", (int)Types.size());
+  llvm::errs() << "\n*** AST Context Stats:\n";
+  llvm::errs() << "  " << Types.size() << " types total.\n";
 
   unsigned counts[] = {
 #define TYPE(Name, Parent) 0,
@@ -308,40 +308,42 @@ void ASTContext::PrintStats() const {
   unsigned TotalBytes = 0;
 #define TYPE(Name, Parent)                                              \
   if (counts[Idx])                                                      \
-    fprintf(stderr, "    %d %s types\n", (int)counts[Idx], #Name);      \
+    llvm::errs() << "    " << counts[Idx] << " " << #Name               \
+                 << " types\n";                                         \
   TotalBytes += counts[Idx] * sizeof(Name##Type);                       \
   ++Idx;
 #define ABSTRACT_TYPE(Name, Parent)
 #include "clang/AST/TypeNodes.def"
 
-  fprintf(stderr, "Total bytes = %d\n", int(TotalBytes));
-  
+  llvm::errs() << "Total bytes = " << TotalBytes << "\n";
+
   // Implicit special member functions.
-  fprintf(stderr, "  %u/%u implicit default constructors created\n",
-          NumImplicitDefaultConstructorsDeclared, 
-          NumImplicitDefaultConstructors);
-  fprintf(stderr, "  %u/%u implicit copy constructors created\n",
-          NumImplicitCopyConstructorsDeclared, 
-          NumImplicitCopyConstructors);
+  llvm::errs() << NumImplicitDefaultConstructorsDeclared << "/"
+               << NumImplicitDefaultConstructors
+               << " implicit default constructors created\n";
+  llvm::errs() << NumImplicitCopyConstructorsDeclared << "/"
+               << NumImplicitCopyConstructors
+               << " implicit copy constructors created\n";
   if (getLangOptions().CPlusPlus)
-    fprintf(stderr, "  %u/%u implicit move constructors created\n",
-            NumImplicitMoveConstructorsDeclared, 
-            NumImplicitMoveConstructors);
-  fprintf(stderr, "  %u/%u implicit copy assignment operators created\n",
-          NumImplicitCopyAssignmentOperatorsDeclared, 
-          NumImplicitCopyAssignmentOperators);
+    llvm::errs() << NumImplicitMoveConstructorsDeclared << "/"
+                 << NumImplicitMoveConstructors
+                 << " implicit move constructors created\n";
+  llvm::errs() << NumImplicitCopyAssignmentOperatorsDeclared << "/"
+               << NumImplicitCopyAssignmentOperators
+               << " implicit copy assignment operators created\n";
   if (getLangOptions().CPlusPlus)
-    fprintf(stderr, "  %u/%u implicit move assignment operators created\n",
-            NumImplicitMoveAssignmentOperatorsDeclared, 
-            NumImplicitMoveAssignmentOperators);
-  fprintf(stderr, "  %u/%u implicit destructors created\n",
-          NumImplicitDestructorsDeclared, NumImplicitDestructors);
-  
+    llvm::errs() << NumImplicitMoveAssignmentOperatorsDeclared << "/"
+                 << NumImplicitMoveAssignmentOperators
+                 << " implicit move assignment operators created\n";
+  llvm::errs() << NumImplicitDestructorsDeclared << "/"
+               << NumImplicitDestructors
+               << " implicit destructors created\n";
+
   if (ExternalSource.get()) {
-    fprintf(stderr, "\n");
+    llvm::errs() << "\n";
     ExternalSource->PrintStats();
   }
-  
+
   BumpAlloc.PrintStats();
 }
 
@@ -3313,6 +3315,31 @@ const ArrayType *ASTContext::getAsArrayType(QualType T) const {
                                               VAT->getBracketsRange()));
 }
 
+QualType ASTContext::getAdjustedParameterType(QualType T) {
+  // C99 6.7.5.3p7:
+  //   A declaration of a parameter as "array of type" shall be
+  //   adjusted to "qualified pointer to type", where the type
+  //   qualifiers (if any) are those specified within the [ and ] of
+  //   the array type derivation.
+  if (T->isArrayType())
+    return getArrayDecayedType(T);
+  
+  // C99 6.7.5.3p8:
+  //   A declaration of a parameter as "function returning type"
+  //   shall be adjusted to "pointer to function returning type", as
+  //   in 6.3.2.1.
+  if (T->isFunctionType())
+    return getPointerType(T);
+  
+  return T;  
+}
+
+QualType ASTContext::getSignatureParameterType(QualType T) {
+  T = getVariableArrayDecayedType(T);
+  T = getAdjustedParameterType(T);
+  return T.getUnqualifiedType();
+}
+
 /// getArrayDecayedType - Return the properly qualified result of decaying the
 /// specified array type to a pointer.  This operation is non-trivial when
 /// handling typedefs etc.  The canonical type of "T" must be an array type,
@@ -4248,17 +4275,7 @@ static void EncodeBitField(const ASTContext *Ctx, std::string& S,
   if (!Ctx->getLangOptions().NeXTRuntime) {
     const RecordDecl *RD = FD->getParent();
     const ASTRecordLayout &RL = Ctx->getASTRecordLayout(RD);
-    // FIXME: This same linear search is also used in ExprConstant - it might
-    // be better if the FieldDecl stored its offset.  We'd be increasing the
-    // size of the object slightly, but saving some time every time it is used.
-    unsigned i = 0;
-    for (RecordDecl::field_iterator Field = RD->field_begin(),
-                                 FieldEnd = RD->field_end();
-         Field != FieldEnd; (void)++Field, ++i) {
-      if (*Field == FD)
-        break;
-    }
-    S += llvm::utostr(RL.getFieldOffset(i));
+    S += llvm::utostr(RL.getFieldOffset(FD->getFieldIndex()));
     if (T->isEnumeralType())
       S += 'i';
     else
@@ -5424,6 +5441,10 @@ bool ASTContext::typesAreCompatible(QualType LHS, QualType RHS,
   return !mergeTypes(LHS, RHS, false, CompareUnqualified).isNull();
 }
 
+bool ASTContext::propertyTypesAreCompatible(QualType LHS, QualType RHS) {
+  return typesAreCompatible(LHS, RHS);
+}
+
 bool ASTContext::typesAreBlockPointerCompatible(QualType LHS, QualType RHS) {
   return !mergeTypes(LHS, RHS, true).isNull();
 }
@@ -6478,4 +6499,3 @@ size_t ASTContext::getSideTableAllocatedMemory() const {
   bytes += InstantiatedFromUnnamedFieldDecl.getMemorySize();
   return bytes;
 }
-

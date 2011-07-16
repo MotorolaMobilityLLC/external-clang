@@ -21,6 +21,7 @@
 #include "clang/Frontend/CodeGenOptions.h"
 #include "clang/Basic/ABI.h"
 #include "clang/Basic/TargetInfo.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ValueHandle.h"
@@ -181,15 +182,39 @@ public:
   /// Cleanup implementations should generally be declared in an
   /// anonymous namespace.
   class Cleanup {
+    // Anchor the construction vtable.
+    virtual void anchor();
   public:
-    // Anchor the construction vtable.  We use the destructor because
-    // gcc gives an obnoxious warning if there are virtual methods
-    // with an accessible non-virtual destructor.  Unfortunately,
-    // declaring this destructor makes it non-trivial, but there
-    // doesn't seem to be any other way around this warning.
-    //
-    // This destructor will never be called.
-    virtual ~Cleanup();
+    /// Generation flags.
+    class Flags {
+      enum {
+        F_IsForEH             = 0x1,
+        F_IsNormalCleanupKind = 0x2,
+        F_IsEHCleanupKind     = 0x4
+      };
+      unsigned flags;
+
+    public:
+      Flags() : flags(0) {}
+
+      /// isForEH - true if the current emission is for an EH cleanup.
+      bool isForEHCleanup() const { return flags & F_IsForEH; }
+      bool isForNormalCleanup() const { return !isForEHCleanup(); }
+      void setIsForEHCleanup() { flags |= F_IsForEH; }
+
+      bool isNormalCleanupKind() const { return flags & F_IsNormalCleanupKind; }
+      void setIsNormalCleanupKind() { flags |= F_IsNormalCleanupKind; }
+
+      /// isEHCleanupKind - true if the cleanup was pushed as an EH
+      /// cleanup.
+      bool isEHCleanupKind() const { return flags & F_IsEHCleanupKind; }
+      void setIsEHCleanupKind() { flags |= F_IsEHCleanupKind; }
+    };
+
+    // Provide a virtual destructor to suppress a very common warning
+    // that unfortunately cannot be suppressed without this.  Cleanups
+    // should not rely on this destructor ever being called.
+    virtual ~Cleanup() {}
 
     /// Emit the cleanup.  For normal cleanups, this is run in the
     /// same EH context as when the cleanup was pushed, i.e. the
@@ -198,39 +223,7 @@ public:
     ///
     // \param IsForEHCleanup true if this is for an EH cleanup, false
     ///  if for a normal cleanup.
-    virtual void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) = 0;
-  };
-
-  /// UnconditionalCleanupN stores its N parameters and just passes
-  /// them to the real cleanup function.
-  template <class T, class A0>
-  class UnconditionalCleanup1 : public Cleanup {
-    A0 a0;
-  public:
-    UnconditionalCleanup1(A0 a0) : a0(a0) {}
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
-      T::Emit(CGF, IsForEHCleanup, a0);
-    }
-  };
-
-  template <class T, class A0, class A1>
-  class UnconditionalCleanup2 : public Cleanup {
-    A0 a0; A1 a1;
-  public:
-    UnconditionalCleanup2(A0 a0, A1 a1) : a0(a0), a1(a1) {}
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
-      T::Emit(CGF, IsForEHCleanup, a0, a1);
-    }
-  };
-
-  template <class T, class A0, class A1, class A2>
-  class UnconditionalCleanup3 : public Cleanup {
-    A0 a0; A1 a1; A2 a2;
-  public:
-    UnconditionalCleanup3(A0 a0, A1 a1, A2 a2) : a0(a0), a1(a1), a2(a2) {}
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
-      T::Emit(CGF, IsForEHCleanup, a0, a1, a2);
-    }
+    virtual void Emit(CodeGenFunction &CGF, Flags flags) = 0;
   };
 
   /// ConditionalCleanupN stores the saved form of its N parameters,
@@ -240,9 +233,9 @@ public:
     typedef typename DominatingValue<A0>::saved_type A0_saved;
     A0_saved a0_saved;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
-      T::Emit(CGF, IsForEHCleanup, a0);
+      T(a0).Emit(CGF, flags);
     }
 
   public:
@@ -257,10 +250,10 @@ public:
     A0_saved a0_saved;
     A1_saved a1_saved;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
       A1 a1 = DominatingValue<A1>::restore(CGF, a1_saved);
-      T::Emit(CGF, IsForEHCleanup, a0, a1);
+      T(a0, a1).Emit(CGF, flags);
     }
 
   public:
@@ -277,16 +270,40 @@ public:
     A1_saved a1_saved;
     A2_saved a2_saved;
     
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
       A1 a1 = DominatingValue<A1>::restore(CGF, a1_saved);
       A2 a2 = DominatingValue<A2>::restore(CGF, a2_saved);
-      T::Emit(CGF, IsForEHCleanup, a0, a1, a2);
+      T(a0, a1, a2).Emit(CGF, flags);
     }
     
   public:
     ConditionalCleanup3(A0_saved a0, A1_saved a1, A2_saved a2)
-    : a0_saved(a0), a1_saved(a1), a2_saved(a2) {}
+      : a0_saved(a0), a1_saved(a1), a2_saved(a2) {}
+  };
+
+  template <class T, class A0, class A1, class A2, class A3>
+  class ConditionalCleanup4 : public Cleanup {
+    typedef typename DominatingValue<A0>::saved_type A0_saved;
+    typedef typename DominatingValue<A1>::saved_type A1_saved;
+    typedef typename DominatingValue<A2>::saved_type A2_saved;
+    typedef typename DominatingValue<A3>::saved_type A3_saved;
+    A0_saved a0_saved;
+    A1_saved a1_saved;
+    A2_saved a2_saved;
+    A3_saved a3_saved;
+    
+    void Emit(CodeGenFunction &CGF, Flags flags) {
+      A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
+      A1 a1 = DominatingValue<A1>::restore(CGF, a1_saved);
+      A2 a2 = DominatingValue<A2>::restore(CGF, a2_saved);
+      A3 a3 = DominatingValue<A3>::restore(CGF, a3_saved);
+      T(a0, a1, a2, a3).Emit(CGF, flags);
+    }
+    
+  public:
+    ConditionalCleanup4(A0_saved a0, A1_saved a1, A2_saved a2, A3_saved a3)
+      : a0_saved(a0), a1_saved(a1), a2_saved(a2), a3_saved(a3) {}
   };
 
 private:
@@ -696,10 +713,8 @@ public:
   void pushFullExprCleanup(CleanupKind kind, A0 a0) {
     // If we're not in a conditional branch, or if none of the
     // arguments requires saving, then use the unconditional cleanup.
-    if (!isInConditionalBranch()) {
-      typedef EHScopeStack::UnconditionalCleanup1<T, A0> CleanupType;
-      return EHStack.pushCleanup<CleanupType>(kind, a0);
-    }
+    if (!isInConditionalBranch())
+      return EHStack.pushCleanup<T>(kind, a0);
 
     typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
 
@@ -715,10 +730,8 @@ public:
   void pushFullExprCleanup(CleanupKind kind, A0 a0, A1 a1) {
     // If we're not in a conditional branch, or if none of the
     // arguments requires saving, then use the unconditional cleanup.
-    if (!isInConditionalBranch()) {
-      typedef EHScopeStack::UnconditionalCleanup2<T, A0, A1> CleanupType;
-      return EHStack.pushCleanup<CleanupType>(kind, a0, a1);
-    }
+    if (!isInConditionalBranch())
+      return EHStack.pushCleanup<T>(kind, a0, a1);
 
     typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
     typename DominatingValue<A1>::saved_type a1_saved = saveValueInCond(a1);
@@ -736,8 +749,7 @@ public:
     // If we're not in a conditional branch, or if none of the
     // arguments requires saving, then use the unconditional cleanup.
     if (!isInConditionalBranch()) {
-      typedef EHScopeStack::UnconditionalCleanup3<T, A0, A1, A2> CleanupType;
-      return EHStack.pushCleanup<CleanupType>(kind, a0, a1, a2);
+      return EHStack.pushCleanup<T>(kind, a0, a1, a2);
     }
     
     typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
@@ -746,6 +758,28 @@ public:
     
     typedef EHScopeStack::ConditionalCleanup3<T, A0, A1, A2> CleanupType;
     EHStack.pushCleanup<CleanupType>(kind, a0_saved, a1_saved, a2_saved);
+    initFullExprCleanup();
+  }
+
+  /// pushFullExprCleanup - Push a cleanup to be run at the end of the
+  /// current full-expression.  Safe against the possibility that
+  /// we're currently inside a conditionally-evaluated expression.
+  template <class T, class A0, class A1, class A2, class A3>
+  void pushFullExprCleanup(CleanupKind kind, A0 a0, A1 a1, A2 a2, A3 a3) {
+    // If we're not in a conditional branch, or if none of the
+    // arguments requires saving, then use the unconditional cleanup.
+    if (!isInConditionalBranch()) {
+      return EHStack.pushCleanup<T>(kind, a0, a1, a2, a3);
+    }
+    
+    typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
+    typename DominatingValue<A1>::saved_type a1_saved = saveValueInCond(a1);
+    typename DominatingValue<A2>::saved_type a2_saved = saveValueInCond(a2);
+    typename DominatingValue<A3>::saved_type a3_saved = saveValueInCond(a3);
+    
+    typedef EHScopeStack::ConditionalCleanup4<T, A0, A1, A2, A3> CleanupType;
+    EHStack.pushCleanup<CleanupType>(kind, a0_saved, a1_saved,
+                                     a2_saved, a3_saved);
     initFullExprCleanup();
   }
 
@@ -1151,6 +1185,57 @@ public:
   llvm::LLVMContext &getLLVMContext() { return CGM.getLLVMContext(); }
 
   //===--------------------------------------------------------------------===//
+  //                                  Cleanups
+  //===--------------------------------------------------------------------===//
+
+  typedef void Destroyer(CodeGenFunction &CGF, llvm::Value *addr, QualType ty);
+
+  void pushIrregularPartialArrayCleanup(llvm::Value *arrayBegin,
+                                        llvm::Value *arrayEndPointer,
+                                        QualType elementType,
+                                        Destroyer &destroyer);
+  void pushRegularPartialArrayCleanup(llvm::Value *arrayBegin,
+                                      llvm::Value *arrayEnd,
+                                      QualType elementType,
+                                      Destroyer &destroyer);
+
+  void pushDestroy(QualType::DestructionKind dtorKind,
+                   llvm::Value *addr, QualType type);
+  void pushDestroy(CleanupKind kind, llvm::Value *addr, QualType type,
+                   Destroyer &destroyer, bool useEHCleanupForArray);
+  void emitDestroy(llvm::Value *addr, QualType type, Destroyer &destroyer,
+                   bool useEHCleanupForArray);
+  llvm::Function *generateDestroyHelper(llvm::Constant *addr,
+                                        QualType type,
+                                        Destroyer &destroyer,
+                                        bool useEHCleanupForArray);
+  void emitArrayDestroy(llvm::Value *begin, llvm::Value *end,
+                        QualType type, Destroyer &destroyer,
+                        bool checkZeroLength, bool useEHCleanup);
+
+  Destroyer &getDestroyer(QualType::DestructionKind destructionKind);
+
+  /// Determines whether an EH cleanup is required to destroy a type
+  /// with the given destruction kind.
+  bool needsEHCleanup(QualType::DestructionKind kind) {
+    switch (kind) {
+    case QualType::DK_none:
+      return false;
+    case QualType::DK_cxx_destructor:
+    case QualType::DK_objc_weak_lifetime:
+      return getLangOptions().Exceptions;
+    case QualType::DK_objc_strong_lifetime:
+      return getLangOptions().Exceptions &&
+             CGM.getCodeGenOpts().ObjCAutoRefCountExceptions;
+    }
+    llvm_unreachable("bad destruction kind");
+  }
+
+  CleanupKind getCleanupKind(QualType::DestructionKind kind) {
+    return (needsEHCleanup(kind) ? NormalAndEHCleanup : NormalCleanup);
+  }
+
+  //===--------------------------------------------------------------------===//
   //                                  Objective-C
   //===--------------------------------------------------------------------===//
 
@@ -1312,9 +1397,9 @@ public:
   /// a terminate scope encloses a try.
   llvm::BasicBlock *getTerminateHandler();
 
-  const llvm::Type *ConvertTypeForMem(QualType T);
-  const llvm::Type *ConvertType(QualType T);
-  const llvm::Type *ConvertType(const TypeDecl *T) {
+  llvm::Type *ConvertTypeForMem(QualType T);
+  llvm::Type *ConvertType(QualType T);
+  llvm::Type *ConvertType(const TypeDecl *T) {
     return ConvertType(getContext().getTypeDeclType(T));
   }
 
@@ -1526,6 +1611,12 @@ public:
   // instruction in LLVM instead once it works well enough.
   llvm::Value *EmitVAArg(llvm::Value *VAListAddr, QualType Ty);
 
+  /// emitArrayLength - Compute the length of an array, even if it's a
+  /// VLA, and drill down to the base element type.
+  llvm::Value *emitArrayLength(const ArrayType *arrayType,
+                               QualType &baseType,
+                               llvm::Value *&addr);
+
   /// EmitVLASize - Capture all the sizes for the VLA expressions in
   /// the given variably-modified type and store them in the VLASizeMap.
   ///
@@ -1612,17 +1703,7 @@ public:
                                   CallExpr::const_arg_iterator ArgEnd,
                                   bool ZeroInitialization = false);
 
-  void EmitCXXAggrDestructorCall(const CXXDestructorDecl *D,
-                                 const ArrayType *Array,
-                                 llvm::Value *This);
-
-  void EmitCXXAggrDestructorCall(const CXXDestructorDecl *D,
-                                 llvm::Value *NumElements,
-                                 llvm::Value *This);
-
-  llvm::Function *GenerateCXXAggrDestructorHelper(const CXXDestructorDecl *D,
-                                                  const ArrayType *Array,
-                                                  llvm::Value *This);
+  static Destroyer destroyCXXObject;
 
   void EmitCXXDestructorCall(const CXXDestructorDecl *D, CXXDtorType Type,
                              bool ForVirtualBase, llvm::Value *This);
@@ -1720,6 +1801,8 @@ public:
   AutoVarEmission EmitAutoVarAlloca(const VarDecl &var);
   void EmitAutoVarInit(const AutoVarEmission &emission);
   void EmitAutoVarCleanups(const AutoVarEmission &emission);  
+  void emitAutoVarTypeCleanup(const AutoVarEmission &emission,
+                              QualType::DestructionKind dtorKind);
 
   void EmitStaticVarDecl(const VarDecl &D,
                          llvm::GlobalValue::LinkageTypes Linkage);
@@ -1991,8 +2074,9 @@ public:
                       ReturnValueSlot ReturnValue = ReturnValueSlot());
 
   llvm::CallSite EmitCallOrInvoke(llvm::Value *Callee,
-                                  llvm::Value * const *ArgBegin,
-                                  llvm::Value * const *ArgEnd,
+                                  llvm::ArrayRef<llvm::Value *> Args,
+                                  const llvm::Twine &Name = "");
+  llvm::CallSite EmitCallOrInvoke(llvm::Value *Callee,
                                   const llvm::Twine &Name = "");
 
   llvm::Value *BuildVirtualCall(const CXXMethodDecl *MD, llvm::Value *This,
@@ -2098,15 +2182,9 @@ public:
   llvm::Value *EmitARCRetainScalarExpr(const Expr *expr);
   llvm::Value *EmitARCRetainAutoreleaseScalarExpr(const Expr *expr);
 
-  void PushARCReleaseCleanup(CleanupKind kind, QualType type,
-                             llvm::Value *addr, bool precise,
-                             bool forFullExpr = false);
-  void PushARCWeakReleaseCleanup(CleanupKind kind, QualType type,
-                                 llvm::Value *addr, bool forFullExpr = false);
-  void PushARCFieldReleaseCleanup(CleanupKind cleanupKind,
-                                  const FieldDecl *Field);
-  void PushARCFieldWeakReleaseCleanup(CleanupKind cleanupKind,
-                                      const FieldDecl *Field);
+  static Destroyer destroyARCStrongImprecise;
+  static Destroyer destroyARCStrongPrecise;
+  static Destroyer destroyARCWeak;
 
   void EmitObjCAutoreleasePoolPop(llvm::Value *Ptr); 
   llvm::Value *EmitObjCAutoreleasePoolPush();
@@ -2292,7 +2370,8 @@ private:
   /// Ty, into individual arguments on the provided vector \arg Args. See
   /// ABIArgInfo::Expand.
   void ExpandTypeToArgs(QualType Ty, RValue Src,
-                        llvm::SmallVector<llvm::Value*, 16> &Args);
+                        llvm::SmallVector<llvm::Value*, 16> &Args,
+                        llvm::FunctionType *IRFuncTy);
 
   llvm::Value* EmitAsmInput(const AsmStmt &S,
                             const TargetInfo::ConstraintInfo &Info,

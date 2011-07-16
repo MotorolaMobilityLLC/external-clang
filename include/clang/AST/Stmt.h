@@ -293,6 +293,10 @@ public:
   ///   works on systems with GraphViz (Mac OS X) or dot+gv installed.
   void viewAST() const;
 
+  /// Skip past any implicit AST nodes which might surround this
+  /// statement, such as ExprWithCleanups or ImplicitCastExpr nodes.
+  Stmt *IgnoreImplicit();
+
   // Implement isa<T> support.
   static bool classof(const Stmt *) { return true; }
 
@@ -1467,6 +1471,10 @@ class SEHExceptStmt : public Stmt {
                 Expr *FilterExpr,
                 Stmt *Block);
 
+  friend class ASTReader;
+  friend class ASTStmtReader;
+  explicit SEHExceptStmt(EmptyShell E) : Stmt(SEHExceptStmtClass, E) { }
+
 public:
   static SEHExceptStmt* Create(ASTContext &C,
                                SourceLocation ExceptLoc,
@@ -1500,6 +1508,10 @@ class SEHFinallyStmt : public Stmt {
 
   SEHFinallyStmt(SourceLocation Loc,
                  Stmt *Block);
+
+  friend class ASTReader;
+  friend class ASTStmtReader;
+  explicit SEHFinallyStmt(EmptyShell E) : Stmt(SEHFinallyStmtClass, E) { }
 
 public:
   static SEHFinallyStmt* Create(ASTContext &C,
@@ -1538,6 +1550,10 @@ class SEHTryStmt : public Stmt {
              SourceLocation TryLoc,
              Stmt *TryBlock,
              Stmt *Handler);
+
+  friend class ASTReader;
+  friend class ASTStmtReader;
+  explicit SEHTryStmt(EmptyShell E) : Stmt(SEHTryStmtClass, E) { }
 
 public:
   static SEHTryStmt* Create(ASTContext &C,

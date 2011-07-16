@@ -1,6 +1,8 @@
-// RUN: %clang_cc1 -fobjc-nonfragile-abi -fblocks -fsyntax-only -fobjc-arc -x objective-c %s.result
-// RUN: arcmt-test --args -triple x86_64-apple-darwin10 -fblocks -fobjc-nonfragile-abi -fsyntax-only -x objective-c %s > %t
+// RUN: %clang_cc1 -fobjc-nonfragile-abi -fobjc-exceptions -fblocks -fsyntax-only -fobjc-arc -x objective-c %s.result
+// RUN: arcmt-test --args -triple x86_64-apple-darwin10 -fobjc-exceptions -fblocks -fobjc-nonfragile-abi -fsyntax-only -x objective-c %s > %t
 // RUN: diff %t %s.result
+
+#define nil 0
 
 typedef int BOOL;
 
@@ -36,6 +38,11 @@ id IhaveSideEffect();
   [IhaveSideEffect() release];
 
   [x release], x = 0;
+
+  @try {
+  } @finally {
+    [x release];
+  }
 }
   
 @end

@@ -1547,9 +1547,9 @@ public:
   /// By default, performs semantic analysis to build the new expression.
   /// Subclasses may override this routine to provide different behavior.
   ExprResult RebuildInitList(SourceLocation LBraceLoc,
-                                   MultiExprArg Inits,
-                                   SourceLocation RBraceLoc,
-                                   QualType ResultTy) {
+                             MultiExprArg Inits,
+                             SourceLocation RBraceLoc,
+                             QualType ResultTy) {
     ExprResult Result
       = SemaRef.ActOnInitList(LBraceLoc, move(Inits), RBraceLoc);
     if (Result.isInvalid() || ResultTy->isDependentType())
@@ -1866,8 +1866,9 @@ public:
   ///
   /// By default, performs semantic analysis to build the new expression.
   /// Subclasses may override this routine to provide different behavior.
-  ExprResult RebuildCXXThrowExpr(SourceLocation ThrowLoc, Expr *Sub) {
-    return getSema().ActOnCXXThrow(ThrowLoc, Sub);
+  ExprResult RebuildCXXThrowExpr(SourceLocation ThrowLoc, Expr *Sub,
+                                 bool IsThrownVariableInScope) {
+    return getSema().BuildCXXThrow(ThrowLoc, Sub, IsThrownVariableInScope);
   }
 
   /// \brief Build a new C++ default-argument expression.
@@ -2476,6 +2477,10 @@ bool TreeTransform<Derived>::TransformExprs(Expr **Inputs,
         Outputs.push_back(Out.get());
         continue;
       }
+
+      // Record right away that the argument was changed.  This needs
+      // to happen even if the array expands to nothing.
+      if (ArgChanged) *ArgChanged = true;
       
       // The transform has determined that we should perform an elementwise
       // expansion of the pattern. Do so.
@@ -2492,8 +2497,6 @@ bool TreeTransform<Derived>::TransformExprs(Expr **Inputs,
             return true;
         }
         
-        if (ArgChanged)
-          *ArgChanged = true;  
         Outputs.push_back(Out.get());
       }
         
@@ -6791,7 +6794,8 @@ TreeTransform<Derived>::TransformCXXThrowExpr(CXXThrowExpr *E) {
       SubExpr.get() == E->getSubExpr())
     return SemaRef.Owned(E);
 
-  return getDerived().RebuildCXXThrowExpr(E->getThrowLoc(), SubExpr.get());
+  return getDerived().RebuildCXXThrowExpr(E->getThrowLoc(), SubExpr.get(),
+                                          E->isThrownVariableInScope());
 }
 
 template<typename Derived>
@@ -7661,6 +7665,14 @@ TreeTransform<Derived>::TransformSubstNonTypeTemplateParmPackExpr(
 
 template<typename Derived>
 ExprResult
+TreeTransform<Derived>::TransformSubstNonTypeTemplateParmExpr(
+                                          SubstNonTypeTemplateParmExpr *E) {
+  // Default behavior is to do nothing with this transformation.
+  return SemaRef.Owned(E);
+}
+
+template<typename Derived>
+ExprResult
 TreeTransform<Derived>::TransformMaterializeTemporaryExpr(
                                                   MaterializeTemporaryExpr *E) {
   return getDerived().TransformExpr(E->GetTemporaryExpr());
@@ -8345,11 +8357,24 @@ TreeTransform<Derived>::RebuildCXXOperatorCallExpr(OverloadedOperatorKind Op,
     return SemaRef.CreateOverloadedUnaryOp(OpLoc, Opc, Functions, First);
   }
 
-  if (Op == OO_Subscript)
-    return SemaRef.CreateOverloadedArraySubscriptExpr(Callee->getLocStart(),
-                                                      OpLoc,
-                                                      First,
-                                                      Second);
+  if (Op == OO_Subscript) {
+    SourceLocation LBrace;
+    SourceLocation RBrace;
+
+    if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Callee)) {
+        DeclarationNameLoc &NameLoc = DRE->getNameInfo().getInfo();
+        LBrace = SourceLocation::getFromRawEncoding(
+                    NameLoc.CXXOperatorName.BeginOpNameLoc);
+        RBrace = SourceLocation::getFromRawEncoding(
+                    NameLoc.CXXOperatorName.EndOpNameLoc);
+    } else {
+        LBrace = Callee->getLocStart();
+        RBrace = OpLoc;
+    }
+
+    return SemaRef.CreateOverloadedArraySubscriptExpr(LBrace, RBrace,
+                                                      First, Second);
+  }
 
   // Create the overloaded operator invocation for binary operators.
   BinaryOperatorKind Opc = BinaryOperator::getOverloadedOpcode(Op);

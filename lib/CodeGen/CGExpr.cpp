@@ -20,8 +20,8 @@
 #include "CGObjCRuntime.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclObjC.h"
-#include "llvm/Intrinsics.h"
 #include "clang/Frontend/CodeGenOptions.h"
+#include "llvm/Intrinsics.h"
 #include "llvm/Target/TargetData.h"
 using namespace clang;
 using namespace CodeGen;
@@ -247,6 +247,7 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
       RV = CGF.EmitLoadOfPropertyRefLValue(LV);
       return RV.getScalarVal();
     }
+    
     if (LV.isSimple())
       return LV.getAddress();
     
@@ -282,19 +283,24 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
         case Qualifiers::OCL_Autoreleasing:
           break;
             
-        case Qualifiers::OCL_Strong:
-          CGF.PushARCReleaseCleanup(CGF.getARCCleanupKind(), 
-                                    ObjCARCReferenceLifetimeType, 
-                                    ReferenceTemporary,
-                                    /*Precise lifetime=*/false, 
-                                    /*For full expression=*/true);
+        case Qualifiers::OCL_Strong: {
+          assert(!ObjCARCReferenceLifetimeType->isArrayType());
+          CleanupKind cleanupKind = CGF.getARCCleanupKind();
+          CGF.pushDestroy(cleanupKind, 
+                          ReferenceTemporary,
+                          ObjCARCReferenceLifetimeType,
+                          CodeGenFunction::destroyARCStrongImprecise,
+                          cleanupKind & EHCleanup);
           break;
+        }
           
         case Qualifiers::OCL_Weak:
-          CGF.PushARCWeakReleaseCleanup(NormalAndEHCleanup, 
-                                        ObjCARCReferenceLifetimeType, 
-                                        ReferenceTemporary,
-                                        /*For full expression=*/true);
+          assert(!ObjCARCReferenceLifetimeType->isArrayType());
+          CGF.pushDestroy(NormalAndEHCleanup, 
+                          ReferenceTemporary,
+                          ObjCARCReferenceLifetimeType,
+                          CodeGenFunction::destroyARCWeak,
+                          /*useEHCleanupForArray*/ true);
           break;
         }
         
@@ -460,27 +466,32 @@ CodeGenFunction::EmitReferenceBindingToExpr(const Expr *E,
   else {
     switch (ObjCARCReferenceLifetimeType.getObjCLifetime()) {
     case Qualifiers::OCL_None:
-      llvm_unreachable("Not a reference temporary that needs to be deallocated");
-      break;
-        
+      assert(0 && "Not a reference temporary that needs to be deallocated");
     case Qualifiers::OCL_ExplicitNone:
     case Qualifiers::OCL_Autoreleasing:
       // Nothing to do.
       break;        
         
-    case Qualifiers::OCL_Strong:
-      PushARCReleaseCleanup(getARCCleanupKind(), ObjCARCReferenceLifetimeType, 
-                            ReferenceTemporary,
-                            VD && VD->hasAttr<ObjCPreciseLifetimeAttr>());
+    case Qualifiers::OCL_Strong: {
+      bool precise = VD && VD->hasAttr<ObjCPreciseLifetimeAttr>();
+      CleanupKind cleanupKind = getARCCleanupKind();
+      // This local is a GCC and MSVC compiler workaround.
+      Destroyer *destroyer = precise ? &destroyARCStrongPrecise :
+                                       &destroyARCStrongImprecise;
+      pushDestroy(cleanupKind, ReferenceTemporary, ObjCARCReferenceLifetimeType,
+                  *destroyer, cleanupKind & EHCleanup);
       break;
+    }
         
-    case Qualifiers::OCL_Weak:
+    case Qualifiers::OCL_Weak: {
+      // This local is a GCC and MSVC compiler workaround.
+      Destroyer *destroyer = &destroyARCWeak;
       // __weak objects always get EH cleanups; otherwise, exceptions
       // could cause really nasty crashes instead of mere leaks.
-      PushARCWeakReleaseCleanup(NormalAndEHCleanup, 
-                                ObjCARCReferenceLifetimeType, 
-                                ReferenceTemporary);
+      pushDestroy(NormalAndEHCleanup, ReferenceTemporary,
+                  ObjCARCReferenceLifetimeType, *destroyer, true);
       break;        
+    }
     }
   }
   
@@ -505,8 +516,7 @@ void CodeGenFunction::EmitCheck(llvm::Value *Address, unsigned Size) {
   // This needs to be to the standard address space.
   Address = Builder.CreateBitCast(Address, Int8PtrTy);
 
-  const llvm::Type *IntPtrT = IntPtrTy;
-  llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::objectsize, &IntPtrT, 1);
+  llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::objectsize, IntPtrTy);
 
   // In time, people may want to control this and use a 1 here.
   llvm::Value *Arg = Builder.getFalse();
@@ -695,6 +705,8 @@ LValue CodeGenFunction::EmitLValue(const Expr *E) {
     return EmitLValue(cast<ChooseExpr>(E)->getChosenSubExpr(getContext()));
   case Expr::OpaqueValueExprClass:
     return EmitOpaqueValueLValue(cast<OpaqueValueExpr>(E));
+  case Expr::SubstNonTypeTemplateParmExprClass:
+    return EmitLValue(cast<SubstNonTypeTemplateParmExpr>(E)->getReplacement());
   case Expr::ImplicitCastExprClass:
   case Expr::CStyleCastExprClass:
   case Expr::CXXFunctionalCastExprClass:
@@ -764,6 +776,7 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, llvm::Value *Addr,
                                         QualType Ty,
                                         llvm::MDNode *TBAAInfo) {
   Value = EmitToMemory(Value, Ty);
+  
   llvm::StoreInst *Store = Builder.CreateStore(Value, Addr, Volatile);
   if (Alignment)
     Store->setAlignment(Alignment);
@@ -1274,6 +1287,14 @@ static void setObjCGCLValueClass(const ASTContext &Ctx, const Expr *E,
   }
 }
 
+static llvm::Value *
+EmitBitCastOfLValueToProperType(CodeGenFunction &CGF,
+                                llvm::Value *V, llvm::Type *IRType,
+                                llvm::StringRef Name = llvm::StringRef()) {
+  unsigned AS = cast<llvm::PointerType>(V->getType())->getAddressSpace();
+  return CGF.Builder.CreateBitCast(V, IRType->getPointerTo(AS), Name);
+}
+
 static LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF,
                                       const Expr *E, const VarDecl *VD) {
   assert((VD->hasExternalStorage() || VD->isFileVarDecl()) &&
@@ -1282,6 +1303,10 @@ static LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF,
   llvm::Value *V = CGF.CGM.GetAddrOfGlobalVar(VD);
   if (VD->getType()->isReferenceType())
     V = CGF.Builder.CreateLoad(V, "tmp");
+  
+  V = EmitBitCastOfLValueToProperType(CGF, V,
+                                CGF.getTypes().ConvertTypeForMem(E->getType()));
+
   unsigned Alignment = CGF.getContext().getDeclAlign(VD).getQuantity();
   LValue LV = CGF.MakeAddrLValue(V, E->getType(), Alignment);
   setObjCGCLValueClass(CGF.getContext(), E, LV);
@@ -1289,7 +1314,7 @@ static LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF,
 }
 
 static LValue EmitFunctionDeclLValue(CodeGenFunction &CGF,
-                                      const Expr *E, const FunctionDecl *FD) {
+                                     const Expr *E, const FunctionDecl *FD) {
   llvm::Value *V = CGF.CGM.GetAddrOfFunction(FD);
   if (!FD->hasPrototype()) {
     if (const FunctionProtoType *Proto =
@@ -1337,6 +1362,9 @@ LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
     
     if (VD->getType()->isReferenceType())
       V = Builder.CreateLoad(V, "tmp");
+
+    V = EmitBitCastOfLValueToProperType(*this, V,
+                                    getTypes().ConvertTypeForMem(E->getType()));
 
     LValue LV = MakeAddrLValue(V, E->getType(), Alignment);
     if (NonGCable) {
@@ -1497,7 +1525,7 @@ llvm::BasicBlock *CodeGenFunction::getTrapBB() {
   TrapBB = createBasicBlock("trap");
   EmitBlock(TrapBB);
 
-  llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::trap, 0, 0);
+  llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::trap);
   llvm::CallInst *TrapCall = Builder.CreateCall(F);
   TrapCall->setDoesNotReturn();
   TrapCall->setDoesNotThrow();
@@ -1801,20 +1829,14 @@ LValue CodeGenFunction::EmitLValueForField(llvm::Value *baseAddr,
 
   bool mayAlias = rec->hasAttr<MayAliasAttr>();
 
-  llvm::Value *addr;
+  llvm::Value *addr = baseAddr;
   if (rec->isUnion()) {
-    // For unions, we just cast to the appropriate type.
+    // For unions, there is no pointer adjustment.
     assert(!type->isReferenceType() && "union has reference member");
-
-    const llvm::Type *llvmType = CGM.getTypes().ConvertTypeForMem(type);
-    unsigned AS =
-      cast<llvm::PointerType>(baseAddr->getType())->getAddressSpace();
-    addr = Builder.CreateBitCast(baseAddr, llvmType->getPointerTo(AS),
-                                 field->getName());
   } else {
     // For structs, we GEP to the field that the record layout suggests.
     unsigned idx = CGM.getTypes().getCGRecordLayout(rec).getLLVMFieldNo(field);
-    addr = Builder.CreateStructGEP(baseAddr, idx, field->getName());
+    addr = Builder.CreateStructGEP(addr, idx, field->getName());
 
     // If this is a reference field, load the reference right now.
     if (const ReferenceType *refType = type->getAs<ReferenceType>()) {
@@ -1836,6 +1858,14 @@ LValue CodeGenFunction::EmitLValueForField(llvm::Value *baseAddr,
       cvr = 0; // qualifiers don't recursively apply to referencee
     }
   }
+  
+  // Make sure that the address is pointing to the right type.  This is critical
+  // for both unions and structs.  A union needs a bitcast, a struct element
+  // will need a bitcast if the LLVM type laid out doesn't match the desired
+  // type.
+  addr = EmitBitCastOfLValueToProperType(*this, addr,
+                                         CGM.getTypes().ConvertTypeForMem(type),
+                                         field->getName());
 
   unsigned alignment = getContext().getDeclAlign(field).getQuantity();
   LValue LV = MakeAddrLValue(addr, type, alignment);
@@ -1867,9 +1897,17 @@ CodeGenFunction::EmitLValueForFieldInitialization(llvm::Value *BaseValue,
     CGM.getTypes().getCGRecordLayout(Field->getParent());
   unsigned idx = RL.getLLVMFieldNo(Field);
   llvm::Value *V = Builder.CreateStructGEP(BaseValue, idx, "tmp");
-
   assert(!FieldType.getObjCGCAttr() && "fields cannot have GC attrs");
 
+  
+  // Make sure that the address is pointing to the right type.  This is critical
+  // for both unions and structs.  A union needs a bitcast, a struct element
+  // will need a bitcast if the LLVM type laid out doesn't match the desired
+  // type.
+  const llvm::Type *llvmType = ConvertTypeForMem(FieldType);
+  unsigned AS = cast<llvm::PointerType>(V->getType())->getAddressSpace();
+  V = Builder.CreateBitCast(V, llvmType->getPointerTo(AS));
+  
   unsigned Alignment = getContext().getDeclAlign(Field).getQuantity();
   return MakeAddrLValue(V, FieldType, Alignment);
 }
@@ -2011,7 +2049,8 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_MemberPointerToBoolean:
   case CK_AnyPointerToBlockPointerCast:
   case CK_ObjCProduceObject:
-  case CK_ObjCConsumeObject: {
+  case CK_ObjCConsumeObject:
+  case CK_ObjCReclaimReturnedObject: {
     // These casts only produce lvalues when we're binding a reference to a 
     // temporary realized from a (converted) pure rvalue. Emit the expression
     // as a value, copy it into a temporary, and return an lvalue referring to

@@ -48,11 +48,11 @@ public:
 
   unsigned DetailedRecord : 1; /// Whether we should maintain a detailed
                                /// record of all macro definitions and
-                               /// instantiations.
+                               /// expansions.
   
   /// \brief Whether the detailed preprocessing record includes nested macro 
-  /// instantiations.
-  unsigned DetailedRecordIncludesNestedMacroInstantiations : 1;
+  /// expansions.
+  unsigned DetailedRecordIncludesNestedMacroExpansions : 1;
   
   /// The implicit PCH included at the start of the translation unit, or empty.
   std::string ImplicitPCHInclude;
@@ -154,7 +154,7 @@ public:
   
 public:
   PreprocessorOptions() : UsePredefines(true), DetailedRecord(false),
-                          DetailedRecordIncludesNestedMacroInstantiations(true),
+                          DetailedRecordIncludesNestedMacroExpansions(true),
                           DisablePCHValidation(false), DisableStatCache(false),
                           DumpDeserializedPCHDecls(false),
                           PrecompiledPreambleBytes(0, true),

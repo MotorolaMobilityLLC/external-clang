@@ -1195,7 +1195,7 @@ ASTReader::ASTReadResult ASTReader::ReadSourceManagerBlock(PerFileData &F) {
 
     case SM_SLOC_FILE_ENTRY:
     case SM_SLOC_BUFFER_ENTRY:
-    case SM_SLOC_INSTANTIATION_ENTRY:
+    case SM_SLOC_EXPANSION_ENTRY:
       // Once we hit one of the source location entries, we're done.
       return Success;
     }
@@ -1365,7 +1365,7 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(unsigned ID) {
     break;
   }
 
-  case SM_SLOC_INSTANTIATION_ENTRY: {
+  case SM_SLOC_EXPANSION_ENTRY: {
     SourceLocation SpellingLoc = ReadSourceLocation(*F, Record[1]);
     SourceMgr.createInstantiationLoc(SpellingLoc,
                                      ReadSourceLocation(*F, Record[2]),
@@ -1556,17 +1556,17 @@ PreprocessedEntity *ASTReader::LoadPreprocessedEntity(PerFileData &F) {
     (PreprocessorDetailRecordTypes)F.PreprocessorDetailCursor.ReadRecord(
                                              Code, Record, BlobStart, BlobLen);
   switch (RecType) {
-  case PPD_MACRO_INSTANTIATION: {
+  case PPD_MACRO_EXPANSION: {
     if (PreprocessedEntity *PE = PPRec.getPreprocessedEntity(Record[0]))
       return PE;
     
-    MacroInstantiation *MI
-      = new (PPRec) MacroInstantiation(DecodeIdentifierInfo(Record[3]),
+    MacroExpansion *ME =
+      new (PPRec) MacroExpansion(DecodeIdentifierInfo(Record[3]),
                                  SourceRange(ReadSourceLocation(F, Record[1]),
                                              ReadSourceLocation(F, Record[2])),
-                                       getMacroDefinition(Record[4]));
-    PPRec.SetPreallocatedEntity(Record[0], MI);
-    return MI;
+                                 getMacroDefinition(Record[4]));
+    PPRec.SetPreallocatedEntity(Record[0], ME);
+    return ME;
   }
       
   case PPD_MACRO_DEFINITION: {
@@ -4008,12 +4008,9 @@ Stmt *ASTReader::GetExternalDeclStmt(uint64_t Offset) {
   llvm_unreachable("Broken chain");
 }
 
-bool ASTReader::FindExternalLexicalDecls(const DeclContext *DC,
+ExternalLoadResult ASTReader::FindExternalLexicalDecls(const DeclContext *DC,
                                          bool (*isKindWeWant)(Decl::Kind),
                                          llvm::SmallVectorImpl<Decl*> &Decls) {
-  assert(DC->hasExternalLexicalStorage() &&
-         "DeclContext has no lexical decls in storage");
-
   // There might be lexical decls in multiple parts of the chain, for the TU
   // at least.
   // DeclContextOffsets might reallocate as we load additional decls below,
@@ -4038,7 +4035,7 @@ bool ASTReader::FindExternalLexicalDecls(const DeclContext *DC,
   }
 
   ++NumLexicalDeclContextsRead;
-  return false;
+  return ELR_Success;
 }
 
 DeclContext::lookup_result

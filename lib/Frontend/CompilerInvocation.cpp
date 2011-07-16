@@ -123,6 +123,10 @@ static void CodeGenOptsToArgs(const CodeGenOptions &Opts,
     Res.push_back("-dwarf-debug-flags");
     Res.push_back(Opts.DwarfDebugFlags);
   }
+  if (Opts.ObjCRuntimeHasARC)
+    Res.push_back("-fobjc-runtime-has-arc");
+  if (Opts.ObjCRuntimeHasTerminate)
+    Res.push_back("-fobjc-runtime-has-terminate");
   if (Opts.EmitGcovArcs)
     Res.push_back("-femit-coverage-data");
   if (Opts.EmitGcovNotes)
@@ -357,7 +361,6 @@ static const char *getActionName(frontend::ActionKind Kind) {
   case frontend::ASTDumpXML:             return "-ast-dump-xml";
   case frontend::ASTPrint:               return "-ast-print";
   case frontend::ASTView:                return "-ast-view";
-  case frontend::BoostCon:               return "-boostcon";
   case frontend::CreateModule:           return "-create-module";
   case frontend::DumpRawTokens:          return "-dump-raw-tokens";
   case frontend::DumpTokens:             return "-dump-tokens";
@@ -428,6 +431,13 @@ static void FrontendOptsToArgs(const FrontendOptions &Opts,
   case FrontendOptions::ARCMT_Modify:
     Res.push_back("-arcmt-modify");
     break;
+  case FrontendOptions::ARCMT_Migrate:
+    Res.push_back("-arcmt-migrate");
+    break;
+  }
+  if (!Opts.ARCMTMigrateDir.empty()) {
+    Res.push_back("-arcmt-migrate-directory");
+    Res.push_back(Opts.ARCMTMigrateDir);
   }
 
   bool NeedLang = false;
@@ -690,8 +700,8 @@ static void LangOptsToArgs(const LangOptions &Opts,
   }
   if (Opts.ObjCAutoRefCount)
     Res.push_back("-fobjc-arc");
-  if (Opts.ObjCNoAutoRefCountRuntime)
-    Res.push_back("-fobjc-no-arc-runtime");
+  if (Opts.ObjCRuntimeHasWeak)
+    Res.push_back("-fobjc-runtime-has-weak");
   if (!Opts.ObjCInferRelatedResultType)
     Res.push_back("-fno-objc-infer-related-result-type");
   
@@ -727,6 +737,8 @@ static void LangOptsToArgs(const LangOptions &Opts,
     Res.push_back("-ffake-address-space-map");
   if (Opts.ParseUnknownAnytype)
     Res.push_back("-funknown-anytype");
+  if (Opts.DebuggerSupport)
+    Res.push_back("-fdebugger-support");
   if (Opts.DelayedTemplateParsing)
     Res.push_back("-fdelayed-template-parsing");
   if (Opts.Deprecated)
@@ -976,6 +988,8 @@ static void ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
 
   Opts.AsmVerbose = Args.hasArg(OPT_masm_verbose);
   Opts.ObjCAutoRefCountExceptions = Args.hasArg(OPT_fobjc_arc_exceptions);
+  Opts.ObjCRuntimeHasARC = Args.hasArg(OPT_fobjc_runtime_has_arc);
+  Opts.ObjCRuntimeHasTerminate = Args.hasArg(OPT_fobjc_runtime_has_terminate);
   Opts.CXAAtExit = !Args.hasArg(OPT_fno_use_cxa_atexit);
   Opts.CXXCtorDtorAliases = Args.hasArg(OPT_mconstructor_aliases);
   Opts.CodeModel = Args.getLastArgValue(OPT_mcode_model);
@@ -1036,6 +1050,7 @@ static void ParseDependencyOutputArgs(DependencyOutputOptions &Opts,
   Opts.UsePhonyTargets = Args.hasArg(OPT_MP);
   Opts.ShowHeaderIncludes = Args.hasArg(OPT_H);
   Opts.HeaderIncludeOutputFile = Args.getLastArgValue(OPT_header_include_file);
+  Opts.AddMissingHeaderDeps = Args.hasArg(OPT_MG);
 }
 
 static void ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
@@ -1143,8 +1158,6 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
       Opts.ProgramAction = frontend::ASTPrint; break;
     case OPT_ast_view:
       Opts.ProgramAction = frontend::ASTView; break;
-    case OPT_boostcon:
-      Opts.ProgramAction = frontend::BoostCon; break;
     case OPT_dump_raw_tokens:
       Opts.ProgramAction = frontend::DumpRawTokens; break;
     case OPT_dump_tokens:
@@ -1248,7 +1261,8 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
 
   Opts.ARCMTAction = FrontendOptions::ARCMT_None;
   if (const Arg *A = Args.getLastArg(OPT_arcmt_check,
-                                     OPT_arcmt_modify)) {
+                                     OPT_arcmt_modify,
+                                     OPT_arcmt_migrate)) {
     switch (A->getOption().getID()) {
     default:
       llvm_unreachable("missed a case");
@@ -1258,8 +1272,12 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
     case OPT_arcmt_modify:
       Opts.ARCMTAction = FrontendOptions::ARCMT_Modify;
       break;
+    case OPT_arcmt_migrate:
+      Opts.ARCMTAction = FrontendOptions::ARCMT_Migrate;
+      break;
     }
   }
+  Opts.ARCMTMigrateDir = Args.getLastArgValue(OPT_arcmt_migrate_directory);
 
   InputKind DashX = IK_None;
   if (const Arg *A = Args.getLastArg(OPT_x)) {
@@ -1532,9 +1550,10 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
       Opts.ObjCAutoRefCount = 1;
       if (!Args.hasArg(OPT_fobjc_nonfragile_abi))
         Diags.Report(diag::err_arc_nonfragile_abi);
-      if (Args.hasArg(OPT_fobjc_no_arc_runtime))
-        Opts.ObjCNoAutoRefCountRuntime = 1;
     }
+
+    if (Args.hasArg(OPT_fobjc_runtime_has_weak))
+      Opts.ObjCRuntimeHasWeak = 1;
 
     if (Args.hasArg(OPT_fno_objc_infer_related_result_type))
       Opts.ObjCInferRelatedResultType = 0;
@@ -1650,6 +1669,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.MRTD = Args.hasArg(OPT_mrtd);
   Opts.FakeAddressSpaceMap = Args.hasArg(OPT_ffake_address_space_map);
   Opts.ParseUnknownAnytype = Args.hasArg(OPT_funknown_anytype);
+  Opts.DebuggerSupport = Args.hasArg(OPT_fdebugger_support);
 
   // Record whether the __DEPRECATED define was requested.
   Opts.Deprecated = Args.hasFlag(OPT_fdeprecated_macro,

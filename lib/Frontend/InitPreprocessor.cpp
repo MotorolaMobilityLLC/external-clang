@@ -250,7 +250,7 @@ static void AddObjCXXARCLibcxxDefines(const LangOptions &LangOpts,
         << "}\n"
         << "\n";
       
-    if (!LangOpts.ObjCNoAutoRefCountRuntime) {
+    if (LangOpts.ObjCRuntimeHasWeak) {
       Out << "template <class _Tp>\n"
           << "inline __attribute__ ((__visibility__(\"hidden\"),"
           << "__always_inline__))\n"
@@ -318,7 +318,7 @@ static void AddObjCXXARCLibstdcxxDefines(const LangOptions &LangOpts,
         << "};\n"
         << "\n";
       
-    if (!LangOpts.ObjCNoAutoRefCountRuntime) {
+    if (LangOpts.ObjCRuntimeHasWeak) {
       Out << "template<typename _Tp>\n"
           << "struct __is_scalar<__attribute__((objc_ownership(weak))) _Tp> {\n"
           << "  enum { __value = 0 };\n"
@@ -438,7 +438,8 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
 
   // darwin_constant_cfstrings controls this. This is also dependent
   // on other things like the runtime I believe.  This is set even for C code.
-  Builder.defineMacro("__CONSTANT_CFSTRINGS__");
+  if (!LangOpts.NoConstantCFStrings)
+      Builder.defineMacro("__CONSTANT_CFSTRINGS__");
 
   if (LangOpts.ObjC2)
     Builder.defineMacro("OBJC_NEW_PROPERTIES");

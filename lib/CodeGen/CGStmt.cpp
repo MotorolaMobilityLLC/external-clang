@@ -1408,15 +1408,15 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
   std::vector<LValue> ResultRegDests;
   std::vector<QualType> ResultRegQualTys;
-  std::vector<const llvm::Type *> ResultRegTypes;
-  std::vector<const llvm::Type *> ResultTruncRegTypes;
-  std::vector<const llvm::Type*> ArgTypes;
+  std::vector<llvm::Type *> ResultRegTypes;
+  std::vector<llvm::Type *> ResultTruncRegTypes;
+  std::vector<llvm::Type*> ArgTypes;
   std::vector<llvm::Value*> Args;
 
   // Keep track of inout constraints.
   std::string InOutConstraints;
   std::vector<llvm::Value*> InOutArgs;
-  std::vector<const llvm::Type*> InOutArgTypes;
+  std::vector<llvm::Type*> InOutArgTypes;
 
   for (unsigned i = 0, e = S.getNumOutputs(); i != e; i++) {
     TargetInfo::ConstraintInfo &Info = OutputConstraintInfos[i];
@@ -1465,7 +1465,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
           ResultRegTypes.back() = ConvertType(InputTy);
         }
       }
-      if (const llvm::Type* AdjTy = 
+      if (llvm::Type* AdjTy = 
             getTargetHooks().adjustInlineAsmType(*this, OutputConstraint,
                                                  ResultRegTypes.back()))
         ResultRegTypes.back() = AdjTy;
@@ -1591,7 +1591,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   llvm::InlineAsm *IA =
     llvm::InlineAsm::get(FTy, AsmString, Constraints,
                          S.isVolatile() || S.getNumOutputs() == 0);
-  llvm::CallInst *Result = Builder.CreateCall(IA, Args.begin(), Args.end());
+  llvm::CallInst *Result = Builder.CreateCall(IA, Args);
   Result->addAttribute(~0, llvm::Attribute::NoUnwind);
 
   // Slap the source location of the inline asm into a !srcloc metadata on the

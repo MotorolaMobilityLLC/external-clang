@@ -424,25 +424,7 @@ private:
       Tok.setAnnotationValue(ER.get());
   }
 
-  /// TryAnnotateTypeOrScopeToken - If the current token position is on a
-  /// typename (possibly qualified in C++) or a C++ scope specifier not followed
-  /// by a typename, TryAnnotateTypeOrScopeToken will replace one or more tokens
-  /// with a single annotation token representing the typename or C++ scope
-  /// respectively.
-  /// This simplifies handling of C++ scope specifiers and allows efficient
-  /// backtracking without the need to re-parse and resolve nested-names and
-  /// typenames.
-  /// It will mainly be called when we expect to treat identifiers as typenames
-  /// (if they are typenames). For example, in C we do not expect identifiers
-  /// inside expressions to be treated as typenames so it will not be called
-  /// for expressions in C.
-  ///
-  /// This returns true if the token was annotated.
   bool TryAnnotateTypeOrScopeToken(bool EnteringContext = false);
-
-  /// TryAnnotateCXXScopeToken - Like TryAnnotateTypeOrScopeToken but
-  /// only annotates C++ scope specifiers.  This returns true if there
-  /// was an unrecoverable error.
   bool TryAnnotateCXXScopeToken(bool EnteringContext = false);
 
   /// TryAltiVecToken - Check for context-sensitive AltiVec identifier tokens,
@@ -517,12 +499,6 @@ private:
   };
 
 
-  /// MatchRHSPunctuation - For punctuation with a LHS and RHS (e.g. '['/']'),
-  /// this helper function matches and consumes the specified RHS token if
-  /// present.  If not present, it emits the specified diagnostic indicating
-  /// that the parser failed to match the RHS of the token at LHSLoc.  LHSName
-  /// should be the name of the unmatched LHS token.  This returns the location
-  /// of the consumed token.
   SourceLocation MatchRHSPunctuation(tok::TokenKind RHSTok,
                                      SourceLocation LHSLoc);
 
@@ -1338,6 +1314,9 @@ private:
   StmtResult ParseDefaultStatement(ParsedAttributes &Attr);
   StmtResult ParseCompoundStatement(ParsedAttributes &Attr,
                                     bool isStmtExpr = false);
+  StmtResult ParseCompoundStatement(ParsedAttributes &Attr,
+                                    bool isStmtExpr,
+                                    unsigned ScopeFlags);
   StmtResult ParseCompoundStatementBody(bool isStmtExpr = false);
   bool ParseParenExprOrCondition(ExprResult &ExprResult,
                                  Decl *&DeclResult,
@@ -1756,10 +1735,15 @@ bool ParseAsmOperandsOpt(llvm::SmallVectorImpl<IdentifierInfo *> &Names,
   void ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
                                ParsedAttributes &attrs,
                                bool RequiresArg = false);
-  void ParseFunctionDeclaratorIdentifierList(SourceLocation LParenLoc,
-                                             IdentifierInfo *FirstIdent,
-                                             SourceLocation FirstIdentLoc,
-                                             Declarator &D);
+  bool isFunctionDeclaratorIdentifierList();
+  void ParseFunctionDeclaratorIdentifierList(
+         Declarator &D,
+         llvm::SmallVector<DeclaratorChunk::ParamInfo, 16> &ParamInfo);
+  void ParseParameterDeclarationClause(
+         Declarator &D,
+         ParsedAttributes &attrs,
+         llvm::SmallVector<DeclaratorChunk::ParamInfo, 16> &ParamInfo,
+         SourceLocation &EllipsisLoc);
   void ParseBracketDeclarator(Declarator &D);
 
   //===--------------------------------------------------------------------===//

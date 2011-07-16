@@ -154,6 +154,12 @@ public:
   /// copied.
   NestedNameSpecifierLoc getWithLocInContext(ASTContext &Context) const;
 
+  /// \brief Retrieve the location of the name in the last qualifier
+  /// in this nested name specifier.  For example:
+  ///   ::foo::bar<0>::
+  ///          ^~~
+  SourceLocation getLastQualifierNameLoc() const;
+
   /// No scope specifier.
   bool isEmpty() const { return !Range.isValid(); }
   /// A scope specifier is present, but may be valid or invalid.
@@ -761,7 +767,9 @@ public:
     /// \brief A destructor name.
     IK_DestructorName,
     /// \brief A template-id, e.g., f<int>.
-    IK_TemplateId
+    IK_TemplateId,
+    /// \brief An implicit 'self' parameter
+    IK_ImplicitSelfParam
   } Kind;
 
   /// \brief Anonymous union that holds extra data associated with the
@@ -814,7 +822,7 @@ public:
   SourceLocation EndLocation;
   
   UnqualifiedId() : Kind(IK_Identifier), Identifier(0) { }
-  
+
   /// \brief Do not use this copy constructor. It is temporary, and only
   /// exists because we are holding FieldDeclarators in a SmallVector when we
   /// don't actually need them.
@@ -841,6 +849,7 @@ public:
   
   /// \brief Determine what kind of name we have.
   IdKind getKind() const { return Kind; }
+  void setKind(IdKind kind) { Kind = kind; } 
   
   /// \brief Specify that this unqualified-id was parsed as an identifier.
   ///
@@ -1088,6 +1097,10 @@ struct DeclaratorChunk {
     /// If this is an invalid location, there is no ref-qualifier.
     unsigned RefQualifierLoc;
 
+    /// \brief The location of the 'mutable' qualifer in a lambda-declarator, if
+    /// any.
+    unsigned MutableLoc;
+
     /// \brief When ExceptionSpecType isn't EST_None or EST_Delayed, the
     /// location of the keyword introducing the spec.
     unsigned ExceptionSpecLoc;
@@ -1149,9 +1162,18 @@ struct DeclaratorChunk {
       return SourceLocation::getFromRawEncoding(RefQualifierLoc);
     }
 
+    /// \brief Retrieve the location of the 'mutable' qualifier, if any.
+    SourceLocation getMutableLoc() const {
+      return SourceLocation::getFromRawEncoding(MutableLoc);
+    }
+
     /// \brief Determine whether this function declaration contains a 
     /// ref-qualifier.
     bool hasRefQualifier() const { return getRefQualifierLoc().isValid(); }
+
+    /// \brief Determine whether this lambda-declarator contains a 'mutable'
+    /// qualifier.
+    bool hasMutableQualifier() const { return getMutableLoc().isValid(); }
 
     /// \brief Get the type of exception specification this function has.
     ExceptionSpecificationType getExceptionSpecType() const {
@@ -1276,6 +1298,7 @@ struct DeclaratorChunk {
                                      unsigned TypeQuals, 
                                      bool RefQualifierIsLvalueRef,
                                      SourceLocation RefQualifierLoc,
+                                     SourceLocation MutableLoc,
                                      ExceptionSpecificationType ESpecType,
                                      SourceLocation ESpecLoc,
                                      ParsedType *Exceptions,

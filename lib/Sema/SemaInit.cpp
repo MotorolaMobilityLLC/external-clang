@@ -769,7 +769,8 @@ void InitListChecker::CheckSubElementType(const InitializedEntity &Entity,
   //   subaggregate, brace elision is assumed and the initializer is
   //   considered for the initialization of the first member of
   //   the subaggregate.
-  if (ElemType->isAggregateType() || ElemType->isVectorType()) {
+  if (!SemaRef.getLangOptions().OpenCL && 
+      (ElemType->isAggregateType() || ElemType->isVectorType())) {
     CheckImplicitInitList(Entity, IList, ElemType, Index, StructuredList,
                           StructuredIndex);
     ++StructuredIndex;
@@ -2155,7 +2156,7 @@ void InitializationSequence::Step::Destroy() {
 }
 
 bool InitializationSequence::isDirectReferenceBinding() const {
-  return getKind() == ReferenceBinding && Steps.back().Kind == SK_BindReference;
+  return !Steps.empty() && Steps.back().Kind == SK_BindReference;
 }
 
 bool InitializationSequence::isAmbiguous() const {
@@ -2622,8 +2623,6 @@ static void TryReferenceInitialization(Sema &S,
                                        const InitializationKind &Kind,
                                        Expr *Initializer,
                                        InitializationSequence &Sequence) {
-  Sequence.setSequenceKind(InitializationSequence::ReferenceBinding);
-
   QualType DestType = Entity.getType();
   QualType cv1T1 = DestType->getAs<ReferenceType>()->getPointeeType();
   Qualifiers T1Quals;
@@ -3892,6 +3891,11 @@ void InitializationSequence::PrintInitLocationNote(Sema &S,
   }
 }
 
+static bool isReferenceBinding(const InitializationSequence::Step &s) {
+  return s.Kind == InitializationSequence::SK_BindReference ||
+         s.Kind == InitializationSequence::SK_BindReferenceToTemporary;
+}
+
 ExprResult
 InitializationSequence::Perform(Sema &S,
                                 const InitializedEntity &Entity,
@@ -4187,8 +4191,7 @@ InitializationSequence::Perform(Sema &S,
         CreatedObject = Conversion->getResultType()->isRecordType();
       }
 
-      bool RequiresCopy = !IsCopy &&
-        getKind() != InitializationSequence::ReferenceBinding;
+      bool RequiresCopy = !IsCopy && !isReferenceBinding(Steps.back());
       if (RequiresCopy || shouldBindAsTemporary(Entity))
         CurInit = S.MaybeBindToTemporary(CurInit.takeAs<Expr>());
       else if (CreatedObject && shouldDestroyTemporary(Entity)) {
@@ -4865,10 +4868,6 @@ void InitializationSequence::dump(llvm::raw_ostream &OS) const {
 
   case NormalSequence:
     OS << "Normal sequence: ";
-    break;
-
-  case ReferenceBinding:
-    OS << "Reference binding: ";
     break;
   }
 

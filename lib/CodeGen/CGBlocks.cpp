@@ -25,22 +25,6 @@
 using namespace clang;
 using namespace CodeGen;
 
-struct CallMemsetLocalBlockObject : EHScopeStack::Cleanup {
-  llvm::AllocaInst *BlockAddr;
-  CharUnits BlockSize;
-  
-  CallMemsetLocalBlockObject(llvm::AllocaInst *blockAddr, 
-                             CharUnits blocSize) 
-    : BlockAddr(blockAddr), BlockSize(blocSize) {}
-  
-  void Emit(CodeGenFunction &CGF, bool isForEH) {
-    CGF.Builder.CreateMemSet(BlockAddr, 
-                             llvm::ConstantInt::get(CGF.Int8Ty, 0xCD), 
-                             BlockSize.getQuantity(), 
-                             BlockAddr->getAlignment());
-  }
-};
-
 CGBlockInfo::CGBlockInfo(const BlockExpr *blockExpr, const char *N)
   : Name(N), CXXThisIndex(0), CanBeGlobal(false), NeedsCopyDispose(false),
     HasCXXObject(false), UsesStret(false), StructureType(0), Block(blockExpr) {
@@ -180,11 +164,11 @@ namespace {
     CharUnits Alignment;
     CharUnits Size;
     const BlockDecl::Capture *Capture; // null for 'this'
-    const llvm::Type *Type;
+    llvm::Type *Type;
 
     BlockLayoutChunk(CharUnits align, CharUnits size,
                      const BlockDecl::Capture *capture,
-                     const llvm::Type *type)
+                     llvm::Type *type)
       : Alignment(align), Size(size), Capture(capture), Type(type) {}
 
     /// Tell the block info that this chunk has the given field index.
@@ -259,7 +243,7 @@ static CharUnits getLowBit(CharUnits v) {
 }
 
 static void initializeForBlockHeader(CodeGenModule &CGM, CGBlockInfo &info,
-                    llvm::SmallVectorImpl<const llvm::Type*> &elementTypes) {
+                             llvm::SmallVectorImpl<llvm::Type*> &elementTypes) {
   ASTContext &C = CGM.getContext();
 
   // The header is basically a 'struct { void *; int; int; void *; void *; }'.
@@ -279,8 +263,8 @@ static void initializeForBlockHeader(CodeGenModule &CGM, CGBlockInfo &info,
   info.BlockSize = headerSize;
 
   assert(elementTypes.empty());
-  const llvm::Type *i8p = CGM.getTypes().ConvertType(C.VoidPtrTy);
-  const llvm::Type *intTy = CGM.getTypes().ConvertType(C.IntTy);
+  llvm::Type *i8p = CGM.getTypes().ConvertType(C.VoidPtrTy);
+  llvm::Type *intTy = CGM.getTypes().ConvertType(C.IntTy);
   elementTypes.push_back(i8p);
   elementTypes.push_back(intTy);
   elementTypes.push_back(intTy);
@@ -296,7 +280,7 @@ static void computeBlockInfo(CodeGenModule &CGM, CGBlockInfo &info) {
   ASTContext &C = CGM.getContext();
   const BlockDecl *block = info.getBlockDecl();
 
-  llvm::SmallVector<const llvm::Type*, 8> elementTypes;
+  llvm::SmallVector<llvm::Type*, 8> elementTypes;
   initializeForBlockHeader(CGM, info, elementTypes);
 
   if (!block->hasCaptures()) {
@@ -324,7 +308,7 @@ static void computeBlockInfo(CodeGenModule &CGM, CGBlockInfo &info) {
     else
       thisType = cast<CXXMethodDecl>(DC)->getThisType(C);
 
-    const llvm::Type *llvmType = CGM.getTypes().ConvertType(thisType);
+    llvm::Type *llvmType = CGM.getTypes().ConvertType(thisType);
     std::pair<CharUnits,CharUnits> tinfo
       = CGM.getContext().getTypeInfoInChars(thisType);
     maxFieldAlign = std::max(maxFieldAlign, tinfo.second);
@@ -344,7 +328,7 @@ static void computeBlockInfo(CodeGenModule &CGM, CGBlockInfo &info) {
       // Just use void* instead of a pointer to the byref type.
       QualType byRefPtrTy = C.VoidPtrTy;
 
-      const llvm::Type *llvmType = CGM.getTypes().ConvertType(byRefPtrTy);
+      llvm::Type *llvmType = CGM.getTypes().ConvertType(byRefPtrTy);
       std::pair<CharUnits,CharUnits> tinfo
         = CGM.getContext().getTypeInfoInChars(byRefPtrTy);
       maxFieldAlign = std::max(maxFieldAlign, tinfo.second);
@@ -400,7 +384,7 @@ static void computeBlockInfo(CodeGenModule &CGM, CGBlockInfo &info) {
     CharUnits align = C.getDeclAlign(variable);
     maxFieldAlign = std::max(maxFieldAlign, align);
 
-    const llvm::Type *llvmType =
+    llvm::Type *llvmType =
       CGM.getTypes().ConvertTypeForMem(variable->getType());
 
     layout.push_back(BlockLayoutChunk(align, size, &*ci, llvmType));
@@ -643,18 +627,23 @@ llvm::Value *CodeGenFunction::EmitBlockLiteral(const BlockExpr *blockExpr) {
     // Push a destructor if necessary.  The semantics for when this
     // actually gets run are really obscure.
     if (!ci->isByRef()) {
-      switch (type.isDestructedType()) {
+      switch (QualType::DestructionKind dtorKind = type.isDestructedType()) {
       case QualType::DK_none:
         break;
-      case QualType::DK_cxx_destructor:
-        PushDestructorCleanup(type, blockField);
+
+      // Block captures count as local values and have imprecise semantics.
+      // They also can't be arrays, so need to worry about that.
+      case QualType::DK_objc_strong_lifetime: {
+        // This local is a GCC and MSVC compiler workaround.
+        Destroyer *destroyer = &destroyARCStrongImprecise;
+        pushDestroy(getCleanupKind(dtorKind), blockField, type,
+                    *destroyer, /*useEHCleanupForArray*/ false);
         break;
-      case QualType::DK_objc_strong_lifetime:
-        PushARCReleaseCleanup(getARCCleanupKind(), type, blockField, false);
-        break;
+      }
+
       case QualType::DK_objc_weak_lifetime:
-        // __weak objects on the stack always get EH cleanups.
-        PushARCWeakReleaseCleanup(NormalAndEHCleanup, type, blockField);
+      case QualType::DK_cxx_destructor:
+        pushDestroy(dtorKind, blockField, type);
         break;
       }
     }
@@ -665,19 +654,16 @@ llvm::Value *CodeGenFunction::EmitBlockLiteral(const BlockExpr *blockExpr) {
   llvm::Value *result =
     Builder.CreateBitCast(blockAddr,
                           ConvertType(blockInfo.getBlockExpr()->getType()));
-  if (getLangOptions().CatchUndefined)
-    EHStack.pushCleanup<CallMemsetLocalBlockObject>(NormalCleanup, blockAddr, 
-                                                    blockInfo.BlockSize);
 
   return result;
 }
 
 
-const llvm::Type *CodeGenModule::getBlockDescriptorType() {
+llvm::Type *CodeGenModule::getBlockDescriptorType() {
   if (BlockDescriptorType)
     return BlockDescriptorType;
 
-  const llvm::Type *UnsignedLongTy =
+  llvm::Type *UnsignedLongTy =
     getTypes().ConvertType(getContext().UnsignedLongTy);
 
   // struct __block_descriptor {
@@ -695,21 +681,19 @@ const llvm::Type *CodeGenModule::getBlockDescriptorType() {
   //   const char *layout;      // reserved
   // };
   BlockDescriptorType =
-    llvm::StructType::get(UnsignedLongTy, UnsignedLongTy, NULL);
-
-  getModule().addTypeName("struct.__block_descriptor",
-                          BlockDescriptorType);
+    llvm::StructType::createNamed("struct.__block_descriptor",
+                                  UnsignedLongTy, UnsignedLongTy, NULL);
 
   // Now form a pointer to that.
   BlockDescriptorType = llvm::PointerType::getUnqual(BlockDescriptorType);
   return BlockDescriptorType;
 }
 
-const llvm::Type *CodeGenModule::getGenericBlockLiteralType() {
+llvm::Type *CodeGenModule::getGenericBlockLiteralType() {
   if (GenericBlockLiteralType)
     return GenericBlockLiteralType;
 
-  const llvm::Type *BlockDescPtrTy = getBlockDescriptorType();
+  llvm::Type *BlockDescPtrTy = getBlockDescriptorType();
 
   // struct __block_literal_generic {
   //   void *__isa;
@@ -718,15 +702,14 @@ const llvm::Type *CodeGenModule::getGenericBlockLiteralType() {
   //   void (*__invoke)(void *);
   //   struct __block_descriptor *__descriptor;
   // };
-  GenericBlockLiteralType = llvm::StructType::get(VoidPtrTy,
-                                                  IntTy,
-                                                  IntTy,
-                                                  VoidPtrTy,
-                                                  BlockDescPtrTy,
-                                                  NULL);
-
-  getModule().addTypeName("struct.__block_literal_generic",
-                          GenericBlockLiteralType);
+  GenericBlockLiteralType =
+    llvm::StructType::createNamed("struct.__block_literal_generic",
+                                  VoidPtrTy,
+                                  IntTy,
+                                  IntTy,
+                                  VoidPtrTy,
+                                  BlockDescPtrTy,
+                                  NULL);
 
   return GenericBlockLiteralType;
 }
@@ -1682,15 +1665,17 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const VarDecl *D) {
   
   QualType Ty = D->getType();
 
-  llvm::SmallVector<const llvm::Type *, 8> types;
+  llvm::SmallVector<llvm::Type *, 8> types;
   
-  llvm::PATypeHolder ByRefTypeHolder = llvm::OpaqueType::get(getLLVMContext());
+  llvm::StructType *ByRefType =
+    llvm::StructType::createNamed(getLLVMContext(),
+                                "struct.__block_byref_" + D->getNameAsString());
   
   // void *__isa;
   types.push_back(Int8PtrTy);
   
   // void *__forwarding;
-  types.push_back(llvm::PointerType::getUnqual(ByRefTypeHolder));
+  types.push_back(llvm::PointerType::getUnqual(ByRefType));
   
   // int32_t __flags;
   types.push_back(Int32Ty);
@@ -1725,7 +1710,7 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const VarDecl *D) {
     
     unsigned NumPaddingBytes = AlignedOffsetInBytes - CurrentOffsetInBytes;
     if (NumPaddingBytes > 0) {
-      const llvm::Type *Ty = llvm::Type::getInt8Ty(getLLVMContext());
+      llvm::Type *Ty = llvm::Type::getInt8Ty(getLLVMContext());
       // FIXME: We need a sema error for alignment larger than the minimum of
       // the maximal stack alignment and the alignment of malloc on the system.
       if (NumPaddingBytes > 1)
@@ -1741,13 +1726,9 @@ const llvm::Type *CodeGenFunction::BuildByRefType(const VarDecl *D) {
   // T x;
   types.push_back(ConvertTypeForMem(Ty));
   
-  const llvm::Type *T = llvm::StructType::get(getLLVMContext(), types, Packed);
+  ByRefType->setBody(types, Packed);
   
-  cast<llvm::OpaqueType>(ByRefTypeHolder.get())->refineAbstractTypeTo(T);
-  CGM.getModule().addTypeName("struct.__block_byref_" + D->getNameAsString(), 
-                              ByRefTypeHolder.get());
-  
-  Info.first = ByRefTypeHolder.get();
+  Info.first = ByRefType;
   
   Info.second = types.size() - 1;
   
@@ -1818,7 +1799,7 @@ namespace {
     llvm::Value *Addr;
     CallBlockRelease(llvm::Value *Addr) : Addr(Addr) {}
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       // Should we be passing FIELD_IS_WEAK here?
       CGF.BuildBlockRelease(Addr, BLOCK_FIELD_IS_BYREF);
     }

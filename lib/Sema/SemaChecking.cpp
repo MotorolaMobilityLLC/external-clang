@@ -2586,14 +2586,23 @@ IntRange GetExprRange(ASTContext &C, Expr *E, unsigned MaxWidth) {
     case BO_NE:
       return IntRange::forBoolType();
 
-    // The type of these compound assignments is the type of the LHS,
-    // so the RHS is not necessarily an integer.
+    // The type of the assignments is the type of the LHS, so the RHS
+    // is not necessarily the same type.
     case BO_MulAssign:
     case BO_DivAssign:
     case BO_RemAssign:
     case BO_AddAssign:
     case BO_SubAssign:
+    case BO_XorAssign:
+    case BO_OrAssign:
+      // TODO: bitfields?
       return IntRange::forValueOfType(C, E->getType());
+
+    // Simple assignments just pass through the RHS, which will have
+    // been coerced to the LHS type.
+    case BO_Assign:
+      // TODO: bitfields?
+      return GetExprRange(C, BO->getRHS(), MaxWidth);
 
     // Operations with opaque sources are black-listed.
     case BO_PtrMemD:
@@ -2650,14 +2659,54 @@ IntRange GetExprRange(ASTContext &C, Expr *E, unsigned MaxWidth) {
     case BO_Sub:
       if (BO->getLHS()->getType()->isPointerType())
         return IntRange::forValueOfType(C, E->getType());
-      // fallthrough
+      break;
 
-    default:
+    // The width of a division result is mostly determined by the size
+    // of the LHS.
+    case BO_Div: {
+      // Don't 'pre-truncate' the operands.
+      unsigned opWidth = C.getIntWidth(E->getType());
+      IntRange L = GetExprRange(C, BO->getLHS(), opWidth);
+
+      // If the divisor is constant, use that.
+      llvm::APSInt divisor;
+      if (BO->getRHS()->isIntegerConstantExpr(divisor, C)) {
+        unsigned log2 = divisor.logBase2(); // floor(log_2(divisor))
+        if (log2 >= L.Width)
+          L.Width = (L.NonNegative ? 0 : 1);
+        else
+          L.Width = std::min(L.Width - log2, MaxWidth);
+        return L;
+      }
+
+      // Otherwise, just use the LHS's width.
+      IntRange R = GetExprRange(C, BO->getRHS(), opWidth);
+      return IntRange(L.Width, L.NonNegative && R.NonNegative);
+    }
+
+    // The result of a remainder can't be larger than the result of
+    // either side.
+    case BO_Rem: {
+      // Don't 'pre-truncate' the operands.
+      unsigned opWidth = C.getIntWidth(E->getType());
+      IntRange L = GetExprRange(C, BO->getLHS(), opWidth);
+      IntRange R = GetExprRange(C, BO->getRHS(), opWidth);
+
+      IntRange meet = IntRange::meet(L, R);
+      meet.Width = std::min(meet.Width, MaxWidth);
+      return meet;
+    }
+
+    // The default behavior is okay for these.
+    case BO_Mul:
+    case BO_Add:
+    case BO_Xor:
+    case BO_Or:
       break;
     }
 
-    // Treat every other operator as if it were closed on the
-    // narrowest type that encompasses both operands.
+    // The default case is to treat the operation as if it were closed
+    // on the narrowest type that encompasses both operands.
     IntRange L = GetExprRange(C, BO->getLHS(), MaxWidth);
     IntRange R = GetExprRange(C, BO->getRHS(), MaxWidth);
     return IntRange::join(L, R);
@@ -2981,18 +3030,16 @@ void DiagnoseFloatingLiteralImpCast(Sema &S, FloatingLiteral *FL, QualType T,
   if (&Value.getSemantics() == &llvm::APFloat::PPCDoubleDouble)
     return;
 
-  // Try to convert this exactly to an 64-bit integer. FIXME: It would be
-  // nice to support arbitrarily large integers here.
+  // Try to convert this exactly to an integer.
   bool isExact = false;
-  uint64_t IntegerPart;
-  if (Value.convertToInteger(&IntegerPart, 64, /*isSigned=*/true,
+  llvm::APSInt IntegerValue(S.Context.getIntWidth(T),
+                            T->hasUnsignedIntegerRepresentation());
+  if (Value.convertToInteger(IntegerValue,
                              llvm::APFloat::rmTowardZero, &isExact)
       != llvm::APFloat::opOK || !isExact)
     return;
 
-  llvm::APInt IntegerValue(64, IntegerPart, /*isSigned=*/true);
-
-  std::string LiteralValue = IntegerValue.toString(10, /*isSigned=*/true);
+  std::string LiteralValue = IntegerValue.toString(10);
   S.Diag(FL->getExprLoc(), diag::note_fix_integral_float_as_integer)
     << FixItHint::CreateReplacement(FL->getSourceRange(), LiteralValue);
 }
@@ -3543,6 +3590,7 @@ static bool findRetainCycleOwner(Expr *e, RetainCycleOwner &owner) {
       case CK_BitCast:
       case CK_LValueBitCast:
       case CK_LValueToRValue:
+      case CK_ObjCReclaimReturnedObject:
         e = cast->getSubExpr();
         continue;
 

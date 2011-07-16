@@ -38,8 +38,10 @@ using namespace sema;
 /// function.
 static ExprResult
 CreateFunctionRefExpr(Sema &S, FunctionDecl *Fn,
-                      SourceLocation Loc = SourceLocation()) {
-  ExprResult E = S.Owned(new (S.Context) DeclRefExpr(Fn, Fn->getType(), VK_LValue, Loc));
+                      SourceLocation Loc = SourceLocation(), 
+                      const DeclarationNameLoc &LocInfo = DeclarationNameLoc()){
+  ExprResult E = S.Owned(new (S.Context) DeclRefExpr(Fn, Fn->getType(), 
+                                                     VK_LValue, Loc, LocInfo));
   E = S.DefaultFunctionArrayConversion(E.take());
   if (E.isInvalid())
     return ExprError();
@@ -4535,19 +4537,19 @@ Sema::AddConversionCandidate(CXXConversionDecl *Conversion,
                                 CK_FunctionToPointerDecay,
                                 &ConversionRef, VK_RValue);
 
-  QualType CallResultType
-    = Conversion->getConversionType().getNonLValueExprType(Context);
-  if (RequireCompleteType(From->getLocStart(), CallResultType, 0)) {
+  QualType ConversionType = Conversion->getConversionType();
+  if (RequireCompleteType(From->getLocStart(), ConversionType, 0)) {
     Candidate.Viable = false;
     Candidate.FailureKind = ovl_fail_bad_final_conversion;
     return;
   }
 
-  ExprValueKind VK = Expr::getValueKindForType(Conversion->getConversionType());
+  ExprValueKind VK = Expr::getValueKindForType(ConversionType);
 
   // Note that it is safe to allocate CallExpr on the stack here because
   // there are 0 arguments (i.e., nothing is allocated using ASTContext's
   // allocator).
+  QualType CallResultType = ConversionType.getNonLValueExprType(Context);
   CallExpr Call(Context, &ConversionFn, 0, 0, CallResultType, VK,
                 From->getLocStart());
   ImplicitConversionSequence ICS =
@@ -8878,7 +8880,10 @@ Sema::CreateOverloadedArraySubscriptExpr(SourceLocation LLoc,
         ResultTy = ResultTy.getNonLValueExprType(Context);
 
         // Build the actual expression node.
-        ExprResult FnExpr = CreateFunctionRefExpr(*this, FnDecl, LLoc);
+        DeclarationNameLoc LocInfo;
+        LocInfo.CXXOperatorName.BeginOpNameLoc = LLoc.getRawEncoding();
+        LocInfo.CXXOperatorName.EndOpNameLoc = RLoc.getRawEncoding();
+        ExprResult FnExpr = CreateFunctionRefExpr(*this, FnDecl, LLoc, LocInfo);
         if (FnExpr.isInvalid())
           return ExprError();
 

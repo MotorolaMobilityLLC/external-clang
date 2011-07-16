@@ -1404,8 +1404,7 @@ bool Sema::DiagnoseEmptyLookup(Scope *S, CXXScopeSpec &SS, LookupResult &R,
     std::string CorrectedQuotedStr(Corrected.getQuoted(getLangOptions()));
     R.setLookupName(Corrected.getCorrection());
 
-    if (!Corrected.isKeyword()) {
-      NamedDecl *ND = Corrected.getCorrectionDecl();
+    if (NamedDecl *ND = Corrected.getCorrectionDecl()) {
       R.addDecl(ND);
       if (isa<ValueDecl>(ND) || isa<FunctionTemplateDecl>(ND)) {
         if (SS.isEmpty())
@@ -1604,7 +1603,9 @@ ExprResult Sema::ActOnIdExpression(Scope *S,
 
   bool IvarLookupFollowUp = false;
   // Perform the required lookup.
-  LookupResult R(*this, NameInfo, LookupOrdinaryName);
+  LookupResult R(*this, NameInfo, 
+                 (Id.getKind() == UnqualifiedId::IK_ImplicitSelfParam) 
+                  ? LookupObjCImplicitSelfParam : LookupOrdinaryName);
   if (TemplateArgs) {
     // Lookup the template name again to correctly establish the context in
     // which it was found. This is really unfortunate as we already did the
@@ -1835,6 +1836,7 @@ Sema::LookupInObjCMethod(LookupResult &Lookup, Scope *S,
       IdentifierInfo &II = Context.Idents.get("self");
       UnqualifiedId SelfName;
       SelfName.setIdentifier(&II, SourceLocation());
+      SelfName.setKind(UnqualifiedId::IK_ImplicitSelfParam);
       CXXScopeSpec SelfScopeSpec;
       ExprResult SelfExpr = ActOnIdExpression(S, SelfScopeSpec,
                                               SelfName, false, false);
@@ -1846,27 +1848,6 @@ Sema::LookupInObjCMethod(LookupResult &Lookup, Scope *S,
         return ExprError();
 
       MarkDeclarationReferenced(Loc, IV);
-      Expr *base = SelfExpr.take();
-      base = base->IgnoreParenImpCasts();
-      if (const DeclRefExpr *DE = dyn_cast<DeclRefExpr>(base)) {
-        const NamedDecl *ND = DE->getDecl();
-        if (!isa<ImplicitParamDecl>(ND)) {
-          // relax the rule such that it is allowed to have a shadow 'self'
-          // where stand-alone ivar can be found in this 'self' object. 
-          // This is to match gcc's behavior.
-          ObjCInterfaceDecl *selfIFace = 0;
-          if (const ObjCObjectPointerType *OPT =
-              base->getType()->getAsObjCInterfacePointerType())
-            selfIFace = OPT->getInterfaceDecl();
-          if (!selfIFace || 
-              !selfIFace->lookupInstanceVariable(IV->getIdentifier())) {
-            Diag(Loc, diag::error_implicit_ivar_access)
-            << IV->getDeclName();
-            Diag(ND->getLocation(), diag::note_declared_at);
-            return ExprError();
-          }
-        }
-      }
       return Owned(new (Context)
                    ObjCIvarRefExpr(IV, IV->getType(), Loc,
                                    SelfExpr.take(), true, true));
@@ -4065,6 +4046,13 @@ ExprResult Sema::CheckCastTypes(SourceLocation CastStartLoc, SourceRange TyR,
           return ExprError();
         }
       }
+    } 
+    else if (!CheckObjCARCUnavailableWeakConversion(castType, castExprType)) {
+           Diag(castExpr->getLocStart(), 
+                diag::err_arc_convesion_of_weak_unavailable) << 1
+                << castExprType << castType 
+                << castExpr->getSourceRange();
+          return ExprError();
     }
   }
   
@@ -4234,13 +4222,14 @@ ExprResult Sema::BuildVectorLiteral(SourceLocation LParenLoc,
   assert(Ty->isVectorType() && "Expected vector type");
 
   llvm::SmallVector<Expr *, 8> initExprs;
+  const VectorType *VTy = Ty->getAs<VectorType>();
+  unsigned numElems = Ty->getAs<VectorType>()->getNumElements();
+  
   // '(...)' form of vector initialization in AltiVec: the number of
   // initializers must be one or must match the size of the vector.
   // If a single value is specified in the initializer then it will be
   // replicated to all the components of the vector
-  if (Ty->getAs<VectorType>()->getVectorKind() ==
-      VectorType::AltiVecVector) {
-    unsigned numElems = Ty->getAs<VectorType>()->getNumElements();
+  if (VTy->getVectorKind() == VectorType::AltiVecVector) {
     // The number of initializers must be one or must match the size of the
     // vector. If a single value is specified in the initializer then it will
     // be replicated to all the components of the vector
@@ -4260,10 +4249,22 @@ ExprResult Sema::BuildVectorLiteral(SourceLocation LParenLoc,
       for (unsigned i = 0, e = numExprs; i != e; ++i)
         initExprs.push_back(exprs[i]);
   }
-  else
+  else {
+    // For OpenCL, when the number of initializers is a single value,
+    // it will be replicated to all components of the vector.
+    if (getLangOptions().OpenCL &&
+        VTy->getVectorKind() == VectorType::GenericVector &&
+        numExprs == 1) {
+        QualType ElemTy = Ty->getAs<VectorType>()->getElementType();
+        ExprResult Literal = Owned(exprs[0]);
+        Literal = ImpCastExprToType(Literal.take(), ElemTy,
+                                    PrepareScalarCast(*this, Literal, ElemTy));
+        return BuildCStyleCastExpr(LParenLoc, TInfo, RParenLoc, Literal.take());
+    }
+    
     for (unsigned i = 0, e = numExprs; i != e; ++i)
       initExprs.push_back(exprs[i]);
-
+  }
   // FIXME: This means that pretty-printing the final AST will produce curly
   // braces instead of the original commas.
   InitListExpr *initE = new (Context) InitListExpr(Context, LParenLoc,
@@ -5124,6 +5125,7 @@ Sema::AssignConvertType
 Sema::CheckAssignmentConstraints(QualType lhsType, ExprResult &rhs,
                                  CastKind &Kind) {
   QualType rhsType = rhs.get()->getType();
+  QualType origLhsType = lhsType;
 
   // Get canonical types.  We're not formatting these types, just comparing
   // them.
@@ -5278,7 +5280,13 @@ Sema::CheckAssignmentConstraints(QualType lhsType, ExprResult &rhs,
     // A* -> B*
     if (rhsType->isObjCObjectPointerType()) {
       Kind = CK_BitCast;
-      return checkObjCPointerTypesForAssignment(*this, lhsType, rhsType);
+      Sema::AssignConvertType result = 
+        checkObjCPointerTypesForAssignment(*this, lhsType, rhsType);
+      if (getLangOptions().ObjCAutoRefCount &&
+          result == Compatible && 
+          !CheckObjCARCUnavailableWeakConversion(origLhsType, rhsType))
+        result = IncompatibleObjCWeakRef;
+      return result;
     }
 
     // int or null -> A*
@@ -5446,8 +5454,12 @@ Sema::CheckSingleAssignmentConstraints(QualType lhsType, ExprResult &rExpr) {
                                                  AA_Assigning);
       if (Res.isInvalid())
         return Incompatible;
+      Sema::AssignConvertType result = Compatible;
+      if (getLangOptions().ObjCAutoRefCount &&
+          !CheckObjCARCUnavailableWeakConversion(lhsType, rExpr.get()->getType()))
+        result = IncompatibleObjCWeakRef;
       rExpr = move(Res);
-      return Compatible;
+      return result;
     }
 
     // FIXME: Currently, we fall through and treat C++ classes like C
@@ -6529,8 +6541,8 @@ inline QualType Sema::CheckLogicalOperands( // C99 6.5.[13,14]
   // is a constant.
   if (lex.get()->getType()->isIntegerType() && !lex.get()->getType()->isBooleanType() &&
       rex.get()->getType()->isIntegerType() && !rex.get()->isValueDependent() &&
-      // Don't warn in macros.
-      !Loc.isMacroID()) {
+      // Don't warn in macros or template instantiations.
+      !Loc.isMacroID() && ActiveTemplateInstantiations.empty()) {
     // If the RHS can be constant folded, and if it constant folds to something
     // that isn't 0 or 1 (which indicate a potential logical operation that
     // happened to fold to true/false) then warn.
@@ -8479,10 +8491,19 @@ ExprResult Sema::ActOnBlockStmtExpr(SourceLocation CaretLoc,
 
   BSI->TheDecl->setBody(cast<CompoundStmt>(Body));
 
-  BlockExpr *Result = new (Context) BlockExpr(BSI->TheDecl, BlockTy);
+  for (BlockDecl::capture_const_iterator ci = BSI->TheDecl->capture_begin(),
+       ce = BSI->TheDecl->capture_end(); ci != ce; ++ci) {
+    const VarDecl *variable = ci->getVariable();
+    QualType T = variable->getType();
+    QualType::DestructionKind destructKind = T.isDestructedType();
+    if (destructKind != QualType::DK_none)
+      getCurFunction()->setHasBranchProtectedScope();
+  }
 
+  BlockExpr *Result = new (Context) BlockExpr(BSI->TheDecl, BlockTy);
   const AnalysisBasedWarnings::Policy &WP = AnalysisWarnings.getDefaultPolicy();
   PopFunctionOrBlockScope(&WP, Result->getBlockDecl(), Result);
+
   return Owned(Result);
 }
 
@@ -8542,6 +8563,23 @@ ExprResult Sema::BuildVAArgExpr(SourceLocation BuiltinLoc,
       Diag(TInfo->getTypeLoc().getBeginLoc(),
           diag::warn_second_parameter_to_va_arg_not_pod)
         << TInfo->getType()
+        << TInfo->getTypeLoc().getSourceRange();
+
+    // Check for va_arg where arguments of the given type will be promoted
+    // (i.e. this va_arg is guaranteed to have undefined behavior).
+    QualType PromoteType;
+    if (TInfo->getType()->isPromotableIntegerType()) {
+      PromoteType = Context.getPromotedIntegerType(TInfo->getType());
+      if (Context.typesAreCompatible(PromoteType, TInfo->getType()))
+        PromoteType = QualType();
+    }
+    if (TInfo->getType()->isSpecificBuiltinType(BuiltinType::Float))
+      PromoteType = Context.DoubleTy;
+    if (!PromoteType.isNull())
+      Diag(TInfo->getTypeLoc().getBeginLoc(),
+          diag::warn_second_parameter_to_va_arg_never_compatible)
+        << TInfo->getType()
+        << PromoteType
         << TInfo->getTypeLoc().getSourceRange();
   }
 
@@ -8678,6 +8716,9 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
     break;
   case IncompatibleVectors:
     DiagKind = diag::warn_incompatible_vectors;
+    break;
+  case IncompatibleObjCWeakRef:
+    DiagKind = diag::err_arc_weak_unavailable_assign;
     break;
   case Incompatible:
     DiagKind = diag::err_typecheck_convert_incompatible;
@@ -9524,9 +9565,6 @@ ExprResult RebuildUnknownAnyExpr::VisitCallExpr(CallExpr *call) {
 }
 
 ExprResult RebuildUnknownAnyExpr::VisitObjCMessageExpr(ObjCMessageExpr *msg) {
-  ObjCMethodDecl *method = msg->getMethodDecl();
-  assert(method && "__unknown_anytype message without result type?");
-
   // Verify that this is a legal result type of a call.
   if (DestType->isArrayType() || DestType->isFunctionType()) {
     S.Diag(msg->getExprLoc(), diag::err_func_returning_array_function)
@@ -9534,8 +9572,11 @@ ExprResult RebuildUnknownAnyExpr::VisitObjCMessageExpr(ObjCMessageExpr *msg) {
     return ExprError();
   }
 
-  assert(method->getResultType() == S.Context.UnknownAnyTy);
-  method->setResultType(DestType);
+  // Rewrite the method result type if available.
+  if (ObjCMethodDecl *method = msg->getMethodDecl()) {
+    assert(method->getResultType() == S.Context.UnknownAnyTy);
+    method->setResultType(DestType);
+  }
 
   // Change the type of the message.
   msg->setType(DestType.getNonReferenceType());

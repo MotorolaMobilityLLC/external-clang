@@ -151,13 +151,13 @@ namespace {
     bool MightThrow;
     llvm::Value *Fn;
 
-    void Emit(CodeGenFunction &CGF, bool IsForEH) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       if (!MightThrow) {
         CGF.Builder.CreateCall(Fn)->setDoesNotThrow();
         return;
       }
 
-      CGF.EmitCallOrInvoke(Fn, 0, 0);
+      CGF.EmitCallOrInvoke(Fn);
     }
   };
 }
@@ -279,7 +279,7 @@ namespace {
     CallSyncExit(llvm::Value *SyncExitFn, llvm::Value *SyncArg)
       : SyncExitFn(SyncExitFn), SyncArg(SyncArg) {}
 
-    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+    void Emit(CodeGenFunction &CGF, Flags flags) {
       CGF.Builder.CreateCall(SyncExitFn, SyncArg)->setDoesNotThrow();
     }
   };

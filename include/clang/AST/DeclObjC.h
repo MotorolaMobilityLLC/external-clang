@@ -641,6 +641,18 @@ public:
     return false;
   }
 
+  /// isArcWeakrefUnavailable - Checks for a class or one of its super classes
+  /// to be incompatible with __weak references. Returns true if it is.
+  bool isArcWeakrefUnavailable() const {
+    const ObjCInterfaceDecl *Class = this;
+    while (Class) {
+      if (Class->hasAttr<ArcWeakrefUnavailableAttr>())
+        return true;
+      Class = Class->getSuperClass();
+   }
+   return false; 
+  }
+
   ObjCIvarDecl *lookupInstanceVariable(IdentifierInfo *IVarName,
                                        ObjCInterfaceDecl *&ClassDeclared);
   ObjCIvarDecl *lookupInstanceVariable(IdentifierInfo *IVarName) {
@@ -1403,6 +1415,12 @@ public:
     OBJC_PR_weak      = 0x200,
     OBJC_PR_strong    = 0x400,
     OBJC_PR_unsafe_unretained = 0x800
+    // Adding a property should change NumPropertyAttrsBits
+  };
+
+  enum {
+    /// \brief Number of bits fitting all the property attributes.
+    NumPropertyAttrsBits = 12
   };
 
   enum SetterKind { Assign, Retain, Copy };
@@ -1410,8 +1428,8 @@ public:
 private:
   SourceLocation AtLoc;   // location of @property
   TypeSourceInfo *DeclType;
-  unsigned PropertyAttributes : 11;
-  unsigned PropertyAttributesAsWritten : 11;
+  unsigned PropertyAttributes : NumPropertyAttrsBits;
+  unsigned PropertyAttributesAsWritten : NumPropertyAttrsBits;
   // @required/@optional
   unsigned PropertyImplementation : 2;
 
@@ -1453,6 +1471,12 @@ public:
 
   PropertyAttributeKind getPropertyAttributesAsWritten() const {
     return PropertyAttributeKind(PropertyAttributesAsWritten);
+  }
+
+  bool hasWrittenStorageAttribute() const {
+    return PropertyAttributesAsWritten & (OBJC_PR_assign | OBJC_PR_copy |
+        OBJC_PR_unsafe_unretained | OBJC_PR_retain | OBJC_PR_strong |
+        OBJC_PR_weak);
   }
   
   void setPropertyAttributesAsWritten(PropertyAttributeKind PRVal) {

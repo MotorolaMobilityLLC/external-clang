@@ -479,6 +479,7 @@ void ExprEngine::Visit(const Stmt* S, ExplodedNode* Pred,
     
     // We don't handle default arguments either yet, but we can fake it
     // for now by just skipping them.
+    case Stmt::SubstNonTypeTemplateParmExprClass:
     case Stmt::CXXDefaultArgExprClass: {
       Dst.Add(Pred);
       break;
@@ -509,7 +510,10 @@ void ExprEngine::Visit(const Stmt* S, ExplodedNode* Pred,
       break;
 
     case Stmt::GNUNullExprClass: {
-      MakeNode(Dst, S, Pred, GetState(Pred)->BindExpr(S, svalBuilder.makeNull()));
+      // GNU __null is a pointer-width integer, not an actual pointer.
+      const GRState *state = GetState(Pred);
+      state = state->BindExpr(S, svalBuilder.makeIntValWithPtrWidth(0, false));
+      MakeNode(Dst, S, Pred, state);
       break;
     }
 
@@ -2194,7 +2198,8 @@ void ExprEngine::VisitCast(const CastExpr *CastE, const Expr *Ex,
       // The analyzer doesn't do anything special with these casts,
       // since it understands retain/release semantics already.
       case CK_ObjCProduceObject:
-      case CK_ObjCConsumeObject: // Fall-through.
+      case CK_ObjCConsumeObject:
+      case CK_ObjCReclaimReturnedObject: // Fall-through.
       // True no-ops.
       case CK_NoOp:
       case CK_FunctionToPointerDecay: {
