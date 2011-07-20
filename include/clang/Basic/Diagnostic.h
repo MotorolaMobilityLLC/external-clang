@@ -16,6 +16,7 @@
 
 #include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/SourceLocation.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/OwningPtr.h"
@@ -614,7 +615,7 @@ private:
   /// only support 10 ranges, could easily be extended if needed.
   CharSourceRange DiagRanges[10];
 
-  enum { MaxFixItHints = 3 };
+  enum { MaxFixItHints = 6 };
 
   /// FixItHints - If valid, provides a hint with some code
   /// to insert, remove, or modify at a particular position.
@@ -984,6 +985,10 @@ public:
   StoredDiagnostic(Diagnostic::Level Level, const DiagnosticInfo &Info);
   StoredDiagnostic(Diagnostic::Level Level, unsigned ID, 
                    llvm::StringRef Message);
+  StoredDiagnostic(Diagnostic::Level Level, unsigned ID, 
+                   llvm::StringRef Message, FullSourceLoc Loc,
+                   llvm::ArrayRef<CharSourceRange> Ranges,
+                   llvm::ArrayRef<FixItHint> Fixits);
   ~StoredDiagnostic();
 
   /// \brief Evaluates true when this object stores a diagnostic.

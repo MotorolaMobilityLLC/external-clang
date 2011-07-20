@@ -353,6 +353,11 @@ int test52(int a, int b) {
   return x; // expected-warning {{variable 'x' may be uninitialized when used here}}
 }
 
+void test53() {
+  int x; // expected-note {{variable 'x' is declared here}} expected-note {{add initialization to silence this warning}}
+  int y = (x);  // expected-warning {{variable 'x' is uninitialized when used here}}
+}
+
 // This CFG caused the uninitialized values warning to inf-loop.
 extern int PR10379_g();
 void PR10379_f(int *len) {

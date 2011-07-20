@@ -1592,7 +1592,9 @@ def note_ovl_candidate_bad_conv : Note<"candidate "
     "function (the implicit move assignment operator)|"
     "constructor (inherited)}0%1"
     " not viable: no known conversion from %2 to %3 for "
-    "%select{%ordinal5 argument|object argument}4">;
+    "%select{%ordinal5 argument|object argument}4; "
+    "%select{|dereference the argument with *|"
+    "take the address of the argument with &}6">;
 def note_ovl_candidate_bad_addrspace : Note<"candidate "
     "%select{function|function|constructor|"
     "function |function |constructor |"
@@ -2086,10 +2088,10 @@ def err_explicit_instantiation_must_be_global : Error<
   "explicit instantiation of %0 must occur at global scope">;
 def warn_explicit_instantiation_out_of_scope_0x : Warning<
   "explicit instantiation of %0 not in a namespace enclosing %1">, 
-  InGroup<DiagGroup<"-Wc++0x-compat"> >;
+  InGroup<CXX0xCompat>;
 def warn_explicit_instantiation_must_be_global_0x : Warning<
   "explicit instantiation of %0 must occur at global scope">, 
-  InGroup<DiagGroup<"-Wc++0x-compat"> >;
+  InGroup<CXX0xCompat>;
   
 def err_explicit_instantiation_requires_name : Error<
   "explicit instantiation declaration requires a name">;
@@ -2121,7 +2123,7 @@ def err_explicit_instantiation_unqualified_wrong_namespace : Error<
   "explicit instantiation of %q0 must occur in %1">;
 def warn_explicit_instantiation_unqualified_wrong_namespace_0x : Warning<
   "explicit instantiation of %q0 must occur in %1">, 
-  InGroup<DiagGroup<"c++0x-compat"> >;
+  InGroup<CXX0xCompat>;
 def err_explicit_instantiation_undefined_member : Error<
   "explicit instantiation of undefined %select{member class|member function|"
   "static data member}0 %1 of class template %2">;

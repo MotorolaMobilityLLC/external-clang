@@ -999,7 +999,7 @@ static bool ShouldDisableCFI(const ArgList &Args,
 
 /// \brief Check whether the given input tree contains any compilation actions.
 static bool ContainsCompileAction(const Action *A) {
-  if (isa<CompileJobAction>(A))
+  if (llvm::isa<CompileJobAction>(A))
     return true;
 
   for (Action::const_iterator it = A->begin(), ie = A->end(); it != ie; ++it)
@@ -1444,6 +1444,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
         CmdArgs.push_back("-arcmt-migrate");
         CmdArgs.push_back("-arcmt-migrate-directory");
         CmdArgs.push_back(A->getValue(Args));
+
+        Args.AddLastArg(CmdArgs, options::OPT_arcmt_migrate_report_output);
+        Args.AddLastArg(CmdArgs, options::OPT_arcmt_migrate_emit_arc_errors);
         break;
       }
     }
