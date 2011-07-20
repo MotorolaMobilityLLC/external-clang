@@ -30,6 +30,8 @@
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCObjectFileInfo.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Support/CommandLine.h"
@@ -259,6 +261,9 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts, Diagnostic &Diags) {
   OwningPtr<MCAsmInfo> MAI(TheTarget->createMCAsmInfo(Opts.Triple));
   assert(MAI && "Unable to create target asm info!");
 
+  OwningPtr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(Opts.Triple));
+  assert(MRI && "Unable to create target register info!");
+
   bool IsBinary = Opts.OutputType == AssemblerInvocation::FT_Obj;
   formatted_raw_ostream *Out = GetOutputStream(Opts, Diags, IsBinary);
   if (!Out)
@@ -273,7 +278,12 @@ static bool ExecuteAssembler(AssemblerInvocation &Opts, Diagnostic &Diags) {
   }
 
   const TargetAsmInfo *tai = new TargetAsmInfo(*TM);
-  MCContext Ctx(*MAI, tai);
+  // FIXME: This is not pretty. MCContext has a ptr to MCObjectFileInfo and
+  // MCObjectFileInfo needs a MCContext reference in order to initialize itself.
+  OwningPtr<MCObjectFileInfo> MOFI(new MCObjectFileInfo());
+  MCContext Ctx(*MAI, *MRI, MOFI.get(), tai);
+  // FIXME: Assembler behavior can change with -static.
+  MOFI->InitMCObjectFileInfo(Opts.Triple, Reloc::Default, Ctx);
   if (Opts.SaveTemporaryLabels)
     Ctx.setAllowTemporaryLabels(false);
 
@@ -357,7 +367,9 @@ int cc1as_main(const char **ArgBegin, const char **ArgEnd,
   // FIXME: We shouldn't need to initialize the Target(Machine)s.
   InitializeAllTargets();
   InitializeAllMCAsmInfos();
+  InitializeAllMCCodeGenInfos();
   InitializeAllMCInstrInfos();
+  InitializeAllMCRegisterInfos();
   InitializeAllMCSubtargetInfos();
   InitializeAllAsmPrinters();
   InitializeAllAsmParsers();
