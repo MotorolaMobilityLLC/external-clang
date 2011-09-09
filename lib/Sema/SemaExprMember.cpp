@@ -241,6 +241,20 @@ Sema::BuildPossibleImplicitMemberExpr(const CXXScopeSpec &SS,
   return ExprError();
 }
 
+/// Determine whether input char is from rgba component set.
+static bool
+IsRGBA(char c) {
+  switch (c) {
+  case 'r':
+  case 'g':
+  case 'b':
+  case 'a':
+    return true;
+  default:
+    return false;
+  }
+}
+
 /// Check an ext-vector component access expression.
 ///
 /// VK should be set in advance to the value kind of the base
@@ -280,7 +294,12 @@ CheckExtVectorComponent(Sema &S, QualType baseType, ExprValueKind &VK,
     HalvingSwizzle = true;
   } else if (!HexSwizzle &&
              (Idx = vecType->getPointAccessorIdx(*compStr)) != -1) {
+    bool HasRGBA = IsRGBA(*compStr);
     do {
+      // If we mix/match rgba with xyzw, break to signal that we encountered
+      // an illegal name.
+      if (HasRGBA != IsRGBA(*compStr))
+        break;
       if (HasIndex[Idx]) HasRepeated = true;
       HasIndex[Idx] = true;
       compStr++;
