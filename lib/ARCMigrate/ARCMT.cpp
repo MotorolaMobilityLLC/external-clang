@@ -19,12 +19,10 @@
 #include "clang/Lex/Preprocessor.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/ADT/Triple.h"
-
 using namespace clang;
 using namespace arcmt;
-using llvm::StringRef;
 
-bool CapturedDiagList::clearDiagnostic(llvm::ArrayRef<unsigned> IDs,
+bool CapturedDiagList::clearDiagnostic(ArrayRef<unsigned> IDs,
                                        SourceRange range) {
   if (range.isInvalid())
     return false;
@@ -40,7 +38,7 @@ bool CapturedDiagList::clearDiagnostic(llvm::ArrayRef<unsigned> IDs,
            diagLoc.isBeforeInTranslationUnitThan(range.getEnd()))) {
       cleared = true;
       ListTy::iterator eraseS = I++;
-      while (I != List.end() && I->getLevel() == Diagnostic::Note)
+      while (I != List.end() && I->getLevel() == DiagnosticsEngine::Note)
         ++I;
       // Clear the diagnostic and any notes following it.
       List.erase(eraseS, I);
@@ -53,7 +51,7 @@ bool CapturedDiagList::clearDiagnostic(llvm::ArrayRef<unsigned> IDs,
   return cleared;
 }
 
-bool CapturedDiagList::hasDiagnostic(llvm::ArrayRef<unsigned> IDs,
+bool CapturedDiagList::hasDiagnostic(ArrayRef<unsigned> IDs,
                                      SourceRange range) const {
   if (range.isInvalid())
     return false;
@@ -75,14 +73,14 @@ bool CapturedDiagList::hasDiagnostic(llvm::ArrayRef<unsigned> IDs,
   return false;
 }
 
-void CapturedDiagList::reportDiagnostics(Diagnostic &Diags) const {
+void CapturedDiagList::reportDiagnostics(DiagnosticsEngine &Diags) const {
   for (ListTy::const_iterator I = List.begin(), E = List.end(); I != E; ++I)
     Diags.Report(*I);
 }
 
 bool CapturedDiagList::hasErrors() const {
   for (ListTy::const_iterator I = List.begin(), E = List.end(); I != E; ++I)
-    if (I->getLevel() >= Diagnostic::Error)
+    if (I->getLevel() >= DiagnosticsEngine::Error)
       return true;
 
   return false;
@@ -90,18 +88,18 @@ bool CapturedDiagList::hasErrors() const {
 
 namespace {
 
-class CaptureDiagnosticClient : public DiagnosticClient {
-  Diagnostic &Diags;
+class CaptureDiagnosticConsumer : public DiagnosticConsumer {
+  DiagnosticsEngine &Diags;
   CapturedDiagList &CapturedDiags;
 public:
-  CaptureDiagnosticClient(Diagnostic &diags,
-                          CapturedDiagList &capturedDiags)
+  CaptureDiagnosticConsumer(DiagnosticsEngine &diags,
+                           CapturedDiagList &capturedDiags)
     : Diags(diags), CapturedDiags(capturedDiags) { }
 
-  virtual void HandleDiagnostic(Diagnostic::Level level,
-                                const DiagnosticInfo &Info) {
+  virtual void HandleDiagnostic(DiagnosticsEngine::Level level,
+                                const Diagnostic &Info) {
     if (arcmt::isARCDiagnostic(Info.getID(), Diags) ||
-        level >= Diagnostic::Error || level == Diagnostic::Note) {
+        level >= DiagnosticsEngine::Error || level == DiagnosticsEngine::Note) {
       CapturedDiags.push_back(StoredDiagnostic(level, Info));
       return;
     }
@@ -109,11 +107,17 @@ public:
     // Non-ARC warnings are ignored.
     Diags.setLastDiagnosticIgnored();
   }
+  
+  DiagnosticConsumer *clone(DiagnosticsEngine &Diags) const {
+    // Just drop any diagnostics that come from cloned consumers; they'll
+    // have different source managers anyway.
+    return new IgnoringDiagConsumer();
+  }
 };
 
 } // end anonymous namespace
 
-static inline llvm::StringRef SimulatorVersionDefineName() {
+static inline StringRef SimulatorVersionDefineName() {
   return "__IPHONE_OS_VERSION_MIN_REQUIRED=";
 }
 
@@ -122,11 +126,11 @@ static inline llvm::StringRef SimulatorVersionDefineName() {
 // and return the grouped values as integers, e.g:
 //   __IPHONE_OS_VERSION_MIN_REQUIRED=40201
 // will return Major=4, Minor=2, Micro=1.
-static bool GetVersionFromSimulatorDefine(llvm::StringRef define,
+static bool GetVersionFromSimulatorDefine(StringRef define,
                                           unsigned &Major, unsigned &Minor,
                                           unsigned &Micro) {
   assert(define.startswith(SimulatorVersionDefineName()));
-  llvm::StringRef name, version;
+  StringRef name, version;
   llvm::tie(name, version) = define.split('=');
   if (version.empty())
     return false;
@@ -155,7 +159,7 @@ static bool HasARCRuntime(CompilerInvocation &origCI) {
       continue;
     if (!define.startswith(SimulatorVersionDefineName()))
       continue;
-    unsigned Major, Minor, Micro;
+    unsigned Major = 0, Minor = 0, Micro = 0;
     if (GetVersionFromSimulatorDefine(define, Major, Minor, Micro) &&
         Major < 10 && Minor < 100 && Micro < 100)
       return Major >= 5;
@@ -178,7 +182,8 @@ static bool HasARCRuntime(CompilerInvocation &origCI) {
   return false;
 }
 
-CompilerInvocation *createInvocationForMigration(CompilerInvocation &origCI) {
+static CompilerInvocation *
+createInvocationForMigration(CompilerInvocation &origCI) {
   llvm::OwningPtr<CompilerInvocation> CInvok;
   CInvok.reset(new CompilerInvocation(origCI));
   CInvok->getPreprocessorOpts().ImplicitPCHInclude = std::string();
@@ -195,13 +200,13 @@ CompilerInvocation *createInvocationForMigration(CompilerInvocation &origCI) {
   return CInvok.take();
 }
 
-void emitPremigrationErrors(const CapturedDiagList &arcDiags,
-                            const DiagnosticOptions &diagOpts,
-                            Preprocessor &PP) {
+static void emitPremigrationErrors(const CapturedDiagList &arcDiags,
+                                   const DiagnosticOptions &diagOpts,
+                                   Preprocessor &PP) {
   TextDiagnosticPrinter printer(llvm::errs(), diagOpts);
   llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
-                   new Diagnostic(DiagID, &printer, /*ShouldOwnClient=*/false));
+  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+      new DiagnosticsEngine(DiagID, &printer, /*ShouldOwnClient=*/false));
   Diags->setSourceManager(&PP.getSourceManager());
   
   printer.BeginSourceFile(PP.getLangOptions(), &PP);
@@ -214,10 +219,10 @@ void emitPremigrationErrors(const CapturedDiagList &arcDiags,
 //===----------------------------------------------------------------------===//
 
 bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
-                                 llvm::StringRef Filename, InputKind Kind,
-                                 DiagnosticClient *DiagClient,
+                                 StringRef Filename, InputKind Kind,
+                                 DiagnosticConsumer *DiagClient,
                                  bool emitPremigrationARCErrors,
-                                 llvm::StringRef plistOut) {
+                                 StringRef plistOut) {
   if (!origCI.getLangOpts().ObjC1)
     return false;
 
@@ -233,11 +238,11 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
 
   assert(DiagClient);
   llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
-                 new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+      new DiagnosticsEngine(DiagID, DiagClient, /*ShouldOwnClient=*/false));
 
   // Filter of all diagnostics.
-  CaptureDiagnosticClient errRec(*Diags, capturedDiags);
+  CaptureDiagnosticConsumer errRec(*Diags, capturedDiags);
   Diags->setClient(&errRec, /*ShouldOwnClient=*/false);
 
   llvm::OwningPtr<ASTUnit> Unit(
@@ -262,7 +267,7 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
     emitPremigrationErrors(capturedDiags, origCI.getDiagnosticOpts(),
                            Unit->getPreprocessor());
   if (!plistOut.empty()) {
-    llvm::SmallVector<StoredDiagnostic, 8> arcDiags;
+    SmallVector<StoredDiagnostic, 8> arcDiags;
     for (CapturedDiagList::iterator
            I = capturedDiags.begin(), E = capturedDiags.end(); I != E; ++I)
       arcDiags.push_back(*I);
@@ -272,7 +277,7 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
 
   // After parsing of source files ended, we want to reuse the
   // diagnostics objects to emit further diagnostics.
-  // We call BeginSourceFile because DiagnosticClient requires that 
+  // We call BeginSourceFile because DiagnosticConsumer requires that 
   // diagnostics with source range information are emitted only in between
   // BeginSourceFile() and EndSourceFile().
   DiagClient->BeginSourceFile(Ctx.getLangOptions(), &Unit->getPreprocessor());
@@ -303,11 +308,11 @@ bool arcmt::checkForManualIssues(CompilerInvocation &origCI,
 //===----------------------------------------------------------------------===//
 
 static bool applyTransforms(CompilerInvocation &origCI,
-                            llvm::StringRef Filename, InputKind Kind,
-                            DiagnosticClient *DiagClient,
-                            llvm::StringRef outputDir,
+                            StringRef Filename, InputKind Kind,
+                            DiagnosticConsumer *DiagClient,
+                            StringRef outputDir,
                             bool emitPremigrationARCErrors,
-                            llvm::StringRef plistOut) {
+                            StringRef plistOut) {
   if (!origCI.getLangOpts().ObjC1)
     return false;
 
@@ -332,8 +337,8 @@ static bool applyTransforms(CompilerInvocation &origCI,
   }
 
   llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
-                 new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+      new DiagnosticsEngine(DiagID, DiagClient, /*ShouldOwnClient=*/false));
 
   if (outputDir.empty()) {
     origCI.getLangOpts().ObjCAutoRefCount = true;
@@ -347,18 +352,18 @@ static bool applyTransforms(CompilerInvocation &origCI,
 }
 
 bool arcmt::applyTransformations(CompilerInvocation &origCI,
-                                 llvm::StringRef Filename, InputKind Kind,
-                                 DiagnosticClient *DiagClient) {
+                                 StringRef Filename, InputKind Kind,
+                                 DiagnosticConsumer *DiagClient) {
   return applyTransforms(origCI, Filename, Kind, DiagClient,
-                         llvm::StringRef(), false, llvm::StringRef());
+                         StringRef(), false, StringRef());
 }
 
 bool arcmt::migrateWithTemporaryFiles(CompilerInvocation &origCI,
-                                      llvm::StringRef Filename, InputKind Kind,
-                                      DiagnosticClient *DiagClient,
-                                      llvm::StringRef outputDir,
+                                      StringRef Filename, InputKind Kind,
+                                      DiagnosticConsumer *DiagClient,
+                                      StringRef outputDir,
                                       bool emitPremigrationARCErrors,
-                                      llvm::StringRef plistOut) {
+                                      StringRef plistOut) {
   assert(!outputDir.empty() && "Expected output directory path");
   return applyTransforms(origCI, Filename, Kind, DiagClient,
                          outputDir, emitPremigrationARCErrors, plistOut);
@@ -366,13 +371,13 @@ bool arcmt::migrateWithTemporaryFiles(CompilerInvocation &origCI,
 
 bool arcmt::getFileRemappings(std::vector<std::pair<std::string,std::string> > &
                                   remap,
-                              llvm::StringRef outputDir,
-                              DiagnosticClient *DiagClient) {
+                              StringRef outputDir,
+                              DiagnosticConsumer *DiagClient) {
   assert(!outputDir.empty());
 
   llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
-                 new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+      new DiagnosticsEngine(DiagID, DiagClient, /*ShouldOwnClient=*/false));
 
   FileRemapper remapper;
   bool err = remapper.initFromDisk(outputDir, *Diags,
@@ -400,7 +405,8 @@ public:
   ARCMTMacroTrackerPPCallbacks(std::vector<SourceLocation> &ARCMTMacroLocs)
     : ARCMTMacroLocs(ARCMTMacroLocs) { }
 
-  virtual void MacroExpands(const Token &MacroNameTok, const MacroInfo *MI) {
+  virtual void MacroExpands(const Token &MacroNameTok, const MacroInfo *MI,
+                            SourceRange Range) {
     if (MacroNameTok.getIdentifierInfo()->getName() == getARCMTMacroName())
       ARCMTMacroLocs.push_back(MacroNameTok.getLocation());
   }
@@ -414,7 +420,7 @@ public:
     : ARCMTMacroLocs(ARCMTMacroLocs) { }
 
   virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
-                                         llvm::StringRef InFile) {
+                                         StringRef InFile) {
     CI.getPreprocessor().addPPCallbacks(
                               new ARCMTMacroTrackerPPCallbacks(ARCMTMacroLocs));
     return new ASTConsumer();
@@ -438,7 +444,7 @@ public:
       Listener->finish();
   }
 
-  virtual void insert(SourceLocation loc, llvm::StringRef text) {
+  virtual void insert(SourceLocation loc, StringRef text) {
     bool err = rewriter.InsertText(loc, text, /*InsertAfter=*/true,
                                    /*indentNewLines=*/true);
     if (!err && Listener)
@@ -468,13 +474,13 @@ public:
 MigrationProcess::RewriteListener::~RewriteListener() { }
 
 MigrationProcess::MigrationProcess(const CompilerInvocation &CI,
-                                   DiagnosticClient *diagClient,
-                                   llvm::StringRef outputDir)
+                                   DiagnosticConsumer *diagClient,
+                                   StringRef outputDir)
   : OrigCI(CI), DiagClient(diagClient) {
   if (!outputDir.empty()) {
     llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-    llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
-                 new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+    llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+      new DiagnosticsEngine(DiagID, DiagClient, /*ShouldOwnClient=*/false));
     Remapper.initFromDisk(outputDir, *Diags, /*ignoreIfFilesChanges=*/true);
   }
 }
@@ -492,11 +498,11 @@ bool MigrationProcess::applyTransform(TransformFn trans,
 
   assert(DiagClient);
   llvm::IntrusiveRefCntPtr<DiagnosticIDs> DiagID(new DiagnosticIDs());
-  llvm::IntrusiveRefCntPtr<Diagnostic> Diags(
-               new Diagnostic(DiagID, DiagClient, /*ShouldOwnClient=*/false));
+  llvm::IntrusiveRefCntPtr<DiagnosticsEngine> Diags(
+      new DiagnosticsEngine(DiagID, DiagClient, /*ShouldOwnClient=*/false));
 
   // Filter of all diagnostics.
-  CaptureDiagnosticClient errRec(*Diags, capturedDiags);
+  CaptureDiagnosticConsumer errRec(*Diags, capturedDiags);
   Diags->setClient(&errRec, /*ShouldOwnClient=*/false);
 
   llvm::OwningPtr<ARCMTMacroTrackerAction> ASTAction;
@@ -524,7 +530,7 @@ bool MigrationProcess::applyTransform(TransformFn trans,
 
   // After parsing of source files ended, we want to reuse the
   // diagnostics objects to emit further diagnostics.
-  // We call BeginSourceFile because DiagnosticClient requires that 
+  // We call BeginSourceFile because DiagnosticConsumer requires that 
   // diagnostics with source range information are emitted only in between
   // BeginSourceFile() and EndSourceFile().
   DiagClient->BeginSourceFile(Ctx.getLangOptions(), &Unit->getPreprocessor());
@@ -558,7 +564,7 @@ bool MigrationProcess::applyTransform(TransformFn trans,
     buf.write(vecOS);
     vecOS.flush();
     llvm::MemoryBuffer *memBuf = llvm::MemoryBuffer::getMemBufferCopy(
-                   llvm::StringRef(newText.data(), newText.size()), newFname);
+                   StringRef(newText.data(), newText.size()), newFname);
     llvm::SmallString<64> filePath(file->getName());
     Unit->getFileManager().FixupRelativePath(filePath);
     Remapper.remap(filePath.str(), memBuf);
@@ -571,7 +577,7 @@ bool MigrationProcess::applyTransform(TransformFn trans,
 // isARCDiagnostic.
 //===----------------------------------------------------------------------===//
 
-bool arcmt::isARCDiagnostic(unsigned diagID, Diagnostic &Diag) {
+bool arcmt::isARCDiagnostic(unsigned diagID, DiagnosticsEngine &Diag) {
   return Diag.getDiagnosticIDs()->getCategoryNumberForDiag(diagID) ==
            diag::DiagCat_Automatic_Reference_Counting_Issue;
 }

@@ -134,6 +134,9 @@ def ccc_ : Joined<"-ccc-">, Group<ccc_Group>, Flags<[Unsupported]>;
 
 def _HASH_HASH_HASH : Flag<"-###">, Flags<[DriverOption]>,
     HelpText<"Print the commands to run for this compilation">;
+// The '--' option is here for the sake of compatibility with gcc, but is 
+// being ignored by the driver.
+def _DASH_DASH : Flag<"--">, Flags<[DriverOption]>;
 def A : JoinedOrSeparate<"-A">;
 def B : JoinedOrSeparate<"-B">;
 def CC : Flag<"-CC">;
@@ -298,6 +301,8 @@ def fdiagnostics_show_category_EQ : Joined<"-fdiagnostics-show-category=">, Grou
 def fdollars_in_identifiers : Flag<"-fdollars-in-identifiers">, Group<f_Group>;
 def fdwarf2_cfi_asm : Flag<"-fdwarf2-cfi-asm">, Group<f_Group>;
 def fno_dwarf2_cfi_asm : Flag<"-fno-dwarf2-cfi-asm">, Group<f_Group>;
+def fdwarf_directory_asm : Flag<"-fdwarf-directory-asm">, Group<f_Group>;
+def fno_dwarf_directory_asm : Flag<"-fno-dwarf-directory-asm">, Group<f_Group>;
 def felide_constructors : Flag<"-felide-constructors">, Group<f_Group>;
 def feliminate_unused_debug_symbols : Flag<"-feliminate-unused-debug-symbols">, Group<f_Group>;
 def femit_all_decls : Flag<"-femit-all-decls">, Group<f_Group>;
@@ -319,7 +324,7 @@ def fno_gnu89_inline : Flag<"-fno-gnu89-inline">, Group<f_Group>;
 def fgnu_runtime : Flag<"-fgnu-runtime">, Group<f_Group>;
 def fheinous_gnu_extensions : Flag<"-fheinous-gnu-extensions">;
 def filelist : Separate<"-filelist">, Flags<[LinkerInput]>;
-def findirect_virtual_calls : Flag<"-findirect-virtual-calls">, Group<f_Group>;
+def findirect_virtual_calls : Flag<"-findirect-virtual-calls">, Alias<fapple_kext>;
 def finline_functions : Flag<"-finline-functions">, Group<clang_ignored_f_Group>;
 def finline : Flag<"-finline">, Group<clang_ignored_f_Group>;
 def finstrument_functions : Flag<"-finstrument-functions">, Group<f_Group>;
@@ -337,8 +342,14 @@ def fmath_errno : Flag<"-fmath-errno">, Group<f_Group>;
 def fmerge_all_constants : Flag<"-fmerge-all-constants">, Group<f_Group>;
 def fmessage_length_EQ : Joined<"-fmessage-length=">, Group<f_Group>;
 def fms_extensions : Flag<"-fms-extensions">, Group<f_Group>;
+def fms_compatibility : Flag<"-fms-compatibility">, Group<f_Group>;
 def fmsc_version : Joined<"-fmsc-version=">, Group<f_Group>;
 def fdelayed_template_parsing : Flag<"-fdelayed-template-parsing">, Group<f_Group>;
+def fmodule_cache_path : Separate<"-fmodule-cache-path">, Group<i_Group>, 
+  Flags<[NoForward]>;
+def fauto_module_import : Flag <"-fauto-module-import">, Group<f_Group>,
+  Flags<[NoForward]>;
+  
 def fmudflapth : Flag<"-fmudflapth">, Group<f_Group>;
 def fmudflap : Flag<"-fmudflap">, Group<f_Group>;
 def fnested_functions : Flag<"-fnested-functions">, Group<f_Group>;
@@ -374,6 +385,7 @@ def fno_lax_vector_conversions : Flag<"-fno-lax-vector-conversions">, Group<f_Gr
 def fno_math_errno : Flag<"-fno-math-errno">, Group<f_Group>;
 def fno_merge_all_constants : Flag<"-fno-merge-all-constants">, Group<f_Group>;
 def fno_ms_extensions : Flag<"-fno-ms-extensions">, Group<f_Group>;
+def fno_ms_compatibility : Flag<"-fno-ms-compatibility">, Group<f_Group>;
 def fno_delayed_template_parsing : Flag<"-fno-delayed-template-parsing">, Group<f_Group>;
 def fno_objc_default_synthesize_properties 
   : Flag<"-fno-objc-default-synthesize-properties">, Group<f_Group>;
@@ -430,6 +442,9 @@ def force__cpusubtype__ALL : Flag<"-force_cpusubtype_ALL">;
 def force__flat__namespace : Flag<"-force_flat_namespace">;
 def force__load : Separate<"-force_load">;
 def foutput_class_dir_EQ : Joined<"-foutput-class-dir=">, Group<f_Group>;
+def fpack_struct : Flag<"-fpack-struct">, Group<f_Group>;
+def fno_pack_struct : Flag<"-fno-pack-struct">, Group<f_Group>;
+def fpack_struct_EQ : Joined<"-fpack-struct=">, Group<f_Group>;
 def fpascal_strings : Flag<"-fpascal-strings">, Group<f_Group>;
 def fpch_preprocess : Flag<"-fpch-preprocess">, Group<f_Group>;
 def fpic : Flag<"-fpic">, Group<f_Group>;
@@ -470,7 +485,7 @@ def Wlarger_than_ : Joined<"-Wlarger-than-">, Alias<Wlarger_than>;
 def Wframe_larger_than : Separate<"-Wframe-larger-than">, Group<clang_ignored_f_Group>;
 def Wframe_larger_than_EQ : Joined<"-Wframe-larger-than=">, Alias<Wframe_larger_than>;
 
-def fterminated_vtables : Flag<"-fterminated-vtables">, Group<f_Group>;
+def fterminated_vtables : Flag<"-fterminated-vtables">, Alias<fapple_kext>;
 def fthreadsafe_statics : Flag<"-fthreadsafe-statics">, Group<f_Group>;
 def ftime_report : Flag<"-ftime-report">, Group<f_Group>;
 def ftrapv : Flag<"-ftrapv">, Group<f_Group>;
@@ -500,8 +515,9 @@ def gused : Joined<"-gused">, Group<g_Group>;
 def g_Flag : Flag<"-g">, Group<g_Group>;
 def g_Joined : Joined<"-g">, Group<g_Group>;
 def headerpad__max__install__names : Joined<"-headerpad_max_install_names">;
+def index_header_map : Flag<"-index-header-map">;
 def idirafter : JoinedOrSeparate<"-idirafter">, Group<clang_i_Group>;
-def iframework : JoinedOrSeparate<"-iframework">, Group<clang_i_Group>;
+def iframework : Joined<"-iframework">, Group<clang_i_Group>;
 def imacros : JoinedOrSeparate<"-imacros">, Group<clang_i_Group>;
 def image__base : Separate<"-image_base">;
 def include_ : JoinedOrSeparate<"-include">, Group<clang_i_Group>, EnumName<"include">;
@@ -532,6 +548,7 @@ def mdynamic_no_pic : Joined<"-mdynamic-no-pic">, Group<m_Group>, Flags<[NoArgum
 def mfix_and_continue : Flag<"-mfix-and-continue">, Group<clang_ignored_m_Group>;
 def mfloat_abi_EQ : Joined<"-mfloat-abi=">, Group<m_Group>;
 def mfpu_EQ : Joined<"-mfpu=">, Group<m_Group>;
+def mglobal_merge : Flag<"-mglobal-merge">, Group<m_Group>;
 def mhard_float : Flag<"-mhard-float">, Group<m_Group>;
 def miphoneos_version_min_EQ : Joined<"-miphoneos-version-min=">, Group<m_Group>;
 def mios_version_min_EQ : Joined<"-mios-version-min=">, Alias<miphoneos_version_min_EQ>;
@@ -546,6 +563,7 @@ def mmmx : Flag<"-mmmx">, Group<m_x86_Features_Group>;
 def mno_3dnowa : Flag<"-mno-3dnowa">, Group<m_x86_Features_Group>;
 def mno_3dnow : Flag<"-mno-3dnow">, Group<m_x86_Features_Group>;
 def mno_constant_cfstrings : Flag<"-mno-constant-cfstrings">, Group<m_Group>;
+def mno_global_merge : Flag<"-mno-global-merge">, Group<m_Group>;
 def mno_mmx : Flag<"-mno-mmx">, Group<m_x86_Features_Group>;
 def mno_pascal_strings : Flag<"-mno-pascal-strings">, Group<m_Group>;
 def mno_red_zone : Flag<"-mno-red-zone">, Group<m_Group>;
@@ -608,6 +626,7 @@ def noprebind : Flag<"-noprebind">;
 def noseglinkedit : Flag<"-noseglinkedit">;
 def nostartfiles : Flag<"-nostartfiles">;
 def nostdinc : Flag<"-nostdinc">;
+def nostdlibinc : Flag<"-nostdlibinc">;
 def nostdincxx : Flag<"-nostdinc++">;
 def nostdlib : Flag<"-nostdlib">;
 def object : Flag<"-object">;
@@ -669,6 +688,7 @@ def single__module : Flag<"-single_module">;
 def specs_EQ : Joined<"-specs=">;
 def specs : Separate<"-specs">, Flags<[Unsupported]>;
 def static_libgcc : Flag<"-static-libgcc">;
+def static_libstdcxx : Flag<"-static-libstdc++">;
 def static : Flag<"-static">, Flags<[NoArgumentUnused]>;
 def std_default_EQ : Joined<"-std-default=">;
 def std_EQ : Joined<"-std=">;
@@ -692,6 +712,8 @@ def u : JoinedOrSeparate<"-u">, Group<u_Group>;
 def use_gold_plugin : Flag<"-use-gold-plugin">;
 def v : Flag<"-v">,
   HelpText<"Show commands to run and use verbose output">;
+def verify : Flag<"-verify">, Flags<[DriverOption]>,
+  HelpText<"Verify output using a verifier.">;
 def weak_l : Joined<"-weak-l">, Flags<[LinkerInput]>;
 def weak__framework : Separate<"-weak_framework">, Flags<[LinkerInput]>;
 def weak__library : Separate<"-weak_library">, Flags<[LinkerInput]>;

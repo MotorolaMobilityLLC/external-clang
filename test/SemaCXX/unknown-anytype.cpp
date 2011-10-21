@@ -14,9 +14,9 @@ namespace test1 {
     // making sure that these locations check for placeholder types
     // properly.
 
-    int x = foo; // expected-error {{cannot initialize}}
+    int x = foo; // expected-error {{'foo' has unknown type}}
     int y = 0 + foo; // expected-error {{'foo' has unknown type}}
-    return foo; // expected-error {{cannot initialize}}
+    return foo; // expected-error {{'foo' has unknown type}}
   }
 }
 
@@ -32,5 +32,16 @@ namespace test3 {
   void test() {
     foo(); // expected-error {{call to unsupported expression with unknown type}}
     ((void(void)) foo)(); // expected-error {{variable 'foo' with unknown type cannot be given a function type}}
+  }
+}
+
+// rdar://problem/9899447
+namespace test4 {
+  extern __unknown_anytype test0(...);
+  extern __unknown_anytype test1(...);
+
+  void test() {
+    void (*fn)(int) = (void(*)(int)) test0;
+    int x = (int) test1; // expected-error {{function 'test1' with unknown type must be given a function type}}
   }
 }

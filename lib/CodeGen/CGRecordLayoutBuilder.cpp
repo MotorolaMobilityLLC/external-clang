@@ -35,7 +35,7 @@ class CGRecordLayoutBuilder {
 public:
   /// FieldTypes - Holds the LLVM types that the struct is created from.
   /// 
-  llvm::SmallVector<llvm::Type *, 16> FieldTypes;
+  SmallVector<llvm::Type *, 16> FieldTypes;
 
   /// BaseSubobjectType - Holds the LLVM type for the non-virtual part
   /// of the struct. For example, consider:
@@ -363,15 +363,14 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
 
 void CGRecordLayoutBuilder::LayoutBitField(const FieldDecl *D,
                                            uint64_t fieldOffset) {
-  uint64_t fieldSize =
-    D->getBitWidth()->EvaluateAsInt(Types.getContext()).getZExtValue();
+  uint64_t fieldSize = D->getBitWidthValue(Types.getContext());
 
   if (fieldSize == 0)
     return;
 
   uint64_t nextFieldOffsetInBits = Types.getContext().toBits(NextFieldOffset);
   CharUnits numBytesToAppend;
-  unsigned charAlign = Types.getContext().Target.getCharAlign();
+  unsigned charAlign = Types.getContext().getTargetInfo().getCharAlign();
 
   if (fieldOffset < nextFieldOffsetInBits && !BitsAvailableInLastField) {
     assert(fieldOffset % charAlign == 0 && 
@@ -492,8 +491,7 @@ llvm::Type *
 CGRecordLayoutBuilder::LayoutUnionField(const FieldDecl *Field,
                                         const ASTRecordLayout &Layout) {
   if (Field->isBitField()) {
-    uint64_t FieldSize =
-      Field->getBitWidth()->EvaluateAsInt(Types.getContext()).getZExtValue();
+    uint64_t FieldSize = Field->getBitWidthValue(Types.getContext());
 
     // Ignore zero sized bit fields.
     if (FieldSize == 0)
@@ -502,7 +500,7 @@ CGRecordLayoutBuilder::LayoutUnionField(const FieldDecl *Field,
     llvm::Type *FieldTy = llvm::Type::getInt8Ty(Types.getLLVMContext());
     CharUnits NumBytesToAppend = Types.getContext().toCharUnitsFromBits(
       llvm::RoundUpToAlignment(FieldSize, 
-                               Types.getContext().Target.getCharAlign()));
+                               Types.getContext().getTargetInfo().getCharAlign()));
 
     if (NumBytesToAppend > CharUnits::One())
       FieldTy = llvm::ArrayType::get(FieldTy, NumBytesToAppend.getQuantity());
@@ -671,7 +669,13 @@ CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
 
   // Check if we need to add a vtable pointer.
   if (RD->isDynamicClass()) {
-    if (!PrimaryBase) {
+    if (PrimaryBase) {
+      if (!Layout.isPrimaryBaseVirtual())
+        LayoutNonVirtualBase(PrimaryBase, CharUnits::Zero());
+      else
+        LayoutVirtualBase(PrimaryBase, CharUnits::Zero());
+    } else if (Types.getContext().getTargetInfo().getCXXABI() !=
+               CXXABI_Microsoft) {
       llvm::Type *FunctionType =
         llvm::FunctionType::get(llvm::Type::getInt32Ty(Types.getLLVMContext()),
                                 /*isVarArg=*/true);
@@ -680,11 +684,7 @@ CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
       assert(NextFieldOffset.isZero() &&
              "VTable pointer must come first!");
       AppendField(CharUnits::Zero(), VTableTy->getPointerTo());
-    } else {
-      if (!Layout.isPrimaryBaseVirtual())
-        LayoutNonVirtualBase(PrimaryBase, CharUnits::Zero());
-      else
-        LayoutVirtualBase(PrimaryBase, CharUnits::Zero());
+      
     }
   }
 
@@ -735,8 +735,8 @@ CGRecordLayoutBuilder::ComputeNonVirtualBaseType(const CXXRecordDecl *RD) {
   }
 
   
-  BaseSubobjectType = llvm::StructType::createNamed(Types.getLLVMContext(), "",
-                                                    FieldTypes, Packed);
+  BaseSubobjectType = llvm::StructType::create(Types.getLLVMContext(),
+                                               FieldTypes, "", Packed);
   Types.addRecordTypeName(RD, BaseSubobjectType, ".base");
 
   // Pull the padding back off.
@@ -1037,7 +1037,7 @@ CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D,
   return RL;
 }
 
-void CGRecordLayout::print(llvm::raw_ostream &OS) const {
+void CGRecordLayout::print(raw_ostream &OS) const {
   OS << "<CGRecordLayout\n";
   OS << "  LLVMType:" << *CompleteObjectType << "\n";
   if (BaseSubobjectType)
@@ -1071,7 +1071,7 @@ void CGRecordLayout::dump() const {
   print(llvm::errs());
 }
 
-void CGBitFieldInfo::print(llvm::raw_ostream &OS) const {
+void CGBitFieldInfo::print(raw_ostream &OS) const {
   OS << "<CGBitFieldInfo";
   OS << " Size:" << Size;
   OS << " IsSigned:" << IsSigned << "\n";

@@ -123,13 +123,7 @@ public:
   bool hasNoDeclarations() const {
     return declToIndex.size() == 0;
   }
-  
-  bool hasEntry(const VarDecl *vd) const {
-    return declToIndex.getValueIndex(vd).hasValue();
-  }
-  
-  bool hasValues(const CFGBlock *block);
-  
+
   void resetScratch();
   ValueVector &getScratch() { return scratch; }
   
@@ -170,7 +164,7 @@ ValueVector &CFGBlockValues::lazyCreate(ValueVector *&bv) {
 /// This function pattern matches for a '&&' or '||' that appears at
 /// the beginning of a CFGBlock that also (1) has a terminator and 
 /// (2) has no other elements.  If such an expression is found, it is returned.
-static BinaryOperator *getLogicalOperatorInChain(const CFGBlock *block) {
+static const BinaryOperator *getLogicalOperatorInChain(const CFGBlock *block) {
   if (block->empty())
     return 0;
 
@@ -178,7 +172,7 @@ static BinaryOperator *getLogicalOperatorInChain(const CFGBlock *block) {
   if (!cstmt)
     return 0;
 
-  BinaryOperator *b = llvm::dyn_cast_or_null<BinaryOperator>(cstmt->getStmt());
+  const BinaryOperator *b = dyn_cast_or_null<BinaryOperator>(cstmt->getStmt());
   
   if (!b || !b->isLogicalOp())
     return 0;
@@ -209,11 +203,6 @@ ValueVector &CFGBlockValues::getValueVector(const CFGBlock *block,
   return lazyCreate(vals[idx].first);
 }
 
-bool CFGBlockValues::hasValues(const CFGBlock *block) {
-  unsigned idx = block->getBlockID();
-  return vals[idx].second != 0;  
-}
-
 BVPair &CFGBlockValues::getValueVectors(const clang::CFGBlock *block,
                                         bool shouldLazyCreate) {
   unsigned idx = block->getBlockID();
@@ -223,13 +212,6 @@ BVPair &CFGBlockValues::getValueVectors(const clang::CFGBlock *block,
   return vals[idx];
 }
 
-void CFGBlockValues::mergeIntoScratch(ValueVector const &source,
-                                      bool isFirst) {
-  if (isFirst)
-    scratch = source;
-  else
-    scratch |= source;
-}
 #if 0
 static void printVector(const CFGBlock *block, ValueVector &bv,
                         unsigned num) {
@@ -240,7 +222,23 @@ static void printVector(const CFGBlock *block, ValueVector &bv,
   }
   llvm::errs() << " : " << num << '\n';
 }
+
+static void printVector(const char *name, ValueVector const &bv) {
+  llvm::errs() << name << " : ";
+  for (unsigned i = 0; i < bv.size(); ++i) {
+    llvm::errs() << ' ' << bv[i];
+  }
+  llvm::errs() << "\n";
+}
 #endif
+
+void CFGBlockValues::mergeIntoScratch(ValueVector const &source,
+                                      bool isFirst) {
+  if (isFirst)
+    scratch = source;
+  else
+    scratch |= source;
+}
 
 bool CFGBlockValues::updateValueVectorWithScratch(const CFGBlock *block) {
   ValueVector &dst = getValueVector(block, 0);
@@ -283,7 +281,7 @@ ValueVector::reference CFGBlockValues::operator[](const VarDecl *vd) {
 
 namespace {
 class DataflowWorklist {
-  llvm::SmallVector<const CFGBlock *, 20> worklist;
+  SmallVector<const CFGBlock *, 20> worklist;
   llvm::BitVector enqueuedBlocks;
 public:
   DataflowWorklist(const CFG &cfg) : enqueuedBlocks(cfg.getNumBlockIDs()) {}
@@ -341,7 +339,6 @@ class TransferFunctions : public StmtVisitor<TransferFunctions> {
   const CFG &cfg;
   AnalysisContext &ac;
   UninitVariablesHandler *handler;
-  const bool flagBlockUses;
   
   /// The last DeclRefExpr seen when analyzing a block.  Used to
   /// cheat when detecting cases when the address of a variable is taken.
@@ -352,15 +349,19 @@ class TransferFunctions : public StmtVisitor<TransferFunctions> {
   /// possible to either silence the warning in some cases, or we
   /// propagate the uninitialized value.
   CastExpr *lastLoad;
+  
+  /// For some expressions, we want to ignore any post-processing after
+  /// visitation.
+  bool skipProcessUses;
+  
 public:
   TransferFunctions(CFGBlockValues &vals, const CFG &cfg,
                     AnalysisContext &ac,
-                    UninitVariablesHandler *handler,
-                    bool flagBlockUses)
+                    UninitVariablesHandler *handler)
     : vals(vals), cfg(cfg), ac(ac), handler(handler),
-      flagBlockUses(flagBlockUses), lastDR(0), lastLoad(0) {}
+      lastDR(0), lastLoad(0),
+      skipProcessUses(false) {}
   
-  const CFG &getCFG() { return cfg; }
   void reportUninit(const DeclRefExpr *ex, const VarDecl *vd,
                     bool isAlwaysUninit);
 
@@ -383,13 +384,27 @@ public:
 };
 }
 
+static const Expr *stripCasts(ASTContext &C, const Expr *Ex) {
+  while (Ex) {
+    Ex = Ex->IgnoreParenNoopCasts(C);
+    if (const CastExpr *CE = dyn_cast<CastExpr>(Ex)) {
+      if (CE->getCastKind() == CK_LValueBitCast) {
+        Ex = CE->getSubExpr();
+        continue;
+      }
+    }
+    break;
+  }
+  return Ex;
+}
+
 void TransferFunctions::reportUninit(const DeclRefExpr *ex,
                                      const VarDecl *vd, bool isAlwaysUnit) {
   if (handler) handler->handleUseOfUninitVariable(ex, vd, isAlwaysUnit);
 }
 
-FindVarResult TransferFunctions::findBlockVarDecl(Expr* ex) {
-  if (DeclRefExpr* dr = dyn_cast<DeclRefExpr>(ex->IgnoreParenCasts()))
+FindVarResult TransferFunctions::findBlockVarDecl(Expr *ex) {
+  if (DeclRefExpr *dr = dyn_cast<DeclRefExpr>(ex->IgnoreParenCasts()))
     if (VarDecl *vd = dyn_cast<VarDecl>(dr->getDecl()))
       if (isTrackedVar(vd))
         return FindVarResult(vd, dr);  
@@ -399,14 +414,13 @@ FindVarResult TransferFunctions::findBlockVarDecl(Expr* ex) {
 void TransferFunctions::VisitObjCForCollectionStmt(ObjCForCollectionStmt *fs) {
   // This represents an initialization of the 'element' value.
   Stmt *element = fs->getElement();
-  const VarDecl* vd = 0;
+  const VarDecl *vd = 0;
   
-  if (DeclStmt* ds = dyn_cast<DeclStmt>(element)) {
+  if (DeclStmt *ds = dyn_cast<DeclStmt>(element)) {
     vd = cast<VarDecl>(ds->getSingleDecl());
     if (!isTrackedVar(vd))
       vd = 0;
-  }
-  else {
+  } else {
     // Initialize the value of the reference variable.
     const FindVarResult &res = findBlockVarDecl(cast<Expr>(element));
     vd = res.getDecl();
@@ -417,14 +431,10 @@ void TransferFunctions::VisitObjCForCollectionStmt(ObjCForCollectionStmt *fs) {
 }
 
 void TransferFunctions::VisitBlockExpr(BlockExpr *be) {
-  if (!flagBlockUses || !handler)
-    return;
   const BlockDecl *bd = be->getBlockDecl();
   for (BlockDecl::capture_const_iterator i = bd->capture_begin(),
         e = bd->capture_end() ; i != e; ++i) {
     const VarDecl *vd = i->getVariable();
-    if (!vd->hasLocalStorage())
-      continue;
     if (!isTrackedVar(vd))
       continue;
     if (i->isByRef()) {
@@ -432,7 +442,7 @@ void TransferFunctions::VisitBlockExpr(BlockExpr *be) {
       continue;
     }
     Value v = vals[vd];
-    if (isUninitialized(v))
+    if (handler && isUninitialized(v))
       handler->handleUseOfUninitVariable(be, vd, isAlwaysUninit(v));
   }
 }
@@ -441,8 +451,10 @@ void TransferFunctions::VisitDeclRefExpr(DeclRefExpr *dr) {
   // Record the last DeclRefExpr seen.  This is an lvalue computation.
   // We use this value to later detect if a variable "escapes" the analysis.
   if (const VarDecl *vd = dyn_cast<VarDecl>(dr->getDecl()))
-    if (isTrackedVar(vd))
+    if (isTrackedVar(vd)) {
+      ProcessUses();
       lastDR = dr;
+    }
 }
 
 void TransferFunctions::VisitDeclStmt(DeclStmt *ds) {
@@ -462,8 +474,9 @@ void TransferFunctions::VisitDeclStmt(DeclStmt *ds) {
           // appropriately, but we need to continue to analyze subsequent uses
           // of the variable.
           if (init == lastLoad) {
-            DeclRefExpr *DR =
-              cast<DeclRefExpr>(lastLoad->getSubExpr()->IgnoreParens());
+            const DeclRefExpr *DR
+              = cast<DeclRefExpr>(stripCasts(ac.getASTContext(),
+                                             lastLoad->getSubExpr()));
             if (DR->getDecl() == vd) {
               // int x = x;
               // Propagate uninitialized value, but don't immediately report
@@ -471,11 +484,17 @@ void TransferFunctions::VisitDeclStmt(DeclStmt *ds) {
               vals[vd] = Uninitialized;
               lastLoad = 0;
               lastDR = 0;
+              if (handler)
+                handler->handleSelfInit(vd);
               return;
             }
           }
 
           // All other cases: treat the new variable as initialized.
+          // This is a minor optimization to reduce the propagation
+          // of the analysis, since we will have already reported
+          // the use of the uninitialized value (which visiting the
+          // initializer).
           vals[vd] = Initialized;
         }
       }
@@ -486,12 +505,13 @@ void TransferFunctions::VisitDeclStmt(DeclStmt *ds) {
 void TransferFunctions::VisitBinaryOperator(clang::BinaryOperator *bo) {
   if (bo->isAssignmentOp()) {
     const FindVarResult &res = findBlockVarDecl(bo->getLHS());
-    if (const VarDecl* vd = res.getDecl()) {
+    if (const VarDecl *vd = res.getDecl()) {
       ValueVector::reference val = vals[vd];
       if (isUninitialized(val)) {
         if (bo->getOpcode() != BO_Assign)
           reportUninit(res.getDeclRefExpr(), vd, isAlwaysUninit(val));
-        val = Initialized;
+        else
+          val = Initialized;
       }
     }
   }
@@ -511,11 +531,8 @@ void TransferFunctions::VisitUnaryOperator(clang::UnaryOperator *uo) {
         lastDR = 0;
 
         ValueVector::reference val = vals[vd];
-        if (isUninitialized(val)) {
+        if (isUninitialized(val))
           reportUninit(res.getDeclRefExpr(), vd, isAlwaysUninit(val));
-          // Don't cascade warnings.
-          val = Initialized;
-        }
       }
       break;
     }
@@ -527,15 +544,14 @@ void TransferFunctions::VisitUnaryOperator(clang::UnaryOperator *uo) {
 void TransferFunctions::VisitCastExpr(clang::CastExpr *ce) {
   if (ce->getCastKind() == CK_LValueToRValue) {
     const FindVarResult &res = findBlockVarDecl(ce->getSubExpr());
-    if (const VarDecl *vd = res.getDecl()) {
+    if (res.getDecl()) {
       assert(res.getDeclRefExpr() == lastDR);
-      if (isUninitialized(vals[vd])) {
-        // Record this load of an uninitialized value.  Normally this
-        // results in a warning, but we delay reporting the issue
-        // in case it is wrapped in a void cast, etc.
-        lastLoad = ce;
-      }
+      lastLoad = ce;
     }
+  }
+  else if (ce->getCastKind() == CK_NoOp ||
+           ce->getCastKind() == CK_LValueBitCast) {
+    skipProcessUses = true;
   }
   else if (CStyleCastExpr *cse = dyn_cast<CStyleCastExpr>(ce)) {
     if (cse->getType()->isVoidType()) {
@@ -551,8 +567,10 @@ void TransferFunctions::VisitCastExpr(clang::CastExpr *ce) {
 }
 
 void TransferFunctions::Visit(clang::Stmt *s) {
+  skipProcessUses = false;
   StmtVisitor<TransferFunctions>::Visit(s);
-  ProcessUses(s);
+  if (!skipProcessUses)
+    ProcessUses(s);
 }
 
 void TransferFunctions::ProcessUses(Stmt *s) {
@@ -565,16 +583,19 @@ void TransferFunctions::ProcessUses(Stmt *s) {
     if (lastLoad == s)
       return;
 
-    // If we reach here, we have seen a load of an uninitialized value
+    const DeclRefExpr *DR =
+      cast<DeclRefExpr>(stripCasts(ac.getASTContext(),
+                                   lastLoad->getSubExpr()));
+    const VarDecl *VD = cast<VarDecl>(DR->getDecl());
+
+    // If we reach here, we may have seen a load of an uninitialized value
     // and it hasn't been casted to void or otherwise handled.  In this
     // situation, report the incident.
-    DeclRefExpr *DR = cast<DeclRefExpr>(lastLoad->getSubExpr()->IgnoreParens());
-    VarDecl *VD = cast<VarDecl>(DR->getDecl());
-    reportUninit(DR, VD, isAlwaysUninit(vals[VD]));
+    if (isUninitialized(vals[VD]))
+      reportUninit(DR, VD, isAlwaysUninit(vals[VD]));
+
     lastLoad = 0;
-    
-    // Prevent cascade of warnings.
-    vals[VD] = Initialized;
+
     if (DR == lastDR) {
       lastDR = 0;
       return;
@@ -596,8 +617,7 @@ void TransferFunctions::ProcessUses(Stmt *s) {
 static bool runOnBlock(const CFGBlock *block, const CFG &cfg,
                        AnalysisContext &ac, CFGBlockValues &vals,
                        llvm::BitVector &wasAnalyzed,
-                       UninitVariablesHandler *handler = 0,
-                       bool flagBlockUses = false) {
+                       UninitVariablesHandler *handler = 0) {
   
   wasAnalyzed[block->getBlockID()] = true;
   
@@ -615,8 +635,7 @@ static bool runOnBlock(const CFGBlock *block, const CFG &cfg,
       vals.mergeIntoScratch(*(vB.second ? vB.second : vB.first), false);
       valsAB.first = vA.first;
       valsAB.second = &vals.getScratch();
-    }
-    else {
+    } else {
       // Merge the 'T' bits from the first and second.
       assert(b->getOpcode() == BO_LOr);
       vals.mergeIntoScratch(*vA.first, true);
@@ -632,15 +651,18 @@ static bool runOnBlock(const CFGBlock *block, const CFG &cfg,
   bool isFirst = true;
   for (CFGBlock::const_pred_iterator I = block->pred_begin(),
        E = block->pred_end(); I != E; ++I) {
-    vals.mergeIntoScratch(vals.getValueVector(*I, block), isFirst);
-    isFirst = false;
+    const CFGBlock *pred = *I;
+    if (wasAnalyzed[pred->getBlockID()]) {
+      vals.mergeIntoScratch(vals.getValueVector(pred, block), isFirst);
+      isFirst = false;
+    }
   }
   // Apply the transfer function.
-  TransferFunctions tf(vals, cfg, ac, handler, flagBlockUses);
+  TransferFunctions tf(vals, cfg, ac, handler);
   for (CFGBlock::const_iterator I = block->begin(), E = block->end(); 
        I != E; ++I) {
     if (const CFGStmt *cs = dyn_cast<CFGStmt>(&*I)) {
-      tf.Visit(cs->getStmt());
+      tf.Visit(const_cast<Stmt*>(cs->getStmt()));
     }
   }
   tf.ProcessUses();
@@ -678,6 +700,7 @@ void clang::runUninitializedVariablesAnalysis(
   llvm::BitVector previouslyVisited(cfg.getNumBlockIDs());
   worklist.enqueueSuccessors(&cfg.getEntry());
   llvm::BitVector wasAnalyzed(cfg.getNumBlockIDs(), false);
+  wasAnalyzed[cfg.getEntry().getBlockID()] = true;
 
   while (const CFGBlock *block = worklist.dequeue()) {
     // Did the block change?
@@ -690,9 +713,9 @@ void clang::runUninitializedVariablesAnalysis(
   
   // Run through the blocks one more time, and report uninitialized variabes.
   for (CFG::const_iterator BI = cfg.begin(), BE = cfg.end(); BI != BE; ++BI) {
-    if (wasAnalyzed[(*BI)->getBlockID()]) {
-      runOnBlock(*BI, cfg, ac, vals, wasAnalyzed, &handler,
-                 /* flagBlockUses */ true);
+    const CFGBlock *block = *BI;
+    if (wasAnalyzed[block->getBlockID()]) {
+      runOnBlock(block, cfg, ac, vals, wasAnalyzed, &handler);
       ++stats.NumBlockVisits;
     }
   }

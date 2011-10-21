@@ -38,8 +38,7 @@ static bool ParsePrecision(FormatStringHandler &H, PrintfSpecifier &FS,
                            unsigned *argIndex) {
   if (argIndex) {
     FS.setPrecision(ParseNonPositionAmount(Beg, E, *argIndex));
-  }
-  else {
+  } else {
     const OptionalAmount Amt = ParsePositionAmount(H, Start, Beg, E,
                                            analyze_format_string::PrecisionPos);
     if (Amt.isInvalid())
@@ -356,7 +355,7 @@ ArgTypeResult PrintfSpecifier::getArgType(ASTContext &Ctx) const {
   return ArgTypeResult();
 }
 
-bool PrintfSpecifier::fixType(QualType QT) {
+bool PrintfSpecifier::fixType(QualType QT, const LangOptions &LangOpt) {
   // Handle strings first (char *, wchar_t *)
   if (QT->isPointerType() && (QT->getPointeeType()->isAnyCharacterType())) {
     CS.setKind(ConversionSpecifier::sArg);
@@ -373,11 +372,9 @@ bool PrintfSpecifier::fixType(QualType QT) {
   }
 
   // We can only work with builtin types.
-  if (!QT->isBuiltinType())
-    return false;
-
-  // Everything else should be a base type
   const BuiltinType *BT = QT->getAs<BuiltinType>();
+  if (!BT)
+    return false;
 
   // Set length modifier
   switch (BT->getKind()) {
@@ -388,18 +385,16 @@ bool PrintfSpecifier::fixType(QualType QT) {
   case BuiltinType::Char32:
   case BuiltinType::UInt128:
   case BuiltinType::Int128:
-    // Integral types which are non-trivial to correct.
+  case BuiltinType::Half:
+    // Various types which are non-trivial to correct.
     return false;
 
-  case BuiltinType::Void:
-  case BuiltinType::NullPtr:
-  case BuiltinType::ObjCId:
-  case BuiltinType::ObjCClass:
-  case BuiltinType::ObjCSel:
-  case BuiltinType::Dependent:
-  case BuiltinType::Overload:
-  case BuiltinType::BoundMember:
-  case BuiltinType::UnknownAny:
+#define SIGNED_TYPE(Id, SingletonId)
+#define UNSIGNED_TYPE(Id, SingletonId)
+#define FLOATING_TYPE(Id, SingletonId)
+#define BUILTIN_TYPE(Id, SingletonId) \
+  case BuiltinType::Id:
+#include "clang/AST/BuiltinTypes.def"
     // Misc other stuff which doesn't make sense here.
     return false;
 
@@ -437,6 +432,23 @@ bool PrintfSpecifier::fixType(QualType QT) {
     break;
   }
 
+  // Handle size_t, ptrdiff_t, etc. that have dedicated length modifiers in C99.
+  if (isa<TypedefType>(QT) && (LangOpt.C99 || LangOpt.CPlusPlus0x)) {
+    const IdentifierInfo *Identifier = QT.getBaseTypeIdentifier();
+    if (Identifier->getName() == "size_t") {
+      LM.setKind(LengthModifier::AsSizeT);
+    } else if (Identifier->getName() == "ssize_t") {
+      // Not C99, but common in Unix.
+      LM.setKind(LengthModifier::AsSizeT);
+    } else if (Identifier->getName() == "intmax_t") {
+      LM.setKind(LengthModifier::AsIntMax);
+    } else if (Identifier->getName() == "uintmax_t") {
+      LM.setKind(LengthModifier::AsIntMax);
+    } else if (Identifier->getName() == "ptrdiff_t") {
+      LM.setKind(LengthModifier::AsPtrDiff);
+    }
+  }
+
   // Set conversion specifier and disable any flags which do not apply to it.
   // Let typedefs to char fall through to int, as %c is silly for uint8_t.
   if (isa<TypedefType>(QT) && QT->isAnyCharacterType()) {
@@ -461,15 +473,14 @@ bool PrintfSpecifier::fixType(QualType QT) {
       CS.setKind(ConversionSpecifier::uArg);
     HasAlternativeForm = 0;
     HasPlusPrefix = 0;
-  }
-  else {
-    assert(0 && "Unexpected type");
+  } else {
+    llvm_unreachable("Unexpected type");
   }
 
   return true;
 }
 
-void PrintfSpecifier::toString(llvm::raw_ostream &os) const {
+void PrintfSpecifier::toString(raw_ostream &os) const {
   // Whilst some features have no defined order, we are using the order
   // appearing in the C99 standard (ISO/IEC 9899:1999 (E) 7.19.6.1)
   os << "%";

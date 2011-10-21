@@ -20,9 +20,9 @@ using namespace CodeGen;
 CGCXXABI::~CGCXXABI() { }
 
 static void ErrorUnsupportedABI(CodeGenFunction &CGF,
-                                llvm::StringRef S) {
-  Diagnostic &Diags = CGF.CGM.getDiags();
-  unsigned DiagID = Diags.getCustomDiagID(Diagnostic::Error,
+                                StringRef S) {
+  DiagnosticsEngine &Diags = CGF.CGM.getDiags();
+  unsigned DiagID = Diags.getCustomDiagID(DiagnosticsEngine::Error,
                                           "cannot yet compile %1 in this ABI");
   Diags.Report(CGF.getContext().getFullLoc(CGF.CurCodeDecl->getLocation()),
                DiagID)

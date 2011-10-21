@@ -14,6 +14,7 @@
 #ifndef LLVM_CLANG_SOURCELOCATION_H
 #define LLVM_CLANG_SOURCELOCATION_H
 
+#include "clang/Basic/LLVM.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
 #include <utility>
 #include <functional>
@@ -21,8 +22,6 @@
 
 namespace llvm {
   class MemoryBuffer;
-  class raw_ostream;
-  class StringRef;
   template <typename T> struct DenseMapInfo;
   template <typename T> struct isPodLike;
 }
@@ -72,19 +71,21 @@ private:
 ///
 /// Technically, a source location is simply an offset into the manager's view
 /// of the input source, which is all input buffers (including macro
-/// instantiations) concatenated in an effectively arbitrary order. The manager
-/// actually maintains two blocks of input buffers. One, starting at offset 0
-/// and growing upwards, contains all buffers from this module. The other,
+/// expansions) concatenated in an effectively arbitrary order. The manager
+/// actually maintains two blocks of input buffers. One, starting at offset
+/// 0 and growing upwards, contains all buffers from this module. The other,
 /// starting at the highest possible offset and growing downwards, contains
 /// buffers of loaded modules.
 ///
 /// In addition, one bit of SourceLocation is used for quick access to the
-/// information whether the location is in a file or a macro instantiation.
+/// information whether the location is in a file or a macro expansion.
 ///
 /// It is important that this type remains small. It is currently 32 bits wide.
 class SourceLocation {
   unsigned ID;
   friend class SourceManager;
+  friend class ASTReader;
+  friend class ASTWriter;
   enum {
     MacroIDBit = 1U << 31
   };
@@ -124,11 +125,10 @@ private:
   }
 public:
 
-  /// getFileLocWithOffset - Return a source location with the specified offset
-  /// from this file SourceLocation.
-  SourceLocation getFileLocWithOffset(int Offset) const {
-    assert(((getOffset()+Offset) & MacroIDBit) == 0 &&
-           "offset overflow or macro loc");
+  /// \brief Return a source location with the specified offset from this
+  /// SourceLocation.
+  SourceLocation getLocWithOffset(int Offset) const {
+    assert(((getOffset()+Offset) & MacroIDBit) == 0 && "offset overflow");
     SourceLocation L;
     L.ID = ID+Offset;
     return L;
@@ -164,7 +164,7 @@ public:
     return getFromRawEncoding((unsigned)(uintptr_t)Encoding);
   }
 
-  void print(llvm::raw_ostream &OS, const SourceManager &SM) const;
+  void print(raw_ostream &OS, const SourceManager &SM) const;
   void dump(const SourceManager &SM) const;
 };
 
@@ -275,11 +275,11 @@ public:
 
   FileID getFileID() const;
 
-  FullSourceLoc getInstantiationLoc() const;
+  FullSourceLoc getExpansionLoc() const;
   FullSourceLoc getSpellingLoc() const;
 
-  unsigned getInstantiationLineNumber(bool *Invalid = 0) const;
-  unsigned getInstantiationColumnNumber(bool *Invalid = 0) const;
+  unsigned getExpansionLineNumber(bool *Invalid = 0) const;
+  unsigned getExpansionColumnNumber(bool *Invalid = 0) const;
 
   unsigned getSpellingLineNumber(bool *Invalid = 0) const;
   unsigned getSpellingColumnNumber(bool *Invalid = 0) const;
@@ -290,7 +290,7 @@ public:
 
   /// getBufferData - Return a StringRef to the source buffer data for the
   /// specified FileID.
-  llvm::StringRef getBufferData(bool *Invalid = 0) const;
+  StringRef getBufferData(bool *Invalid = 0) const;
 
   /// getDecomposedLoc - Decompose the specified location into a raw FileID +
   /// Offset pair.  The first element is the FileID, the second is the
@@ -340,8 +340,8 @@ public:
 
 /// PresumedLoc - This class represents an unpacked "presumed" location which
 /// can be presented to the user.  A 'presumed' location can be modified by
-/// #line and GNU line marker directives and is always the instantiation point
-/// of a normal location.
+/// #line and GNU line marker directives and is always the expansion point of
+/// a normal location.
 ///
 /// You can get a PresumedLoc from a SourceLocation with SourceManager.
 class PresumedLoc {

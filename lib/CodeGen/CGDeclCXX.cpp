@@ -46,7 +46,9 @@ static void EmitDeclInit(CodeGenFunction &CGF, const VarDecl &D,
   } else if (type->isAnyComplexType()) {
     CGF.EmitComplexExprIntoAddr(Init, DeclPtr, lv.isVolatile());
   } else {
-    CGF.EmitAggExpr(Init, AggValueSlot::forLValue(lv, true));
+    CGF.EmitAggExpr(Init, AggValueSlot::forLValue(lv,AggValueSlot::IsDestructed,
+                                          AggValueSlot::DoesNotNeedGCBarriers,
+                                                  AggValueSlot::IsNotAliased));
   }
 }
 
@@ -126,10 +128,9 @@ CodeGenFunction::EmitCXXGlobalDtorRegistration(llvm::Constant *DtorFn,
   }
 
   // Get the destructor function type
-  llvm::Type *ArgTys[] = { Int8PtrTy };
   llvm::Type *DtorFnTy =
     llvm::FunctionType::get(llvm::Type::getVoidTy(getLLVMContext()),
-                            ArgTys, false);
+                            Int8PtrTy, false);
   DtorFnTy = llvm::PointerType::getUnqual(DtorFnTy);
 
   llvm::Type *Params[] = { DtorFnTy, Int8PtrTy, Int8PtrTy };
@@ -168,14 +169,14 @@ void CodeGenFunction::EmitCXXGuardedInit(const VarDecl &D,
 static llvm::Function *
 CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
                                    llvm::FunctionType *FTy,
-                                   llvm::StringRef Name) {
+                                   StringRef Name) {
   llvm::Function *Fn =
     llvm::Function::Create(FTy, llvm::GlobalValue::InternalLinkage,
                            Name, &CGM.getModule());
   if (!CGM.getContext().getLangOptions().AppleKext) {
     // Set the section if needed.
     if (const char *Section = 
-          CGM.getContext().Target.getStaticInitSectionSpecifier())
+          CGM.getContext().getTargetInfo().getStaticInitSectionSpecifier())
       Fn->setSection(Section);
   }
 
@@ -234,7 +235,7 @@ CodeGenModule::EmitCXXGlobalInitFunc() {
     CreateGlobalInitOrDestructFunction(*this, FTy, "_GLOBAL__I_a");
 
   if (!PrioritizedCXXGlobalInits.empty()) {
-    llvm::SmallVector<llvm::Constant*, 8> LocalCXXGlobalInits;
+    SmallVector<llvm::Constant*, 8> LocalCXXGlobalInits;
     llvm::array_pod_sort(PrioritizedCXXGlobalInits.begin(), 
                          PrioritizedCXXGlobalInits.end()); 
     for (unsigned i = 0; i < PrioritizedCXXGlobalInits.size(); i++) {
