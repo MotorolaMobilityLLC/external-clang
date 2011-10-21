@@ -20,6 +20,9 @@ clang_codegen_SRC_FILES :=	\
 	CGBuiltin.cpp	\
 	CGCall.cpp	\
 	CGClass.cpp	\
+	CGCUDANV.cpp \
+	CGCUDARuntime.cpp \
+	CGOpenCLRuntime.cpp \
 	CGCXX.cpp	\
 	CGCXXABI.cpp	\
 	CGCleanup.cpp	\

@@ -11,25 +11,27 @@ clang_static_analyzer_core_SRC_FILES := \
   AggExprVisitor.cpp \
   AnalysisManager.cpp \
   BasicConstraintManager.cpp \
-  BasicStore.cpp \
   BasicValueFactory.cpp \
   BugReporter.cpp \
   BugReporterVisitors.cpp \
-  CFRefCount.cpp \
+  Checker.cpp \
   CheckerContext.cpp \
+  CheckerRegistry.cpp \
   CheckerHelpers.cpp \
   CheckerManager.cpp \
   Environment.cpp \
   ExplodedGraph.cpp \
   ExprEngine.cpp \
-  FlatStore.cpp \
+  ExprEngineC.cpp \
+  ExprEngineCXX.cpp \
+  ExprEngineCallAndReturn.cpp \
+  ExprEngineObjC.cpp \
   BlockCounter.cpp \
-  CXXExprEngine.cpp \
   CoreEngine.cpp \
-  GRState.cpp \
   HTMLDiagnostics.cpp \
   MemRegion.cpp \
   ObjCMessage.cpp \
+  ProgramState.cpp \
   PathDiagnostic.cpp \
   PlistDiagnostics.cpp \
   RangeConstraintManager.cpp \
@@ -57,4 +59,5 @@ LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
+include $(CLANG_VERSION_INC_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)

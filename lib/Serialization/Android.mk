@@ -15,6 +15,7 @@ TBLGEN_TABLES := \
   AttrPCHWrite.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \
+  DiagnosticSemaKinds.inc \
   Attrs.inc \
   DeclNodes.inc \
   StmtNodes.inc
@@ -28,7 +29,9 @@ clang_serialization_SRC_FILES :=\
   ASTWriter.cpp \
   ASTWriterDecl.cpp \
   ASTWriterStmt.cpp \
-  ChainedIncludesSource.cpp
+  ChainedIncludesSource.cpp \
+  Module.cpp \
+  ModuleManager.cpp
 
 LOCAL_SRC_FILES := $(clang_serialization_SRC_FILES)
 

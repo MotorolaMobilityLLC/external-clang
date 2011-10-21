@@ -37,10 +37,11 @@ clang_frontend_SRC_FILES := \
   LogDiagnosticPrinter.cpp \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
+  TextDiagnostic.cpp \
   TextDiagnosticBuffer.cpp \
   TextDiagnosticPrinter.cpp \
-  VerifyDiagnosticsClient.cpp \
-  Warnings.cpp
+  Warnings.cpp \
+  VerifyDiagnosticConsumer.cpp
 
 LOCAL_SRC_FILES := $(clang_frontend_SRC_FILES)
 

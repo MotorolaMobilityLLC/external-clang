@@ -26,7 +26,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   CheckSecuritySyntaxOnly.cpp \
   CheckSizeofPointer.cpp \
   ChrootChecker.cpp \
-  ClangSACheckerProvider.cpp \
+  ClangCheckers.cpp \
   DeadStoresChecker.cpp \
   DebugCheckers.cpp \
   DereferenceChecker.cpp \
@@ -35,8 +35,10 @@ clang_static_analyzer_checkers_SRC_FILES := \
   IdempotentOperationChecker.cpp \
   IteratorsChecker.cpp \
   LLVMConventionsChecker.cpp \
+  MacOSKeychainAPIChecker.cpp \
   MacOSXAPIChecker.cpp \
   MallocChecker.cpp \
+  MallocOverflowSecurityChecker.cpp \
   NSAutoreleasePoolChecker.cpp \
   NSErrorChecker.cpp \
   NoReturnFunctionChecker.cpp \
@@ -47,6 +49,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   PointerArithChecker.cpp \
   PointerSubChecker.cpp \
   PthreadLockChecker.cpp \
+  RetainCountChecker.cpp \
   ReturnPointerRangeChecker.cpp \
   ReturnUndefChecker.cpp \
   StackAddrEscapeChecker.cpp \
@@ -75,4 +78,5 @@ LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
+include $(CLANG_VERSION_INC_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)

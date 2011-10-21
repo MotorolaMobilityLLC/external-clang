@@ -22,6 +22,7 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/StaticAnalyzer/Core \
   lib/StaticAnalyzer/Frontend \
   tools/driver \
+  utils/TableGen \
   ))
 
 include $(LOCAL_PATH)/clang.mk

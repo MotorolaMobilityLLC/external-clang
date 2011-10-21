@@ -51,8 +51,8 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMX86AsmParser \
   libLLVMX86CodeGen \
   libLLVMX86Disassembler \
-  libLLVMX86AsmPrinter \
   libLLVMX86Desc \
+  libLLVMX86AsmPrinter \
   libLLVMX86Utils \
   libLLVMARMInfo \
   libLLVMAsmParser \
@@ -60,11 +60,11 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMBitReader \
   libLLVMBitWriter \
   libLLVMSelectionDAG \
+  libLLVMipo \
+  libLLVMipa \
   libLLVMInstCombine \
   libLLVMInstrumentation \
   libLLVMCodeGen \
-  libLLVMipo \
-  libLLVMipa \
   libLLVMLinker \
   libLLVMMC \
   libLLVMMCParser \
