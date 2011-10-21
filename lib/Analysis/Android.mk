@@ -22,10 +22,12 @@ clang_analysis_SRC_FILES :=	\
 	FormatString.cpp	\
 	LiveVariables.cpp	\
 	PrintfFormatString.cpp	\
+	ProgramPoint.cpp \
 	PseudoConstantAnalysis.cpp	\
 	ReachableCode.cpp	\
 	ScanfFormatString.cpp	\
-	UninitializedValues.cpp
+	UninitializedValues.cpp \
+	ThreadSafety.cpp
 
 
 LOCAL_SRC_FILES := $(clang_analysis_SRC_FILES)

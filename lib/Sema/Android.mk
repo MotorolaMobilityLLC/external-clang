@@ -24,12 +24,13 @@ clang_sema_SRC_FILES :=	\
 	IdentifierResolver.cpp	\
 	DelayedDiagnostic.cpp \
 	JumpDiagnostics.cpp	\
+	MultiInitializer.cpp \
 	Scope.cpp \
 	Sema.cpp	\
 	SemaAccess.cpp	\
 	SemaAttr.cpp	\
-	SemaCXXCast.cpp	\
 	SemaCXXScopeSpec.cpp	\
+	SemaCast.cpp \
 	SemaChecking.cpp	\
 	SemaCodeComplete.cpp	\
 	SemaDecl.cpp	\
@@ -41,6 +42,7 @@ clang_sema_SRC_FILES :=	\
 	SemaExprCXX.cpp	\
 	SemaExprMember.cpp \
 	SemaExprObjC.cpp	\
+	SemaFixItUtils.cpp \
 	SemaInit.cpp	\
 	SemaLookup.cpp	\
 	SemaObjCProperty.cpp	\

@@ -26,6 +26,7 @@ clang_basic_SRC_FILES :=	\
 	FileManager.cpp	\
 	FileSystemStatCache.cpp	\
 	IdentifierTable.cpp	\
+	LangOptions.cpp \
 	SourceLocation.cpp	\
 	SourceManager.cpp	\
 	TargetInfo.cpp	\

@@ -48,6 +48,7 @@ clang_ast_SRC_FILES :=	\
 	ParentMap.cpp	\
 	RecordLayout.cpp	\
 	RecordLayoutBuilder.cpp	\
+	SelectorLocationsKind.cpp \
 	Stmt.cpp	\
 	StmtDumper.cpp	\
 	StmtIterator.cpp	\
@@ -58,7 +59,9 @@ clang_ast_SRC_FILES :=	\
 	TemplateName.cpp	\
 	Type.cpp	\
 	TypeLoc.cpp	\
-	TypePrinter.cpp
+	TypePrinter.cpp \
+	VTTBuilder.cpp \
+	VTableBuilder.cpp
 
 LOCAL_SRC_FILES := $(clang_ast_SRC_FILES)
 

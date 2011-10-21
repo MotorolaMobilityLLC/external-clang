@@ -7,6 +7,7 @@ include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=    \
 	AttrList.inc	\
+	AttrLateParsed.inc \
 	Attrs.inc	\
 	DeclNodes.inc	\
 	DiagnosticParseKinds.inc	\

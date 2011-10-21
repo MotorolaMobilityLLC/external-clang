@@ -20,3 +20,19 @@ include $(LLVM_ROOT_PATH)/llvm.mk
 ifneq ($(LLVM_HOST_BUILD_MK),)
 include $(LLVM_HOST_BUILD_MK)
 endif
+
+###########################################################
+## Commands for running tblgen to compile a td file
+###########################################################
+define transform-host-clang-td-to-out
+@mkdir -p $(dir $@)
+@echo "Host TableGen: $(LOCAL_MODULE) (gen-$(1)) <= $<"
+$(hide) $(CLANG_TBLGEN) \
+	-I $(dir $<)	\
+	-I $(LLVM_ROOT_PATH)/include	\
+	-I $(LLVM_ROOT_PATH)/host/include	\
+	-I $(LLVM_ROOT_PATH)/lib/Target	\
+	$(if $(strip $(CLANG_ROOT_PATH)),-I $(CLANG_ROOT_PATH)/include,)	\
+	-gen-$(strip $(1))	\
+	-o $@ $<
+endef
