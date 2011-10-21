@@ -154,7 +154,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
     new llvm::GlobalAlias(AliasType, Linkage, "", Aliasee, &getModule());
 
   // Switch any previous uses to the alias.
-  llvm::StringRef MangledName = getMangledName(AliasDecl);
+  StringRef MangledName = getMangledName(AliasDecl);
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
     assert(Entry->isDeclaration() && "definition already exists for alias");
@@ -214,7 +214,7 @@ CodeGenModule::GetAddrOfCXXConstructor(const CXXConstructorDecl *ctor,
                                        const CGFunctionInfo *fnInfo) {
   GlobalDecl GD(ctor, ctorType);
   
-  llvm::StringRef name = getMangledName(GD);
+  StringRef name = getMangledName(GD);
   if (llvm::GlobalValue *existing = GetGlobalValue(name))
     return existing;
 
@@ -236,11 +236,7 @@ void CodeGenModule::EmitCXXDestructors(const CXXDestructorDecl *D) {
 
   // The destructor used for destructing this as a most-derived class;
   // call the base destructor and then destructs any virtual bases.
-  if (!D->getParent()->isAbstract() || D->isVirtual()) {
-    // We don't need to emit the complete ctor if the class is abstract,
-    // unless the destructor is virtual and needs to be in the vtable.
-    EmitGlobal(GlobalDecl(D, Dtor_Complete));
-  }
+  EmitGlobal(GlobalDecl(D, Dtor_Complete));
 
   // The destructor used for destructing this as a base class; ignores
   // virtual bases.
@@ -282,7 +278,7 @@ CodeGenModule::GetAddrOfCXXDestructor(const CXXDestructorDecl *dtor,
                                       const CGFunctionInfo *fnInfo) {
   GlobalDecl GD(dtor, dtorType);
 
-  llvm::StringRef name = getMangledName(GD);
+  StringRef name = getMangledName(GD);
   if (llvm::GlobalValue *existing = GetGlobalValue(name))
     return existing;
 
@@ -309,7 +305,7 @@ llvm::Value *
 CodeGenFunction::BuildVirtualCall(const CXXMethodDecl *MD, llvm::Value *This,
                                   llvm::Type *Ty) {
   MD = MD->getCanonicalDecl();
-  uint64_t VTableIndex = CGM.getVTables().getMethodVTableIndex(MD);
+  uint64_t VTableIndex = CGM.getVTableContext().getMethodVTableIndex(MD);
   
   return ::BuildVirtualCall(*this, VTableIndex, This, Ty);
 }
@@ -339,9 +335,10 @@ CodeGenFunction::BuildAppleKextVirtualCall(const CXXMethodDecl *MD,
   VTable = Builder.CreateBitCast(VTable, Ty);
   assert(VTable && "BuildVirtualCall = kext vtbl pointer is null");
   MD = MD->getCanonicalDecl();
-  uint64_t VTableIndex = CGM.getVTables().getMethodVTableIndex(MD);
+  uint64_t VTableIndex = CGM.getVTableContext().getMethodVTableIndex(MD);
   uint64_t AddressPoint = 
-    CGM.getVTables().getAddressPoint(BaseSubobject(RD, CharUnits::Zero()), RD);
+    CGM.getVTableContext().getVTableLayout(RD)
+       .getAddressPoint(BaseSubobject(RD, CharUnits::Zero()));
   VTableIndex += AddressPoint;
   llvm::Value *VFuncPtr = 
     Builder.CreateConstInBoundsGEP1_64(VTable, VTableIndex, "vfnkxt");
@@ -374,9 +371,10 @@ CodeGenFunction::BuildAppleKextVirtualDestructorCall(
     VTable = Builder.CreateBitCast(VTable, Ty);
     DD = cast<CXXDestructorDecl>(DD->getCanonicalDecl());
     uint64_t VTableIndex = 
-      CGM.getVTables().getMethodVTableIndex(GlobalDecl(DD, Type));
+      CGM.getVTableContext().getMethodVTableIndex(GlobalDecl(DD, Type));
     uint64_t AddressPoint =
-      CGM.getVTables().getAddressPoint(BaseSubobject(RD, CharUnits::Zero()), RD);
+      CGM.getVTableContext().getVTableLayout(RD)
+         .getAddressPoint(BaseSubobject(RD, CharUnits::Zero()));
     VTableIndex += AddressPoint;
     llvm::Value *VFuncPtr =
       Builder.CreateConstInBoundsGEP1_64(VTable, VTableIndex, "vfnkxt");
@@ -390,7 +388,7 @@ CodeGenFunction::BuildVirtualCall(const CXXDestructorDecl *DD, CXXDtorType Type,
                                   llvm::Value *This, llvm::Type *Ty) {
   DD = cast<CXXDestructorDecl>(DD->getCanonicalDecl());
   uint64_t VTableIndex = 
-    CGM.getVTables().getMethodVTableIndex(GlobalDecl(DD, Type));
+    CGM.getVTableContext().getMethodVTableIndex(GlobalDecl(DD, Type));
 
   return ::BuildVirtualCall(*this, VTableIndex, This, Ty);
 }

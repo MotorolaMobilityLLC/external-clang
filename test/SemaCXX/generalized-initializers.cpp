@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -std=c++0x -fsyntax-only -verify %s
+// RUN: %clang_cc1 -std=c++11 -fsyntax-only -verify %s
 // XFAIL: *
 
 template <typename T, typename U>
@@ -40,32 +40,6 @@ namespace std {
 
 namespace integral {
 
-  void initialization() {
-    { const int a{}; static_assert(a == 0, ""); }
-    { const int a = {}; static_assert(a == 0, ""); }
-    { const int a{1}; static_assert(a == 1, ""); }
-    { const int a = {1}; static_assert(a == 1, ""); }
-    { const int a{1, 2}; } // expected-error {{excess elements}}
-    { const int a = {1, 2}; } // expected-error {{excess elements}}
-    { const short a{100000}; } // expected-error {{narrowing conversion}}
-    { const short a = {100000}; } // expected-error {{narrowing conversion}}
-  }
-
-  int function_call() {
-    void takes_int(int);
-    takes_int({1});
-
-    int ar[10];
-    (void) ar[{1}]; // expected-error {{initializer list is illegal with the built-in index operator}}
-
-    return {1};
-  }
-
-  void inline_init() {
-    (void) int{1};
-    (void) new int{1};
-  }
-
   void initializer_list() {
     std::initializer_list<int> il = { 1, 2, 3 };
     std::initializer_list<double> dl = { 1.0, 2.0, 3 };
@@ -75,11 +49,6 @@ namespace integral {
 
     for (int i : {1, 2, 3, 4}) {}
   }
-
-  struct A {
-    int i;
-    A() : i{1} {}
-  };
 
 }
 
@@ -200,29 +169,4 @@ namespace litb {
   // valid (T deduced to <>).
   B g({1, 2, 3});
 
-}
-
-namespace aggregate {
-  // Direct list initialization does NOT allow braces to be elided!
-  struct S {
-    int ar[2];
-    struct T {
-      int i1;
-      int i2;
-    } t;
-    struct U {
-      int i1;
-    } u[2];
-    struct V {
-      int var[2];
-    } v;
-  };
-
-  void test() {
-    S s1 = { 1, 2, 3 ,4, 5, 6, 7, 8 }; // no-error
-    S s2{ {1, 2}, {3, 4}, { {5}, {6} }, { {7, 8} } }; // completely braced
-    S s3{ 1, 2, 3, 4, 5, 6 }; // xpected-error
-    S s4{ {1, 2}, {3, 4}, {5, 6}, { {7, 8} } }; // xpected-error
-    S s5{ {1, 2}, {3, 4}, { {5}, {6} }, {7, 8} }; // xpected-error
-  }
 }

@@ -16,6 +16,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/ErrorHandling.h"
 using namespace clang;
 
 namespace {
@@ -91,9 +92,9 @@ static double GetApproxValue(const llvm::APFloat &F) {
   return V.convertToDouble();
 }
 
-void APValue::print(llvm::raw_ostream &OS) const {
+void APValue::print(raw_ostream &OS) const {
   switch (getKind()) {
-  default: assert(0 && "Unknown APValue kind!");
+  default: llvm_unreachable("Unknown APValue kind!");
   case Uninitialized:
     OS << "Uninitialized";
     return;
@@ -120,10 +121,10 @@ void APValue::print(llvm::raw_ostream &OS) const {
   }
 }
 
-static void WriteShortAPValueToStream(llvm::raw_ostream& Out,
+static void WriteShortAPValueToStream(raw_ostream& Out,
                                       const APValue& V) {
   switch (V.getKind()) {
-  default: assert(0 && "Unknown APValue kind!");
+  default: llvm_unreachable("Unknown APValue kind!");
   case APValue::Uninitialized:
     Out << "Uninitialized";
     break;

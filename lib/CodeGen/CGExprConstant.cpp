@@ -138,13 +138,12 @@ void ConstStructBuilder::AppendBitField(const FieldDecl *Field,
     // We need to add padding.
     CharUnits PadSize = Context.toCharUnitsFromBits(
       llvm::RoundUpToAlignment(FieldOffset - NextFieldOffsetInBits, 
-                               Context.Target.getCharAlign()));
+                               Context.getTargetInfo().getCharAlign()));
 
     AppendPadding(PadSize);
   }
 
-  uint64_t FieldSize =
-    Field->getBitWidth()->EvaluateAsInt(Context).getZExtValue();
+  uint64_t FieldSize = Field->getBitWidthValue(Context);
 
   llvm::APInt FieldValue = CI->getValue();
 
@@ -364,7 +363,7 @@ bool ConstStructBuilder::Build(InitListExpr *ILE) {
       continue;
 
     // Don't emit anonymous bitfields, they just affect layout.
-    if (Field->isBitField() && !Field->getIdentifier()) {
+    if (Field->isUnnamedBitfield()) {
       LastFD = (*Field);
       continue;
     }
@@ -571,7 +570,8 @@ public:
     case CK_NoOp:
       return C;
 
-    case CK_AnyPointerToObjCPointerCast:
+    case CK_CPointerToObjCPointerCast:
+    case CK_BlockPointerToObjCPointerCast:
     case CK_AnyPointerToBlockPointerCast:
     case CK_LValueBitCast:
     case CK_BitCast:
@@ -585,9 +585,10 @@ public:
     case CK_GetObjCProperty:
     case CK_ToVoid:
     case CK_Dynamic:
-    case CK_ObjCProduceObject:
-    case CK_ObjCConsumeObject:
-    case CK_ObjCReclaimReturnedObject:
+    case CK_ARCProduceObject:
+    case CK_ARCConsumeObject:
+    case CK_ARCReclaimReturnedObject:
+    case CK_ARCExtendBlockObject:
       return 0;
 
     // These might need to be supported for constexpr.
@@ -740,6 +741,22 @@ public:
   }
 
   llvm::Constant *VisitInitListExpr(InitListExpr *ILE) {
+    if (ILE->getType()->isAnyComplexType() && ILE->getNumInits() == 2) {
+      // Complex type with element initializers
+      Expr *Real = ILE->getInit(0);
+      Expr *Imag = ILE->getInit(1);
+      llvm::Constant *Complex[2];
+      Complex[0] = CGM.EmitConstantExpr(Real, Real->getType(), CGF);
+      if (!Complex[0])
+        return 0;
+      Complex[1] = CGM.EmitConstantExpr(Imag, Imag->getType(), CGF);
+      if (!Complex[1])
+        return 0;
+      llvm::StructType *STy =
+          cast<llvm::StructType>(ConvertType(ILE->getType()));
+      return llvm::ConstantStruct::get(STy, Complex);
+    }
+
     if (ILE->getType()->isScalarType()) {
       // We have a scalar in braces. Just use the first element.
       if (ILE->getNumInits() > 0) {
@@ -762,10 +779,7 @@ public:
     if (ILE->getType()->isVectorType())
       return 0;
 
-    assert(0 && "Unable to handle InitListExpr");
-    // Get rid of control reaches end of void function warning.
-    // Not reached.
-    return 0;
+    llvm_unreachable("Unable to handle InitListExpr");
   }
 
   llvm::Constant *VisitCXXConstructExpr(CXXConstructExpr *E) {
@@ -789,8 +803,8 @@ public:
 
     if (E->getNumArgs()) {
       assert(E->getNumArgs() == 1 && "trivial ctor with > 1 argument");
-      assert(E->getConstructor()->isCopyConstructor() &&
-             "trivial ctor has argument but isn't a copy ctor");
+      assert(E->getConstructor()->isCopyOrMoveConstructor() &&
+             "trivial ctor has argument but isn't a copy/move ctor");
 
       Expr *Arg = E->getArg(0);
       assert(CGM.getContext().hasSameUnqualifiedType(Ty, Arg->getType()) &&
@@ -948,8 +962,7 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
   if (Success && !Result.HasSideEffects) {
     switch (Result.Val.getKind()) {
     case APValue::Uninitialized:
-      assert(0 && "Constant expressions should be initialized.");
-      return 0;
+      llvm_unreachable("Constant expressions should be initialized.");
     case APValue::LValue: {
       llvm::Type *DestTy = getTypes().ConvertTypeForMem(DestType);
       llvm::Constant *Offset =
@@ -964,7 +977,7 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
         if (!Offset->isNullValue()) {
           llvm::Type *Type = llvm::Type::getInt8PtrTy(VMContext);
           llvm::Constant *Casted = llvm::ConstantExpr::getBitCast(C, Type);
-          Casted = llvm::ConstantExpr::getGetElementPtr(Casted, &Offset, 1);
+          Casted = llvm::ConstantExpr::getGetElementPtr(Casted, Offset);
           C = llvm::ConstantExpr::getBitCast(Casted, C->getType());
         }
 
@@ -1013,8 +1026,13 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
                                                     NULL);
       return llvm::ConstantStruct::get(STy, Complex);
     }
-    case APValue::Float:
-      return llvm::ConstantFP::get(VMContext, Result.Val.getFloat());
+    case APValue::Float: {
+      const llvm::APFloat &Init = Result.Val.getFloat();
+      if (&Init.getSemantics() == &llvm::APFloat::IEEEhalf)
+        return llvm::ConstantInt::get(VMContext, Init.bitcastToAPInt());
+      else
+        return llvm::ConstantFP::get(VMContext, Init);
+    }
     case APValue::ComplexFloat: {
       llvm::Constant *Complex[2];
 
@@ -1030,7 +1048,7 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
       return llvm::ConstantStruct::get(STy, Complex);
     }
     case APValue::Vector: {
-      llvm::SmallVector<llvm::Constant *, 4> Inits;
+      SmallVector<llvm::Constant *, 4> Inits;
       unsigned NumElts = Result.Val.getVectorLength();
 
       if (Context.getLangOptions().AltiVec &&
@@ -1329,4 +1347,9 @@ llvm::Constant *CodeGenModule::EmitNullConstant(QualType T) {
   // Itanium C++ ABI 2.3:
   //   A NULL pointer is represented as -1.
   return getCXXABI().EmitNullMemberPointer(T->castAs<MemberPointerType>());
+}
+
+llvm::Constant *
+CodeGenModule::EmitNullConstantForBase(const CXXRecordDecl *Record) {
+  return ::EmitNullConstant(*this, Record, false);
 }

@@ -82,7 +82,7 @@ public:
   /// JobList - A sequence of jobs to perform.
 class JobList : public Job {
 public:
-  typedef llvm::SmallVector<Job*, 4> list_type;
+  typedef SmallVector<Job*, 4> list_type;
   typedef list_type::size_type size_type;
   typedef list_type::iterator iterator;
   typedef list_type::const_iterator const_iterator;
@@ -96,6 +96,9 @@ public:
 
   /// Add a job to the list (taking ownership).
   void addJob(Job *J) { Jobs.push_back(J); }
+
+  /// Clear the job list.
+  void clear();
 
   const list_type &getJobs() const { return Jobs; }
 

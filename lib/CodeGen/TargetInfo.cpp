@@ -57,7 +57,7 @@ const llvm::TargetData &ABIInfo::getTargetData() const {
 
 
 void ABIArgInfo::dump() const {
-  llvm::raw_ostream &OS = llvm::errs();
+  raw_ostream &OS = llvm::errs();
   OS << "(ABIArgInfo Kind=";
   switch (TheKind) {
   case Direct:
@@ -86,6 +86,25 @@ void ABIArgInfo::dump() const {
 }
 
 TargetCodeGenInfo::~TargetCodeGenInfo() { delete Info; }
+
+// If someone can figure out a general rule for this, that would be great.
+// It's probably just doomed to be platform-dependent, though.
+unsigned TargetCodeGenInfo::getSizeOfUnwindException() const {
+  // Verified for:
+  //   x86-64     FreeBSD, Linux, Darwin
+  //   x86-32     FreeBSD, Linux, Darwin
+  //   PowerPC    Linux, Darwin
+  //   ARM        Darwin (*not* EABI)
+  return 32;
+}
+
+bool TargetCodeGenInfo::isNoProtoCallVariadic(CallingConv CC) const {
+  // The following conventions are known to require this to be false:
+  //   x86_stdcall
+  //   MIPS
+  // For everything else, we just prefer false unless we opt out.
+  return false;
+}
 
 static bool isEmptyRecord(ASTContext &Context, QualType T, bool AllowArrays);
 
@@ -357,7 +376,7 @@ bool UseX86_MMXType(llvm::Type *IRType) {
 }
 
 static llvm::Type* X86AdjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
-                                          llvm::StringRef Constraint,
+                                          StringRef Constraint,
                                           llvm::Type* Ty) {
   if ((Constraint == "y" || Constraint == "&y") && Ty->isVectorTy())
     return llvm::Type::getX86_MMXTy(CGF.getLLVMContext());
@@ -428,7 +447,7 @@ public:
                                llvm::Value *Address) const;
 
   llvm::Type* adjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
-                                  llvm::StringRef Constraint,
+                                  StringRef Constraint,
                                   llvm::Type* Ty) const {
     return X86AdjustInlineAsmType(CGF, Constraint, Ty);
   }
@@ -892,7 +911,7 @@ class X86_64ABIInfo : public ABIInfo {
   /// required strict binary compatibility with older versions of GCC
   /// may need to exempt themselves.
   bool honorsRevision0_98() const {
-    return !getContext().Target.getTriple().isOSDarwin();
+    return !getContext().getTargetInfo().getTriple().isOSDarwin();
   }
 
 public:
@@ -943,9 +962,18 @@ public:
   }
 
   llvm::Type* adjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
-                                  llvm::StringRef Constraint,
+                                  StringRef Constraint,
                                   llvm::Type* Ty) const {
     return X86AdjustInlineAsmType(CGF, Constraint, Ty);
+  }
+
+  bool isNoProtoCallVariadic(CallingConv CC) const {
+    // The default CC on x86-64 sets %al to the number of SSA
+    // registers used, and GCC sets this when calling an unprototyped
+    // function, so we override the default behavior.
+    if (CC == CC_Default || CC == CC_C) return true;
+
+    return TargetCodeGenInfo::isNoProtoCallVariadic(CC);
   }
 
 };
@@ -1309,8 +1337,7 @@ void X86_64ABIInfo::classify(QualType Ty, uint64_t OffsetBase,
           continue;
 
         uint64_t Offset = OffsetBase + Layout.getFieldOffset(idx);
-        uint64_t Size =
-          i->getBitWidth()->EvaluateAsInt(getContext()).getZExtValue();
+        uint64_t Size = i->getBitWidthValue(getContext());
 
         uint64_t EB_Lo = Offset / 64;
         uint64_t EB_Hi = (Offset + Size - 1) / 64;
@@ -1678,7 +1705,7 @@ classifyReturnType(QualType RetTy) const {
 
   case SSEUp:
   case X87Up:
-    assert(0 && "Invalid classification for lo word.");
+    llvm_unreachable("Invalid classification for lo word.");
 
     // AMD64-ABI 3.2.3p4: Rule 2. Types of class memory are returned via
     // hidden argument.
@@ -1732,7 +1759,7 @@ classifyReturnType(QualType RetTy) const {
     // never occur as a hi class.
   case Memory:
   case X87:
-    assert(0 && "Invalid classification for hi word.");
+    llvm_unreachable("Invalid classification for hi word.");
 
   case ComplexX87: // Previously handled.
   case NoClass:
@@ -1820,7 +1847,7 @@ ABIArgInfo X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned &neededInt,
 
   case SSEUp:
   case X87Up:
-    assert(0 && "Invalid classification for lo word.");
+    llvm_unreachable("Invalid classification for lo word.");
 
     // AMD64-ABI 3.2.3p3: Rule 2. If the class is INTEGER, the next
     // available register of the sequence %rdi, %rsi, %rdx, %rcx, %r8
@@ -1864,8 +1891,7 @@ ABIArgInfo X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned &neededInt,
   case Memory:
   case X87:
   case ComplexX87:
-    assert(0 && "Invalid classification for hi word.");
-    break;
+    llvm_unreachable("Invalid classification for hi word.");
 
   case NoClass: break;
 
@@ -2166,7 +2192,7 @@ ABIArgInfo WinX86_64ABIInfo::classify(QualType Ty) const {
 
     // FIXME: mingw-w64-gcc emits 128-bit struct as i128
     if (Size == 128 &&
-        getContext().Target.getTriple().getOS() == llvm::Triple::MinGW32)
+        getContext().getTargetInfo().getTriple().getOS() == llvm::Triple::MinGW32)
       return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(),
                                                           Size));
 
@@ -2300,6 +2326,11 @@ private:
 public:
   ARMABIInfo(CodeGenTypes &CGT, ABIKind _Kind) : ABIInfo(CGT), Kind(_Kind) {}
 
+  bool isEABI() const {
+    StringRef Env = getContext().getTargetInfo().getTriple().getEnvironmentName();
+    return (Env == "gnueabi" || Env == "eabi");
+  }
+
 private:
   ABIKind getABIKind() const { return Kind; }
 
@@ -2317,11 +2348,15 @@ public:
   ARMTargetCodeGenInfo(CodeGenTypes &CGT, ARMABIInfo::ABIKind K)
     :TargetCodeGenInfo(new ARMABIInfo(CGT, K)) {}
 
+  const ARMABIInfo &getABIInfo() const {
+    return static_cast<const ARMABIInfo&>(TargetCodeGenInfo::getABIInfo());
+  }
+
   int getDwarfEHStackPointer(CodeGen::CodeGenModule &M) const {
     return 13;
   }
 
-  llvm::StringRef getARCRetainAutoreleasedReturnValueMarker() const {
+  StringRef getARCRetainAutoreleasedReturnValueMarker() const {
     return "mov\tr7, r7\t\t@ marker for objc_retainAutoreleaseReturnValue";
   }
 
@@ -2337,6 +2372,11 @@ public:
     AssignToArrayRange(Builder, Address, Four8, 0, 15);
 
     return false;
+  }
+
+  unsigned getSizeOfUnwindException() const {
+    if (getABIInfo().isEABI()) return 88;
+    return TargetCodeGenInfo::getSizeOfUnwindException();
   }
 };
 
@@ -2354,8 +2394,7 @@ void ARMABIInfo::computeInfo(CGFunctionInfo &FI) const {
 
   // Calling convention as default by an ABI.
   llvm::CallingConv::ID DefaultCC;
-  llvm::StringRef Env = getContext().Target.getTriple().getEnvironmentName();
-  if (Env == "gnueabi" || Env == "eabi")
+  if (isEABI())
     DefaultCC = llvm::CallingConv::ARM_AAPCS;
   else
     DefaultCC = llvm::CallingConv::ARM_APCS;
@@ -2379,6 +2418,73 @@ void ARMABIInfo::computeInfo(CGFunctionInfo &FI) const {
   }
 }
 
+/// isHomogeneousAggregate - Return true if a type is an AAPCS-VFP homogeneous
+/// aggregate.  If HAMembers is non-null, the number of base elements
+/// contained in the type is returned through it; this is used for the
+/// recursive calls that check aggregate component types.
+static bool isHomogeneousAggregate(QualType Ty, const Type *&Base,
+                                   ASTContext &Context,
+                                   uint64_t *HAMembers = 0) {
+  uint64_t Members;
+  if (const ConstantArrayType *AT = Context.getAsConstantArrayType(Ty)) {
+    if (!isHomogeneousAggregate(AT->getElementType(), Base, Context, &Members))
+      return false;
+    Members *= AT->getSize().getZExtValue();
+  } else if (const RecordType *RT = Ty->getAs<RecordType>()) {
+    const RecordDecl *RD = RT->getDecl();
+    if (RD->isUnion() || RD->hasFlexibleArrayMember())
+      return false;
+    if (const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
+      if (!CXXRD->isAggregate())
+        return false;
+    }
+    Members = 0;
+    for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
+         i != e; ++i) {
+      const FieldDecl *FD = *i;
+      uint64_t FldMembers;
+      if (!isHomogeneousAggregate(FD->getType(), Base, Context, &FldMembers))
+        return false;
+      Members += FldMembers;
+    }
+  } else {
+    Members = 1;
+    if (const ComplexType *CT = Ty->getAs<ComplexType>()) {
+      Members = 2;
+      Ty = CT->getElementType();
+    }
+
+    // Homogeneous aggregates for AAPCS-VFP must have base types of float,
+    // double, or 64-bit or 128-bit vectors.
+    if (const BuiltinType *BT = Ty->getAs<BuiltinType>()) {
+      if (BT->getKind() != BuiltinType::Float && 
+          BT->getKind() != BuiltinType::Double)
+        return false;
+    } else if (const VectorType *VT = Ty->getAs<VectorType>()) {
+      unsigned VecSize = Context.getTypeSize(VT);
+      if (VecSize != 64 && VecSize != 128)
+        return false;
+    } else {
+      return false;
+    }
+
+    // The base type must be the same for all members.  Vector types of the
+    // same total size are treated as being equivalent here.
+    const Type *TyPtr = Ty.getTypePtr();
+    if (!Base)
+      Base = TyPtr;
+    if (Base != TyPtr &&
+        (!Base->isVectorType() || !TyPtr->isVectorType() ||
+         Context.getTypeSize(Base) != Context.getTypeSize(TyPtr)))
+      return false;
+  }
+
+  // Homogeneous Aggregates can have at most 4 members of the base type.
+  if (HAMembers)
+    *HAMembers = Members;
+  return (Members <= 4);
+}
+
 ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty) const {
   if (!isAggregateTypeForABI(Ty)) {
     // Treat an enum type as its underlying type.
@@ -2398,23 +2504,26 @@ ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty) const {
   if (isRecordWithNonTrivialDestructorOrCopyConstructor(Ty))
     return ABIArgInfo::getIndirect(0, /*ByVal=*/false);
 
+  if (getABIKind() == ARMABIInfo::AAPCS_VFP) {
+    // Homogeneous Aggregates need to be expanded.
+    const Type *Base = 0;
+    if (isHomogeneousAggregate(Ty, Base, getContext()))
+      return ABIArgInfo::getExpand();
+  }
+
   // Otherwise, pass by coercing to a structure of the appropriate size.
   //
+  // FIXME: This is kind of nasty... but there isn't much choice because the ARM
+  // backend doesn't support byval.
   // FIXME: This doesn't handle alignment > 64 bits.
   llvm::Type* ElemTy;
   unsigned SizeRegs;
-  if (getContext().getTypeSizeInChars(Ty) <= CharUnits::fromQuantity(64)) {
-    ElemTy = llvm::Type::getInt32Ty(getVMContext());
-    SizeRegs = (getContext().getTypeSize(Ty) + 31) / 32;
-  } else if (getABIKind() == ARMABIInfo::APCS) {
-    // Initial ARM ByVal support is APCS-only.
-    return ABIArgInfo::getIndirect(0, /*ByVal=*/true);
-  } else {
-    // FIXME: This is kind of nasty... but there isn't much choice
-    // because most of the ARM calling conventions don't yet support
-    // byval.
+  if (getContext().getTypeAlign(Ty) > 32) {
     ElemTy = llvm::Type::getInt64Ty(getVMContext());
     SizeRegs = (getContext().getTypeSize(Ty) + 63) / 64;
+  } else {
+    ElemTy = llvm::Type::getInt32Ty(getVMContext());
+    SizeRegs = (getContext().getTypeSize(Ty) + 31) / 32;
   }
 
   llvm::Type *STy =
@@ -2632,6 +2741,9 @@ class PTXTargetCodeGenInfo : public TargetCodeGenInfo {
 public:
   PTXTargetCodeGenInfo(CodeGenTypes &CGT)
     : TargetCodeGenInfo(new PTXABIInfo(CGT)) {}
+    
+  virtual void SetTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
+                                   CodeGen::CodeGenModule &M) const;
 };
 
 ABIArgInfo PTXABIInfo::classifyReturnType(QualType RetTy) const {
@@ -2661,19 +2773,57 @@ void PTXABIInfo::computeInfo(CGFunctionInfo &FI) const {
 
   // Calling convention as default by an ABI.
   llvm::CallingConv::ID DefaultCC;
-  llvm::StringRef Env = getContext().Target.getTriple().getEnvironmentName();
-  if (Env == "device")
+  const LangOptions &LangOpts = getContext().getLangOptions();
+  if (LangOpts.OpenCL || LangOpts.CUDA) {
+    // If we are in OpenCL or CUDA mode, then default to device functions
     DefaultCC = llvm::CallingConv::PTX_Device;
-  else
-    DefaultCC = llvm::CallingConv::PTX_Kernel;
-
+  } else {
+    // If we are in standard C/C++ mode, use the triple to decide on the default
+    StringRef Env = 
+      getContext().getTargetInfo().getTriple().getEnvironmentName();
+    if (Env == "device")
+      DefaultCC = llvm::CallingConv::PTX_Device;
+    else
+      DefaultCC = llvm::CallingConv::PTX_Kernel;
+  }
   FI.setEffectiveCallingConvention(DefaultCC);
+   
 }
 
 llvm::Value *PTXABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
                                    CodeGenFunction &CFG) const {
   llvm_unreachable("PTX does not support varargs");
   return 0;
+}
+
+void PTXTargetCodeGenInfo::SetTargetAttributes(const Decl *D,
+                                               llvm::GlobalValue *GV,
+                                               CodeGen::CodeGenModule &M) const{
+  const FunctionDecl *FD = dyn_cast<FunctionDecl>(D);
+  if (!FD) return;
+
+  llvm::Function *F = cast<llvm::Function>(GV);
+
+  // Perform special handling in OpenCL mode
+  if (M.getLangOptions().OpenCL) {
+    // Use OpenCL function attributes to set proper calling conventions
+    // By default, all functions are device functions
+    if (FD->hasAttr<OpenCLKernelAttr>()) {
+      // OpenCL __kernel functions get a kernel calling convention
+      F->setCallingConv(llvm::CallingConv::PTX_Kernel);
+      // And kernel functions are not subject to inlining
+      F->addFnAttr(llvm::Attribute::NoInline);
+    }
+  }
+
+  // Perform special handling in CUDA mode.
+  if (M.getLangOptions().CUDA) {
+    // CUDA __global__ functions get a kernel calling convention.  Since
+    // __global__ functions cannot be called from the device, we do not
+    // need to set the noinline attribute.
+    if (FD->getAttr<CUDAGlobalAttr>())
+      F->setCallingConv(llvm::CallingConv::PTX_Kernel);
+  }
 }
 
 }
@@ -2900,7 +3050,7 @@ void MSP430TargetCodeGenInfo::SetTargetAttributes(const Decl *D,
       // Step 3: Emit ISR vector alias.
       unsigned Num = attr->getNumber() + 0xffe0;
       new llvm::GlobalAlias(GV->getType(), llvm::Function::ExternalLinkage,
-                            "vector_" + llvm::Twine::utohexstr(Num),
+                            "vector_" + Twine::utohexstr(Num),
                             GV, &M.getModule());
     }
   }
@@ -2913,6 +3063,7 @@ void MSP430TargetCodeGenInfo::SetTargetAttributes(const Decl *D,
 
 namespace {
 class MipsABIInfo : public ABIInfo {
+  static const unsigned MinABIStackAlignInBytes = 4;
 public:
   MipsABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
 
@@ -2923,10 +3074,13 @@ public:
                                  CodeGenFunction &CGF) const;
 };
 
+const unsigned MipsABIInfo::MinABIStackAlignInBytes;
+
 class MIPSTargetCodeGenInfo : public TargetCodeGenInfo {
+  unsigned SizeOfUnwindException;
 public:
-  MIPSTargetCodeGenInfo(CodeGenTypes &CGT)
-    : TargetCodeGenInfo(new MipsABIInfo(CGT)) {}
+  MIPSTargetCodeGenInfo(CodeGenTypes &CGT, unsigned SZ)
+    : TargetCodeGenInfo(new MipsABIInfo(CGT)), SizeOfUnwindException(SZ) {}
 
   int getDwarfEHStackPointer(CodeGen::CodeGenModule &CGM) const {
     return 29;
@@ -2934,6 +3088,10 @@ public:
 
   bool initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
                                llvm::Value *Address) const;
+
+  unsigned getSizeOfUnwindException() const {
+    return SizeOfUnwindException;
+  }
 };
 }
 
@@ -2942,6 +3100,11 @@ ABIArgInfo MipsABIInfo::classifyArgumentType(QualType Ty) const {
     // Ignore empty aggregates.
     if (getContext().getTypeSize(Ty) == 0)
       return ABIArgInfo::getIgnore();
+
+    // Records with non trivial destructors/constructors should not be passed
+    // by value.
+    if (isRecordWithNonTrivialDestructorOrCopyConstructor(Ty))
+      return ABIArgInfo::getIndirect(0, /*ByVal=*/false);
 
     return ABIArgInfo::getIndirect(0);
   }
@@ -2982,7 +3145,37 @@ void MipsABIInfo::computeInfo(CGFunctionInfo &FI) const {
 
 llvm::Value* MipsABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
                                     CodeGenFunction &CGF) const {
-  return 0;
+  llvm::Type *BP = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
+  llvm::Type *BPP = llvm::PointerType::getUnqual(BP);
+ 
+  CGBuilderTy &Builder = CGF.Builder;
+  llvm::Value *VAListAddrAsBPP = Builder.CreateBitCast(VAListAddr, BPP, "ap");
+  llvm::Value *Addr = Builder.CreateLoad(VAListAddrAsBPP, "ap.cur");
+  unsigned TypeAlign = getContext().getTypeAlign(Ty) / 8;
+  llvm::Type *PTy = llvm::PointerType::getUnqual(CGF.ConvertType(Ty));
+  llvm::Value *AddrTyped;
+
+  if (TypeAlign > MinABIStackAlignInBytes) {
+    llvm::Value *AddrAsInt32 = CGF.Builder.CreatePtrToInt(Addr, CGF.Int32Ty);
+    llvm::Value *Inc = llvm::ConstantInt::get(CGF.Int32Ty, TypeAlign - 1);
+    llvm::Value *Mask = llvm::ConstantInt::get(CGF.Int32Ty, -TypeAlign);
+    llvm::Value *Add = CGF.Builder.CreateAdd(AddrAsInt32, Inc);
+    llvm::Value *And = CGF.Builder.CreateAnd(Add, Mask);
+    AddrTyped = CGF.Builder.CreateIntToPtr(And, PTy);
+  }
+  else
+    AddrTyped = Builder.CreateBitCast(Addr, PTy);  
+
+  llvm::Value *AlignedAddr = Builder.CreateBitCast(AddrTyped, BP);
+  TypeAlign = std::max(TypeAlign, MinABIStackAlignInBytes);
+  uint64_t Offset =
+    llvm::RoundUpToAlignment(CGF.getContext().getTypeSize(Ty) / 8, TypeAlign);
+  llvm::Value *NextAddr =
+    Builder.CreateGEP(AlignedAddr, llvm::ConstantInt::get(CGF.Int32Ty, Offset),
+                      "ap.next");
+  Builder.CreateStore(NextAddr, VAListAddrAsBPP);
+  
+  return AddrTyped;
 }
 
 bool
@@ -3018,29 +3211,98 @@ MIPSTargetCodeGenInfo::initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
   return false;
 }
 
+//===----------------------------------------------------------------------===//
+// TCE ABI Implementation (see http://tce.cs.tut.fi). Uses mostly the defaults.
+// Currently subclassed only to implement custom OpenCL C function attribute 
+// handling.
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+class TCETargetCodeGenInfo : public DefaultTargetCodeGenInfo {
+public:
+  TCETargetCodeGenInfo(CodeGenTypes &CGT)
+    : DefaultTargetCodeGenInfo(CGT) {}
+
+  virtual void SetTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
+                                   CodeGen::CodeGenModule &M) const;
+};
+
+void TCETargetCodeGenInfo::SetTargetAttributes(const Decl *D,
+                                               llvm::GlobalValue *GV,
+                                               CodeGen::CodeGenModule &M) const {
+  const FunctionDecl *FD = dyn_cast<FunctionDecl>(D);
+  if (!FD) return;
+
+  llvm::Function *F = cast<llvm::Function>(GV);
+  
+  if (M.getLangOptions().OpenCL) {
+    if (FD->hasAttr<OpenCLKernelAttr>()) {
+      // OpenCL C Kernel functions are not subject to inlining
+      F->addFnAttr(llvm::Attribute::NoInline);
+          
+      if (FD->hasAttr<ReqdWorkGroupSizeAttr>()) {
+
+        // Convert the reqd_work_group_size() attributes to metadata.
+        llvm::LLVMContext &Context = F->getContext();
+        llvm::NamedMDNode *OpenCLMetadata = 
+            M.getModule().getOrInsertNamedMetadata("opencl.kernel_wg_size_info");
+
+        SmallVector<llvm::Value*, 5> Operands;
+        Operands.push_back(F);
+
+        Operands.push_back(llvm::Constant::getIntegerValue(
+                             llvm::Type::getInt32Ty(Context), 
+                             llvm::APInt(
+                               32, 
+                               FD->getAttr<ReqdWorkGroupSizeAttr>()->getXDim())));
+        Operands.push_back(llvm::Constant::getIntegerValue(
+                             llvm::Type::getInt32Ty(Context), 
+                             llvm::APInt(
+                               32,
+                               FD->getAttr<ReqdWorkGroupSizeAttr>()->getYDim())));
+        Operands.push_back(llvm::Constant::getIntegerValue(
+                             llvm::Type::getInt32Ty(Context), 
+                             llvm::APInt(
+                               32, 
+                               FD->getAttr<ReqdWorkGroupSizeAttr>()->getZDim())));
+
+        // Add a boolean constant operand for "required" (true) or "hint" (false)
+        // for implementing the work_group_size_hint attr later. Currently 
+        // always true as the hint is not yet implemented.
+        Operands.push_back(llvm::ConstantInt::getTrue(llvm::Type::getInt1Ty(Context)));
+
+        OpenCLMetadata->addOperand(llvm::MDNode::get(Context, Operands));
+      }
+    }
+  }
+}
+
+}
 
 const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
   if (TheTargetCodeGenInfo)
     return *TheTargetCodeGenInfo;
 
-  // For now we just cache the TargetCodeGenInfo in CodeGenModule and don't
-  // free it.
-
-  const llvm::Triple &Triple = getContext().Target.getTriple();
+  const llvm::Triple &Triple = getContext().getTargetInfo().getTriple();
   switch (Triple.getArch()) {
   default:
     return *(TheTargetCodeGenInfo = new DefaultTargetCodeGenInfo(Types));
 
   case llvm::Triple::mips:
   case llvm::Triple::mipsel:
-    return *(TheTargetCodeGenInfo = new MIPSTargetCodeGenInfo(Types));
+    return *(TheTargetCodeGenInfo = new MIPSTargetCodeGenInfo(Types, 24));
+
+  case llvm::Triple::mips64:
+  case llvm::Triple::mips64el:
+    return *(TheTargetCodeGenInfo = new MIPSTargetCodeGenInfo(Types, 32));
 
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
     {
       ARMABIInfo::ABIKind Kind = ARMABIInfo::AAPCS;
 
-      if (strcmp(getContext().Target.getABI(), "apcs-gnu") == 0)
+      if (strcmp(getContext().getTargetInfo().getABI(), "apcs-gnu") == 0)
         Kind = ARMABIInfo::APCS;
       else if (CodeGenOpts.FloatABI == "hard")
         Kind = ARMABIInfo::AAPCS_VFP;
@@ -3064,8 +3326,11 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
   case llvm::Triple::msp430:
     return *(TheTargetCodeGenInfo = new MSP430TargetCodeGenInfo(Types));
 
+  case llvm::Triple::tce:
+    return *(TheTargetCodeGenInfo = new TCETargetCodeGenInfo(Types));
+
   case llvm::Triple::x86: {
-    bool DisableMMX = strcmp(getContext().Target.getABI(), "no-mmx") == 0;
+    bool DisableMMX = strcmp(getContext().getTargetInfo().getABI(), "no-mmx") == 0;
 
     if (Triple.isOSDarwin())
       return *(TheTargetCodeGenInfo =

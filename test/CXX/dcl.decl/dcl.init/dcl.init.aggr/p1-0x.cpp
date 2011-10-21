@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -verify -std=c++0x %s
+// RUN: %clang_cc1 -fsyntax-only -verify -std=c++11 %s
 
 // An aggregate is an array or a class...
 struct Aggr {
@@ -18,11 +18,10 @@ struct NonAggr1a {
   NonAggr1a(int, int);
   int k;
 };
-// In C++03, this is {{non-aggregate type 'NonAggr1a'}}.
 // In C++0x, 'user-provided' is only defined for special member functions, so
-// this type is considered to be an aggregate. This is probably a langauge
-// defect.
-NonAggr1a na1a = { 42 };
+// this type is considered to be an aggregate. This is considered to be
+// a language defect.
+NonAggr1a na1a = { 42 }; // expected-error {{non-aggregate type 'NonAggr1a'}}
 
 struct NonAggr1b {
   NonAggr1b(const NonAggr1b &);
@@ -54,6 +53,10 @@ NonAggr4 na4 = { 42 }; // expected-error {{non-aggregate type 'NonAggr4'}}
 struct NonAggr5 : Aggr {
 };
 NonAggr5 na5 = { b }; // expected-error {{non-aggregate type 'NonAggr5'}}
+template<typename...BaseList>
+struct MaybeAggr5a : BaseList... {};
+MaybeAggr5a<> ma5a0 = {}; // ok
+MaybeAggr5a<Aggr> ma5a1 = {}; // expected-error {{non-aggregate type 'MaybeAggr5a<Aggr>'}}
 
 // and no virtual functions.
 struct NonAggr6 {

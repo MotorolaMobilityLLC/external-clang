@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fdiagnostics-parseable-fixits -x c++ %s 2> %t  || true
+// RUN: not %clang_cc1 -fdiagnostics-parseable-fixits -x c++ %s 2> %t
 // RUN: FileCheck %s < %t
 // PR5941
 // END.
@@ -24,7 +24,7 @@ void f2(intTy2 *a) {
 
 // This call cannot be fixed since without resulting in null pointer dereference.
 // CHECK: error: no matching function for call to 'f1
-// CHECK-NOT: take the address of the argument with &
+// CHECK-NOT: dereference the argument with *
 // CHECK-NOT: fix-it
   f1((int *)0);
 }
@@ -65,16 +65,23 @@ struct B : public A {
   double y;
 };
 
+class C : A {};
+
 bool br(A &a);
 bool bp(A *a);
 bool dv(B b);
 
-void dbcaller(A *ptra, B *ptrb) {
+void u(int x);
+void u(const C *x);
+void u(double x);
+
+void dbcaller(A *ptra, B *ptrb, C &c, B &refb) {
   B b;
 
 // CHECK: error: no matching function for call to 'br
 // CHECK: fix-it{{.*}}*
   br(ptrb); // good
+
 // CHECK: error: no matching function for call to 'bp
 // CHECK: fix-it{{.*}}&
   bp(b); // good
@@ -82,6 +89,30 @@ void dbcaller(A *ptra, B *ptrb) {
 // CHECK: error: no matching function for call to 'dv
 // CHECK-NOT: fix-it
   dv(ptra); // bad: base to derived
+
+// CHECK: error: no matching function for call to 'dv
+// CHECK: remove &
+  dv(&b);
+
+// CHECK: error: no matching function for call to 'bp
+// CHECK: remove *
+  bp(*ptra);
+
+// CHECK: error: no viable overloaded '='
+// CHECK: remove &
+  b = &refb;
+
+// TODO: Test that we do not provide a fixit when inheritance is private.
+// CHECK: error: no matching function for call to 'bp
+// There should not be a fixit here:
+// CHECK: fix-it
+  bp(c);
+
+// CHECK: no matching function for call to 'u'
+// CHECK: candidate function not viable: no known conversion from 'C' to 'const C *' for 1st argument; take the address of the argument with &
+// CHECK: candidate function not viable
+// CHECK: candidate function not viable
+  u(c);
 }
 
 // CHECK: errors generated
