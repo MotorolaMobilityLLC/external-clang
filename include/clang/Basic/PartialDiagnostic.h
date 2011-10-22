@@ -33,7 +33,7 @@ public:
         /// currently only support up to 10 arguments (%0-%9).
         /// A single diagnostic with more than that almost certainly has to
         /// be simplified anyway.
-        MaxArguments = DiagnosticsEngine::MaxArguments
+        MaxArguments = 10
     };
   
     /// NumDiagArgs - This contains the number of entries in Arguments.
@@ -65,7 +65,7 @@ public:
     /// only support 10 ranges, could easily be extended if needed.
     CharSourceRange DiagRanges[10];
     
-    enum { MaxFixItHints = DiagnosticsEngine::MaxFixItHints };
+    enum { MaxFixItHints = 3 };
     
     /// FixItHints - If valid, provides a hint with some code
     /// to insert, remove, or modify at a particular position.
@@ -165,8 +165,6 @@ private:
 
     assert(DiagStorage->NumFixItHints < Storage::MaxFixItHints &&
            "Too many code modification hints!");
-    if (DiagStorage->NumFixItHints >= Storage::MaxFixItHints)
-      return;  // Don't crash in release builds
     DiagStorage->FixItHints[DiagStorage->NumFixItHints++]
       = Hint;
   }
