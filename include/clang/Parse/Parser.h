@@ -80,6 +80,7 @@ class Parser : public CodeCompletionHandler {
   friend class InMessageExpressionRAIIObject;
   friend class PoisonSEHIdentifiersRAIIObject;
   friend class ParenBraceBracketBalancer;
+  friend class BalancedDelimiterTracker;
 
   Preprocessor &PP;
 
