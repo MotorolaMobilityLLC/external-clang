@@ -410,14 +410,12 @@ private:
     return PP.LookAhead(0);
   }
 
-  class BalancedDelimiterTracker;
-
   /// \brief Tracks information about the current nesting depth of 
   /// opening delimiters of each kind.
   class DelimiterTracker {
   private:
     friend class Parser;
-    friend class Parser::BalancedDelimiterTracker;
+    friend class BalancedDelimiterTracker;
 
     unsigned Paren, Brace, Square, Less, LLLess;
     unsigned& get(tok::TokenKind t) {
