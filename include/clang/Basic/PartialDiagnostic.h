@@ -33,7 +33,7 @@ public:
         /// currently only support up to 10 arguments (%0-%9).
         /// A single diagnostic with more than that almost certainly has to
         /// be simplified anyway.
-        MaxArguments = 10  // Hard-code 10 to support GCC 4.0.1 used by Xcode 3.0
+        MaxArguments = DiagnosticsEngine::MaxArguments
     };
   
     /// NumDiagArgs - This contains the number of entries in Arguments.
@@ -65,7 +65,7 @@ public:
     /// only support 10 ranges, could easily be extended if needed.
     CharSourceRange DiagRanges[10];
     
-    enum { MaxFixItHints = 6 };  // Hard-code to support GCC 4.0.1 in Xcode 3.0
+    enum { MaxFixItHints = DiagnosticsEngine::MaxFixItHints };
     
     /// FixItHints - If valid, provides a hint with some code
     /// to insert, remove, or modify at a particular position.
