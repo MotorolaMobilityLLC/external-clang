@@ -414,7 +414,6 @@ private:
   class DelimiterTracker {
   private:
     friend class Parser;
-    friend class BalancedDelimiterTracker;
 
     unsigned Paren, Brace, Square, Less, LLLess;
     unsigned& get(tok::TokenKind t) {
