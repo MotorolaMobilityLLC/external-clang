@@ -3080,6 +3080,8 @@ public:
                                      TargetInfo::ConstraintInfo &Info) const {
     switch (*Name) {
     default:
+      return false;
+        
     case 'r': // CPU registers.
     case 'd': // Equivalent to "r" unless generating MIPS16 code.
     case 'y': // Equivalent to "r", backwards compatibility only.
