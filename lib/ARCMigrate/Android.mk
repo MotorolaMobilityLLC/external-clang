@@ -26,6 +26,8 @@ clang_arc_migrate_SRC_FILES := \
   TransEmptyStatementsAndDealloc.cpp \
   TransformActions.cpp \
   Transforms.cpp \
+  TransGCAttrs.cpp \
+  TransGCCalls.cpp \
   TransProperties.cpp \
   TransRetainReleaseDealloc.cpp \
   TransUnbridgedCasts.cpp \
