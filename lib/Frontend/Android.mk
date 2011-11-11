@@ -37,6 +37,7 @@ clang_frontend_SRC_FILES := \
   LogDiagnosticPrinter.cpp \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
+  SerializedDiagnosticPrinter.cpp \
   TextDiagnostic.cpp \
   TextDiagnosticBuffer.cpp \
   TextDiagnosticPrinter.cpp \

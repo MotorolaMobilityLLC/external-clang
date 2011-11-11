@@ -14,20 +14,22 @@ TBLGEN_TABLES :=    \
 	StmtNodes.inc
 
 clang_analysis_SRC_FILES :=	\
-	AnalysisContext.cpp	\
+	AnalysisDeclContext.cpp	\
 	CFG.cpp	\
 	CFGReachabilityAnalysis.cpp	\
 	CFGStmtMap.cpp	\
 	CocoaConventions.cpp	\
+	Dominators.cpp \
 	FormatString.cpp	\
 	LiveVariables.cpp	\
+	PostOrderCFGView.cpp \
 	PrintfFormatString.cpp	\
 	ProgramPoint.cpp \
 	PseudoConstantAnalysis.cpp	\
 	ReachableCode.cpp	\
 	ScanfFormatString.cpp	\
-	UninitializedValues.cpp \
-	ThreadSafety.cpp
+	ThreadSafety.cpp \
+	UninitializedValues.cpp
 
 
 LOCAL_SRC_FILES := $(clang_analysis_SRC_FILES)

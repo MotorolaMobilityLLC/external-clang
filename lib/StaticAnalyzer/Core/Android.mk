@@ -15,7 +15,6 @@ clang_static_analyzer_core_SRC_FILES := \
   BugReporter.cpp \
   BugReporterVisitors.cpp \
   Checker.cpp \
-  CheckerContext.cpp \
   CheckerRegistry.cpp \
   CheckerHelpers.cpp \
   CheckerManager.cpp \
