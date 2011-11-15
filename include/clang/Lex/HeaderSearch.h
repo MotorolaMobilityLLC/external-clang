@@ -15,6 +15,7 @@
 #define LLVM_CLANG_LEX_HEADERSEARCH_H
 
 #include "clang/Lex/DirectoryLookup.h"
+#include "clang/Lex/ModuleMap.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Allocator.h"
@@ -151,7 +152,6 @@ class HeaderSearch {
   llvm::StringMap<std::pair<unsigned, unsigned>, llvm::BumpPtrAllocator>
     LookupFileCache;
 
-
   /// FrameworkMap - This is a collection mapping a framework or subframework
   /// name like "Carbon" to the Carbon.framework directory.
   llvm::StringMap<const DirectoryEntry *, llvm::BumpPtrAllocator>
@@ -161,6 +161,12 @@ class HeaderSearch {
   /// headermaps.  This vector owns the headermap.
   std::vector<std::pair<const FileEntry*, const HeaderMap*> > HeaderMaps;
 
+  /// \brief The mapping between modules and headers.
+  ModuleMap ModMap;
+  
+  /// \brief Describes whether a given directory has a module map in it.
+  llvm::DenseMap<const DirectoryEntry *, bool> DirectoryHasModuleMap;
+  
   /// \brief Uniqued set of framework names, which is used to track which 
   /// headers were included as framework headers.
   llvm::StringSet<llvm::BumpPtrAllocator> FrameworkNames;
@@ -347,13 +353,30 @@ public:
   
   void IncrementFrameworkLookupCount() { ++NumFrameworkLookups; }
 
-  typedef std::vector<HeaderFileInfo>::const_iterator header_file_iterator;
-  header_file_iterator header_file_begin() const { return FileInfo.begin(); }
-  header_file_iterator header_file_end() const { return FileInfo.end(); }
+  /// \brief Determine whether there is a module map that may map the header
+  /// with the given file name to a (sub)module.
+  ///
+  /// \param Filename The name of the file.
+  ///
+  /// \param Root The "root" directory, at which we should stop looking for
+  /// module maps.
+  bool hasModuleMap(StringRef Filename, const DirectoryEntry *Root);
+  
+  /// \brief Retrieve the module that corresponds to the given file, if any.
+  ///
+  /// FIXME: This will need to be generalized for submodules.
+  StringRef findModuleForHeader(const FileEntry *File);
+  
   unsigned header_file_size() const { return FileInfo.size(); }
 
   // Used by ASTReader.
   void setHeaderFileInfoForUID(HeaderFileInfo HFI, unsigned UID);
+
+  /// getFileInfo - Return the HeaderFileInfo structure for the specified
+  /// FileEntry.
+  const HeaderFileInfo &getFileInfo(const FileEntry *FE) const {
+    return const_cast<HeaderSearch*>(this)->getFileInfo(FE);
+  }
 
   // Used by external tools
   typedef std::vector<DirectoryLookup>::const_iterator search_dir_iterator;
@@ -388,6 +411,35 @@ public:
   size_t getTotalMemory() const;
 
 private:
+  /// \brief Describes what happened when we tried to load a module map file.
+  enum LoadModuleMapResult {
+    /// \brief The module map file had already been loaded.
+    LMM_AlreadyLoaded,
+    /// \brief The module map file was loaded by this invocation.
+    LMM_NewlyLoaded,
+    /// \brief There is was directory with the given name.
+    LMM_NoDirectory,
+    /// \brief There was either no module map file or the module map file was
+    /// invalid.
+    LMM_InvalidModuleMap
+  };
+  
+  /// \brief Try to load the module map file in the given directory.
+  ///
+  /// \param DirName The name of the directory where we will look for a module
+  /// map file.
+  ///
+  /// \returns The result of attempting to load the module map file from the
+  /// named directory.
+  LoadModuleMapResult loadModuleMapFile(StringRef DirName);
+
+  /// \brief Try to load the module map file in the given directory.
+  ///
+  /// \param Dir The directory where we will look for a module map file.
+  ///
+  /// \returns The result of attempting to load the module map file from the
+  /// named directory.
+  LoadModuleMapResult loadModuleMapFile(const DirectoryEntry *Dir);
 
   /// getFileInfo - Return the HeaderFileInfo structure for the specified
   /// FileEntry.

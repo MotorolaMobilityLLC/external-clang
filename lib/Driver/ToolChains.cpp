@@ -334,8 +334,11 @@ void DarwinClang::AddLinkSearchPathArgs(const ArgList &Args,
   // Unfortunately, we still might depend on a few of the libraries that are
   // only available in the gcc library directory (in particular
   // libstdc++.dylib). For now, hardcode the path to the known install location.
+  // FIXME: This should get ripped out someday.  However, when building on
+  // 10.6 (darwin10), we're still relying on this to find libstdc++.dylib.
   llvm::sys::Path P(getDriver().Dir);
   P.eraseComponent(); // .../usr/bin -> ../usr
+  P.appendComponent("llvm-gcc-4.2");
   P.appendComponent("lib");
   P.appendComponent("gcc");
   switch (getTriple().getArch()) {
@@ -709,6 +712,8 @@ void DarwinClang::AddCXXStdlibLibArgs(const ArgList &Args,
     }
 
     // Otherwise, look in the root.
+    // FIXME: This should be removed someday when we don't have to care about
+    // 10.6 and earlier, where /usr/lib/libstdc++.dylib does not exist.
     if ((llvm::sys::fs::exists("/usr/lib/libstdc++.dylib", Exists) || !Exists)&&
       (!llvm::sys::fs::exists("/usr/lib/libstdc++.6.dylib", Exists) && Exists)){
       CmdArgs.push_back("/usr/lib/libstdc++.6.dylib");
@@ -1989,6 +1994,12 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
   const StringRef ARMMultiarchIncludeDirs[] = {
     "/usr/include/arm-linux-gnueabi"
   };
+  const StringRef MIPSMultiarchIncludeDirs[] = {
+    "/usr/include/mips-linux-gnu"
+  };
+  const StringRef MIPSELMultiarchIncludeDirs[] = {
+    "/usr/include/mipsel-linux-gnu"
+  };
   ArrayRef<StringRef> MultiarchIncludeDirs;
   if (getTriple().getArch() == llvm::Triple::x86_64) {
     MultiarchIncludeDirs = X86_64MultiarchIncludeDirs;
@@ -1996,6 +2007,10 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
     MultiarchIncludeDirs = X86MultiarchIncludeDirs;
   } else if (getTriple().getArch() == llvm::Triple::arm) {
     MultiarchIncludeDirs = ARMMultiarchIncludeDirs;
+  } else if (getTriple().getArch() == llvm::Triple::mips) {
+    MultiarchIncludeDirs = MIPSMultiarchIncludeDirs;
+  } else if (getTriple().getArch() == llvm::Triple::mipsel) {
+    MultiarchIncludeDirs = MIPSELMultiarchIncludeDirs;
   }
   for (ArrayRef<StringRef>::iterator I = MultiarchIncludeDirs.begin(),
                                      E = MultiarchIncludeDirs.end();

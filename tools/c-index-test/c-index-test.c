@@ -45,6 +45,8 @@ static unsigned getDefaultParsingOptions() {
   return options;
 }
 
+static int checkForErrors(CXTranslationUnit TU);
+
 static void PrintExtent(FILE *out, unsigned begin_line, unsigned begin_column,
                         unsigned end_line, unsigned end_column) {
   fprintf(out, "[%d:%d - %d:%d]", begin_line, begin_column,
@@ -707,6 +709,11 @@ static int perform_test_load(CXIndex Idx, CXTranslationUnit TU,
     PV(TU);
 
   PrintDiagnostics(TU);
+  if (checkForErrors(TU) != 0) {
+    clang_disposeTranslationUnit(TU);
+    return -1;
+  }
+
   clang_disposeTranslationUnit(TU);
   return 0;
 }
@@ -802,6 +809,9 @@ int perform_test_reparse_source(int argc, const char **argv, int trials,
     return 1;
   }
   
+  if (checkForErrors(TU) != 0)
+    return -1;
+
   if (getenv("CINDEXTEST_REMAP_AFTER_TRIAL")) {
     remap_after_trial =
         strtol(getenv("CINDEXTEST_REMAP_AFTER_TRIAL"), &endptr, 10);
@@ -818,9 +828,13 @@ int perform_test_reparse_source(int argc, const char **argv, int trials,
       clang_disposeIndex(Idx);
       return -1;      
     }
+
+    if (checkForErrors(TU) != 0)
+      return -1;
   }
   
   result = perform_test_load(Idx, TU, filter, NULL, Visitor, PV);
+
   free_remapped_files(unsaved_files, num_unsaved_files);
   clang_disposeIndex(Idx);
   return result;
@@ -1577,7 +1591,8 @@ static void printCXIndexLoc(CXIdxLoc loc) {
   printf("%d:%d", line, column);
 }
 
-static CXIdxClientEntity makeClientEntity(CXIdxEntityInfo *info, CXIdxLoc loc) {
+static CXIdxClientContainer makeClientContainer(const CXIdxEntityInfo *info,
+                                                CXIdxLoc loc) {
   const char *name;
   char *newStr;
   CXIdxClientFile file;
@@ -1591,7 +1606,7 @@ static CXIdxClientEntity makeClientEntity(CXIdxEntityInfo *info, CXIdxLoc loc) {
   /* FIXME: free these.*/
   newStr = (char *)malloc(strlen(name) + 10);
   sprintf(newStr, "%s:%d:%d", name, line, column);
-  return (CXIdxClientEntity)newStr;
+  return (CXIdxClientContainer)newStr;
 }
 
 static void printCXIndexContainer(CXIdxClientContainer container) {
@@ -1609,7 +1624,8 @@ static const char *getEntityKindString(CXIdxEntityKind kind) {
   case CXIdxEntity_ObjCClass: return "objc-class";
   case CXIdxEntity_ObjCProtocol: return "objc-protocol";
   case CXIdxEntity_ObjCCategory: return "objc-category";
-  case CXIdxEntity_ObjCMethod: return "objc-method";
+  case CXIdxEntity_ObjCInstanceMethod: return "objc-instance-method";
+  case CXIdxEntity_ObjCClassMethod: return "objc-class-method";
   case CXIdxEntity_ObjCProperty: return "objc-property";
   case CXIdxEntity_ObjCIvar: return "objc-ivar";
   case CXIdxEntity_Enum: return "enum";
@@ -1617,11 +1633,13 @@ static const char *getEntityKindString(CXIdxEntityKind kind) {
   case CXIdxEntity_Union: return "union";
   case CXIdxEntity_CXXClass: return "c++-class";
   }
+  assert(0 && "Garbage entity kind");
+  return 0;
 }
 
 static void printEntityInfo(const char *cb,
                             CXClientData client_data,
-                            CXIdxEntityInfo *info) {
+                            const CXIdxEntityInfo *info) {
   const char *name;
   IndexData *index_data;
   index_data = (IndexData *)client_data;
@@ -1634,6 +1652,20 @@ static void printEntityInfo(const char *cb,
   printf("%s: kind: %s", cb, getEntityKindString(info->kind));
   printf(" | name: %s", name);
   printf(" | USR: %s", info->USR);
+}
+
+static void printProtocolList(const CXIdxObjCProtocolRefListInfo *ProtoInfo,
+                              CXClientData client_data) {
+  unsigned i;
+  for (i = 0; i < ProtoInfo->numProtocols; ++i) {
+    printEntityInfo("     <protocol>", client_data,
+                    ProtoInfo->protocols[i]->protocol);
+    printf(" | cursor: ");
+    PrintCursor(ProtoInfo->protocols[i]->cursor);
+    printf(" | loc: ");
+    printCXIndexLoc(ProtoInfo->protocols[i]->loc);
+    printf("\n");
+  }
 }
 
 static void index_diagnostic(CXClientData client_data,
@@ -1669,7 +1701,7 @@ static CXIdxClientFile index_enteredMainFile(CXClientData client_data,
 }
 
 static CXIdxClientFile index_ppIncludedFile(CXClientData client_data,
-                                      CXIdxIncludedFileInfo *info) {
+                                            const CXIdxIncludedFileInfo *info) {
   IndexData *index_data;
   index_data = (IndexData *)client_data;
   printCheck(index_data);
@@ -1684,62 +1716,6 @@ static CXIdxClientFile index_ppIncludedFile(CXClientData client_data,
   return (CXIdxClientFile)info->file;
 }
 
-static CXIdxClientMacro index_ppMacroDefined(CXClientData client_data,
-                                       CXIdxMacroDefinedInfo *info) {
-  IndexData *index_data;
-  index_data = (IndexData *)client_data;
-  printCheck(index_data);
-
-  printf("[ppMacroDefined]: %s", info->macroInfo->name);
-  printf(" | loc: ");
-  printCXIndexLoc(info->macroInfo->loc);
-  printf(" | defBegin: ");
-  printCXIndexLoc(info->defBegin);
-  printf(" | length: %d\n", info->defLength);
-
-  return (CXIdxClientMacro)info->macroInfo->name;
-}
-
-static void index_ppMacroUndefined(CXClientData client_data,
-                                         CXIdxMacroUndefinedInfo *info) {
-  IndexData *index_data;
-  index_data = (IndexData *)client_data;
-  printCheck(index_data);
-
-  printf("[ppMacroUndefined]: %s", info->name);
-  printf(" | loc: ");
-  printCXIndexLoc(info->loc);
-  printf("\n");
-}
-
-static void index_ppMacroExpanded(CXClientData client_data,
-                                        CXIdxMacroExpandedInfo *info) {
-  IndexData *index_data;
-  index_data = (IndexData *)client_data;
-  printCheck(index_data);
-
-  printf("[ppMacroExpanded]: %s", info->name);
-  printf(" | loc: ");
-  printCXIndexLoc(info->loc);
-  printf("\n");
-}
-
-static CXIdxClientEntity index_importedEntity(CXClientData client_data,
-                                        CXIdxImportedEntityInfo *info) {
-  IndexData *index_data;
-  index_data = (IndexData *)client_data;
-  printCheck(index_data);
-
-  printEntityInfo("[importedEntity]", client_data, info->entityInfo);
-  printf(" | cursor: ");
-  PrintCursor(info->cursor);
-  printf(" | loc: ");
-  printCXIndexLoc(info->loc);
-  printf("\n");
-
-  return makeClientEntity(info->entityInfo, info->loc);
-}
-
 static CXIdxClientContainer index_startedTranslationUnit(CXClientData client_data,
                                                    void *reserved) {
   IndexData *index_data;
@@ -1750,9 +1726,13 @@ static CXIdxClientContainer index_startedTranslationUnit(CXClientData client_dat
   return (CXIdxClientContainer)"TU";
 }
 
-static CXIdxClientEntity index_indexDeclaration(CXClientData client_data,
-                                                    CXIdxDeclInfo *info) {
+static void index_indexDeclaration(CXClientData client_data,
+                                   const CXIdxDeclInfo *info,
+                                   const CXIdxDeclOut *outData) {
   IndexData *index_data;
+  const CXIdxObjCCategoryDeclInfo *CatInfo;
+  const CXIdxObjCInterfaceDeclInfo *InterInfo;
+  const CXIdxObjCProtocolRefListInfo *ProtoInfo;
   index_data = (IndexData *)client_data;
 
   printEntityInfo("[indexDeclaration]", client_data, info->entityInfo);
@@ -1763,14 +1743,9 @@ static CXIdxClientEntity index_indexDeclaration(CXClientData client_data,
   printf(" | container: ");
   printCXIndexContainer(info->container);
   printf(" | isRedecl: %d", info->isRedeclaration);
-  printf(" | isDef: %d\n", info->isDefinition);
-
-  
-  if (clang_index_isEntityTagKind(info->entityInfo->kind)) {
-    printCheck(index_data);
-    printf("     <TagInfo>: isAnonymous: %d\n",
-           clang_index_getTagDeclInfo(info)->isAnonymous);
-  }
+  printf(" | isDef: %d", info->isDefinition);
+  printf(" | isContainer: %d", info->isContainer);
+  printf(" | isImplicit: %d\n", info->isImplicit);
 
   if (clang_index_isEntityObjCContainerKind(info->entityInfo->kind)) {
     const char *kindName = 0;
@@ -1787,64 +1762,34 @@ static CXIdxClientEntity index_indexDeclaration(CXClientData client_data,
     printf("     <ObjCContainerInfo>: kind: %s\n", kindName);
   }
 
-  if (clang_index_isEntityObjCCategoryKind(info->entityInfo->kind)) {
-    CXIdxObjCCategoryDeclInfo *
-      CatInfo = clang_index_getObjCCategoryDeclInfo(info);
+  if ((CatInfo = clang_index_getObjCCategoryDeclInfo(info))) {
     printEntityInfo("     <ObjCCategoryInfo>: class", client_data,
                     CatInfo->objcClass);
     printf("\n");
   }
 
-  if (!info->isRedeclaration)
-    return makeClientEntity(info->entityInfo, info->loc);
-
-  return 0;
-}
-
-static CXIdxClientContainer
-index_startedContainer(CXClientData client_data, CXIdxContainerInfo *info) {
-  printEntityInfo("[startedContainer]", client_data, info->entity);
-  printf(" | cursor: ");
-  PrintCursor(info->cursor);
-  printf(" | loc: ");
-  printCXIndexLoc(info->loc);
-  printf(" | isObjCImpl: %d\n", info->isObjCImpl);
-
-  return (CXIdxClientContainer)info->entity->clientEntity;
-}
-
-static void index_defineObjCClass(CXClientData client_data,
-                                  CXIdxObjCClassDefineInfo *info) {
-  printEntityInfo("[defineObjCClass]", client_data, info->objcClass);
-  printf(" | cursor: ");
-  PrintCursor(info->cursor);
-  printf(" | container: ");
-  printCXIndexContainer(info->container);
-  
-  if (info->baseInfo) {
-    printEntityInfo(" | <base>", client_data, info->baseInfo->objcClass);
-    printf(" | base loc: ");
-    printCXIndexLoc(info->baseInfo->loc);
+  if ((InterInfo = clang_index_getObjCInterfaceDeclInfo(info))) {
+    if (InterInfo->superInfo) {
+      printEntityInfo("     <base>", client_data,
+                      InterInfo->superInfo->base);
+      printf(" | cursor: ");
+      PrintCursor(InterInfo->superInfo->cursor);
+      printf(" | loc: ");
+      printCXIndexLoc(InterInfo->superInfo->loc);
+      printf("\n");
+    }
   }
 
-  printf("\n");
-}
+  if ((ProtoInfo = clang_index_getObjCProtocolRefListInfo(info))) {
+    printProtocolList(ProtoInfo, client_data);
+  }
 
-static void index_endedContainer(CXClientData client_data,
-                                 CXIdxEndContainerInfo *info) {
-  IndexData *index_data;
-  index_data = (IndexData *)client_data;
-  printCheck(index_data);
-
-  printf("[endedContainer]: ");
-  printCXIndexContainer(info->container);
-  printf(" | end: ");
-  printCXIndexLoc(info->endLoc);
-  printf("\n");
+  if (outData->outContainer)
+    *outData->outContainer = makeClientContainer(info->entityInfo, info->loc);
 }
 
 static void index_indexEntityReference(CXClientData client_data,
-                                       CXIdxEntityRefInfo *info) {
+                                       const CXIdxEntityRefInfo *info) {
   printEntityInfo("[indexEntityReference]", client_data, info->referencedEntity);
   printf(" | cursor: ");
   PrintCursor(info->cursor);
@@ -1853,7 +1798,7 @@ static void index_indexEntityReference(CXClientData client_data,
   printEntityInfo(" | <parent>:", client_data, info->parentEntity);
   printf(" | container: ");
   printCXIndexContainer(info->container);
-  printf(" | kind: ");
+  printf(" | refkind: ");
   switch (info->kind) {
   case CXIdxEntityRef_Direct: printf("direct"); break;
   case CXIdxEntityRef_ImplicitProperty: printf("implicit prop"); break;
@@ -1862,20 +1807,13 @@ static void index_indexEntityReference(CXClientData client_data,
 }
 
 static IndexerCallbacks IndexCB = {
+  0, /*abortQuery*/
   index_diagnostic,
   index_enteredMainFile,
   index_ppIncludedFile,
-  index_ppMacroDefined,
-  index_ppMacroUndefined,
-  index_ppMacroExpanded,
   0, /*importedASTFile*/
-  index_importedEntity,
-  0,/*index_importedMacro,*/
   index_startedTranslationUnit,
   index_indexDeclaration,
-  index_startedContainer,
-  index_defineObjCClass,
-  index_endedContainer,
   index_indexEntityReference
 };
 

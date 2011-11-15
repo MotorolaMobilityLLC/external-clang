@@ -3111,9 +3111,10 @@ Decl *ASTNodeImporter::VisitObjCProtocolDecl(ObjCProtocolDecl *D) {
                                          Name.getAsIdentifierInfo(), Loc,
                                          Importer.Import(D->getAtStartLoc()),
                                          D->isInitiallyForwardDecl());
-      ToProto->setForwardDecl(D->isForwardDecl());
       ToProto->setLexicalDeclContext(LexicalDC);
       LexicalDC->addDeclInternal(ToProto);
+      if (D->isInitiallyForwardDecl() && !D->isForwardDecl())
+        ToProto->completedForwardDecl();
     }
     Importer.Imported(D, ToProto);
 
@@ -3172,11 +3173,12 @@ Decl *ASTNodeImporter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
       ToIface = ObjCInterfaceDecl::Create(Importer.getToContext(), DC,
                                           Importer.Import(D->getAtStartLoc()),
                                           Name.getAsIdentifierInfo(), Loc,
-                                          D->isForwardDecl(),
+                                          D->isInitiallyForwardDecl(),
                                           D->isImplicitInterfaceDecl());
-      ToIface->setForwardDecl(D->isForwardDecl());
       ToIface->setLexicalDeclContext(LexicalDC);
       LexicalDC->addDeclInternal(ToIface);
+      if (D->isInitiallyForwardDecl() && !D->isForwardDecl())
+        ToIface->completedForwardDecl();
     }
     Importer.Imported(D, ToIface);
 
@@ -3220,6 +3222,17 @@ Decl *ASTNodeImporter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
 
     // Check for consistency of superclasses.
     DeclarationName FromSuperName, ToSuperName;
+    
+    // If the superclass hasn't been imported yet, do so before checking.
+    ObjCInterfaceDecl *DSuperClass = D->getSuperClass();
+    ObjCInterfaceDecl *ToIfaceSuperClass = ToIface->getSuperClass();
+    
+    if (DSuperClass && !ToIfaceSuperClass) {
+      Decl *ImportedSuperClass = Importer.Import(DSuperClass);
+      ObjCInterfaceDecl *ImportedSuperIface = cast<ObjCInterfaceDecl>(ImportedSuperClass);
+      ToIface->setSuperClass(ImportedSuperIface);
+    }
+
     if (D->getSuperClass())
       FromSuperName = Importer.Import(D->getSuperClass()->getDeclName());
     if (ToIface->getSuperClass())
