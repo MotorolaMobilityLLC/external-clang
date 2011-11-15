@@ -6,30 +6,31 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES := \
-	DiagnosticLexKinds.inc \
-	DiagnosticCommonKinds.inc \
-	AttrSpellings.inc
+  DiagnosticLexKinds.inc \
+  DiagnosticCommonKinds.inc \
+  AttrSpellings.inc
 
-clang_lex_SRC_FILES :=	\
-	HeaderMap.cpp	\
-	HeaderSearch.cpp	\
-	Lexer.cpp	\
-	LiteralSupport.cpp	\
-	MacroArgs.cpp	\
-	MacroInfo.cpp	\
-	PPCaching.cpp	\
-	PPDirectives.cpp	\
-	PPExpressions.cpp	\
-	PPLexerChange.cpp	\
-	PPMacroExpansion.cpp	\
-	PTHLexer.cpp	\
-	Pragma.cpp	\
-	PreprocessingRecord.cpp	\
-	Preprocessor.cpp	\
-	PreprocessorLexer.cpp	\
-	ScratchBuffer.cpp	\
-	TokenConcatenation.cpp	\
-	TokenLexer.cpp
+clang_lex_SRC_FILES := \
+  HeaderMap.cpp \
+  HeaderSearch.cpp \
+  Lexer.cpp \
+  LiteralSupport.cpp \
+  MacroArgs.cpp \
+  MacroInfo.cpp \
+  ModuleMap.cpp \
+  PPCaching.cpp \
+  PPDirectives.cpp \
+  PPExpressions.cpp \
+  PPLexerChange.cpp \
+  PPMacroExpansion.cpp \
+  PTHLexer.cpp \
+  Pragma.cpp \
+  PreprocessingRecord.cpp \
+  Preprocessor.cpp \
+  PreprocessorLexer.cpp \
+  ScratchBuffer.cpp \
+  TokenConcatenation.cpp \
+  TokenLexer.cpp
 
 LOCAL_SRC_FILES := $(clang_lex_SRC_FILES)
 
