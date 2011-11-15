@@ -3187,7 +3187,7 @@ static void TryReferenceInitialization(Sema &S,
     if (T1Quals != T2Quals)
       Sequence.AddQualificationConversionStep(cv1T1, ValueKind);
     Sequence.AddReferenceBindingStep(cv1T1,
-         /*bindingTemporary=*/(InitCategory.isPRValue() && !T2->isArrayType()));
+                                 /*bindingTemporary=*/InitCategory.isPRValue());
     return;
   }
 
@@ -3795,17 +3795,14 @@ InitializationSequence::InitializationSequence(Sema &S,
   setSequenceKind(NormalSequence);
 
   for (unsigned I = 0; I != NumArgs; ++I)
-    if (const BuiltinType *PlaceholderTy
-          = Args[I]->getType()->getAsPlaceholderType()) {
+    if (Args[I]->getType()->isNonOverloadPlaceholderType()) {
       // FIXME: should we be doing this here?
-      if (PlaceholderTy->getKind() != BuiltinType::Overload) {
-        ExprResult result = S.CheckPlaceholderExpr(Args[I]);
-        if (result.isInvalid()) {
-          SetFailed(FK_PlaceholderType);
-          return;
-        }
-        Args[I] = result.take();
+      ExprResult result = S.CheckPlaceholderExpr(Args[I]);
+      if (result.isInvalid()) {
+        SetFailed(FK_PlaceholderType);
+        return;
       }
+      Args[I] = result.take();
     }
 
 

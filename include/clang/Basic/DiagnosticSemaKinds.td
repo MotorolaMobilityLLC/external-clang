@@ -257,10 +257,16 @@ def note_please_include_header : Note<
 def note_previous_builtin_declaration : Note<"%0 is a builtin with type %1">;
 def warn_implicit_decl_requires_stdio : Warning<
   "declaration of built-in function '%0' requires inclusion of the header "
-  "<stdio.h>">;
+  "<stdio.h>">,
+  InGroup<BuiltinRequiresHeader>;
 def warn_implicit_decl_requires_setjmp : Warning<
   "declaration of built-in function '%0' requires inclusion of the header "
-  "<setjmp.h>">;
+  "<setjmp.h>">,
+  InGroup<BuiltinRequiresHeader>;
+def warn_implicit_decl_requires_ucontext : Warning<
+  "declaration of built-in function '%0' requires inclusion of the header "
+  "<ucontext.h>">,
+  InGroup<BuiltinRequiresHeader>;
 def warn_redecl_library_builtin : Warning<
   "incompatible redeclaration of library function %0">;
 def err_builtin_definition : Error<"definition of builtin function %0">;
@@ -367,6 +373,8 @@ def warn_property_attribute : Warning<
 def warn_property_types_are_incompatible : Warning<
   "property type %0 is incompatible with type %1 inherited from %2">;
 def err_undef_interface : Error<"cannot find interface declaration for %0">;
+def err_category_forward_interface : Error<
+  "cannot define %select{category|class extension}0 for undefined class %1">;
 def err_class_extension_after_impl : Error<
   "cannot declare class extension for %0 after class implementation">;
 def note_implementation_declared : Note<
@@ -1113,7 +1121,7 @@ def warn_cxx98_compat_temp_copy : Warning<
   "of type %2 when binding a reference to a temporary would %select{invoke "
   "an inaccessible constructor|find no viable constructor|find ambiguous "
   "constructors|invoke a deleted constructor}0 in C++98">,
-  InGroup<CXX98Compat>, DefaultIgnore;
+  InGroup<CXX98CompatBindToTemporaryCopy>, DefaultIgnore;
 
 // C++11 decltype
 def err_cannot_determine_declared_type_of_overloaded_function : Error<
@@ -2157,10 +2165,10 @@ def ext_template_arg_unnamed_type : ExtWarn<
   "template argument uses unnamed type">, InGroup<UnnamedTypeTemplateArgs>;
 def warn_cxx98_compat_template_arg_local_type : Warning<
   "local type %0 as template argument is incompatible with C++98">,
-  InGroup<CXX98Compat>, DefaultIgnore;
+  InGroup<CXX98CompatLocalTypeTemplateArgs>, DefaultIgnore;
 def warn_cxx98_compat_template_arg_unnamed_type : Warning<
   "unnamed type as template argument is incompatible with C++98">,
-  InGroup<CXX98Compat>, DefaultIgnore;
+  InGroup<CXX98CompatUnnamedTypeTemplateArgs>, DefaultIgnore;
 def note_template_unnamed_type_here : Note<
   "unnamed type used in template argument was declared here">;
 def err_template_arg_overload_type : Error<
@@ -3072,8 +3080,10 @@ def note_arc_gained_method_convention : Note<
   "declaration in interface is not in the '%select{alloc|copy|init|new}0' "
   "family because %select{its result type is not an object pointer|"
   "its result type is unrelated to its receiver type}1">;
-def err_typecheck_arr_assign_self : Error<
+def err_typecheck_arc_assign_self : Error<
   "cannot assign to 'self' outside of a method in the init family">;
+def err_typecheck_arc_assign_self_class_method : Error<
+  "cannot assign to 'self' in a class method">;
 def err_typecheck_arr_assign_enumeration : Error<
   "fast enumeration variables can't be modified in ARC by default; "
   "declare the variable __strong to allow this">;
@@ -3609,7 +3619,7 @@ def err_property_not_as_forward_class : Error<
   "property %0 refers to an incomplete Objective-C class %1 "
   "(with no @interface available)">;
 def note_forward_class : Note<
-  "forward class is declared here">;
+  "forward declaration of class here">;
 def err_duplicate_property : Error<
   "property has a previous declaration">;
 def ext_gnu_void_ptr : Extension<

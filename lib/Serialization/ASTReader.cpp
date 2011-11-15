@@ -2604,7 +2604,7 @@ void ASTReader::InitializeContext() {
       }
     }
     
-    if (unsigned Jmp_buf = SpecialTypes[SPECIAL_TYPE_jmp_buf]) {
+    if (unsigned Jmp_buf = SpecialTypes[SPECIAL_TYPE_JMP_BUF]) {
       QualType Jmp_bufType = GetType(Jmp_buf);
       if (Jmp_bufType.isNull()) {
         Error("jmp_buf type is NULL");
@@ -2625,7 +2625,7 @@ void ASTReader::InitializeContext() {
       }
     }
     
-    if (unsigned Sigjmp_buf = SpecialTypes[SPECIAL_TYPE_sigjmp_buf]) {
+    if (unsigned Sigjmp_buf = SpecialTypes[SPECIAL_TYPE_SIGJMP_BUF]) {
       QualType Sigjmp_bufType = GetType(Sigjmp_buf);
       if (Sigjmp_bufType.isNull()) {
         Error("sigjmp_buf type is NULL");
@@ -2659,6 +2659,24 @@ void ASTReader::InitializeContext() {
           = SpecialTypes[SPECIAL_TYPE_OBJC_SEL_REDEFINITION]) {
       if (Context.ObjCSelRedefinitionType.isNull())
         Context.ObjCSelRedefinitionType = GetType(ObjCSelRedef);
+    }
+
+    if (unsigned Ucontext_t = SpecialTypes[SPECIAL_TYPE_UCONTEXT_T]) {
+      QualType Ucontext_tType = GetType(Ucontext_t);
+      if (Ucontext_tType.isNull()) {
+        Error("ucontext_t type is NULL");
+        return;
+      }
+
+      if (!Context.ucontext_tDecl) {
+        if (const TypedefType *Typedef = Ucontext_tType->getAs<TypedefType>())
+          Context.setucontext_tDecl(Typedef->getDecl());
+        else {
+          const TagType *Tag = Ucontext_tType->getAs<TagType>();
+          assert(Tag && "Invalid ucontext_t type in AST file");
+          Context.setucontext_tDecl(Tag->getDecl());
+        }
+      }
     }
   }
   
@@ -5524,6 +5542,14 @@ void ASTReader::FinishedDeserializing() {
                                 PendingPreviousDecls.front().second);
       PendingPreviousDecls.pop_front();
     }
+
+    for (std::vector<std::pair<ObjCInterfaceDecl *,
+                               serialization::DeclID> >::iterator
+           I = PendingChainedObjCCategories.begin(),
+           E = PendingChainedObjCCategories.end(); I != E; ++I) {
+      loadObjCChainedCategories(I->second, I->first);
+    }
+    PendingChainedObjCCategories.clear();
 
     // We are not in recursive loading, so it's safe to pass the "interesting"
     // decls to the consumer.

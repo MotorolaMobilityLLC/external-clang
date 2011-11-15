@@ -823,14 +823,21 @@ static QualType handleComplexIntConversion(Sema &S, ExprResult &LHS,
 
   if (LHSComplexInt) {
     // int -> _Complex int
+    // FIXME: This needs to take integer ranks into account
+    RHS = S.ImpCastExprToType(RHS.take(), LHSComplexInt->getElementType(),
+                              CK_IntegralCast);
     RHS = S.ImpCastExprToType(RHS.take(), LHSType, CK_IntegralRealToComplex);
     return LHSType;
   }
 
   assert(RHSComplexInt);
   // int -> _Complex int
-  if (!IsCompAssign)
+  // FIXME: This needs to take integer ranks into account
+  if (!IsCompAssign) {
+    LHS = S.ImpCastExprToType(LHS.take(), RHSComplexInt->getElementType(),
+                              CK_IntegralCast);
     LHS = S.ImpCastExprToType(LHS.take(), RHSType, CK_IntegralRealToComplex);
+  }
   return RHSType;
 }
 
@@ -3969,10 +3976,7 @@ Sema::ActOnInitList(SourceLocation LBraceLoc, MultiExprArg InitArgList,
   // Immediately handle non-overload placeholders.  Overloads can be
   // resolved contextually, but everything else here can't.
   for (unsigned I = 0; I != NumInit; ++I) {
-    if (const BuiltinType *pty
-          = InitList[I]->getType()->getAsPlaceholderType()) {
-      if (pty->getKind() == BuiltinType::Overload) continue;
-
+    if (InitList[I]->getType()->isNonOverloadPlaceholderType()) {
       ExprResult result = CheckPlaceholderExpr(InitList[I]);
 
       // Ignore failures; dropping the entire initializer list because
@@ -7056,7 +7060,9 @@ static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
           //  - self
           ObjCMethodDecl *method = S.getCurMethodDecl();
           if (method && var == method->getSelfDecl())
-            Diag = diag::err_typecheck_arr_assign_self;
+            Diag = method->isClassMethod()
+              ? diag::err_typecheck_arc_assign_self_class_method
+              : diag::err_typecheck_arc_assign_self;
 
           //  - fast enumeration variables
           else
@@ -8615,6 +8621,10 @@ void Sema::ActOnBlockStart(SourceLocation CaretLoc, Scope *CurScope) {
     PushDeclContext(CurScope, Block);
   else
     CurContext = Block;
+
+  // Enter a new evaluation context to insulate the block from any
+  // cleanups from the enclosing full-expression.
+  PushExpressionEvaluationContext(PotentiallyEvaluated);  
 }
 
 void Sema::ActOnBlockArguments(Declarator &ParamInfo, Scope *CurScope) {
@@ -8742,6 +8752,10 @@ void Sema::ActOnBlockArguments(Declarator &ParamInfo, Scope *CurScope) {
 /// ActOnBlockError - If there is an error parsing a block, this callback
 /// is invoked to pop the information about the block from the action impl.
 void Sema::ActOnBlockError(SourceLocation CaretLoc, Scope *CurScope) {
+  // Leave the expression-evaluation context.
+  DiscardCleanupsInEvaluationContext();
+  PopExpressionEvaluationContext();
+
   // Pop off CurBlock, handle nested blocks.
   PopDeclContext();
   PopFunctionOrBlockScope();
@@ -8754,6 +8768,10 @@ ExprResult Sema::ActOnBlockStmtExpr(SourceLocation CaretLoc,
   // If blocks are disabled, emit an error.
   if (!LangOpts.Blocks)
     Diag(CaretLoc, diag::err_blocks_disable);
+
+  // Leave the expression-evaluation context.
+  assert(!ExprNeedsCleanups && "cleanups within block not correctly bound!");
+  PopExpressionEvaluationContext();
 
   BlockScopeInfo *BSI = cast<BlockScopeInfo>(FunctionScopes.back());
   
