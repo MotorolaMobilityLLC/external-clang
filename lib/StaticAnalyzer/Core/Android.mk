@@ -12,12 +12,15 @@ clang_static_analyzer_core_SRC_FILES := \
   AnalysisManager.cpp \
   BasicConstraintManager.cpp \
   BasicValueFactory.cpp \
+  BlockCounter.cpp \
   BugReporter.cpp \
   BugReporterVisitors.cpp \
   Checker.cpp \
-  CheckerRegistry.cpp \
+  CheckerContext.cpp \
   CheckerHelpers.cpp \
   CheckerManager.cpp \
+  CheckerRegistry.cpp \
+  CoreEngine.cpp \
   Environment.cpp \
   ExplodedGraph.cpp \
   ExprEngine.cpp \
@@ -25,21 +28,19 @@ clang_static_analyzer_core_SRC_FILES := \
   ExprEngineCXX.cpp \
   ExprEngineCallAndReturn.cpp \
   ExprEngineObjC.cpp \
-  BlockCounter.cpp \
-  CoreEngine.cpp \
   HTMLDiagnostics.cpp \
   MemRegion.cpp \
   ObjCMessage.cpp \
-  ProgramState.cpp \
   PathDiagnostic.cpp \
   PlistDiagnostics.cpp \
+  ProgramState.cpp \
   RangeConstraintManager.cpp \
   RegionStore.cpp \
+  SValBuilder.cpp \
+  SVals.cpp \
   SimpleConstraintManager.cpp \
   SimpleSValBuilder.cpp \
   Store.cpp \
-  SValBuilder.cpp \
-  SVals.cpp \
   SymbolManager.cpp \
   TextPathDiagnostics.cpp
 
