@@ -22,7 +22,6 @@ clang_codegen_SRC_FILES :=	\
 	CGClass.cpp	\
 	CGCUDANV.cpp \
 	CGCUDARuntime.cpp \
-	CGOpenCLRuntime.cpp \
 	CGCXX.cpp	\
 	CGCXXABI.cpp	\
 	CGCleanup.cpp	\
@@ -40,6 +39,7 @@ clang_codegen_SRC_FILES :=	\
 	CGObjCGNU.cpp	\
 	CGObjCMac.cpp	\
 	CGObjCRuntime.cpp \
+	CGOpenCLRuntime.cpp \
 	CGRecordLayoutBuilder.cpp	\
 	CGRTTI.cpp	\
 	CGStmt.cpp	\

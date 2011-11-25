@@ -32,6 +32,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   DereferenceChecker.cpp \
   DivZeroChecker.cpp \
   FixedAddressChecker.cpp \
+  GenericTaintChecker.cpp \
   IdempotentOperationChecker.cpp \
   IteratorsChecker.cpp \
   LLVMConventionsChecker.cpp \
