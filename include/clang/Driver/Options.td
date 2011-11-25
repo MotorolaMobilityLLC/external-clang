@@ -262,6 +262,8 @@ def faccess_control : Flag<"-faccess-control">, Group<f_Group>;
 def fallow_unsupported : Flag<"-fallow-unsupported">, Group<f_Group>;
 def fapple_kext : Flag<"-fapple-kext">, Group<f_Group>;
 def fapple_pragma_pack : Flag<"-fapple-pragma-pack">, Group<f_Group>;
+def faddress_sanitizer : Flag<"-faddress-sanitizer">, Group<f_Group>;
+def fno_address_sanitizer : Flag<"-fno-address-sanitizer">, Group<f_Group>;
 def fasm : Flag<"-fasm">, Group<f_Group>;
 
 def fasm_blocks : Flag<"-fasm-blocks">, Group<f_Group>;
@@ -476,7 +478,9 @@ def fstrict_aliasing : Flag<"-fstrict-aliasing">, Group<f_Group>;
 def fstrict_overflow : Flag<"-fstrict-overflow">, Group<f_Group>;
 def fsyntax_only : Flag<"-fsyntax-only">, Flags<[DriverOption]>;
 def ftabstop_EQ : Joined<"-ftabstop=">, Group<f_Group>;
+def ftemplate_depth_EQ : Joined<"-ftemplate-depth=">, Group<f_Group>;
 def ftemplate_depth_ : Joined<"-ftemplate-depth-">, Group<f_Group>;
+def fconstexpr_depth_EQ : Joined<"-fconstexpr-depth=">, Group<f_Group>;
 def ftemplate_backtrace_limit_EQ : Joined<"-ftemplate-backtrace-limit=">,
                                    Group<f_Group>;
 def ftest_coverage : Flag<"-ftest-coverage">, Group<f_Group>;

@@ -3941,6 +3941,11 @@ void clang_findReferencesInFileWithBlock(CXCursor, CXFile,
 typedef void *CXIdxClientFile;
 
 /**
+ * \brief The client's data object that is associated with a semantic entity.
+ */
+typedef void *CXIdxClientEntity;
+
+/**
  * \brief The client's data object that is associated with a semantic container
  * of entities.
  */
@@ -4016,34 +4021,86 @@ typedef enum {
   CXIdxEntity_Enum          = 13,
   CXIdxEntity_Struct        = 14,
   CXIdxEntity_Union         = 15,
-  CXIdxEntity_CXXClass      = 16
+
+  CXIdxEntity_CXXClass              = 16,
+  CXIdxEntity_CXXNamespace          = 17,
+  CXIdxEntity_CXXNamespaceAlias     = 18,
+  CXIdxEntity_CXXStaticVariable     = 19,
+  CXIdxEntity_CXXStaticMethod       = 20,
+  CXIdxEntity_CXXInstanceMethod     = 21,
+  CXIdxEntity_CXXConstructor        = 22,
+  CXIdxEntity_CXXDestructor         = 23,
+  CXIdxEntity_CXXConversionFunction = 24,
+  CXIdxEntity_CXXTypeAlias          = 25
 
 } CXIdxEntityKind;
 
+/**
+ * \brief Extra C++ template information for an entity. This can apply to:
+ * CXIdxEntity_Function
+ * CXIdxEntity_CXXClass
+ * CXIdxEntity_CXXStaticMethod
+ * CXIdxEntity_CXXInstanceMethod
+ * CXIdxEntity_CXXConstructor
+ * CXIdxEntity_CXXConversionFunction
+ * CXIdxEntity_CXXTypeAlias
+ */
+typedef enum {
+  CXIdxEntity_NonTemplate   = 0,
+  CXIdxEntity_Template      = 1,
+  CXIdxEntity_TemplatePartialSpecialization = 2,
+  CXIdxEntity_TemplateSpecialization = 3
+} CXIdxEntityCXXTemplateKind;
+
 typedef struct {
   CXIdxEntityKind kind;
+  CXIdxEntityCXXTemplateKind templateKind;
   const char *name;
   const char *USR;
+  CXCursor cursor;
 } CXIdxEntityInfo;
+
+typedef struct {
+  CXCursor cursor;
+} CXIdxContainerInfo;
+
+typedef enum {
+  CXIdxAttr_Unexposed     = 0,
+  CXIdxAttr_IBAction      = 1,
+  CXIdxAttr_IBOutlet      = 2,
+  CXIdxAttr_IBOutletCollection = 3
+} CXIdxAttrKind;
+
+typedef struct {
+  CXIdxAttrKind kind;
+  CXCursor cursor;
+  CXIdxLoc loc;
+} CXIdxAttrInfo;
+
+typedef struct {
+  const CXIdxAttrInfo *attrInfo;
+  const CXIdxEntityInfo *objcClass;
+  CXCursor classCursor;
+  CXIdxLoc classLoc;
+} CXIdxIBOutletCollectionAttrInfo;
 
 typedef struct {
   const CXIdxEntityInfo *entityInfo;
   CXCursor cursor;
   CXIdxLoc loc;
-  CXIdxClientContainer container;
+  const CXIdxContainerInfo *container;
   int isRedeclaration;
   int isDefinition;
   int isContainer;
+  const CXIdxContainerInfo *declAsContainer;
   /**
    * \brief Whether the declaration exists in code or was created implicitly
    * by the compiler, e.g. implicit objc methods for properties.
    */
   int isImplicit;
+  const CXIdxAttrInfo *const *attributes;
+  unsigned numAttributes;
 } CXIdxDeclInfo;
-
-typedef struct {
-  CXIdxClientContainer *outContainer;
-} CXIdxDeclOut;
 
 typedef enum {
   CXIdxObjCContainer_ForwardRef = 0,
@@ -4059,6 +4116,8 @@ typedef struct {
 typedef struct {
   const CXIdxObjCContainerDeclInfo *containerInfo;
   const CXIdxEntityInfo *objcClass;
+  CXCursor classCursor;
+  CXIdxLoc classLoc;
 } CXIdxObjCCategoryDeclInfo;
 
 typedef struct {
@@ -4084,6 +4143,12 @@ typedef struct {
   const CXIdxObjCProtocolRefListInfo *protocols;
 } CXIdxObjCInterfaceDeclInfo;
 
+typedef struct {
+  const CXIdxDeclInfo *declInfo;
+  const CXIdxBaseClassInfo *const *bases;
+  unsigned numBases;
+} CXIdxCXXClassDeclInfo;
+
 /**
  * \brief Data for \see indexEntityReference callback.
  */
@@ -4093,9 +4158,10 @@ typedef enum {
    */
   CXIdxEntityRef_Direct = 1,
   /**
-   * \brief A reference of an ObjC method via the dot syntax.
+   * \brief An implicit reference, e.g. a reference of an ObjC method via the
+   * dot syntax.
    */
-  CXIdxEntityRef_ImplicitProperty = 2
+  CXIdxEntityRef_Implicit = 2
 } CXIdxEntityRefKind;
 
 /**
@@ -4125,7 +4191,7 @@ typedef struct {
   /**
    * \brief Container context of the reference.
    */
-  CXIdxClientContainer container;
+  const CXIdxContainerInfo *container;
   CXIdxEntityRefKind kind;
 } CXIdxEntityRefInfo;
 
@@ -4137,10 +4203,10 @@ typedef struct {
   int (*abortQuery)(CXClientData client_data, void *reserved);
 
   /**
-   * \brief Called when a diagnostic is emitted.
+   * \brief Called at the end of indexing; passes the complete diagnostic set.
    */
   void (*diagnostic)(CXClientData client_data,
-                     CXDiagnostic, void *reserved);
+                     CXDiagnosticSet, void *reserved);
 
   CXIdxClientFile (*enteredMainFile)(CXClientData client_data,
                                CXFile mainFile, void *reserved);
@@ -4169,7 +4235,7 @@ typedef struct {
                                                  void *reserved);
 
   void (*indexDeclaration)(CXClientData client_data,
-                           const CXIdxDeclInfo *, const CXIdxDeclOut *);
+                           const CXIdxDeclInfo *);
 
   /**
    * \brief Called to index a reference of an entity.
@@ -4193,6 +4259,76 @@ clang_index_getObjCCategoryDeclInfo(const CXIdxDeclInfo *);
 CINDEX_LINKAGE const CXIdxObjCProtocolRefListInfo *
 clang_index_getObjCProtocolRefListInfo(const CXIdxDeclInfo *);
 
+CINDEX_LINKAGE const CXIdxIBOutletCollectionAttrInfo *
+clang_index_getIBOutletCollectionAttrInfo(const CXIdxAttrInfo *);
+
+CINDEX_LINKAGE const CXIdxCXXClassDeclInfo *
+clang_index_getCXXClassDeclInfo(const CXIdxDeclInfo *);
+
+/**
+ * \brief For retrieving a custom CXIdxClientContainer attached to a
+ * container.
+ */
+CINDEX_LINKAGE CXIdxClientContainer
+clang_index_getClientContainer(const CXIdxContainerInfo *);
+
+/**
+ * \brief For setting a custom CXIdxClientContainer attached to a
+ * container.
+ */
+CINDEX_LINKAGE void
+clang_index_setClientContainer(const CXIdxContainerInfo *,CXIdxClientContainer);
+
+/**
+ * \brief For retrieving a custom CXIdxClientEntity attached to an entity.
+ */
+CINDEX_LINKAGE CXIdxClientEntity
+clang_index_getClientEntity(const CXIdxEntityInfo *);
+
+/**
+ * \brief For setting a custom CXIdxClientEntity attached to an entity.
+ */
+CINDEX_LINKAGE void
+clang_index_setClientEntity(const CXIdxEntityInfo *, CXIdxClientEntity);
+
+/**
+ * \brief An indexing action, to be applied to one or multiple translation units
+ * but not on concurrent threads. If there are threads doing indexing
+ * concurrently, they should use different CXIndexAction objects.
+ */
+typedef void *CXIndexAction;
+
+/**
+ * \brief An indexing action, to be applied to one or multiple translation units
+ * but not on concurrent threads. If there are threads doing indexing
+ * concurrently, they should use different CXIndexAction objects.
+ *
+ * \param CIdx The index object with which the index action will be associated.
+ */
+CINDEX_LINKAGE CXIndexAction clang_IndexAction_create(CXIndex CIdx);
+
+/**
+ * \brief Destroy the given index action.
+ *
+ * The index action must not be destroyed until all of the translation units
+ * created within that index action have been destroyed.
+ */
+CINDEX_LINKAGE void clang_IndexAction_dispose(CXIndexAction);
+
+typedef enum {
+  /**
+   * \brief Used to indicate that no special indexing options are needed.
+   */
+  CXIndexOpt_None = 0x0,
+  
+  /**
+   * \brief Used to indicate that \see indexEntityReference should be invoked
+   * for only one reference of an entity per source file that does not also
+   * include a declaration/definition of the entity.
+   */
+  CXIndexOpt_SuppressRedundantRefs = 0x1
+} CXIndexOptFlags;
+
 /**
  * \brief Index the given source file and the translation unit corresponding
  * to that file via callbacks implemented through \see IndexerCallbacks.
@@ -4206,17 +4342,18 @@ clang_index_getObjCProtocolRefListInfo(const CXIdxDeclInfo *);
  * \param index_callbacks_size Size of \see IndexerCallbacks structure that gets
  * passed in index_callbacks.
  *
- * \param index_options Options affecting indexing; reserved.
+ * \param index_options A bitmask of options that affects how indexing is
+ * performed. This should be a bitwise OR of the CXIndexOpt_XXX flags.
  *
  * \param out_TU [out] pointer to store a CXTranslationUnit that can be reused
  * after indexing is finished. Set to NULL if you do not require it.
  *
- * \returns If there is a failure from which the compiler cannot recover returns
+ * \returns If there is a failure from which the there is no recovery, returns
  * non-zero, otherwise returns 0.
- * 
+ *
  * The rest of the parameters are the same as \see clang_parseTranslationUnit.
  */
-CINDEX_LINKAGE int clang_indexTranslationUnit(CXIndex CIdx,
+CINDEX_LINKAGE int clang_indexSourceFile(CXIndexAction,
                                          CXClientData client_data,
                                          IndexerCallbacks *index_callbacks,
                                          unsigned index_callbacks_size,
@@ -4228,6 +4365,29 @@ CINDEX_LINKAGE int clang_indexTranslationUnit(CXIndex CIdx,
                                          unsigned num_unsaved_files,
                                          CXTranslationUnit *out_TU,
                                          unsigned TU_options);
+
+/**
+ * \brief Index the given translation unit via callbacks implemented through
+ * \see IndexerCallbacks.
+ * 
+ * The order of callback invocations is not guaranteed to be the same as
+ * when indexing a source file. The high level order will be:
+ * 
+ *   -Preprocessor callbacks invocations
+ *   -Declaration/reference callbacks invocations
+ *   -Diagnostic callback invocations
+ *
+ * The parameters are the same as \see clang_indexSourceFile.
+ * 
+ * \returns If there is a failure from which the there is no recovery, returns
+ * non-zero, otherwise returns 0.
+ */
+CINDEX_LINKAGE int clang_indexTranslationUnit(CXIndexAction,
+                                              CXClientData client_data,
+                                              IndexerCallbacks *index_callbacks,
+                                              unsigned index_callbacks_size,
+                                              unsigned index_options,
+                                              CXTranslationUnit);
 
 /**
  * \brief Retrieve the CXIdxFile, file, line, column, and offset represented by

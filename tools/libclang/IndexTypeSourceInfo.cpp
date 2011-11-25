@@ -36,6 +36,8 @@ public:
 
   bool VisitTagTypeLoc(TagTypeLoc TL) {
     TagDecl *D = TL.getDecl();
+    if (D->getParentFunctionOrMethod())
+      return true;
 
     if (TL.isDefinition()) {
       IndexCtx.indexTagDecl(D);
@@ -85,8 +87,8 @@ void IndexingContext::indexTypeLoc(TypeLoc TL,
 }
 
 void IndexingContext::indexTagDecl(const TagDecl *D) {
-  handleTagDecl(D);
-  if (D->isThisDeclarationADefinition()) {
-    indexDeclContext(D);
+  if (handleTagDecl(D)) {
+    if (D->isThisDeclarationADefinition())
+      indexDeclContext(D);
   }
 }

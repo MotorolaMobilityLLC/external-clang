@@ -27,6 +27,7 @@
 
 namespace clang {
   
+class DirectoryEntry;
 class FileEntry;
 class FileManager;
 class DiagnosticConsumer;
@@ -58,23 +59,41 @@ public:
     /// \brief The headers that are part of this module.
     llvm::SmallVector<const FileEntry *, 2> Headers;
     
+    /// \brief Whether this is a framework module.
+    bool IsFramework;
+    
     /// \brief Whether this is an explicit submodule.
     bool IsExplicit;
     
     /// \brief Construct a top-level module.
-    explicit Module(StringRef Name, SourceLocation DefinitionLoc)
+    explicit Module(StringRef Name, SourceLocation DefinitionLoc,
+                    bool IsFramework)
       : Name(Name), DefinitionLoc(DefinitionLoc), Parent(0), UmbrellaHeader(0),
-        IsExplicit(false) { }
+        IsFramework(IsFramework), IsExplicit(false) { }
     
     /// \brief Construct  a new module or submodule.
     Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent, 
-           bool IsExplicit)
+           bool IsFramework, bool IsExplicit)
       : Name(Name), DefinitionLoc(DefinitionLoc), Parent(Parent), 
-        UmbrellaHeader(0), IsExplicit(IsExplicit) {
+        UmbrellaHeader(0), IsFramework(IsFramework), IsExplicit(IsExplicit) {
     }
-           
+     
+    ~Module();
+    
     /// \brief Determine whether this module is a submodule.
     bool isSubModule() const { return Parent != 0; }
+    
+    /// \brief Determine whether this module is a part of a framework,
+    /// either because it is a framework module or because it is a submodule
+    /// of a framework module.
+    bool isPartOfFramework() const {
+      for (const Module *Mod = this; Mod; Mod = Mod->Parent) 
+        if (Mod->IsFramework)
+          return true;
+      
+      return false;
+    }
+    
     
     /// \brief Retrieve the full name of this module, including the path from
     /// its top-level module.
@@ -95,6 +114,14 @@ private:
   /// \brief Mapping from each header to the module that owns the contents of the
   /// that header.
   llvm::DenseMap<const FileEntry *, Module *> Headers;
+  
+  /// \brief Mapping from directories with umbrella headers to the module
+  /// that is generated from the umbrella header.
+  ///
+  /// This mapping is used to map headers that haven't explicitly been named
+  /// in the module map over to the module that includes them via its umbrella
+  /// header.
+  llvm::DenseMap<const DirectoryEntry *, Module *> UmbrellaDirs;
   
   friend class ModuleMapParser;
   
@@ -128,6 +155,11 @@ public:
   /// \returns The named module, if known; otherwise, returns null.
   Module *findModule(StringRef Name);
   
+  /// \brief Infer the contents of a framework module map from the given
+  /// framework directory.
+  Module *inferFrameworkModule(StringRef ModuleName, 
+                               const DirectoryEntry *FrameworkDir);
+                               
   /// \brief Parse the given module map file, and record any modules we 
   /// encounter.
   ///

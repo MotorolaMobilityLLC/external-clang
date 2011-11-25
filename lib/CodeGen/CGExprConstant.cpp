@@ -1074,6 +1074,7 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
     case APValue::Array:
     case APValue::Struct:
     case APValue::Union:
+    case APValue::MemberPointer:
       break;
     }
   }
@@ -1084,6 +1085,12 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
     C = llvm::ConstantExpr::getZExt(C, BoolTy);
   }
   return C;
+}
+
+llvm::Constant *
+CodeGenModule::GetAddrOfConstantCompoundLiteral(const CompoundLiteralExpr *E) {
+  assert(E->isFileScope() && "not a file-scope compound literal expr");
+  return ConstExprEmitter(*this, 0).EmitLValue(E);
 }
 
 static uint64_t getFieldOffset(ASTContext &C, const FieldDecl *field) {

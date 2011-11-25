@@ -249,6 +249,7 @@ void ASTDeclReader::VisitDecl(Decl *D) {
   D->setImplicit(Record[Idx++]);
   D->setUsed(Record[Idx++]);
   D->setReferenced(Record[Idx++]);
+  D->TopLevelDeclInObjCContainer = Record[Idx++];
   D->setAccess((AccessSpecifier)Record[Idx++]);
   D->FromASTFile = true;
   D->ModulePrivate = Record[Idx++];
@@ -559,7 +560,6 @@ void ASTDeclReader::VisitObjCInterfaceDecl(ObjCInterfaceDecl *ID) {
   ID->setIvarList(0);
   ID->InitiallyForwardDecl = Record[Idx++];
   ID->ForwardDecl = Record[Idx++];
-  ID->setImplicitInterfaceDecl(Record[Idx++]);
   ID->setSuperClassLoc(ReadSourceLocation(Record, Idx));
   ID->setLocEnd(ReadSourceLocation(Record, Idx));
 }

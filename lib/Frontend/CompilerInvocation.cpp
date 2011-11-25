@@ -30,6 +30,20 @@
 #include "llvm/Support/Path.h"
 using namespace clang;
 
+//===----------------------------------------------------------------------===//
+// Initialization.
+//===----------------------------------------------------------------------===//
+
+CompilerInvocationBase::CompilerInvocationBase()
+  : LangOpts(new LangOptions()) {}
+
+CompilerInvocationBase::CompilerInvocationBase(const CompilerInvocationBase &X)
+  : LangOpts(new LangOptions(*X.getLangOpts())) {}
+
+//===----------------------------------------------------------------------===//
+// Utility functions.
+//===----------------------------------------------------------------------===//
+
 static const char *getAnalysisStoreName(AnalysisStores Kind) {
   switch (Kind) {
   default:
@@ -394,6 +408,7 @@ static const char *getActionName(frontend::ActionKind Kind) {
   case frontend::EmitObj:                return "-emit-obj";
   case frontend::FixIt:                  return "-fixit";
   case frontend::GenerateModule:         return "-emit-module";
+  case frontend::GenerateModuleFromMap:  return "-emit-module-from-map";
   case frontend::GeneratePCH:            return "-emit-pch";
   case frontend::GeneratePTH:            return "-emit-pth";
   case frontend::InitOnly:               return "-init-only";
@@ -652,6 +667,8 @@ static void LangOptsToArgs(const LangOptions &Opts,
     Res.push_back("-fpascal-strings");
   if (Opts.CatchUndefined)
     Res.push_back("-fcatch-undefined-behavior");
+  if (Opts.AddressSanitizer)
+    Res.push_back("-faddress-sanitizer");
   if (Opts.WritableStrings)
     Res.push_back("-fwritable-strings");
   if (Opts.ConstStrings)
@@ -772,6 +789,10 @@ static void LangOptsToArgs(const LangOptions &Opts,
     Res.push_back("-ftemplate-depth");
     Res.push_back(llvm::utostr(Opts.InstantiationDepth));
   }
+  if (Opts.ConstexprCallDepth != DefaultLangOpts.ConstexprCallDepth) {
+    Res.push_back("-fconstexpr-depth");
+    Res.push_back(llvm::utostr(Opts.ConstexprCallDepth));
+  }
   if (!Opts.ObjCConstantStringClass.empty()) {
     Res.push_back("-fconstant-string-class");
     Res.push_back(Opts.ObjCConstantStringClass);
@@ -788,6 +809,8 @@ static void LangOptsToArgs(const LangOptions &Opts,
     Res.push_back("-fdeprecated-macro");
   if (Opts.ApplePragmaPack)
     Res.push_back("-fapple-pragma-pack");
+  if (!Opts.CurrentModule.empty())
+    Res.push_back("-fmodule-name=" + Opts.CurrentModule);
 }
 
 static void PreprocessorOptsToArgs(const PreprocessorOptions &Opts,
@@ -887,7 +910,7 @@ void CompilerInvocation::toArgs(std::vector<std::string> &Res) {
   FileSystemOptsToArgs(getFileSystemOpts(), Res);
   FrontendOptsToArgs(getFrontendOpts(), Res);
   HeaderSearchOptsToArgs(getHeaderSearchOpts(), Res);
-  LangOptsToArgs(getLangOpts(), Res);
+  LangOptsToArgs(*getLangOpts(), Res);
   PreprocessorOptsToArgs(getPreprocessorOpts(), Res);
   PreprocessorOutputOptsToArgs(getPreprocessorOutputOpts(), Res);
   TargetOptsToArgs(getTargetOpts(), Res);
@@ -1250,6 +1273,8 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
       Opts.ProgramAction = frontend::FixIt; break;
     case OPT_emit_module:
       Opts.ProgramAction = frontend::GenerateModule; break;
+    case OPT_emit_module_from_map:
+      Opts.ProgramAction = frontend::GenerateModuleFromMap; break;
     case OPT_emit_pch:
       Opts.ProgramAction = frontend::GeneratePCH; break;
     case OPT_emit_pth:
@@ -1755,7 +1780,9 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.ElideConstructors = !Args.hasArg(OPT_fno_elide_constructors);
   Opts.MathErrno = Args.hasArg(OPT_fmath_errno);
   Opts.InstantiationDepth = Args.getLastArgIntValue(OPT_ftemplate_depth, 1024,
-                                               Diags);
+                                                    Diags);
+  Opts.ConstexprCallDepth = Args.getLastArgIntValue(OPT_fconstexpr_depth, 512,
+                                                    Diags);
   Opts.DelayedTemplateParsing = Args.hasArg(OPT_fdelayed_template_parsing);
   Opts.NumLargeByValueCopy = Args.getLastArgIntValue(OPT_Wlarge_by_value_copy,
                                                     0, Diags);
@@ -1784,7 +1811,9 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.FakeAddressSpaceMap = Args.hasArg(OPT_ffake_address_space_map);
   Opts.ParseUnknownAnytype = Args.hasArg(OPT_funknown_anytype);
   Opts.DebuggerSupport = Args.hasArg(OPT_fdebugger_support);
+  Opts.AddressSanitizer = Args.hasArg(OPT_faddress_sanitizer);
   Opts.ApplePragmaPack = Args.hasArg(OPT_fapple_pragma_pack);
+  Opts.CurrentModule = Args.getLastArgValue(OPT_fmodule_name);
 
   // Record whether the __DEPRECATED define was requested.
   Opts.Deprecated = Args.hasFlag(OPT_fdeprecated_macro,
@@ -1973,9 +2002,9 @@ void CompilerInvocation::CreateFromArgs(CompilerInvocation &Res,
   ParseCodeGenArgs(Res.getCodeGenOpts(), *Args, DashX, Diags);
   ParseHeaderSearchArgs(Res.getHeaderSearchOpts(), *Args);
   if (DashX != IK_AST && DashX != IK_LLVM_IR) {
-    ParseLangArgs(Res.getLangOpts(), *Args, DashX, Diags);
+    ParseLangArgs(*Res.getLangOpts(), *Args, DashX, Diags);
     if (Res.getFrontendOpts().ProgramAction == frontend::RewriteObjC)
-      Res.getLangOpts().ObjCExceptions = 1;
+      Res.getLangOpts()->ObjCExceptions = 1;
   }
   // FIXME: ParsePreprocessorArgs uses the FileManager to read the contents of
   // PCH file and find the original header name. Remove the need to do that in
@@ -2048,9 +2077,9 @@ std::string CompilerInvocation::getModuleHash() const {
   
   // Extend the signature with the language options
 #define LANGOPT(Name, Bits, Default, Description) \
-  Signature.add(LangOpts.Name, Bits);
+  Signature.add(LangOpts->Name, Bits);
 #define ENUM_LANGOPT(Name, Type, Bits, Default, Description) \
-  Signature.add(static_cast<unsigned>(LangOpts.get##Name()), Bits);
+  Signature.add(static_cast<unsigned>(LangOpts->get##Name()), Bits);
 #define BENIGN_LANGOPT(Name, Bits, Default, Description)
 #define BENIGN_ENUM_LANGOPT(Name, Type, Bits, Default, Description)
 #include "clang/Basic/LangOptions.def"

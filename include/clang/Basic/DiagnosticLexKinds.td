@@ -392,10 +392,12 @@ def note_mmap_prev_definition : Note<"previously defined here">;
 def err_mmap_header_conflict : Error<
   "header '%0' is already part of module '%1'">;
 def err_mmap_header_not_found : Error<
-  "%select{|umbrella }0 header '%1' not found">;
+  "%select{|umbrella }0header '%1' not found">;
 def err_mmap_umbrella_header_conflict : Error<
   "module '%0' already has an umbrella header ('%1')">;
 def err_mmap_umbrella_header_submodule : Error<
   "submodule '%0' can not have an umbrella header">;
-  
+def err_mmap_umbrella_clash : Error<
+  "umbrella header for module '%0' already covers this directory">;
+
 }

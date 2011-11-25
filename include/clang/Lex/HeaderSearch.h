@@ -207,12 +207,24 @@ public:
     //LookupFileCache.clear();
   }
 
+  /// AddSearchPath - Add an additional search path.
+  void AddSearchPath(const DirectoryLookup &dir, bool isAngled) {
+    unsigned idx = isAngled ? SystemDirIdx : AngledDirIdx;
+    SearchDirs.insert(SearchDirs.begin() + idx, dir);
+    if (!isAngled)
+      AngledDirIdx++;
+    SystemDirIdx++;
+  }
+
   /// \brief Set the path to the module cache and the name of the module
   /// we're building
   void configureModules(StringRef CachePath, StringRef BuildingModule) {
     ModuleCachePath = CachePath;
     this->BuildingModule = BuildingModule;
   }
+  
+  /// \brief Retrieve the path to the module cache.
+  StringRef getModuleCachePath() const { return ModuleCachePath; }
   
   /// ClearFileInfo - Forget everything we know about headers so far.
   void ClearFileInfo() {
@@ -255,15 +267,16 @@ public:
   /// Filename for framework includes.
   ///
   /// \param SuggestedModule If non-null, and the file found is semantically
-  /// part of a known module, this will be set to the name of the module that
-  /// could be imported instead of preprocessing/parsing the file found.
+  /// part of a known module, this will be set to the module that should
+  /// be imported instead of preprocessing/parsing the file found.
   const FileEntry *LookupFile(StringRef Filename, bool isAngled,
                               const DirectoryLookup *FromDir,
                               const DirectoryLookup *&CurDir,
                               const FileEntry *CurFileEnt,
                               SmallVectorImpl<char> *SearchPath,
                               SmallVectorImpl<char> *RelativePath,
-                              StringRef *SuggestedModule);
+                              ModuleMap::Module **SuggestedModule,
+                              bool SkipCache = false);
 
   /// LookupSubframeworkHeader - Look up a subframework for the specified
   /// #include file.  For example, if #include'ing <HIToolbox/HIToolbox.h> from
@@ -363,9 +376,41 @@ public:
   bool hasModuleMap(StringRef Filename, const DirectoryEntry *Root);
   
   /// \brief Retrieve the module that corresponds to the given file, if any.
+  ModuleMap::Module *findModuleForHeader(const FileEntry *File);
+  
+  
+  /// \brief Read the contents of the given module map file.
   ///
-  /// FIXME: This will need to be generalized for submodules.
-  StringRef findModuleForHeader(const FileEntry *File);
+  /// \param File The module map file.
+  ///
+  /// \param OnlyModule If non-NULL, this will receive the 
+  ///
+  /// \returns true if an error occurred, false otherwise.
+  bool loadModuleMapFile(const FileEntry *File);
+  
+  /// \brief Retrieve a module with the given name.
+  ///
+  /// \param Name The name of the module to retrieve.
+  ///
+  /// \param AllowSearch If true, we're allowed to look for module maps within
+  /// the header search path. Otherwise, the module must already be known.
+  ///
+  /// \returns The module, if found; otherwise, null.
+  ModuleMap::Module *getModule(StringRef Name, bool AllowSearch = true);
+
+  /// \brief Retrieve a module with the given name, which may be part of the
+  /// given framework.
+  ///
+  /// \param Name The name of the module to retrieve.
+  ///
+  /// \param Dir The framework directory (e.g., ModuleName.framework).
+  ///
+  /// \returns The module, if found; otherwise, null.
+  ModuleMap::Module *getFrameworkModule(StringRef Name, 
+                                        const DirectoryEntry *Dir);
+
+  /// \brief Retrieve the module map.
+  ModuleMap &getModuleMap() { return ModMap; }
   
   unsigned header_file_size() const { return FileInfo.size(); }
 

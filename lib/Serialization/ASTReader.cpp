@@ -1081,9 +1081,20 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(int ID) {
     return Failure;
 
   case SM_SLOC_FILE_ENTRY: {
-    std::string Filename(BlobStart, BlobStart + BlobLen);
+    if (Record.size() < 7) {
+      Error("source location entry is incorrect");
+      return Failure;
+    }
+
+    bool OverriddenBuffer = Record[6];
+    
+    std::string OrigFilename(BlobStart, BlobStart + BlobLen);
+    std::string Filename = OrigFilename;
     MaybeAddSystemRootToFilename(Filename);
-    const FileEntry *File = FileMgr.getFile(Filename);
+    const FileEntry *File = 
+      OverriddenBuffer? FileMgr.getVirtualFile(Filename, (off_t)Record[4],
+                                               (time_t)Record[5])
+                      : FileMgr.getFile(Filename, /*OpenFile=*/false);
     if (File == 0 && !OriginalDir.empty() && !CurrentDir.empty() &&
         OriginalDir != CurrentDir) {
       std::string resolved = resolveFileRelativeToOriginalDir(Filename,
@@ -1100,11 +1111,6 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(int ID) {
       ErrorStr += Filename;
       ErrorStr += "' referenced by AST file";
       Error(ErrorStr.c_str());
-      return Failure;
-    }
-
-    if (Record.size() < 6) {
-      Error("source location entry is incorrect");
       return Failure;
     }
 
@@ -1131,18 +1137,37 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(int ID) {
                                         ID, BaseOffset + Record[0]);
     SrcMgr::FileInfo &FileInfo =
           const_cast<SrcMgr::FileInfo&>(SourceMgr.getSLocEntry(FID).getFile());
-    FileInfo.NumCreatedFIDs = Record[6];
+    FileInfo.NumCreatedFIDs = Record[7];
     if (Record[3])
       FileInfo.setHasLineDirectives();
 
-    const DeclID *FirstDecl = F->FileSortedDecls + Record[7];
-    unsigned NumFileDecls = Record[8];
+    const DeclID *FirstDecl = F->FileSortedDecls + Record[8];
+    unsigned NumFileDecls = Record[9];
     if (NumFileDecls) {
       assert(F->FileSortedDecls && "FILE_SORTED_DECLS not encountered yet ?");
       FileDeclIDs[FID] = FileDeclsInfo(F, llvm::makeArrayRef(FirstDecl,
                                                              NumFileDecls));
     }
     
+    const SrcMgr::ContentCache *ContentCache
+      = SourceMgr.getOrCreateContentCache(File);
+    if (OverriddenBuffer && !ContentCache->BufferOverridden &&
+        ContentCache->ContentsEntry == ContentCache->OrigEntry) {
+      unsigned Code = SLocEntryCursor.ReadCode();
+      Record.clear();
+      unsigned RecCode
+        = SLocEntryCursor.ReadRecord(Code, Record, &BlobStart, &BlobLen);
+      
+      if (RecCode != SM_SLOC_BUFFER_BLOB) {
+        Error("AST record has invalid code");
+        return Failure;
+      }
+      
+      llvm::MemoryBuffer *Buffer
+        = llvm::MemoryBuffer::getMemBuffer(StringRef(BlobStart, BlobLen - 1),
+                                           Filename);
+      SourceMgr.overrideFileContents(File, Buffer);
+    }
     break;
   }
 
@@ -1160,8 +1185,8 @@ ASTReader::ASTReadResult ASTReader::ReadSLocEntryRecord(int ID) {
     }
 
     llvm::MemoryBuffer *Buffer
-    = llvm::MemoryBuffer::getMemBuffer(StringRef(BlobStart, BlobLen - 1),
-                                       Name);
+      = llvm::MemoryBuffer::getMemBuffer(StringRef(BlobStart, BlobLen - 1),
+                                         Name);
     FileID BufferID = SourceMgr.createFileIDForMemBuffer(Buffer, ID,
                                                          BaseOffset + Offset);
 
@@ -2341,6 +2366,10 @@ ASTReader::ASTReadResult ASTReader::validateFileEntries(Module &M) {
       return Failure;
 
     case SM_SLOC_FILE_ENTRY: {
+      // If the buffer was overridden, the file need not exist.
+      if (Record[6])
+        break;
+      
       StringRef Filename(BlobStart, BlobLen);
       const FileEntry *File = getFileEntry(Filename);
 
@@ -2352,7 +2381,7 @@ ASTReader::ASTReadResult ASTReader::validateFileEntries(Module &M) {
         return IgnorePCH;
       }
 
-      if (Record.size() < 6) {
+      if (Record.size() < 7) {
         Error("source location entry is incorrect");
         return Failure;
       }
@@ -2789,6 +2818,10 @@ bool ASTReader::ParseLanguageOptions(
   LangOpts.set##Name(static_cast<LangOptions::Type>(Record[Idx++]));
 #include "clang/Basic/LangOptions.def"
     
+    unsigned Length = Record[Idx++];
+    LangOpts.CurrentModule.assign(Record.begin() + Idx, 
+                                  Record.begin() + Idx + Length);
+    Idx += Length;
     return Listener->ReadLanguageOptions(LangOpts);
   }
 
@@ -4258,6 +4291,14 @@ void ASTReader::FindFileRegionDecls(FileID File,
     BeginIt = std::lower_bound(DInfo.Decls.begin(), DInfo.Decls.end(),
                                BeginLoc, DIDComp);
   if (BeginIt != DInfo.Decls.begin())
+    --BeginIt;
+
+  // If we are pointing at a top-level decl inside an objc container, we need
+  // to backtrack until we find it otherwise we will fail to report that the
+  // region overlaps with an objc container.
+  while (BeginIt != DInfo.Decls.begin() &&
+         GetDecl(getGlobalDeclID(*DInfo.Mod, *BeginIt))
+             ->isTopLevelDeclInObjCContainer())
     --BeginIt;
 
   ArrayRef<serialization::LocalDeclID>::iterator

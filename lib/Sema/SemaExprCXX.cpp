@@ -1861,14 +1861,17 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
       }
     }
 
+    // Perform lvalue-to-rvalue cast, if needed.
+    Ex = DefaultLvalueConversion(Ex.take());
+
     // C++ [expr.delete]p2:
     //   [Note: a pointer to a const type can be the operand of a
     //   delete-expression; it is not necessary to cast away the constness
     //   (5.2.11) of the pointer expression before it is used as the operand
     //   of the delete-expression. ]
     if (!Context.hasSameType(Ex.get()->getType(), Context.VoidPtrTy))
-      Ex = Owned(ImplicitCastExpr::Create(Context, Context.VoidPtrTy, CK_NoOp,
-                                          Ex.take(), 0, VK_RValue));
+      Ex = Owned(ImplicitCastExpr::Create(Context, Context.VoidPtrTy,
+                                          CK_BitCast, Ex.take(), 0, VK_RValue));
 
     if (Pointee->isArrayType() && !ArrayForm) {
       Diag(StartLoc, diag::warn_delete_array_type)
@@ -2096,6 +2099,12 @@ static ExprResult BuildCXXCastArgument(Sema &S,
                                                  HadMultipleCandidates);
     if (Result.isInvalid())
       return ExprError();
+    // Record usage of conversion in an implicit cast.
+    Result = S.Owned(ImplicitCastExpr::Create(S.Context,
+                                              Result.get()->getType(),
+                                              CK_UserDefinedConversion,
+                                              Result.get(), 0,
+                                              Result.get()->getValueKind()));
 
     S.CheckMemberOperatorAccess(CastLoc, From, /*arg*/ 0, FoundDecl);
 
@@ -4557,7 +4566,7 @@ ExprResult Sema::BuildCXXMemberCallExpr(Expr *E, NamedDecl *FoundDecl,
 
   MemberExpr *ME =
       new (Context) MemberExpr(Exp.take(), /*IsArrow=*/false, Method,
-                               SourceLocation(), Method->getType(),
+                               SourceLocation(), Context.BoundMemberTy,
                                VK_RValue, OK_Ordinary);
   if (HadMultipleCandidates)
     ME->setHadMultipleCandidates(true);
