@@ -486,7 +486,8 @@ const FileEntry *Preprocessor::LookupFile(
     const DirectoryLookup *&CurDir,
     SmallVectorImpl<char> *SearchPath,
     SmallVectorImpl<char> *RelativePath,
-    StringRef *SuggestedModule) {
+    ModuleMap::Module **SuggestedModule,
+    bool SkipCache) {
   // If the header lookup mechanism may be relative to the current file, pass in
   // info about where the current file is.
   const FileEntry *CurFileEnt = 0;
@@ -510,7 +511,7 @@ const FileEntry *Preprocessor::LookupFile(
   CurDir = CurDirLookup;
   const FileEntry *FE = HeaderInfo.LookupFile(
       Filename, isAngled, FromDir, CurDir, CurFileEnt,
-      SearchPath, RelativePath, SuggestedModule);
+      SearchPath, RelativePath, SuggestedModule, SkipCache);
   if (FE) return FE;
 
   // Otherwise, see if this is a subframework header.  If so, this is relative
@@ -1269,7 +1270,7 @@ void Preprocessor::HandleIncludeDirective(SourceLocation HashLoc,
   llvm::SmallString<1024> RelativePath;
   // We get the raw path only if we have 'Callbacks' to which we later pass
   // the path.
-  StringRef SuggestedModule;
+  ModuleMap::Module *SuggestedModule = 0;
   const FileEntry *File = LookupFile(
       Filename, isAngled, LookupFrom, CurDir,
       Callbacks ? &SearchPath : NULL, Callbacks ? &RelativePath : NULL,
@@ -1277,17 +1278,39 @@ void Preprocessor::HandleIncludeDirective(SourceLocation HashLoc,
 
   // If we are supposed to import a module rather than including the header,
   // do so now.
-  if (!SuggestedModule.empty()) {
+  if (SuggestedModule) {
+    // FIXME: Actually load the submodule that we were given.
+    while (SuggestedModule->Parent)
+      SuggestedModule = SuggestedModule->Parent;
+    
     TheModuleLoader.loadModule(IncludeTok.getLocation(),
-                               Identifiers.get(SuggestedModule),
+                               Identifiers.get(SuggestedModule->Name),
                                FilenameTok.getLocation());
     return;
   }
   
-  // Notify the callback object that we've seen an inclusion directive.
-  if (Callbacks)
+  if (Callbacks) {
+    if (!File) {
+      // Give the clients a chance to recover.
+      llvm::SmallString<128> RecoveryPath;
+      if (Callbacks->FileNotFound(Filename, RecoveryPath)) {
+        if (const DirectoryEntry *DE = FileMgr.getDirectory(RecoveryPath)) {
+          // Add the recovery path to the list of search paths.
+          DirectoryLookup DL(DE, SrcMgr::C_User, true, false);
+          HeaderInfo.AddSearchPath(DL, isAngled);
+
+          // Try the lookup again, skipping the cache.
+          File = LookupFile(Filename, isAngled, LookupFrom, CurDir, 0, 0,
+                            AutoModuleImport ? &SuggestedModule : 0,
+                            /*SkipCache*/true);
+        }
+      }
+    }
+
+    // Notify the callback object that we've seen an inclusion directive.
     Callbacks->InclusionDirective(HashLoc, IncludeTok, Filename, isAngled, File,
                                   End, SearchPath, RelativePath);
+  }
 
   if (File == 0) {
     if (!SuppressIncludeNotFoundError)

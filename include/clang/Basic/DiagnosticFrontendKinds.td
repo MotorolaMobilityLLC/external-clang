@@ -148,9 +148,15 @@ def warn_pch_compiler_options_mismatch : Error<
 def err_not_a_pch_file : Error<
     "'%0' does not appear to be a precompiled header file">, DefaultFatal;
 def warn_unknown_warning_option : Warning<
-    "unknown warning option '%0'; did you mean '%1'?">,
+    "unknown warning option '%0'">,
     InGroup<DiagGroup<"unknown-warning-option"> >;
 def warn_unknown_negative_warning_option : Warning<
+    "unknown warning option '%0'?">,
+    InGroup<DiagGroup<"unknown-warning-option"> >, DefaultIgnore;
+def warn_unknown_warning_option_suggest : Warning<
+    "unknown warning option '%0'; did you mean '%1'?">,
+    InGroup<DiagGroup<"unknown-warning-option"> >;
+def warn_unknown_negative_warning_option_suggest : Warning<
     "unknown warning option '%0'; did you mean '%1'?">,
     InGroup<DiagGroup<"unknown-warning-option"> >, DefaultIgnore;
 def warn_unknown_warning_specifier : Warning<
@@ -164,4 +170,14 @@ def warn_incompatible_analyzer_plugin_api : Warning<
     InGroup<DiagGroup<"analyzer-incompatible-plugin"> >;
 def note_incompatible_analyzer_plugin_api : Note<
     "current API version is '%0', but plugin was compiled with version '%1'">;
+    
+def err_module_map_not_found : Error<"module map file '%0' not found">, 
+  DefaultFatal;
+def err_missing_module_name : Error<
+  "no module name provided; specify one with -fmodule-name=">, 
+  DefaultFatal;
+def err_missing_module : Error<
+  "no module named '%0' declared in module map file '%1'">, DefaultFatal;
+def err_missing_umbrella_header : Error<
+  "cannot open umbrella header '%0': %1">, DefaultFatal;
 }

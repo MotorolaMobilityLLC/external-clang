@@ -1609,8 +1609,13 @@ static CXIdxClientContainer makeClientContainer(const CXIdxEntityInfo *info,
   return (CXIdxClientContainer)newStr;
 }
 
-static void printCXIndexContainer(CXIdxClientContainer container) {
-  printf("[%s]", (const char *)container);
+static void printCXIndexContainer(const CXIdxContainerInfo *info) {
+  CXIdxClientContainer container;
+  container = clang_index_getClientContainer(info);
+  if (!container)
+    printf("[<<NULL>>]");
+  else
+    printf("[%s]", (const char *)container);
 }
 
 static const char *getEntityKindString(CXIdxEntityKind kind) {
@@ -1632,6 +1637,27 @@ static const char *getEntityKindString(CXIdxEntityKind kind) {
   case CXIdxEntity_Struct: return "struct";
   case CXIdxEntity_Union: return "union";
   case CXIdxEntity_CXXClass: return "c++-class";
+  case CXIdxEntity_CXXNamespace: return "namespace";
+  case CXIdxEntity_CXXNamespaceAlias: return "namespace-alias";
+  case CXIdxEntity_CXXStaticVariable: return "c++-static-var";
+  case CXIdxEntity_CXXStaticMethod: return "c++-static-method";
+  case CXIdxEntity_CXXInstanceMethod: return "c++-instance-method";
+  case CXIdxEntity_CXXConstructor: return "constructor";
+  case CXIdxEntity_CXXDestructor: return "destructor";
+  case CXIdxEntity_CXXConversionFunction: return "conversion-func";
+  case CXIdxEntity_CXXTypeAlias: return "type-alias";
+  }
+  assert(0 && "Garbage entity kind");
+  return 0;
+}
+
+static const char *getEntityTemplateKindString(CXIdxEntityCXXTemplateKind kind) {
+  switch (kind) {
+  case CXIdxEntity_NonTemplate: return "";
+  case CXIdxEntity_Template: return "-template";
+  case CXIdxEntity_TemplatePartialSpecialization:
+    return "-template-partial-spec";
+  case CXIdxEntity_TemplateSpecialization: return "-template-spec";
   }
   assert(0 && "Garbage entity kind");
   return 0;
@@ -1645,11 +1671,17 @@ static void printEntityInfo(const char *cb,
   index_data = (IndexData *)client_data;
   printCheck(index_data);
 
+  if (!info) {
+    printf("%s: <<NULL>>", cb);
+    return;
+  }
+
   name = info->name;
   if (!name)
     name = "<anon-tag>";
 
-  printf("%s: kind: %s", cb, getEntityKindString(info->kind));
+  printf("%s: kind: %s%s", cb, getEntityKindString(info->kind),
+         getEntityTemplateKindString(info->templateKind));
   printf(" | name: %s", name);
   printf(" | USR: %s", info->USR);
 }
@@ -1727,12 +1759,12 @@ static CXIdxClientContainer index_startedTranslationUnit(CXClientData client_dat
 }
 
 static void index_indexDeclaration(CXClientData client_data,
-                                   const CXIdxDeclInfo *info,
-                                   const CXIdxDeclOut *outData) {
+                                   const CXIdxDeclInfo *info) {
   IndexData *index_data;
   const CXIdxObjCCategoryDeclInfo *CatInfo;
   const CXIdxObjCInterfaceDeclInfo *InterInfo;
   const CXIdxObjCProtocolRefListInfo *ProtoInfo;
+  unsigned i;
   index_data = (IndexData *)client_data;
 
   printEntityInfo("[indexDeclaration]", client_data, info->entityInfo);
@@ -1746,6 +1778,13 @@ static void index_indexDeclaration(CXClientData client_data,
   printf(" | isDef: %d", info->isDefinition);
   printf(" | isContainer: %d", info->isContainer);
   printf(" | isImplicit: %d\n", info->isImplicit);
+
+  for (i = 0; i != info->numAttributes; ++i) {
+    const CXIdxAttrInfo *Attr = info->attributes[i];
+    printf("     <attribute>: ");
+    PrintCursor(Attr->cursor);
+    printf("\n");
+  }
 
   if (clang_index_isEntityObjCContainerKind(info->entityInfo->kind)) {
     const char *kindName = 0;
@@ -1765,6 +1804,10 @@ static void index_indexDeclaration(CXClientData client_data,
   if ((CatInfo = clang_index_getObjCCategoryDeclInfo(info))) {
     printEntityInfo("     <ObjCCategoryInfo>: class", client_data,
                     CatInfo->objcClass);
+    printf(" | cursor: ");
+    PrintCursor(CatInfo->classCursor);
+    printf(" | loc: ");
+    printCXIndexLoc(CatInfo->classLoc);
     printf("\n");
   }
 
@@ -1784,8 +1827,9 @@ static void index_indexDeclaration(CXClientData client_data,
     printProtocolList(ProtoInfo, client_data);
   }
 
-  if (outData->outContainer)
-    *outData->outContainer = makeClientContainer(info->entityInfo, info->loc);
+  if (info->declAsContainer)
+    clang_index_setClientContainer(info->declAsContainer,
+                              makeClientContainer(info->entityInfo, info->loc));
 }
 
 static void index_indexEntityReference(CXClientData client_data,
@@ -1801,7 +1845,7 @@ static void index_indexEntityReference(CXClientData client_data,
   printf(" | refkind: ");
   switch (info->kind) {
   case CXIdxEntityRef_Direct: printf("direct"); break;
-  case CXIdxEntityRef_ImplicitProperty: printf("implicit prop"); break;
+  case CXIdxEntityRef_Implicit: printf("implicit"); break;
   }
   printf("\n");
 }
@@ -1819,8 +1863,10 @@ static IndexerCallbacks IndexCB = {
 
 static int index_file(int argc, const char **argv) {
   const char *check_prefix;
-  CXIndex CIdx;
+  CXIndex Idx;
+  CXIndexAction idxAction;
   IndexData index_data;
+  unsigned index_opts;
   int result;
 
   check_prefix = 0;
@@ -1837,17 +1883,87 @@ static int index_file(int argc, const char **argv) {
     return -1;
   }
 
-  CIdx = clang_createIndex(0, 1);
+  if (!(Idx = clang_createIndex(/* excludeDeclsFromPCH */ 1,
+                                /* displayDiagnosics=*/1))) {
+    fprintf(stderr, "Could not create Index\n");
+    return 1;
+  }
+  idxAction = 0;
+  result = 1;
+
   index_data.check_prefix = check_prefix;
   index_data.first_check_printed = 0;
   index_data.fail_for_error = 0;
 
-  result = clang_indexTranslationUnit(CIdx, &index_data,
-                                      &IndexCB,sizeof(IndexCB),
-                                      0, 0, argv, argc, 0, 0, 0, 0);
-  if (index_data.fail_for_error)
-    return -1;
+  index_opts = 0;
+  if (getenv("CINDEXTEST_SUPPRESSREFS"))
+    index_opts |= CXIndexOpt_SuppressRedundantRefs;
 
+  idxAction = clang_IndexAction_create(Idx);
+  result = clang_indexSourceFile(idxAction, &index_data,
+                                 &IndexCB,sizeof(IndexCB), index_opts,
+                                 0, argv, argc, 0, 0, 0, 0);
+  if (index_data.fail_for_error)
+    result = -1;
+
+  clang_IndexAction_dispose(idxAction);
+  clang_disposeIndex(Idx);
+  return result;
+}
+
+static int index_tu(int argc, const char **argv) {
+  CXIndex Idx;
+  CXIndexAction idxAction;
+  CXTranslationUnit TU;
+  const char *check_prefix;
+  IndexData index_data;
+  unsigned index_opts;
+  int result;
+
+  check_prefix = 0;
+  if (argc > 0) {
+    if (strstr(argv[0], "-check-prefix=") == argv[0]) {
+      check_prefix = argv[0] + strlen("-check-prefix=");
+      ++argv;
+      --argc;
+    }
+  }
+
+  if (argc == 0) {
+    fprintf(stderr, "no ast file\n");
+    return -1;
+  }
+
+  if (!(Idx = clang_createIndex(/* excludeDeclsFromPCH */ 1,
+                                /* displayDiagnosics=*/1))) {
+    fprintf(stderr, "Could not create Index\n");
+    return 1;
+  }
+  idxAction = 0;
+  result = 1;
+
+  if (!CreateTranslationUnit(Idx, argv[0], &TU))
+    goto finished;
+
+  index_data.check_prefix = check_prefix;
+  index_data.first_check_printed = 0;
+  index_data.fail_for_error = 0;
+
+  index_opts = 0;
+  if (getenv("CINDEXTEST_SUPPRESSREFS"))
+    index_opts |= CXIndexOpt_SuppressRedundantRefs;
+
+  idxAction = clang_IndexAction_create(Idx);
+  result = clang_indexTranslationUnit(idxAction, &index_data,
+                                      &IndexCB,sizeof(IndexCB),
+                                      index_opts, TU);
+  if (index_data.fail_for_error)
+    goto finished;
+
+  finished:
+  clang_IndexAction_dispose(idxAction);
+  clang_disposeIndex(Idx);
+  
   return result;
 }
 
@@ -2394,6 +2510,7 @@ static void print_usage(void) {
     "       c-index-test -cursor-at=<site> <compiler arguments>\n"
     "       c-index-test -file-refs-at=<site> <compiler arguments>\n"
     "       c-index-test -index-file [-check-prefix=<FileCheck prefix>] <compiler arguments>\n"
+    "       c-index-test -index-tu [-check-prefix=<FileCheck prefix>] <AST file>\n"
     "       c-index-test -test-file-scan <AST file> <source file> "
           "[FileCheck prefix]\n");
   fprintf(stderr,
@@ -2449,6 +2566,8 @@ int cindextest_main(int argc, const char **argv) {
     return find_file_refs_at(argc, argv);
   if (argc > 2 && strcmp(argv[1], "-index-file") == 0)
     return index_file(argc - 2, argv + 2);
+  if (argc > 2 && strcmp(argv[1], "-index-tu") == 0)
+    return index_tu(argc - 2, argv + 2);
   else if (argc >= 4 && strncmp(argv[1], "-test-load-tu", 13) == 0) {
     CXCursorVisitor I = GetVisitor(argv[1] + 13);
     if (I)

@@ -2163,22 +2163,126 @@ bool Sema::IsBlockPointerConversion(QualType FromType, QualType ToType,
    return true;
 }
 
+enum {
+  ft_default,
+  ft_different_class,
+  ft_parameter_arity,
+  ft_parameter_mismatch,
+  ft_return_type,
+  ft_qualifer_mismatch
+};
+
+/// HandleFunctionTypeMismatch - Gives diagnostic information for differeing
+/// function types.  Catches different number of parameter, mismatch in
+/// parameter types, and different return types.
+void Sema::HandleFunctionTypeMismatch(PartialDiagnostic &PDiag,
+                                      QualType FromType, QualType ToType) {
+  // Get the function type from the pointers.
+  if (FromType->isMemberPointerType() && ToType->isMemberPointerType()) {
+    const MemberPointerType *FromMember = FromType->getAs<MemberPointerType>(),
+                            *ToMember = ToType->getAs<MemberPointerType>();
+    if (FromMember->getClass() != ToMember->getClass()) {
+      PDiag << ft_different_class << QualType(ToMember->getClass(), 0)
+            << QualType(FromMember->getClass(), 0);
+      return;
+    }
+    FromType = FromMember->getPointeeType();
+    ToType = ToMember->getPointeeType();
+  } else if (FromType->isPointerType() && ToType->isPointerType()) {
+    FromType = FromType->getPointeeType();
+    ToType = ToType->getPointeeType();
+  } else {
+    PDiag << ft_default;
+    return;
+  }
+
+  FromType = FromType.getNonReferenceType();
+  ToType = ToType.getNonReferenceType();
+
+  // If either type is not valid, of the types are the same, no extra info.
+  if (FromType.isNull() || ToType.isNull() ||
+      Context.hasSameType(FromType, ToType)) {
+    PDiag << ft_default;
+    return;
+  }
+
+  // Don't print extra info for non-specialized template functions.
+  if (FromType->isInstantiationDependentType() &&
+      !FromType->getAs<TemplateSpecializationType>()) {
+    PDiag << ft_default;
+    return;
+  }
+
+  const FunctionProtoType *FromFunction = FromType->getAs<FunctionProtoType>(),
+                          *ToFunction = ToType->getAs<FunctionProtoType>();
+
+  // Both types need to be function types.
+  if (!FromFunction || !ToFunction) {
+    PDiag << ft_default;
+    return;
+  }
+
+  if (FromFunction->getNumArgs() != ToFunction->getNumArgs()) {
+    PDiag << ft_parameter_arity << ToFunction->getNumArgs()
+          << FromFunction->getNumArgs();
+    return;
+  }
+
+  // Handle different parameter types.
+  unsigned ArgPos;
+  if (!FunctionArgTypesAreEqual(FromFunction, ToFunction, &ArgPos)) {
+    PDiag << ft_parameter_mismatch << ArgPos + 1
+          << ToFunction->getArgType(ArgPos)
+          << FromFunction->getArgType(ArgPos);
+    return;
+  }
+
+  // Handle different return type.
+  if (!Context.hasSameType(FromFunction->getResultType(),
+                           ToFunction->getResultType())) {
+    PDiag << ft_return_type << ToFunction->getResultType()
+          << FromFunction->getResultType();
+    return;
+  }
+
+  unsigned FromQuals = FromFunction->getTypeQuals(),
+           ToQuals = ToFunction->getTypeQuals();
+  if (FromQuals != ToQuals) {
+    PDiag << ft_qualifer_mismatch << ToQuals << FromQuals;
+    return;
+  }
+
+  // Unable to find a difference, so add no extra info.
+  PDiag << ft_default;
+}
+
 /// FunctionArgTypesAreEqual - This routine checks two function proto types
 /// for equlity of their argument types. Caller has already checked that
 /// they have same number of arguments. This routine assumes that Objective-C
 /// pointer types which only differ in their protocol qualifiers are equal.
+/// If the parameters are different, ArgPos will have the the parameter index
+/// of the first different parameter.
 bool Sema::FunctionArgTypesAreEqual(const FunctionProtoType *OldType,
-                                    const FunctionProtoType *NewType) {
-  if (!getLangOptions().ObjC1)
-    return std::equal(OldType->arg_type_begin(), OldType->arg_type_end(),
-                      NewType->arg_type_begin());
+                                    const FunctionProtoType *NewType,
+                                    unsigned *ArgPos) {
+  if (!getLangOptions().ObjC1) {
+    for (FunctionProtoType::arg_type_iterator O = OldType->arg_type_begin(),
+         N = NewType->arg_type_begin(),
+         E = OldType->arg_type_end(); O && (O != E); ++O, ++N) {
+      if (!Context.hasSameType(*O, *N)) {
+        if (ArgPos) *ArgPos = O - OldType->arg_type_begin();
+        return false;
+      }
+    }
+    return true;
+  }
 
   for (FunctionProtoType::arg_type_iterator O = OldType->arg_type_begin(),
        N = NewType->arg_type_begin(),
        E = OldType->arg_type_end(); O && (O != E); ++O, ++N) {
     QualType ToType = (*O);
     QualType FromType = (*N);
-    if (ToType != FromType) {
+    if (!Context.hasSameType(ToType, FromType)) {
       if (const PointerType *PTTo = ToType->getAs<PointerType>()) {
         if (const PointerType *PTFr = FromType->getAs<PointerType>())
           if ((PTTo->getPointeeType()->isObjCQualifiedIdType() &&
@@ -2194,6 +2298,7 @@ bool Sema::FunctionArgTypesAreEqual(const FunctionProtoType *OldType,
           if (PTTo->getInterfaceDecl() == PTFr->getInterfaceDecl())
             continue;
       }
+      if (ArgPos) *ArgPos = O - OldType->arg_type_begin();
       return false;
     }
   }
@@ -4309,8 +4414,11 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
                                                  HadMultipleCandidates);
       if (Result.isInvalid())
         return ExprError();
-
-      From = Result.get();
+      // Record usage of conversion in an implicit cast.
+      From = ImplicitCastExpr::Create(Context, Result.get()->getType(),
+                                      CK_UserDefinedConversion,
+                                      Result.get(), 0,
+                                      Result.get()->getValueKind());
     }
 
     // We'll complain below about a non-integral condition type.
@@ -4337,8 +4445,11 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
                                                HadMultipleCandidates);
     if (Result.isInvalid())
       return ExprError();
-
-    From = Result.get();
+    // Record usage of conversion in an implicit cast.
+    From = ImplicitCastExpr::Create(Context, Result.get()->getType(),
+                                    CK_UserDefinedConversion,
+                                    Result.get(), 0,
+                                    Result.get()->getValueKind());
     break;
   }
 
@@ -7009,17 +7120,19 @@ void MaybeEmitInheritedConstructorNote(Sema &S, FunctionDecl *Fn) {
 } // end anonymous namespace
 
 // Notes the location of an overload candidate.
-void Sema::NoteOverloadCandidate(FunctionDecl *Fn) {
+void Sema::NoteOverloadCandidate(FunctionDecl *Fn, QualType DestType) {
   std::string FnDesc;
   OverloadCandidateKind K = ClassifyOverloadCandidate(*this, Fn, FnDesc);
-  Diag(Fn->getLocation(), diag::note_ovl_candidate)
-    << (unsigned) K << FnDesc;
+  PartialDiagnostic PD = PDiag(diag::note_ovl_candidate)
+                             << (unsigned) K << FnDesc;
+  HandleFunctionTypeMismatch(PD, Fn->getType(), DestType);
+  Diag(Fn->getLocation(), PD);
   MaybeEmitInheritedConstructorNote(*this, Fn);
 }
 
 //Notes the location of all overload candidates designated through 
 // OverloadedExpr
-void Sema::NoteAllOverloadCandidates(Expr* OverloadedExpr) {
+void Sema::NoteAllOverloadCandidates(Expr* OverloadedExpr, QualType DestType) {
   assert(OverloadedExpr->getType() == Context.OverloadTy);
 
   OverloadExpr::FindResult Ovl = OverloadExpr::find(OverloadedExpr);
@@ -7030,10 +7143,10 @@ void Sema::NoteAllOverloadCandidates(Expr* OverloadedExpr) {
        I != IEnd; ++I) {
     if (FunctionTemplateDecl *FunTmpl = 
                 dyn_cast<FunctionTemplateDecl>((*I)->getUnderlyingDecl()) ) {
-      NoteOverloadCandidate(FunTmpl->getTemplatedDecl());   
+      NoteOverloadCandidate(FunTmpl->getTemplatedDecl(), DestType);
     } else if (FunctionDecl *Fun 
                       = dyn_cast<FunctionDecl>((*I)->getUnderlyingDecl()) ) {
-      NoteOverloadCandidate(Fun);
+      NoteOverloadCandidate(Fun, DestType);
     }
   }
 }
@@ -8126,7 +8239,7 @@ private:
                              << Matches[0].second->getDeclName(),
                            S.PDiag(diag::note_ovl_candidate)
                              << (unsigned) oc_function_template,
-                           Complain);
+                           Complain, TargetFunctionType);
 
     if (Result != MatchesCopy.end()) {
       // Make it the first and only element
@@ -8155,7 +8268,7 @@ public:
     S.Diag(OvlExpr->getLocStart(), diag::err_addr_ovl_no_viable)
         << OvlExpr->getName() << TargetFunctionType
         << OvlExpr->getSourceRange();
-    S.NoteAllOverloadCandidates(OvlExpr);
+    S.NoteAllOverloadCandidates(OvlExpr, TargetFunctionType);
   } 
   
   bool IsInvalidFormOfPointerToMemberFunction() const {
@@ -8181,9 +8294,11 @@ public:
     S.Diag(OvlExpr->getLocStart(), diag::err_addr_ovl_ambiguous)
       << OvlExpr->getName()
       << OvlExpr->getSourceRange();
-    S.NoteAllOverloadCandidates(OvlExpr);
+    S.NoteAllOverloadCandidates(OvlExpr, TargetFunctionType);
   }
-  
+
+  bool hadMultipleCandidates() const { return (OvlExpr->getNumDecls() > 1); }
+
   int getNumMatches() const { return Matches.size(); }
   
   FunctionDecl* getMatchingFunctionDecl() const {
@@ -8213,16 +8328,18 @@ public:
 /// resolved, and NULL otherwise. When @p Complain is true, this
 /// routine will emit diagnostics if there is an error.
 FunctionDecl *
-Sema::ResolveAddressOfOverloadedFunction(Expr *AddressOfExpr, QualType TargetType,
-                                    bool Complain,
-                                    DeclAccessPair &FoundResult) {
-
+Sema::ResolveAddressOfOverloadedFunction(Expr *AddressOfExpr,
+                                         QualType TargetType,
+                                         bool Complain,
+                                         DeclAccessPair &FoundResult,
+                                         bool *pHadMultipleCandidates) {
   assert(AddressOfExpr->getType() == Context.OverloadTy);
-  
-  AddressOfFunctionResolver Resolver(*this, AddressOfExpr, TargetType, Complain);
+
+  AddressOfFunctionResolver Resolver(*this, AddressOfExpr, TargetType,
+                                     Complain);
   int NumMatches = Resolver.getNumMatches();
   FunctionDecl* Fn = 0;
-  if ( NumMatches == 0 && Complain) {
+  if (NumMatches == 0 && Complain) {
     if (Resolver.IsInvalidFormOfPointerToMemberFunction())
       Resolver.ComplainIsInvalidFormOfPointerToMemberFunction();
     else
@@ -8238,7 +8355,9 @@ Sema::ResolveAddressOfOverloadedFunction(Expr *AddressOfExpr, QualType TargetTyp
     if (Complain)
       CheckAddressOfMemberAccess(AddressOfExpr, FoundResult);
   }
-  
+
+  if (pHadMultipleCandidates)
+    *pHadMultipleCandidates = Resolver.hadMultipleCandidates();
   return Fn;
 }
 
@@ -8706,7 +8825,7 @@ Sema::BuildOverloadedCallExpr(Scope *S, Expr *Fn, UnresolvedLookupExpr *ULE,
     // to instantiation time to be able to search into type dependent base
     // classes.
     if (getLangOptions().MicrosoftMode && CurContext->isDependentContext() && 
-        isa<CXXMethodDecl>(CurContext)) {
+        (isa<CXXMethodDecl>(CurContext) || isa<CXXRecordDecl>(CurContext))) {
       CallExpr *CE = new (Context) CallExpr(Context, Fn, Args, NumArgs,
                                           Context.DependentTy, VK_RValue,
                                           RParenLoc);
@@ -9810,6 +9929,10 @@ Sema::BuildCallToObjectOfClassType(Scope *S, Expr *Obj,
                                              Conv, HadMultipleCandidates);
     if (Call.isInvalid())
       return ExprError();
+    // Record usage of conversion in an implicit cast.
+    Call = Owned(ImplicitCastExpr::Create(Context, Call.get()->getType(),
+                                          CK_UserDefinedConversion,
+                                          Call.get(), 0, VK_RValue));
 
     return ActOnCallExpr(S, Call.get(), LParenLoc, MultiExprArg(Args, NumArgs),
                          RParenLoc);

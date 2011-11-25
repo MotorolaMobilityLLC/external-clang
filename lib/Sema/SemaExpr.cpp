@@ -1520,10 +1520,17 @@ bool Sema::DiagnoseEmptyLookup(Scope *S, CXXScopeSpec &SS, LookupResult &R,
         // Don't give errors about ambiguities in this lookup.
         R.suppressDiagnostics();
 
+        // During a default argument instantiation the CurContext points
+        // to a CXXMethodDecl; but we can't apply a this-> fixit inside a
+        // function parameter list, hence add an explicit check.
+        bool isDefaultArgument = !ActiveTemplateInstantiations.empty() &&
+                              ActiveTemplateInstantiations.back().Kind ==
+            ActiveTemplateInstantiation::DefaultFunctionArgumentInstantiation;
         CXXMethodDecl *CurMethod = dyn_cast<CXXMethodDecl>(CurContext);
         bool isInstance = CurMethod &&
                           CurMethod->isInstance() &&
-                          DC == CurMethod->getParent();
+                          DC == CurMethod->getParent() && !isDefaultArgument;
+                          
 
         // Give a code modification hint to insert 'this->'.
         // TODO: fixit for inserting 'Base<T>::' in the other cases.
@@ -1534,7 +1541,7 @@ bool Sema::DiagnoseEmptyLookup(Scope *S, CXXScopeSpec &SS, LookupResult &R,
           CXXMethodDecl *DepMethod = cast_or_null<CXXMethodDecl>(
               CurMethod->getInstantiatedFromMemberFunction());
           if (DepMethod) {
-            if (getLangOptions().MicrosoftExt)
+            if (getLangOptions().MicrosoftMode)
               diagnostic = diag::warn_found_via_dependent_bases_lookup;
             Diag(R.getNameLoc(), diagnostic) << Name
               << FixItHint::CreateInsertion(R.getNameLoc(), "this->");
@@ -1560,12 +1567,23 @@ bool Sema::DiagnoseEmptyLookup(Scope *S, CXXScopeSpec &SS, LookupResult &R,
             Diag(R.getNameLoc(), diagnostic) << Name;
           }
         } else {
+          if (getLangOptions().MicrosoftMode)
+            diagnostic = diag::warn_found_via_dependent_bases_lookup;
           Diag(R.getNameLoc(), diagnostic) << Name;
         }
 
         // Do we really want to note all of these?
         for (LookupResult::iterator I = R.begin(), E = R.end(); I != E; ++I)
           Diag((*I)->getLocation(), diag::note_dependent_var_use);
+
+        // Return true if we are inside a default argument instantiation
+        // and the found name refers to an instance member function, otherwise
+        // the function calling DiagnoseEmptyLookup will try to create an
+        // implicit member call and this is wrong for default argument.
+        if (isDefaultArgument && ((*R.begin())->isCXXInstanceMember())) {
+          Diag(R.getNameLoc(), diag::err_member_call_without_object);
+          return true;
+        }
 
         // Tell the callee to try to recover.
         return false;
@@ -9010,6 +9028,7 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
   FixItHint Hint;
   ConversionFixItGenerator ConvHints;
   bool MayHaveConvFixit = false;
+  bool MayHaveFunctionDiff = false;
 
   switch (ConvTy) {
   default: llvm_unreachable("Unknown conversion type");
@@ -9099,6 +9118,7 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
     ConvHints.tryToFixConversion(SrcExpr, SrcType, DstType, *this);
     MayHaveConvFixit = true;
     isInvalid = true;
+    MayHaveFunctionDiff = true;
     break;
   }
 
@@ -9137,7 +9157,14 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
   }
   if (MayHaveConvFixit) { FDiag << (unsigned) (ConvHints.Kind); }
 
+  if (MayHaveFunctionDiff)
+    HandleFunctionTypeMismatch(FDiag, SecondType, FirstType);
+
   Diag(Loc, FDiag);
+
+  if (SecondType == Context.OverloadTy)
+    NoteAllOverloadCandidates(OverloadExpr::find(SrcExpr).Expression,
+                              FirstType);
 
   if (CheckInferredResultType)
     EmitRelatedResultTypeNote(SrcExpr);

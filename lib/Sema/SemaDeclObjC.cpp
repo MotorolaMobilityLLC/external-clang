@@ -817,9 +817,10 @@ Decl *Sema::ActOnStartCategoryImplementation(
     if (!CatIDecl) {
       // Category @implementation with no corresponding @interface.
       // Create and install one.
-      CatIDecl = ObjCCategoryDecl::Create(Context, CurContext, SourceLocation(),
-                                          SourceLocation(), SourceLocation(),
+      CatIDecl = ObjCCategoryDecl::Create(Context, CurContext, AtCatImplLoc,
+                                          ClassLoc, CatLoc,
                                           CatName, IDecl);
+      CatIDecl->setImplicit();
     }
   }
 
@@ -2325,6 +2326,8 @@ void Sema::ActOnAtEnd(Scope *S, SourceRange AtEnd,
 
   for (unsigned i = 0; i != tuvNum; i++) {
     DeclGroupRef DG = allTUVars[i].getAsVal<DeclGroupRef>();
+    for (DeclGroupRef::iterator I = DG.begin(), E = DG.end(); I != E; ++I)
+      (*I)->setTopLevelDeclInObjCContainer();
     Consumer.HandleTopLevelDeclInObjCContainer(DG);
   }
 }

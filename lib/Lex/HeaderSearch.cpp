@@ -219,7 +219,7 @@ const FileEntry *DirectoryLookup::LookupFile(
     SmallVectorImpl<char> *SearchPath,
     SmallVectorImpl<char> *RelativePath,
     StringRef BuildingModule,
-    StringRef *SuggestedModule) const {
+    ModuleMap::Module **SuggestedModule) const {
   llvm::SmallString<1024> TmpDir;
   if (isNormalDir()) {
     // Concatenate the requested file onto the directory.
@@ -245,8 +245,8 @@ const FileEntry *DirectoryLookup::LookupFile(
       
       // If there is a module that corresponds to this header, 
       // suggest it.
-      StringRef Module = HS.findModuleForHeader(File);
-      if (!Module.empty() && Module != BuildingModule)
+      ModuleMap::Module *Module = HS.findModuleForHeader(File);
+      if (Module && Module->getTopLevelModuleName() != BuildingModule)
         *SuggestedModule = Module;
       
       return File;
@@ -285,7 +285,7 @@ const FileEntry *DirectoryLookup::DoFrameworkLookup(
     SmallVectorImpl<char> *SearchPath,
     SmallVectorImpl<char> *RelativePath,
     StringRef BuildingModule,
-    StringRef *SuggestedModule) const 
+    ModuleMap::Module **SuggestedModule) const 
 {
   FileManager &FileMgr = HS.getFileMgr();
 
@@ -311,7 +311,8 @@ const FileEntry *DirectoryLookup::DoFrameworkLookup(
     FrameworkName.push_back('/');
 
   // FrameworkName = "/System/Library/Frameworks/Cocoa"
-  FrameworkName.append(Filename.begin(), Filename.begin()+SlashPos);
+  StringRef ModuleName(Filename.begin(), SlashPos);
+  FrameworkName += ModuleName;
 
   // FrameworkName = "/System/Library/Frameworks/Cocoa.framework/"
   FrameworkName += ".framework/";
@@ -337,6 +338,18 @@ const FileEntry *DirectoryLookup::DoFrameworkLookup(
     RelativePath->append(Filename.begin()+SlashPos+1, Filename.end());
   }
 
+  // If we're allowed to look for modules, try to load or create the module
+  // corresponding to this framework.
+  ModuleMap::Module *Module = 0;
+  if (SuggestedModule) {
+    if (const DirectoryEntry *FrameworkDir
+                                    = FileMgr.getDirectory(FrameworkName)) {
+      if ((Module = HS.getFrameworkModule(ModuleName, FrameworkDir)) &&
+          Module->Name == BuildingModule)
+        Module = 0;
+    }
+  }
+  
   // Check "/System/Library/Frameworks/Cocoa.framework/Headers/file.h"
   unsigned OrigSize = FrameworkName.size();
 
@@ -348,16 +361,16 @@ const FileEntry *DirectoryLookup::DoFrameworkLookup(
     SearchPath->append(FrameworkName.begin(), FrameworkName.end()-1);
   }
 
-  /// Determine whether this is the module we're building or not.
-  bool AutomaticImport = SuggestedModule &&
-    (BuildingModule != StringRef(Filename.begin(), SlashPos)) &&
+  // Determine whether this is the module we're building or not.
+  // FIXME: Do we still need the ".." hack?
+  bool AutomaticImport = Module &&
     !Filename.substr(SlashPos + 1).startswith("..");
   
   FrameworkName.append(Filename.begin()+SlashPos+1, Filename.end());
   if (const FileEntry *FE = FileMgr.getFile(FrameworkName.str(),
                                             /*openFile=*/!AutomaticImport)) {
     if (AutomaticImport)
-      *SuggestedModule = StringRef(Filename.begin(), SlashPos);
+      *SuggestedModule = Module;
     return FE;
   }
 
@@ -372,7 +385,7 @@ const FileEntry *DirectoryLookup::DoFrameworkLookup(
   const FileEntry *FE = FileMgr.getFile(FrameworkName.str(), 
                                         /*openFile=*/!AutomaticImport);
   if (FE && AutomaticImport)
-    *SuggestedModule = StringRef(Filename.begin(), SlashPos);
+    *SuggestedModule = Module;
   return FE;
 }
 
@@ -395,10 +408,11 @@ const FileEntry *HeaderSearch::LookupFile(
     const FileEntry *CurFileEnt,
     SmallVectorImpl<char> *SearchPath,
     SmallVectorImpl<char> *RelativePath,
-    StringRef *SuggestedModule) 
+    ModuleMap::Module **SuggestedModule,
+    bool SkipCache)
 {
   if (SuggestedModule)
-    *SuggestedModule = StringRef();
+    *SuggestedModule = 0;
     
   // If 'Filename' is absolute, check to see if it exists and no searching.
   if (llvm::sys::path::is_absolute(Filename)) {
@@ -471,7 +485,7 @@ const FileEntry *HeaderSearch::LookupFile(
   // If the entry has been previously looked up, the first value will be
   // non-zero.  If the value is equal to i (the start point of our search), then
   // this is a matching hit.
-  if (CacheLookup.first == i+1) {
+  if (!SkipCache && CacheLookup.first == i+1) {
     // Skip querying potentially lots of directories for this lookup.
     i = CacheLookup.second;
   } else {
@@ -793,12 +807,75 @@ bool HeaderSearch::hasModuleMap(StringRef FileName,
   return false;
 }
 
-StringRef HeaderSearch::findModuleForHeader(const FileEntry *File) {
+ModuleMap::Module *HeaderSearch::findModuleForHeader(const FileEntry *File) {
   if (ModuleMap::Module *Module = ModMap.findModuleForHeader(File))
-    return Module->getTopLevelModuleName();
+    return Module;
   
-  return StringRef();
+  return 0;
 }
+
+bool HeaderSearch::loadModuleMapFile(const FileEntry *File) {
+  const DirectoryEntry *Dir = File->getDir();
+  
+  llvm::DenseMap<const DirectoryEntry *, bool>::iterator KnownDir
+    = DirectoryHasModuleMap.find(Dir);
+  if (KnownDir != DirectoryHasModuleMap.end())
+    return !KnownDir->second;
+  
+  bool Result = ModMap.parseModuleMapFile(File);
+  DirectoryHasModuleMap[Dir] = !Result;
+  return Result;
+}
+
+ModuleMap::Module *HeaderSearch::getModule(StringRef Name, bool AllowSearch) {
+  if (ModuleMap::Module *Module = ModMap.findModule(Name))
+    return Module;
+  
+  if (!AllowSearch)
+    return 0;
+  
+  for (unsigned I = 0, N = SearchDirs.size(); I != N; ++I) {
+    if (!SearchDirs[I].isNormalDir())
+      continue;
+    
+    switch (loadModuleMapFile(SearchDirs[I].getDir())) {
+    case LMM_AlreadyLoaded:
+    case LMM_InvalidModuleMap:
+    case LMM_NoDirectory:
+      break;
+        
+    case LMM_NewlyLoaded:
+      if (ModuleMap::Module *Module = ModMap.findModule(Name))
+        return Module;
+      break;
+    }
+  }
+  
+  return 0;
+}
+  
+ModuleMap::Module *HeaderSearch::getFrameworkModule(StringRef Name, 
+                                                    const DirectoryEntry *Dir) {
+  if (ModuleMap::Module *Module = ModMap.findModule(Name))
+    return Module;
+  
+  // Try to load a module map file.
+  switch (loadModuleMapFile(Dir)) {
+  case LMM_InvalidModuleMap:
+    break;
+    
+  case LMM_AlreadyLoaded:
+  case LMM_NoDirectory:
+    return 0;
+    
+  case LMM_NewlyLoaded:
+    return ModMap.findModule(Name);
+  }
+  
+  // Try to infer a module map.
+  return ModMap.inferFrameworkModule(Name, Dir);
+}
+
 
 HeaderSearch::LoadModuleMapResult 
 HeaderSearch::loadModuleMapFile(StringRef DirName) {

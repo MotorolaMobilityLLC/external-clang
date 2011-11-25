@@ -507,8 +507,13 @@ int Driver::ExecuteCompilation(const Compilation &C,
     return Res;
 
   // Otherwise, remove result files as well.
-  if (!C.getArgs().hasArg(options::OPT_save_temps))
+  if (!C.getArgs().hasArg(options::OPT_save_temps)) {
     C.CleanupFileList(C.getResultFiles(), true);
+
+    // Failure result files are valid unless we crashed.
+    if (Res < 0)
+      C.CleanupFileList(C.getFailureResultFiles(), true);
+  }
 
   // Print extra information about abnormal failures, if possible.
   //
@@ -523,7 +528,7 @@ int Driver::ExecuteCompilation(const Compilation &C,
     // FIXME: See FIXME above regarding result code interpretation.
     if (Res < 0)
       Diag(clang::diag::err_drv_command_signalled)
-        << FailingTool.getShortName() << -Res;
+        << FailingTool.getShortName();
     else
       Diag(clang::diag::err_drv_command_failed)
         << FailingTool.getShortName() << Res;

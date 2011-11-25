@@ -114,6 +114,8 @@ def fdebug_compilation_dir : Separate<"-fdebug-compilation-dir">,
   HelpText<"The compilation directory to embed in the debug info.">;
 def dwarf_debug_flags : Separate<"-dwarf-debug-flags">,
   HelpText<"The string to embed in the Dwarf debug flags record.">;
+def faddress_sanitizer: Flag<"-faddress-sanitizer">,
+  HelpText<"Enable AddressSanitizer instrumentation (memory error detection)">;
 def fforbid_guard_variables : Flag<"-fforbid-guard-variables">,
   HelpText<"Emit an error if a C++ static local initializer would need a guard variable">;
 def g : Flag<"-g">, HelpText<"Generate source level debug information">;
@@ -377,6 +379,8 @@ def print_decl_contexts : Flag<"-print-decl-contexts">,
   HelpText<"Print DeclContexts and their Decls">;
 def emit_module : Flag<"-emit-module">,
   HelpText<"Generate pre-compiled module file">;
+def emit_module_from_map : Flag<"-emit-module-from-map">,
+  HelpText<"Generate pre-compiled module file from module map">;
 def emit_pth : Flag<"-emit-pth">,
   HelpText<"Generate pre-tokenized header file">;
 def emit_pch : Flag<"-emit-pch">,
@@ -580,6 +584,8 @@ def fvisibility_inlines_hidden : Flag<"-fvisibility-inlines-hidden">,
   HelpText<"Give inline C++ member functions default visibility by default">;
 def ftemplate_depth : Separate<"-ftemplate-depth">,
   HelpText<"Maximum depth of recursive template instantiation">;
+def fconstexpr_depth : Separate<"-fconstexpr-depth">,
+  HelpText<"Maximum depth of recursive constexpr function calls">;
 def Wlarge_by_value_copy : Separate<"-Wlarge-by-value-copy">,
   HelpText<"Warn if a function definition returns or accepts an object larger "
            "in bytes that a given value">;
@@ -626,6 +632,9 @@ def nobuiltininc : Flag<"-nobuiltininc">,
 def fmodule_cache_path : Separate<"-fmodule-cache-path">, 
   MetaVarName<"<directory>">,
   HelpText<"Specify the module cache path">;           
+def fmodule_name : Joined<"-fmodule-name=">, 
+  MetaVarName<"<name>">,
+  HelpText<"Specify the name of the module to build">;           
 def fdisable_module_hash : Flag<"-fdisable-module-hash">,
   HelpText<"Disable the module hash">;
 def fauto_module_import : Flag<"-fauto-module-import">,

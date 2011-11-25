@@ -117,10 +117,14 @@ static bool isEmptyField(ASTContext &Context, const FieldDecl *FD,
 
   QualType FT = FD->getType();
 
-    // Constant arrays of empty records count as empty, strip them off.
+  // Constant arrays of empty records count as empty, strip them off.
+  // Constant arrays of zero length always count as empty.
   if (AllowArrays)
-    while (const ConstantArrayType *AT = Context.getAsConstantArrayType(FT))
+    while (const ConstantArrayType *AT = Context.getAsConstantArrayType(FT)) {
+      if (AT->getSize() == 0)
+        return true;
       FT = AT->getElementType();
+    }
 
   const RecordType *RT = FT->getAs<RecordType>();
   if (!RT)
@@ -252,6 +256,11 @@ static const Type *isSingleElementStruct(QualType T, ASTContext &Context) {
     }
   }
 
+  // We don't consider a struct a single-element struct if it has
+  // padding beyond the element type.
+  if (Found && Context.getTypeSize(Found) != Context.getTypeSize(T))
+    return 0;
+
   return Found;
 }
 
@@ -287,6 +296,8 @@ static bool canExpandIndirectArgument(QualType Ty, ASTContext &Context) {
   if (!RD->isStruct() || isa<CXXRecordDecl>(RD))
     return false;
 
+  uint64_t Size = 0;
+
   for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
          i != e; ++i) {
     const FieldDecl *FD = *i;
@@ -299,7 +310,13 @@ static bool canExpandIndirectArgument(QualType Ty, ASTContext &Context) {
     // counts as "basic" is more complicated than what we were doing previously.
     if (FD->isBitField())
       return false;
+
+    Size += Context.getTypeSize(FD->getType());
   }
+
+  // Make sure there are not any holes in the struct.
+  if (Size != Context.getTypeSize(Ty))
+    return false;
 
   return true;
 }
@@ -561,51 +578,21 @@ ABIArgInfo X86_32ABIInfo::classifyReturnType(QualType RetTy) const {
     if (!IsSmallStructInRegABI && !RetTy->isAnyComplexType())
       return ABIArgInfo::getIndirect(0);
 
-    // Classify "single element" structs as their element type.
-    if (const Type *SeltTy = isSingleElementStruct(RetTy, getContext())) {
-      if (const BuiltinType *BT = SeltTy->getAs<BuiltinType>()) {
-        if (BT->isIntegerType()) {
-          // We need to use the size of the structure, padding
-          // bit-fields can adjust that to be larger than the single
-          // element type.
-          uint64_t Size = getContext().getTypeSize(RetTy);
-          return ABIArgInfo::getDirect(
-            llvm::IntegerType::get(getVMContext(), (unsigned)Size));
-        }
-
-        if (BT->getKind() == BuiltinType::Float) {
-          assert(getContext().getTypeSize(RetTy) ==
-                 getContext().getTypeSize(SeltTy) &&
-                 "Unexpect single element structure size!");
-          return ABIArgInfo::getDirect(llvm::Type::getFloatTy(getVMContext()));
-        }
-
-        if (BT->getKind() == BuiltinType::Double) {
-          assert(getContext().getTypeSize(RetTy) ==
-                 getContext().getTypeSize(SeltTy) &&
-                 "Unexpect single element structure size!");
-          return ABIArgInfo::getDirect(llvm::Type::getDoubleTy(getVMContext()));
-        }
-      } else if (SeltTy->isPointerType()) {
-        // FIXME: It would be really nice if this could come out as the proper
-        // pointer type.
-        llvm::Type *PtrTy = llvm::Type::getInt8PtrTy(getVMContext());
-        return ABIArgInfo::getDirect(PtrTy);
-      } else if (SeltTy->isVectorType()) {
-        // 64- and 128-bit vectors are never returned in a
-        // register when inside a structure.
-        uint64_t Size = getContext().getTypeSize(RetTy);
-        if (Size == 64 || Size == 128)
-          return ABIArgInfo::getIndirect(0);
-
-        return classifyReturnType(QualType(SeltTy, 0));
-      }
-    }
-
     // Small structures which are register sized are generally returned
     // in a register.
     if (X86_32ABIInfo::shouldReturnTypeInRegister(RetTy, getContext())) {
       uint64_t Size = getContext().getTypeSize(RetTy);
+
+      // As a special-case, if the struct is a "single-element" struct, and
+      // the field is of type "float" or "double", return it in a
+      // floating-point register.  We apply a similar transformation for
+      // pointer types to improve the quality of the generated IR.
+      if (const Type *SeltTy = isSingleElementStruct(RetTy, getContext()))
+        if (SeltTy->isRealFloatingType() || SeltTy->hasPointerRepresentation())
+          return ABIArgInfo::getDirect(CGT.ConvertType(QualType(SeltTy, 0)));
+
+      // FIXME: We should be able to narrow this integer in cases with dead
+      // padding.
       return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(),Size));
     }
 
@@ -637,7 +624,7 @@ static bool isRecordWithSSEVectorType(ASTContext &Context, QualType Ty) {
        i != e; ++i) {
     QualType FT = i->getType();
 
-    if (FT->getAs<VectorType>() && Context.getTypeSize(Ty) == 128)
+    if (FT->getAs<VectorType>() && Context.getTypeSize(FT) == 128)
       return true;
 
     if (isRecordWithSSEVectorType(Context, FT))
@@ -661,7 +648,7 @@ unsigned X86_32ABIInfo::getTypeStackAlignInBytes(QualType Ty,
   }
 
   // Otherwise, if the type contains an SSE vector type, the alignment is 16.
-  if (isRecordWithSSEVectorType(getContext(), Ty))
+  if (Align >= 16 && isRecordWithSSEVectorType(getContext(), Ty))
     return 16;
 
   return MinABIStackAlignInBytes;
@@ -700,8 +687,8 @@ ABIArgInfo X86_32ABIInfo::classifyArgumentType(QualType Ty) const {
         return getIndirectResult(Ty);
     }
 
-    // Ignore empty structs.
-    if (Ty->isStructureType() && getContext().getTypeSize(Ty) == 0)
+    // Ignore empty structs/unions.
+    if (isEmptyRecord(getContext(), Ty, true))
       return ABIArgInfo::getIgnore();
 
     // Expand small (<= 128-bit) record types when we know that the stack layout
@@ -756,12 +743,30 @@ llvm::Value *X86_32ABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
   llvm::Value *VAListAddrAsBPP = Builder.CreateBitCast(VAListAddr, BPP,
                                                        "ap");
   llvm::Value *Addr = Builder.CreateLoad(VAListAddrAsBPP, "ap.cur");
+
+  // Compute if the address needs to be aligned
+  unsigned Align = CGF.getContext().getTypeAlignInChars(Ty).getQuantity();
+  Align = getTypeStackAlignInBytes(Ty, Align);
+  Align = std::max(Align, 4U);
+  if (Align > 4) {
+    // addr = (addr + align - 1) & -align;
+    llvm::Value *Offset =
+      llvm::ConstantInt::get(CGF.Int32Ty, Align - 1);
+    Addr = CGF.Builder.CreateGEP(Addr, Offset);
+    llvm::Value *AsInt = CGF.Builder.CreatePtrToInt(Addr,
+                                                    CGF.Int32Ty);
+    llvm::Value *Mask = llvm::ConstantInt::get(CGF.Int32Ty, -Align);
+    Addr = CGF.Builder.CreateIntToPtr(CGF.Builder.CreateAnd(AsInt, Mask),
+                                      Addr->getType(),
+                                      "ap.cur.aligned");
+  }
+
   llvm::Type *PTy =
     llvm::PointerType::getUnqual(CGF.ConvertType(Ty));
   llvm::Value *AddrTyped = Builder.CreateBitCast(Addr, PTy);
 
   uint64_t Offset =
-    llvm::RoundUpToAlignment(CGF.getContext().getTypeSize(Ty) / 8, 4);
+    llvm::RoundUpToAlignment(CGF.getContext().getTypeSize(Ty) / 8, Align);
   llvm::Value *NextAddr =
     Builder.CreateGEP(Addr, llvm::ConstantInt::get(CGF.Int32Ty, Offset),
                       "ap.next");
@@ -1982,19 +1987,17 @@ static llvm::Value *EmitVAArgFromMemory(llvm::Value *VAListAddr,
 
   // AMD64-ABI 3.5.7p5: Step 7. Align l->overflow_arg_area upwards to a 16
   // byte boundary if alignment needed by type exceeds 8 byte boundary.
+  // It isn't stated explicitly in the standard, but in practice we use
+  // alignment greater than 16 where necessary.
   uint64_t Align = CGF.getContext().getTypeAlign(Ty) / 8;
   if (Align > 8) {
-    // Note that we follow the ABI & gcc here, even though the type
-    // could in theory have an alignment greater than 16. This case
-    // shouldn't ever matter in practice.
-
-    // overflow_arg_area = (overflow_arg_area + 15) & ~15;
+    // overflow_arg_area = (overflow_arg_area + align - 1) & -align;
     llvm::Value *Offset =
-      llvm::ConstantInt::get(CGF.Int32Ty, 15);
+      llvm::ConstantInt::get(CGF.Int64Ty, Align - 1);
     overflow_arg_area = CGF.Builder.CreateGEP(overflow_arg_area, Offset);
     llvm::Value *AsInt = CGF.Builder.CreatePtrToInt(overflow_arg_area,
                                                     CGF.Int64Ty);
-    llvm::Value *Mask = llvm::ConstantInt::get(CGF.Int64Ty, ~15LL);
+    llvm::Value *Mask = llvm::ConstantInt::get(CGF.Int64Ty, -(uint64_t)Align);
     overflow_arg_area =
       CGF.Builder.CreateIntToPtr(CGF.Builder.CreateAnd(AsInt, Mask),
                                  overflow_arg_area->getType(),
