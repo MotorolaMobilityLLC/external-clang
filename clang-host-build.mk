@@ -26,7 +26,7 @@ endif
 ###########################################################
 define transform-host-clang-td-to-out
 @mkdir -p $(dir $@)
-@echo "Host TableGen: $(LOCAL_MODULE) (gen-$(1)) <= $<"
+@echo "Host Clang TableGen: $(TBLGEN_LOCAL_MODULE) (gen-$(1)) <= $<"
 $(hide) $(CLANG_TBLGEN) \
 	-I $(dir $<)	\
 	-I $(LLVM_ROOT_PATH)/include	\
