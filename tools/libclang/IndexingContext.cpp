@@ -22,7 +22,7 @@ using namespace cxcursor;
 IndexingContext::ObjCProtocolListInfo::ObjCProtocolListInfo(
                                     const ObjCProtocolList &ProtList,
                                     IndexingContext &IdxCtx,
-                                    StrAdapter &SA) {
+                                    ScratchAlloc &SA) {
   ObjCInterfaceDecl::protocol_loc_iterator LI = ProtList.loc_begin();
   for (ObjCInterfaceDecl::protocol_iterator
          I = ProtList.begin(), E = ProtList.end(); I != E; ++I, ++LI) {
@@ -34,6 +34,9 @@ IndexingContext::ObjCProtocolListInfo::ObjCProtocolListInfo(
                                 MakeCursorObjCProtocolRef(PD, Loc, IdxCtx.CXTU),
                                 IdxCtx.getIndexLoc(Loc) };
     ProtInfos.push_back(ProtInfo);
+
+    if (IdxCtx.suppressRefs())
+      IdxCtx.markEntityOccurrenceInFile(PD, Loc);
   }
 
   for (unsigned i = 0, e = ProtInfos.size(); i != e; ++i)
@@ -43,9 +46,27 @@ IndexingContext::ObjCProtocolListInfo::ObjCProtocolListInfo(
     Prots.push_back(&ProtInfos[i]);
 }
 
-IndexingContext::AttrListInfo::AttrListInfo(const Decl *D,
-                                            IndexingContext &IdxCtx,
-                                            StrAdapter &SA) {
+
+IBOutletCollectionInfo::IBOutletCollectionInfo(
+                                          const IBOutletCollectionInfo &other)
+  : AttrInfo(CXIdxAttr_IBOutletCollection, other.cursor, other.loc, A) {
+
+  IBCollInfo.attrInfo = this;
+  IBCollInfo.classCursor = other.IBCollInfo.classCursor;
+  IBCollInfo.classLoc = other.IBCollInfo.classLoc;
+  if (other.IBCollInfo.objcClass) {
+    ClassInfo = other.ClassInfo;
+    IBCollInfo.objcClass = &ClassInfo;
+  } else
+    IBCollInfo.objcClass = 0;
+}
+
+AttrListInfo::AttrListInfo(const Decl *D,
+                           IndexingContext &IdxCtx,
+                           ScratchAlloc &SA) : ref_cnt(0) {
+  if (!D->hasAttrs())
+    return;
+
   for (AttrVec::const_iterator AttrI = D->attr_begin(), AttrE = D->attr_end();
          AttrI != AttrE; ++AttrI) {
     const Attr *A = *AttrI;
@@ -92,23 +113,46 @@ IndexingContext::AttrListInfo::AttrListInfo(const Decl *D,
     CXAttrs.push_back(&Attrs[i]);
 }
 
+AttrListInfo::AttrListInfo(const AttrListInfo &other) {
+  assert(other.ref_cnt == 0 &&
+         "Should not copy an AttrListInfo that is ref-counted");
+  ref_cnt = 0;
+
+  Attrs = other.Attrs;
+  IBCollAttrs = other.IBCollAttrs;
+
+  for (unsigned i = 0, e = IBCollAttrs.size(); i != e; ++i)
+    CXAttrs.push_back(&IBCollAttrs[i]);
+
+  for (unsigned i = 0, e = Attrs.size(); i != e; ++i)
+    CXAttrs.push_back(&Attrs[i]);
+}
+
 IndexingContext::CXXBasesListInfo::CXXBasesListInfo(const CXXRecordDecl *D,
                                    IndexingContext &IdxCtx,
-                                   IndexingContext::StrAdapter &SA) {
+                                   ScratchAlloc &SA) {
   for (CXXRecordDecl::base_class_const_iterator
          I = D->bases_begin(), E = D->bases_end(); I != E; ++I) {
     const CXXBaseSpecifier &Base = *I;
     BaseEntities.push_back(EntityInfo());
     const NamedDecl *BaseD = 0;
-    if (const RecordType *RT = Base.getType()->getAs<RecordType>())
-      BaseD = RT->getDecl();
-    else if (const TypedefType *TDT = Base.getType()->getAs<TypedefType>())
+    QualType T = Base.getType();
+    SourceLocation Loc = getBaseLoc(Base);
+
+    if (const TypedefType *TDT = T->getAs<TypedefType>()) {
       BaseD = TDT->getDecl();
+    } else if (const TemplateSpecializationType *
+          TST = T->getAs<TemplateSpecializationType>()) {
+      BaseD = TST->getTemplateName().getAsTemplateDecl();
+    } else if (const RecordType *RT = T->getAs<RecordType>()) {
+      BaseD = RT->getDecl();
+    }
+
     if (BaseD)
       IdxCtx.getEntityInfo(BaseD, BaseEntities.back(), SA);
     CXIdxBaseClassInfo BaseInfo = { 0,
                          MakeCursorCXXBaseSpecifier(&Base, IdxCtx.CXTU),
-                         IdxCtx.getIndexLoc(Base.getSourceRange().getBegin()) };
+                         IdxCtx.getIndexLoc(Loc) };
     BaseInfos.push_back(BaseInfo);
   }
 
@@ -121,7 +165,30 @@ IndexingContext::CXXBasesListInfo::CXXBasesListInfo(const CXXRecordDecl *D,
     CXBases.push_back(&BaseInfos[i]);
 }
 
-const char *IndexingContext::StrAdapter::toCStr(StringRef Str) {
+SourceLocation IndexingContext::CXXBasesListInfo::getBaseLoc(
+                                           const CXXBaseSpecifier &Base) const {
+  SourceLocation Loc = Base.getSourceRange().getBegin();
+  TypeLoc TL;
+  if (Base.getTypeSourceInfo())
+    TL = Base.getTypeSourceInfo()->getTypeLoc();
+  if (TL.isNull())
+    return Loc;
+
+  if (const QualifiedTypeLoc *QL = dyn_cast<QualifiedTypeLoc>(&TL))
+    TL = QL->getUnqualifiedLoc();
+
+  if (const ElaboratedTypeLoc *EL = dyn_cast<ElaboratedTypeLoc>(&TL))
+    return EL->getNamedTypeLoc().getBeginLoc();
+  if (const DependentNameTypeLoc *DL = dyn_cast<DependentNameTypeLoc>(&TL))
+    return DL->getNameLoc();
+  if (const DependentTemplateSpecializationTypeLoc *
+        DTL = dyn_cast<DependentTemplateSpecializationTypeLoc>(&TL))
+    return DTL->getNameLoc();
+
+  return Loc;
+}
+
+const char *ScratchAlloc::toCStr(StringRef Str) {
   if (Str.empty())
     return "";
   if (Str.data()[Str.size()] == '\0')
@@ -129,7 +196,7 @@ const char *IndexingContext::StrAdapter::toCStr(StringRef Str) {
   return copyCStr(Str);
 }
 
-const char *IndexingContext::StrAdapter::copyCStr(StringRef Str) {
+const char *ScratchAlloc::copyCStr(StringRef Str) {
   char *buf = IdxCtx.StrScratch.Allocate<char>(Str.size() + 1);
   std::uninitialized_copy(Str.begin(), Str.end(), buf);
   buf[Str.size()] = '\0';
@@ -161,7 +228,7 @@ void IndexingContext::ppIncludedFile(SourceLocation hashLoc,
   if (!CB.ppIncludedFile)
     return;
 
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
   CXIdxIncludedFileInfo Info = { getIndexLoc(hashLoc),
                                  SA.toCStr(filename),
                                  (CXFile)File,
@@ -192,12 +259,13 @@ bool IndexingContext::handleDecl(const NamedDecl *D,
   if (D->isImplicit() && shouldIgnoreIfImplicit(D))
     return false;
 
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
   getEntityInfo(D, DInfo.EntInfo, SA);
   if (!DInfo.EntInfo.USR || Loc.isInvalid())
     return false;
 
-  markEntityOccurrenceInFile(D, Loc);
+  if (suppressRefs())
+    markEntityOccurrenceInFile(D, Loc);
   
   DInfo.entityInfo = &DInfo.EntInfo;
   DInfo.cursor = Cursor;
@@ -208,8 +276,10 @@ bool IndexingContext::handleDecl(const NamedDecl *D,
   DInfo.attributes = AttrList.getAttrs();
   DInfo.numAttributes = AttrList.getNumAttrs();
 
-  getContainerInfo(D->getDeclContext(), DInfo.Container);
-  DInfo.container = &DInfo.Container;
+  getContainerInfo(D->getDeclContext(), DInfo.SemanticContainer);
+  getContainerInfo(D->getLexicalDeclContext(), DInfo.LexicalContainer);
+  DInfo.semanticContainer = &DInfo.SemanticContainer;
+  DInfo.lexicalContainer = &DInfo.LexicalContainer;
   if (DInfo.isContainer) {
     getContainerInfo(getEntityContainer(D), DInfo.DeclAsContainer);
     DInfo.declAsContainer = &DInfo.DeclAsContainer;
@@ -266,11 +336,16 @@ bool IndexingContext::handleTypedefName(const TypedefNameDecl *D) {
 }
 
 bool IndexingContext::handleObjCClass(const ObjCClassDecl *D) {
-  const ObjCClassDecl::ObjCClassRef *Ref = D->getForwardDecl();
-  ObjCInterfaceDecl *IFaceD = Ref->getInterface();
-  SourceLocation Loc = Ref->getLocation();
+  ObjCInterfaceDecl *IFaceD = D->getForwardInterfaceDecl();
+  SourceLocation Loc = D->getNameLoc();
   bool isRedeclaration = IFaceD->getLocation() != Loc;
  
+  // For @class forward declarations, suppress them the same way as references.
+  if (suppressRefs()) {
+    if (markEntityOccurrenceInFile(IFaceD, Loc))
+      return false; // already occurred.
+  }
+
   ObjCContainerDeclInfo ContDInfo(/*isForwardRef=*/true, isRedeclaration,
                                   /*isImplementation=*/false);
   return handleObjCContainer(IFaceD, Loc,
@@ -278,7 +353,7 @@ bool IndexingContext::handleObjCClass(const ObjCClassDecl *D) {
 }
 
 bool IndexingContext::handleObjCInterface(const ObjCInterfaceDecl *D) {
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
 
   CXIdxBaseClassInfo BaseClass;
   EntityInfo BaseEntity;
@@ -289,9 +364,15 @@ bool IndexingContext::handleObjCInterface(const ObjCInterfaceDecl *D) {
     BaseClass.base = &BaseEntity;
     BaseClass.cursor = MakeCursorObjCSuperClassRef(SuperD, SuperLoc, CXTU);
     BaseClass.loc = getIndexLoc(SuperLoc);
+
+    if (suppressRefs())
+      markEntityOccurrenceInFile(SuperD, SuperLoc);
   }
   
-  ObjCProtocolListInfo ProtInfo(D->getReferencedProtocols(), *this, SA);
+  ObjCProtocolList EmptyProtoList;
+  ObjCProtocolListInfo ProtInfo(D->hasDefinition()? D->getReferencedProtocols()
+                                                  : EmptyProtoList, 
+                                *this, SA);
   
   ObjCInterfaceDeclInfo InterInfo(D);
   InterInfo.ObjCProtoListInfo = ProtInfo.getListInfo();
@@ -321,7 +402,7 @@ bool IndexingContext::handleObjCForwardProtocol(const ObjCProtocolDecl *D,
 }
 
 bool IndexingContext::handleObjCProtocol(const ObjCProtocolDecl *D) {
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
   ObjCProtocolListInfo ProtListInfo(D->getReferencedProtocols(), *this, SA);
   
   ObjCProtocolDeclInfo ProtInfo(D);
@@ -333,13 +414,18 @@ bool IndexingContext::handleObjCProtocol(const ObjCProtocolDecl *D) {
 bool IndexingContext::handleObjCCategory(const ObjCCategoryDecl *D) {
   ObjCCategoryDeclInfo CatDInfo(/*isImplementation=*/false);
   EntityInfo ClassEntity;
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
   const ObjCInterfaceDecl *IFaceD = D->getClassInterface();
   SourceLocation ClassLoc = D->getLocation();
   SourceLocation CategoryLoc = D->IsClassExtension() ? ClassLoc
                                                      : D->getCategoryNameLoc();
   getEntityInfo(IFaceD, ClassEntity, SA);
 
+  if (suppressRefs())
+    markEntityOccurrenceInFile(IFaceD, ClassLoc);
+
+  ObjCProtocolListInfo ProtInfo(D->getReferencedProtocols(), *this, SA);
+  
   CatDInfo.ObjCCatDeclInfo.containerInfo = &CatDInfo.ObjCContDeclInfo;
   if (IFaceD) {
     CatDInfo.ObjCCatDeclInfo.objcClass = &ClassEntity;
@@ -350,6 +436,9 @@ bool IndexingContext::handleObjCCategory(const ObjCCategoryDecl *D) {
     CatDInfo.ObjCCatDeclInfo.classCursor = clang_getNullCursor();
   }
   CatDInfo.ObjCCatDeclInfo.classLoc = getIndexLoc(ClassLoc);
+  CatDInfo.ObjCProtoListInfo = ProtInfo.getListInfo();
+  CatDInfo.ObjCCatDeclInfo.protocols = &CatDInfo.ObjCProtoListInfo;
+
   return handleObjCContainer(D, CategoryLoc, getCursor(D), CatDInfo);
 }
 
@@ -357,10 +446,10 @@ bool IndexingContext::handleObjCCategoryImpl(const ObjCCategoryImplDecl *D) {
   const ObjCCategoryDecl *CatD = D->getCategoryDecl();
   ObjCCategoryDeclInfo CatDInfo(/*isImplementation=*/true);
   EntityInfo ClassEntity;
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
   const ObjCInterfaceDecl *IFaceD = CatD->getClassInterface();
   SourceLocation ClassLoc = D->getLocation();
-  SourceLocation CategoryLoc = ClassLoc; //FIXME: D->getCategoryNameLoc();
+  SourceLocation CategoryLoc = D->getCategoryNameLoc();
   getEntityInfo(IFaceD, ClassEntity, SA);
 
   CatDInfo.ObjCCatDeclInfo.containerInfo = &CatDInfo.ObjCContDeclInfo;
@@ -373,6 +462,8 @@ bool IndexingContext::handleObjCCategoryImpl(const ObjCCategoryImplDecl *D) {
     CatDInfo.ObjCCatDeclInfo.classCursor = clang_getNullCursor();
   }
   CatDInfo.ObjCCatDeclInfo.classLoc = getIndexLoc(ClassLoc);
+  CatDInfo.ObjCCatDeclInfo.protocols = 0;
+
   return handleObjCContainer(D, CategoryLoc, getCursor(D), CatDInfo);
 }
 
@@ -398,6 +489,13 @@ bool IndexingContext::handleSynthesizedObjCMethod(const ObjCMethodDecl *D,
 bool IndexingContext::handleObjCProperty(const ObjCPropertyDecl *D) {
   DeclInfo DInfo(/*isRedeclaration=*/false, /*isDefinition=*/false,
                  /*isContainer=*/false);
+  return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
+}
+
+bool IndexingContext::handleNamespace(const NamespaceDecl *D) {
+  DeclInfo DInfo(/*isRedeclaration=*/!D->isOriginalNamespace(),
+                 /*isDefinition=*/true,
+                 /*isContainer=*/true);
   return handleDecl(D, D->getLocation(), getCursor(D), DInfo);
 }
 
@@ -457,7 +555,7 @@ bool IndexingContext::handleReference(const NamedDecl *D, SourceLocation Loc,
       return false; // already occurred.
   }
 
-  StrAdapter SA(*this);
+  ScratchAlloc SA(*this);
   EntityInfo RefEntity, ParentEntity;
   getEntityInfo(D, RefEntity, SA);
   if (!RefEntity.USR)
@@ -468,12 +566,12 @@ bool IndexingContext::handleReference(const NamedDecl *D, SourceLocation Loc,
   ContainerInfo Container;
   getContainerInfo(DC, Container);
 
-  CXIdxEntityRefInfo Info = { Cursor,
+  CXIdxEntityRefInfo Info = { Kind,
+                              Cursor,
                               getIndexLoc(Loc),
                               &RefEntity,
                               Parent ? &ParentEntity : 0,
-                              &Container,
-                              Kind };
+                              &Container };
   CB.indexEntityReference(ClientData, &Info);
   return true;
 }
@@ -492,7 +590,6 @@ void IndexingContext::addContainerInMap(const DeclContext *DC,
   if (!DC)
     return;
 
-  assert(getScopedContext(DC) == DC);
   ContainerMapTy::iterator I = ContainerMap.find(DC);
   if (I == ContainerMap.end()) {
     if (container)
@@ -525,7 +622,7 @@ void IndexingContext::setClientEntity(const Decl *D, CXIdxClientEntity client) {
 bool IndexingContext::handleCXXRecordDecl(const CXXRecordDecl *RD,
                                           const NamedDecl *OrigD) {
   if (RD->isThisDeclarationADefinition()) {
-    StrAdapter SA(*this);
+    ScratchAlloc SA(*this);
     CXXClassDeclInfo CXXDInfo(/*isRedeclaration=*/!OrigD->isCanonicalDecl(),
                            /*isDefinition=*/RD->isThisDeclarationADefinition());
     CXXBasesListInfo BaseList(RD, *this, SA);
@@ -544,11 +641,13 @@ bool IndexingContext::handleCXXRecordDecl(const CXXRecordDecl *RD,
 
 bool IndexingContext::markEntityOccurrenceInFile(const NamedDecl *D,
                                                  SourceLocation Loc) {
+  if (!D || Loc.isInvalid())
+    return true;
+
   SourceManager &SM = Ctx->getSourceManager();
-  SourceLocation FileLoc = SM.getFileLoc(Loc);
   D = getEntityDecl(D);
   
-  std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(Loc);
+  std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(SM.getFileLoc(Loc));
   FileID FID = LocInfo.first;
   if (FID.isInvalid())
     return true;
@@ -603,32 +702,11 @@ IndexingContext::getEntityContainer(const Decl *D) const {
   return DC;
 }
 
-const DeclContext *
-IndexingContext::getScopedContext(const DeclContext *DC) const {
-  // Local contexts are ignored for indexing.
-  const DeclContext *FuncCtx = cast<Decl>(DC)->getParentFunctionOrMethod();
-  if (FuncCtx)
-    return FuncCtx;
-
-  // We consider enums always scoped for indexing.
-  if (isa<TagDecl>(DC))
-    return DC;
-
-  if (const NamespaceDecl *NS = dyn_cast<NamespaceDecl>(DC)) {
-    if (NS->isAnonymousNamespace())
-      return getScopedContext(NS->getParent());
-    return NS;
-  }
-
-  return DC->getRedeclContext();
-}
-
 CXIdxClientContainer
 IndexingContext::getClientContainerForDC(const DeclContext *DC) const {
   if (!DC)
     return 0;
 
-  DC = getScopedContext(DC);
   ContainerMapTy::const_iterator I = ContainerMap.find(DC);
   if (I == ContainerMap.end())
     return 0;
@@ -689,7 +767,7 @@ void IndexingContext::translateLoc(SourceLocation Loc,
 
 void IndexingContext::getEntityInfo(const NamedDecl *D,
                                     EntityInfo &EntityInfo,
-                                    StrAdapter &SA) {
+                                    ScratchAlloc &SA) {
   if (!D)
     return;
 
@@ -699,6 +777,15 @@ void IndexingContext::getEntityInfo(const NamedDecl *D,
   EntityInfo.IndexCtx = this;
   EntityInfo.kind = CXIdxEntity_Unexposed;
   EntityInfo.templateKind = CXIdxEntity_NonTemplate;
+  EntityInfo.lang = CXIdxEntityLang_C;
+
+  if (D->hasAttrs()) {
+    AttrListInfo *attrs = SA.allocate<AttrListInfo>();
+    new (attrs) AttrListInfo(D, *this, SA);
+    EntityInfo.AttrList = attrs;
+    EntityInfo.attributes = attrs->getAttrs();
+    EntityInfo.numAttributes = attrs->getNumAttrs();
+  }
 
   if (const TagDecl *TD = dyn_cast<TagDecl>(D)) {
     switch (TD->getTagKind()) {
@@ -707,15 +794,18 @@ void IndexingContext::getEntityInfo(const NamedDecl *D,
     case TTK_Union:
       EntityInfo.kind = CXIdxEntity_Union; break;
     case TTK_Class:
-      EntityInfo.kind = CXIdxEntity_CXXClass; break;
+      EntityInfo.kind = CXIdxEntity_CXXClass;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     case TTK_Enum:
       EntityInfo.kind = CXIdxEntity_Enum; break;
     }
 
     if (const CXXRecordDecl *CXXRec = dyn_cast<CXXRecordDecl>(D)) {
-      if (TD->getTagKind() == TTK_Struct &&
-          CXXRec->hasDefinition() && !CXXRec->isPOD())
-        EntityInfo.kind = CXIdxEntity_CXXClass;
+      // FIXME: isPOD check is not sufficient, a POD can contain methods,
+      // we want a isCStructLike check.
+      if (CXXRec->hasDefinition() && !CXXRec->isPOD())
+        EntityInfo.lang = CXIdxEntityLang_CXX;
     }
 
     if (isa<ClassTemplatePartialSpecializationDecl>(D)) {
@@ -733,45 +823,77 @@ void IndexingContext::getEntityInfo(const NamedDecl *D,
       break;
     case Decl::Var:
       EntityInfo.kind = CXIdxEntity_Variable;
-      if (isa<CXXRecordDecl>(D->getDeclContext()))
+      if (isa<CXXRecordDecl>(D->getDeclContext())) {
         EntityInfo.kind = CXIdxEntity_CXXStaticVariable;
+        EntityInfo.lang = CXIdxEntityLang_CXX;
+      }
       break;
     case Decl::Field:
-      EntityInfo.kind = CXIdxEntity_Field; break;
+      EntityInfo.kind = CXIdxEntity_Field;
+      if (const CXXRecordDecl *
+            CXXRec = dyn_cast<CXXRecordDecl>(D->getDeclContext())) {
+        // FIXME: isPOD check is not sufficient, a POD can contain methods,
+        // we want a isCStructLike check.
+        if (!CXXRec->isPOD())
+          EntityInfo.lang = CXIdxEntityLang_CXX;
+      }
+      break;
     case Decl::EnumConstant:
       EntityInfo.kind = CXIdxEntity_EnumConstant; break;
     case Decl::ObjCInterface:
-      EntityInfo.kind = CXIdxEntity_ObjCClass; break;
+      EntityInfo.kind = CXIdxEntity_ObjCClass;
+      EntityInfo.lang = CXIdxEntityLang_ObjC;
+      break;
     case Decl::ObjCProtocol:
-      EntityInfo.kind = CXIdxEntity_ObjCProtocol; break;
+      EntityInfo.kind = CXIdxEntity_ObjCProtocol;
+      EntityInfo.lang = CXIdxEntityLang_ObjC;
+      break;
     case Decl::ObjCCategory:
-      EntityInfo.kind = CXIdxEntity_ObjCCategory; break;
+      EntityInfo.kind = CXIdxEntity_ObjCCategory;
+      EntityInfo.lang = CXIdxEntityLang_ObjC;
+      break;
     case Decl::ObjCMethod:
       if (cast<ObjCMethodDecl>(D)->isInstanceMethod())
         EntityInfo.kind = CXIdxEntity_ObjCInstanceMethod;
       else
         EntityInfo.kind = CXIdxEntity_ObjCClassMethod;
+      EntityInfo.lang = CXIdxEntityLang_ObjC;
       break;
     case Decl::ObjCProperty:
-      EntityInfo.kind = CXIdxEntity_ObjCProperty; break;
+      EntityInfo.kind = CXIdxEntity_ObjCProperty;
+      EntityInfo.lang = CXIdxEntityLang_ObjC;
+      break;
     case Decl::ObjCIvar:
-      EntityInfo.kind = CXIdxEntity_ObjCIvar; break;
+      EntityInfo.kind = CXIdxEntity_ObjCIvar;
+      EntityInfo.lang = CXIdxEntityLang_ObjC;
+      break;
     case Decl::Namespace:
-      EntityInfo.kind = CXIdxEntity_CXXNamespace; break;
+      EntityInfo.kind = CXIdxEntity_CXXNamespace;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     case Decl::NamespaceAlias:
-      EntityInfo.kind = CXIdxEntity_CXXNamespaceAlias; break;
+      EntityInfo.kind = CXIdxEntity_CXXNamespaceAlias;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     case Decl::CXXConstructor:
-      EntityInfo.kind = CXIdxEntity_CXXConstructor; break;
+      EntityInfo.kind = CXIdxEntity_CXXConstructor;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     case Decl::CXXDestructor:
-      EntityInfo.kind = CXIdxEntity_CXXDestructor; break;
+      EntityInfo.kind = CXIdxEntity_CXXDestructor;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     case Decl::CXXConversion:
-      EntityInfo.kind = CXIdxEntity_CXXConversionFunction; break;
+      EntityInfo.kind = CXIdxEntity_CXXConversionFunction;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     case Decl::CXXMethod: {
       const CXXMethodDecl *MD = cast<CXXMethodDecl>(D);
       if (MD->isStatic())
         EntityInfo.kind = CXIdxEntity_CXXStaticMethod;
       else
         EntityInfo.kind = CXIdxEntity_CXXInstanceMethod;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
       break;
     }
     case Decl::ClassTemplate:
@@ -802,7 +924,9 @@ void IndexingContext::getEntityInfo(const NamedDecl *D,
       EntityInfo.templateKind = CXIdxEntity_Template;
       break;
     case Decl::TypeAlias:
-      EntityInfo.kind = CXIdxEntity_CXXTypeAlias; break;
+      EntityInfo.kind = CXIdxEntity_CXXTypeAlias;
+      EntityInfo.lang = CXIdxEntityLang_CXX;
+      break;
     default:
       break;
     }
@@ -816,6 +940,9 @@ void IndexingContext::getEntityInfo(const NamedDecl *D,
           FunctionDecl::TK_FunctionTemplateSpecialization)
       EntityInfo.templateKind = CXIdxEntity_TemplateSpecialization;
   }
+
+  if (EntityInfo.templateKind != CXIdxEntity_NonTemplate)
+    EntityInfo.lang = CXIdxEntityLang_CXX;
 
   if (IdentifierInfo *II = D->getIdentifier()) {
     EntityInfo.name = SA.toCStr(II->getName());

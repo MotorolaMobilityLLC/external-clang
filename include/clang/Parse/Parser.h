@@ -147,6 +147,9 @@ class Parser : public CodeCompletionHandler {
 
   /// \brief Identifier for "unavailable".
   IdentifierInfo *Ident_unavailable;
+  
+  /// \brief Identifier for "message".
+  IdentifierInfo *Ident_message;
 
   /// C++0x contextual keywords.
   mutable IdentifierInfo *Ident_final;
@@ -401,6 +404,9 @@ private:
     // Cut off parsing by acting as if we reached the end-of-file.
     Tok.setKind(tok::eof);
   }
+
+  /// \brief Clear and free the cached objc methods.
+  void clearLateParsedObjCMethods();
 
   /// \brief Handle the annotation token produced for #pragma unused(...)
   void HandlePragmaUnused();
@@ -713,6 +719,7 @@ public:
 private:
   void SuggestParentheses(SourceLocation Loc, unsigned DK,
                           SourceRange ParenRange);
+  void CheckNestedObjCContexts(SourceLocation AtLoc);
 
   /// SkipUntil - Read tokens until we get to the specified token, then consume
   /// it (unless DontConsume is true).  Because we cannot guarantee that the
@@ -1121,7 +1128,7 @@ private:
   /// \brief Contains a late templated function.
   /// Will be parsed at the end of the translation unit.
   struct LateParsedTemplatedFunction {
-    explicit LateParsedTemplatedFunction(Parser* P, Decl *MD)
+    explicit LateParsedTemplatedFunction(Decl *MD)
       : D(MD) {}
 
     CachedTokens Toks;
@@ -1201,7 +1208,7 @@ private:
   // Objective-C External Declarations
   Parser::DeclGroupPtrTy ParseObjCAtDirectives();
   Parser::DeclGroupPtrTy ParseObjCAtClassDeclaration(SourceLocation atLoc);
-  Decl *ParseObjCAtInterfaceDeclaration(SourceLocation atLoc,
+  Decl *ParseObjCAtInterfaceDeclaration(SourceLocation AtLoc,
                                         ParsedAttributes &prefixAttrs);
   void ParseObjCClassInstanceVariables(Decl *interfaceDecl,
                                        tok::ObjCKeywordKind visibility,
@@ -1222,7 +1229,7 @@ private:
   typedef SmallVector<LexedMethod*, 2> LateParsedObjCMethodContainer;
   LateParsedObjCMethodContainer LateParsedObjCMethods;
 
-  Decl *ParseObjCAtImplementationDeclaration(SourceLocation atLoc);
+  Decl *ParseObjCAtImplementationDeclaration(SourceLocation AtLoc);
   DeclGroupPtrTy ParseObjCAtEndDeclaration(SourceRange atEnd);
   Decl *ParseObjCAtAliasDeclaration(SourceLocation atLoc);
   Decl *ParseObjCPropertySynthesize(SourceLocation atLoc);
@@ -1541,6 +1548,8 @@ private:
   void ParseMicrosoftIfExistsExternalDeclaration();
   void ParseMicrosoftIfExistsClassDeclaration(DeclSpec::TST TagType,
                                               AccessSpecifier& CurAS);
+  bool ParseMicrosoftIfExistsBraceInitializer(ExprVector &InitExprs,
+                                              bool &InitExprsOk);
   bool ParseAsmOperandsOpt(SmallVectorImpl<IdentifierInfo *> &Names,
                            SmallVectorImpl<Expr *> &Constraints,
                            SmallVectorImpl<Expr *> &Exprs);
@@ -1898,7 +1907,10 @@ private:
 
 
   void ParseTypeofSpecifier(DeclSpec &DS);
-  void ParseDecltypeSpecifier(DeclSpec &DS);
+  SourceLocation ParseDecltypeSpecifier(DeclSpec &DS);
+  void AnnotateExistingDecltypeSpecifier(const DeclSpec &DS, 
+                                         SourceLocation StartLoc,
+                                         SourceLocation EndLoc);
   void ParseUnderlyingTypeSpecifier(DeclSpec &DS);
   void ParseAtomicSpecifier(DeclSpec &DS);
 

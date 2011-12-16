@@ -26,7 +26,8 @@
 namespace clang {
 
 class DeclContext;
-
+class Module;
+  
 namespace serialization {
 
 /// \brief Specifies the kind of module that has been loaded.
@@ -54,10 +55,10 @@ struct DeclContextInfo {
 /// of some sort loaded as the main file, all of which are specific formulations
 /// of the general notion of a "module". A module may depend on any number of
 /// other modules.
-class Module {
+class ModuleFile {
 public:
-  Module(ModuleKind Kind);
-  ~Module();
+  ModuleFile(ModuleKind Kind);
+  ~ModuleFile();
 
   // === General information ===
 
@@ -200,6 +201,16 @@ public:
   /// search information.
   const char *HeaderFileFrameworkStrings;
 
+  // === Submodule information ===  
+  /// \brief The number of submodules in this module.
+  unsigned LocalNumSubmodules;
+  
+  /// \brief Base submodule ID for submodules local to this module.
+  serialization::SubmoduleID BaseSubmoduleID;
+  
+  /// \brief Remapping table for submodule IDs in this module.
+  ContinuousRangeMap<uint32_t, int, 2> SubmoduleRemap;
+  
   // === Selectors ===
 
   /// \brief The number of selectors new to this file.
@@ -302,10 +313,10 @@ public:
   void *StatCache;
 
   /// \brief List of modules which depend on this module
-  llvm::SetVector<Module *> ImportedBy;
+  llvm::SetVector<ModuleFile *> ImportedBy;
 
   /// \brief List of modules which this module depends on
-  llvm::SetVector<Module *> Imports;
+  llvm::SetVector<ModuleFile *> Imports;
 
   /// \brief Determine whether this module was directly imported at
   /// any point during translation.

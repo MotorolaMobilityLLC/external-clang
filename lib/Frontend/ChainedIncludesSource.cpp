@@ -12,12 +12,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Serialization/ChainedIncludesSource.h"
-#include "clang/Serialization/ASTReader.h"
-#include "clang/Serialization/ASTWriter.h"
+#include "clang/Frontend/ChainedIncludesSource.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/ASTUnit.h"
+#include "clang/Serialization/ASTReader.h"
+#include "clang/Serialization/ASTWriter.h"
 #include "clang/Parse/ParseAST.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Basic/TargetInfo.h"
@@ -105,8 +105,8 @@ ChainedIncludesSource *ChainedIncludesSource::create(CompilerInstance &CI) {
     SmallVector<char, 256> serialAST;
     llvm::raw_svector_ostream OS(serialAST);
     llvm::OwningPtr<ASTConsumer> consumer;
-    consumer.reset(new PCHGenerator(Clang->getPreprocessor(), "-",
-                                    /*IsModule=*/false, /*isysroot=*/"", &OS));
+    consumer.reset(new PCHGenerator(Clang->getPreprocessor(), "-", 0,
+                                    /*isysroot=*/"", &OS));
     Clang->getASTContext().setASTMutationListener(
                                             consumer->GetASTMutationListener());
     Clang->setASTConsumer(consumer.take());
