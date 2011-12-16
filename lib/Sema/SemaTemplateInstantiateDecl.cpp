@@ -351,6 +351,12 @@ Decl *TemplateDeclInstantiator::VisitVarDecl(VarDecl *D) {
                         Sema::LookupOrdinaryName, Sema::ForRedeclaration);
   if (D->isStaticDataMember())
     SemaRef.LookupQualifiedName(Previous, Owner, false);
+  
+  // In ARC, infer 'retaining' for variables of retainable type.
+  if (SemaRef.getLangOptions().ObjCAutoRefCount && 
+      SemaRef.inferObjCARCLifetime(Var))
+    Var->setInvalidDecl();
+
   SemaRef.CheckVariableDeclaration(Var, Previous);
 
   if (D->isOutOfLine()) {
@@ -862,7 +868,14 @@ Decl *TemplateDeclInstantiator::VisitClassTemplateDecl(ClassTemplateDecl *D) {
   // Finish handling of friends.
   if (isFriend) {
     DC->makeDeclVisibleInContext(Inst, /*Recoverable*/ false);
+    Inst->setLexicalDeclContext(Owner);
+    RecordInst->setLexicalDeclContext(Owner);
     return Inst;
+  }
+
+  if (D->isOutOfLine()) {
+    Inst->setLexicalDeclContext(D->getLexicalDeclContext());
+    RecordInst->setLexicalDeclContext(D->getLexicalDeclContext());
   }
 
   Owner->addDecl(Inst);

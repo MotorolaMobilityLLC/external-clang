@@ -298,6 +298,7 @@ protected:
     Builder.defineMacro("_EM_LSIZE", "4");
     Builder.defineMacro("_EM_FSIZE", "4");
     Builder.defineMacro("_EM_DSIZE", "8");
+    Builder.defineMacro("__ELF__");
     DefineStd(Builder, "unix", Opts);
   }
 public:
@@ -371,7 +372,26 @@ protected:
   }
 public:
   OpenBSDTargetInfo(const std::string &triple)
-    : OSTargetInfo<Target>(triple) {}
+    : OSTargetInfo<Target>(triple) {
+      this->UserLabelPrefix = "";
+
+      llvm::Triple Triple(triple);
+      switch (Triple.getArch()) {
+        default:
+        case llvm::Triple::x86:
+        case llvm::Triple::x86_64:
+        case llvm::Triple::arm:
+	case llvm::Triple::sparc:
+          this->MCountName = "__mcount";
+          break;
+        case llvm::Triple::mips64:
+        case llvm::Triple::mips64el:
+        case llvm::Triple::ppc:
+	case llvm::Triple::sparcv9:
+          this->MCountName = "_mcount";
+          break;
+      }
+  }
 };
 
 // PSP Target
@@ -1150,6 +1170,8 @@ static const char* const GCCRegNames[] = {
   "mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7",
   "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
   "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+  "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7",
+  "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15",
 };
 
 const TargetInfo::AddlRegName AddlRegNames[] = {
@@ -1288,6 +1310,12 @@ class X86TargetInfo : public TargetInfo {
     CK_OpteronSSE3,
     CK_AMDFAM10,
 
+    /// \name K10
+    /// K10 architecture processors.
+    //@{
+    CK_BDVER1,
+    CK_BDVER2,
+
     /// This specification is deprecated and will be removed in the future.
     /// Users should prefer \see CK_K8.
     // FIXME: Warn on this when the CPU is set to it.
@@ -1341,7 +1369,11 @@ public:
   virtual void getDefaultFeatures(llvm::StringMap<bool> &Features) const;
   virtual void HandleTargetFeatures(std::vector<std::string> &Features);
   virtual const char* getABI() const {
-    return MMX3DNowLevel == NoMMX3DNow ? "no-mmx" : "";
+    if (PointerWidth == 64 && HasAVX)
+      return "avx";
+    else if (PointerWidth == 32 && MMX3DNowLevel == NoMMX3DNow)
+      return "no-mmx";
+    return "";
   }
   virtual bool setCPU(const std::string &Name) {
     CPU = llvm::StringSwitch<CPUKind>(Name)
@@ -1387,6 +1419,8 @@ public:
       .Case("opteron", CK_Opteron)
       .Case("opteron-sse3", CK_OpteronSSE3)
       .Case("amdfam10", CK_AMDFAM10)
+      .Case("bdver1", CK_BDVER1)
+      .Case("bdver2", CK_BDVER2)
       .Case("x86-64", CK_x86_64)
       .Case("geode", CK_Geode)
       .Default(CK_Generic);
@@ -1448,6 +1482,8 @@ public:
     case CK_Opteron:
     case CK_OpteronSSE3:
     case CK_AMDFAM10:
+    case CK_BDVER1:
+    case CK_BDVER2:
     case CK_x86_64:
       return true;
     }
@@ -1571,6 +1607,12 @@ void X86TargetInfo::getDefaultFeatures(llvm::StringMap<bool> &Features) const {
     setFeatureEnabled(Features, "sse4a", true);
     setFeatureEnabled(Features, "3dnowa", true);
     break;
+  case CK_BDVER1:
+  case CK_BDVER2:
+    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "sse4a", true);
+    setFeatureEnabled(Features, "aes", true);
+    break;
   case CK_C3_2:
     setFeatureEnabled(Features, "mmx", true);
     setFeatureEnabled(Features, "sse", true);
@@ -1587,23 +1629,26 @@ bool X86TargetInfo::setFeatureEnabled(llvm::StringMap<bool> &Features,
       (Name != "sse4" && Name != "sse4.2" && Name != "sse4.1"))
     return false;
 
+  // FIXME: this should probably use a switch with fall through.
+
   if (Enabled) {
     if (Name == "mmx")
       Features["mmx"] = true;
     else if (Name == "sse")
-      Features["sse"] = true;
+      Features["mmx"] = Features["sse"] = true;
     else if (Name == "sse2")
-      Features["sse"] = Features["sse2"] = true;
+      Features["mmx"] = Features["sse"] = Features["sse2"] = true;
     else if (Name == "sse3")
-      Features["sse"] = Features["sse2"] = Features["sse3"] = true;
+      Features["mmx"] = Features["sse"] = Features["sse2"] = Features["sse3"] =
+        true;
     else if (Name == "ssse3")
-      Features["sse"] = Features["sse2"] = Features["sse3"] =
+      Features["mmx"] = Features["sse"] = Features["sse2"] = Features["sse3"] =
         Features["ssse3"] = true;
     else if (Name == "sse4" || Name == "sse4.2")
-      Features["sse"] = Features["sse2"] = Features["sse3"] =
+      Features["mmx"] = Features["sse"] = Features["sse2"] = Features["sse3"] =
         Features["ssse3"] = Features["sse41"] = Features["sse42"] = true;
     else if (Name == "sse4.1")
-      Features["sse"] = Features["sse2"] = Features["sse3"] =
+      Features["mmx"] = Features["sse"] = Features["sse2"] = Features["sse3"] =
         Features["ssse3"] = Features["sse41"] = true;
     else if (Name == "3dnow")
       Features["mmx"] = Features["3dnow"] = true;
@@ -1612,10 +1657,11 @@ bool X86TargetInfo::setFeatureEnabled(llvm::StringMap<bool> &Features,
     else if (Name == "aes")
       Features["aes"] = true;
     else if (Name == "avx")
-      Features["avx"] = Features["sse"] = Features["sse2"] = Features["sse3"] =
-        Features["ssse3"] = Features["sse41"] = Features["sse42"] = true;
+      Features["mmx"] = Features["sse"] = Features["sse2"] = Features["sse3"] =
+        Features["ssse3"] = Features["sse41"] = Features["sse42"] =
+        Features["avx"] = true;
     else if (Name == "sse4a")
-      Features["sse4a"] = true;
+      Features["mmx"] = Features["sse4a"] = true;
   } else {
     if (Name == "mmx")
       Features["mmx"] = Features["3dnow"] = Features["3dnowa"] = false;
@@ -1844,6 +1890,16 @@ void X86TargetInfo::getTargetDefines(const LangOptions &Opts,
     Builder.defineMacro("__amdfam10");
     Builder.defineMacro("__amdfam10__");
     Builder.defineMacro("__tune_amdfam10__");
+    break;
+  case CK_BDVER1:
+    Builder.defineMacro("__bdver1");
+    Builder.defineMacro("__bdver1__");
+    Builder.defineMacro("__tune__bdver1__");
+    break;
+  case CK_BDVER2:
+    Builder.defineMacro("__bdver2");
+    Builder.defineMacro("__bdver2__");
+    Builder.defineMacro("__tune__bdver2__");
     break;
   case CK_Geode:
     Builder.defineMacro("__geode");
@@ -2740,7 +2796,6 @@ const Builtin::Info ARMTargetInfo::BuiltinInfo[] = {
 };
 } // end anonymous namespace.
 
-
 namespace {
 class DarwinARMTargetInfo :
   public DarwinTargetInfo<ARMTargetInfo> {
@@ -2760,6 +2815,137 @@ public:
   }
 };
 } // end anonymous namespace.
+
+
+namespace {
+// Hexagon abstract base class
+class HexagonTargetInfo : public TargetInfo {
+  static const Builtin::Info BuiltinInfo[];
+  static const char * const GCCRegNames[];
+  static const TargetInfo::GCCRegAlias GCCRegAliases[];
+  std::string CPU;
+public:
+  HexagonTargetInfo(const std::string& triple) : TargetInfo(triple)  {
+    DescriptionString = ("e-p:32:32:32-"
+                         "i64:64:64-i32:32:32-"
+                         "i16:16:16-i1:32:32-a:0:0");
+
+    // {} in inline assembly are packet specifiers, not assembly variant
+    // specifiers.
+    NoAsmVariants = true;
+  }
+
+  virtual void getTargetBuiltins(const Builtin::Info *&Records,
+                                 unsigned &NumRecords) const {
+    Records = BuiltinInfo;
+    NumRecords = clang::Hexagon::LastTSBuiltin-Builtin::FirstTSBuiltin;
+  }
+
+  virtual bool validateAsmConstraint(const char *&Name,
+                                     TargetInfo::ConstraintInfo &Info) const {
+    return true;
+  }
+
+  virtual void getTargetDefines(const LangOptions &Opts,
+                                MacroBuilder &Builder) const;
+
+  virtual const char *getVAListDeclaration() const {
+    return "typedef char* __builtin_va_list;";
+  }
+  virtual void getGCCRegNames(const char * const *&Names,
+                              unsigned &NumNames) const;
+  virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                unsigned &NumAliases) const;
+  virtual const char *getClobbers() const {
+    return "";
+  }
+  virtual bool setCPU(const std::string &Name) {
+    CPU = Name;
+    return true;
+  }
+};
+
+void HexagonTargetInfo::getTargetDefines(const LangOptions &Opts,
+                                MacroBuilder &Builder) const {
+  Builder.defineMacro("qdsp6");
+  Builder.defineMacro("__qdsp6", "1");
+  Builder.defineMacro("__qdsp6__", "1");
+
+  Builder.defineMacro("hexagon");
+  Builder.defineMacro("__hexagon", "1");
+  Builder.defineMacro("__hexagon__", "1");
+
+  if(CPU == "hexagonv1") {
+    Builder.defineMacro("__HEXAGON_V1__");
+    Builder.defineMacro("__HEXAGON_ARCH__", "1");
+    if(Opts.HexagonQdsp6Compat) {
+      Builder.defineMacro("__QDSP6_V1__");
+      Builder.defineMacro("__QDSP6_ARCH__", "1");
+    }
+  }
+  else if(CPU == "hexagonv2") {
+    Builder.defineMacro("__HEXAGON_V2__");
+    Builder.defineMacro("__HEXAGON_ARCH__", "2");
+    if(Opts.HexagonQdsp6Compat) {
+      Builder.defineMacro("__QDSP6_V2__");
+      Builder.defineMacro("__QDSP6_ARCH__", "2");
+    }
+  }
+  else if(CPU == "hexagonv3") {
+    Builder.defineMacro("__HEXAGON_V3__");
+    Builder.defineMacro("__HEXAGON_ARCH__", "3");
+    if(Opts.HexagonQdsp6Compat) {
+      Builder.defineMacro("__QDSP6_V3__");
+      Builder.defineMacro("__QDSP6_ARCH__", "3");
+    }
+  }
+  else if(CPU == "hexagonv4") {
+    Builder.defineMacro("__HEXAGON_V4__");
+    Builder.defineMacro("__HEXAGON_ARCH__", "4");
+    if(Opts.HexagonQdsp6Compat) {
+      Builder.defineMacro("__QDSP6_V4__");
+      Builder.defineMacro("__QDSP6_ARCH__", "4");
+    }
+  }
+}
+
+const char * const HexagonTargetInfo::GCCRegNames[] = {
+  "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+  "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+  "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
+  "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
+  "p0", "p1", "p2", "p3",
+  "sa0", "lc0", "sa1", "lc1", "m0", "m1", "usr", "ugp"
+};
+
+void HexagonTargetInfo::getGCCRegNames(const char * const *&Names,
+                                   unsigned &NumNames) const {
+  Names = GCCRegNames;
+  NumNames = llvm::array_lengthof(GCCRegNames);
+}
+
+
+const TargetInfo::GCCRegAlias HexagonTargetInfo::GCCRegAliases[] = {
+  { { "sp" }, "r29" },
+  { { "fp" }, "r30" },
+  { { "lr" }, "r31" },
+ };
+
+void HexagonTargetInfo::getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                     unsigned &NumAliases) const {
+  Aliases = GCCRegAliases;
+  NumAliases = llvm::array_lengthof(GCCRegAliases);
+}
+
+
+const Builtin::Info HexagonTargetInfo::BuiltinInfo[] = {
+#define BUILTIN(ID, TYPE, ATTRS) { #ID, TYPE, ATTRS, 0, ALL_LANGUAGES },
+#define LIBBUILTIN(ID, TYPE, ATTRS, HEADER) { #ID, TYPE, ATTRS, HEADER,\
+                                              ALL_LANGUAGES },
+#include "clang/Basic/BuiltinsHexagon.def"
+};
+}
+
 
 namespace {
 class SparcV8TargetInfo : public TargetInfo {
@@ -3425,6 +3611,9 @@ static TargetInfo *AllocateTarget(const std::string &T) {
   default:
     return NULL;
 
+  case llvm::Triple::hexagon:
+    return new HexagonTargetInfo(T);
+
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
     if (Triple.isOSDarwin())
@@ -3674,13 +3863,32 @@ TargetInfo *TargetInfo::CreateTargetInfo(DiagnosticsEngine &Diags,
   Target->getDefaultFeatures(Features);
 
   // Apply the user specified deltas.
+  // First the enables.
   for (std::vector<std::string>::const_iterator it = Opts.Features.begin(),
          ie = Opts.Features.end(); it != ie; ++it) {
     const char *Name = it->c_str();
 
+    if (Name[0] != '+')
+      continue;
+
     // Apply the feature via the target.
-    if ((Name[0] != '-' && Name[0] != '+') ||
-        !Target->setFeatureEnabled(Features, Name + 1, (Name[0] == '+'))) {
+    if (!Target->setFeatureEnabled(Features, Name + 1, true)) {
+      Diags.Report(diag::err_target_invalid_feature) << Name;
+      return 0;
+    }
+  }
+
+  // Then the disables.
+  for (std::vector<std::string>::const_iterator it = Opts.Features.begin(),
+         ie = Opts.Features.end(); it != ie; ++it) {
+    const char *Name = it->c_str();
+
+    if (Name[0] == '+')
+      continue;
+
+    // Apply the feature via the target.
+    if (Name[0] != '-' ||
+        !Target->setFeatureEnabled(Features, Name + 1, false)) {
       Diags.Report(diag::err_target_invalid_feature) << Name;
       return 0;
     }

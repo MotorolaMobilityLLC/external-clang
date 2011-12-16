@@ -2633,6 +2633,19 @@ struct BaseAndFieldInfo {
     else
       IIK = IIK_Default;
   }
+  
+  bool isImplicitCopyOrMove() const {
+    switch (IIK) {
+    case IIK_Copy:
+    case IIK_Move:
+      return true;
+      
+    case IIK_Default:
+      return false;
+    }
+    
+    return false;
+  }
 };
 }
 
@@ -2678,7 +2691,7 @@ static bool CollectFieldInitializer(Sema &SemaRef, BaseAndFieldInfo &Info,
   // C++0x [class.base.init]p8: if the entity is a non-static data member that
   // has a brace-or-equal-initializer, the entity is initialized as specified
   // in [dcl.init].
-  if (Field->hasInClassInitializer()) {
+  if (Field->hasInClassInitializer() && !Info.isImplicitCopyOrMove()) {
     CXXCtorInitializer *Init;
     if (Indirect)
       Init = new (SemaRef.Context) CXXCtorInitializer(SemaRef.Context, Indirect,
@@ -8583,12 +8596,7 @@ Sema::ComputeDefaultedMoveCtorExceptionSpec(CXXRecordDecl *ClassDecl) {
   for (RecordDecl::field_iterator F = ClassDecl->field_begin(),
                                FEnd = ClassDecl->field_end();
        F != FEnd; ++F) {
-    if (F->hasInClassInitializer()) {
-      if (Expr *E = F->getInClassInitializer())
-        ExceptSpec.CalledExpr(E);
-      else if (!F->isInvalidDecl())
-        ExceptSpec.SetDelayed();
-    } else if (const RecordType *RecordTy
+    if (const RecordType *RecordTy
               = Context.getBaseElementType(F->getType())->getAs<RecordType>()) {
       CXXRecordDecl *FieldRecDecl = cast<CXXRecordDecl>(RecordTy->getDecl());
       CXXConstructorDecl *Constructor = LookupMovingConstructor(FieldRecDecl);
@@ -9520,6 +9528,10 @@ VarDecl *Sema::BuildExceptionDeclaration(Scope *S,
                                     ExDeclType, TInfo, SC_None, SC_None);
   ExDecl->setExceptionVariable(true);
   
+  // In ARC, infer 'retaining' for variables of retainable type.
+  if (getLangOptions().ObjCAutoRefCount && inferObjCARCLifetime(ExDecl))
+    Invalid = true;
+
   if (!Invalid && !ExDeclType->isDependentType()) {
     if (const RecordType *recordType = ExDeclType->getAs<RecordType>()) {
       // C++ [except.handle]p16:
@@ -9624,18 +9636,15 @@ Decl *Sema::ActOnStaticAssertDeclaration(SourceLocation StaticAssertLoc,
   StringLiteral *AssertMessage = cast<StringLiteral>(AssertMessageExpr_);
 
   if (!AssertExpr->isTypeDependent() && !AssertExpr->isValueDependent()) {
-    llvm::APSInt Value(32);
-    if (!AssertExpr->isIntegerConstantExpr(Value, Context)) {
-      Diag(StaticAssertLoc,
-           diag::err_static_assert_expression_is_not_constant) <<
-        AssertExpr->getSourceRange();
+    llvm::APSInt Cond;
+    if (VerifyIntegerConstantExpression(AssertExpr, &Cond,
+                             diag::err_static_assert_expression_is_not_constant,
+                                        /*AllowFold=*/false))
       return 0;
-    }
 
-    if (Value == 0) {
+    if (!Cond)
       Diag(StaticAssertLoc, diag::err_static_assert_failed)
         << AssertMessage->getString() << AssertExpr->getSourceRange();
-    }
   }
 
   if (DiagnoseUnexpandedParameterPack(AssertExpr, UPPC_StaticAssertExpression))
@@ -10609,7 +10618,10 @@ bool Sema::DefineUsedVTables() {
       if (!KeyFunction || 
           (KeyFunction->hasBody(KeyFunctionDef) && 
            KeyFunctionDef->isInlined()))
-        Diag(Class->getLocation(), diag::warn_weak_vtable) << Class;
+        Diag(Class->getLocation(), Class->getTemplateSpecializationKind() ==
+             TSK_ExplicitInstantiationDefinition 
+             ? diag::warn_weak_template_vtable : diag::warn_weak_vtable) 
+          << Class;
     }
   }
   VTableUses.clear();

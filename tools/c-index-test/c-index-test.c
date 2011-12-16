@@ -1548,6 +1548,7 @@ typedef struct {
   const char *check_prefix;
   int first_check_printed;
   int fail_for_error;
+  int abort;
 } IndexData;
 
 static void printCheck(IndexData *data) {
@@ -1577,6 +1578,10 @@ static void printCXIndexLoc(CXIdxLoc loc) {
   clang_indexLoc_getFileLocation(loc, &file, 0, &line, &column, 0);
   if (line == 0) {
     printf("<null loc>");
+    return;
+  }
+  if (!file) {
+    printf("<no idxfile>");
     return;
   }
   filename = clang_getFileName((CXFile)file);
@@ -1663,11 +1668,23 @@ static const char *getEntityTemplateKindString(CXIdxEntityCXXTemplateKind kind) 
   return 0;
 }
 
+static const char *getEntityLanguageString(CXIdxEntityLanguage kind) {
+  switch (kind) {
+  case CXIdxEntityLang_None: return "<none>";
+  case CXIdxEntityLang_C: return "C";
+  case CXIdxEntityLang_ObjC: return "ObjC";
+  case CXIdxEntityLang_CXX: return "C++";
+  }
+  assert(0 && "Garbage language kind");
+  return 0;
+}
+
 static void printEntityInfo(const char *cb,
                             CXClientData client_data,
                             const CXIdxEntityInfo *info) {
   const char *name;
   IndexData *index_data;
+  unsigned i;
   index_data = (IndexData *)client_data;
   printCheck(index_data);
 
@@ -1684,6 +1701,22 @@ static void printEntityInfo(const char *cb,
          getEntityTemplateKindString(info->templateKind));
   printf(" | name: %s", name);
   printf(" | USR: %s", info->USR);
+  printf(" | lang: %s", getEntityLanguageString(info->lang));
+
+  for (i = 0; i != info->numAttributes; ++i) {
+    const CXIdxAttrInfo *Attr = info->attributes[i];
+    printf("     <attribute>: ");
+    PrintCursor(Attr->cursor);
+  }
+}
+
+static void printBaseClassInfo(CXClientData client_data,
+                               const CXIdxBaseClassInfo *info) {
+  printEntityInfo("     <base>", client_data, info->base);
+  printf(" | cursor: ");
+  PrintCursor(info->cursor);
+  printf(" | loc: ");
+  printCXIndexLoc(info->loc);
 }
 
 static void printProtocolList(const CXIdxObjCProtocolRefListInfo *ProtoInfo,
@@ -1701,21 +1734,27 @@ static void printProtocolList(const CXIdxObjCProtocolRefListInfo *ProtoInfo,
 }
 
 static void index_diagnostic(CXClientData client_data,
-                             CXDiagnostic diag, void *reserved) {
+                             CXDiagnosticSet diagSet, void *reserved) {
   CXString str;
   const char *cstr;
+  unsigned numDiags, i;
+  CXDiagnostic diag;
   IndexData *index_data;
   index_data = (IndexData *)client_data;
   printCheck(index_data);
 
-  str = clang_formatDiagnostic(diag, clang_defaultDiagnosticDisplayOptions());
-  cstr = clang_getCString(str);
-  printf("[diagnostic]: %s\n", cstr);
-  clang_disposeString(str);  
-
-  if (getenv("CINDEXTEST_FAILONERROR") &&
-      clang_getDiagnosticSeverity(diag) >= CXDiagnostic_Error) {
-    index_data->fail_for_error = 1;
+  numDiags = clang_getNumDiagnosticsInSet(diagSet);
+  for (i = 0; i != numDiags; ++i) {
+    diag = clang_getDiagnosticInSet(diagSet, i);
+    str = clang_formatDiagnostic(diag, clang_defaultDiagnosticDisplayOptions());
+    cstr = clang_getCString(str);
+    printf("[diagnostic]: %s\n", cstr);
+    clang_disposeString(str);  
+  
+    if (getenv("CINDEXTEST_FAILONERROR") &&
+        clang_getDiagnosticSeverity(diag) >= CXDiagnostic_Error) {
+      index_data->fail_for_error = 1;
+    }
   }
 }
 
@@ -1764,6 +1803,7 @@ static void index_indexDeclaration(CXClientData client_data,
   const CXIdxObjCCategoryDeclInfo *CatInfo;
   const CXIdxObjCInterfaceDeclInfo *InterInfo;
   const CXIdxObjCProtocolRefListInfo *ProtoInfo;
+  const CXIdxCXXClassDeclInfo *CXXClassInfo;
   unsigned i;
   index_data = (IndexData *)client_data;
 
@@ -1772,8 +1812,10 @@ static void index_indexDeclaration(CXClientData client_data,
   PrintCursor(info->cursor);
   printf(" | loc: ");
   printCXIndexLoc(info->loc);
-  printf(" | container: ");
-  printCXIndexContainer(info->container);
+  printf(" | semantic-container: ");
+  printCXIndexContainer(info->semanticContainer);
+  printf(" | lexical-container: ");
+  printCXIndexContainer(info->lexicalContainer);
   printf(" | isRedecl: %d", info->isRedeclaration);
   printf(" | isDef: %d", info->isDefinition);
   printf(" | isContainer: %d", info->isContainer);
@@ -1813,18 +1855,20 @@ static void index_indexDeclaration(CXClientData client_data,
 
   if ((InterInfo = clang_index_getObjCInterfaceDeclInfo(info))) {
     if (InterInfo->superInfo) {
-      printEntityInfo("     <base>", client_data,
-                      InterInfo->superInfo->base);
-      printf(" | cursor: ");
-      PrintCursor(InterInfo->superInfo->cursor);
-      printf(" | loc: ");
-      printCXIndexLoc(InterInfo->superInfo->loc);
+      printBaseClassInfo(client_data, InterInfo->superInfo);
       printf("\n");
     }
   }
 
   if ((ProtoInfo = clang_index_getObjCProtocolRefListInfo(info))) {
     printProtocolList(ProtoInfo, client_data);
+  }
+
+  if ((CXXClassInfo = clang_index_getCXXClassDeclInfo(info))) {
+    for (i = 0; i != CXXClassInfo->numBases; ++i) {
+      printBaseClassInfo(client_data, CXXClassInfo->bases[i]);
+      printf("\n");
+    }
   }
 
   if (info->declAsContainer)
@@ -1850,8 +1894,14 @@ static void index_indexEntityReference(CXClientData client_data,
   printf("\n");
 }
 
+static int index_abortQuery(CXClientData client_data, void *reserved) {
+  IndexData *index_data;
+  index_data = (IndexData *)client_data;
+  return index_data->abort;
+}
+
 static IndexerCallbacks IndexCB = {
-  0, /*abortQuery*/
+  index_abortQuery,
   index_diagnostic,
   index_enteredMainFile,
   index_ppIncludedFile,
@@ -1894,6 +1944,7 @@ static int index_file(int argc, const char **argv) {
   index_data.check_prefix = check_prefix;
   index_data.first_check_printed = 0;
   index_data.fail_for_error = 0;
+  index_data.abort = 0;
 
   index_opts = 0;
   if (getenv("CINDEXTEST_SUPPRESSREFS"))
@@ -1948,6 +1999,7 @@ static int index_tu(int argc, const char **argv) {
   index_data.check_prefix = check_prefix;
   index_data.first_check_printed = 0;
   index_data.fail_for_error = 0;
+  index_data.abort = 0;
 
   index_opts = 0;
   if (getenv("CINDEXTEST_SUPPRESSREFS"))

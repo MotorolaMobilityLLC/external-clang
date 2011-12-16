@@ -440,6 +440,16 @@ void DarwinClang::AddLinkRuntimeLib(const ArgList &Args,
 
 void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
                                         ArgStringList &CmdArgs) const {
+  // Darwin only supports the compiler-rt based runtime libraries.
+  switch (GetRuntimeLibType(Args)) {
+  case ToolChain::RLT_CompilerRT:
+    break;
+  default:
+    getDriver().Diag(diag::err_drv_unsupported_rtlib_for_platform)
+      << Args.getLastArg(options::OPT_rtlib_EQ)->getValue(Args) << "darwin";
+    return;
+  }
+
   // Darwin doesn't support real static executables, don't link any runtime
   // libraries with -static.
   if (Args.hasArg(options::OPT_static))
@@ -464,6 +474,25 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
       AddLinkRuntimeLib(Args, CmdArgs, "libclang_rt.profile_ios.a");
     } else {
       AddLinkRuntimeLib(Args, CmdArgs, "libclang_rt.profile_osx.a");
+    }
+  }
+
+  // Add ASAN runtime library, if required. Dynamic libraries and bundles
+  // should not be linked with the runtime library.
+  if (Args.hasFlag(options::OPT_faddress_sanitizer,
+                   options::OPT_fno_address_sanitizer, false)) {
+    if (Args.hasArg(options::OPT_dynamiclib) ||
+        Args.hasArg(options::OPT_bundle)) return;
+    if (isTargetIPhoneOS()) {
+      getDriver().Diag(diag::err_drv_clang_unsupported_per_platform)
+        << "-faddress-sanitizer";
+    } else {
+      AddLinkRuntimeLib(Args, CmdArgs, "libclang_rt.asan_osx.a");
+
+      // The ASAN runtime library requires C++ and CoreFoundation.
+      AddCXXStdlibLibArgs(Args, CmdArgs);
+      CmdArgs.push_back("-framework");
+      CmdArgs.push_back("CoreFoundation");
     }
   }
 
@@ -1227,14 +1256,17 @@ Generic_GCC::GCCInstallationDetector::GCCInstallationDetector(const Driver &D)
     static const char *const PPCLibDirs[] = { "/lib32", "/lib" };
     static const char *const PPCTriples[] = {
       "powerpc-linux-gnu",
-      "powerpc-unknown-linux-gnu"
+      "powerpc-unknown-linux-gnu",
+      "powerpc-suse-linux"
     };
     LibDirs.append(PPCLibDirs, PPCLibDirs + llvm::array_lengthof(PPCLibDirs));
     Triples.append(PPCTriples, PPCTriples + llvm::array_lengthof(PPCTriples));
   } else if (HostArch == llvm::Triple::ppc64) {
     static const char *const PPC64LibDirs[] = { "/lib64", "/lib" };
     static const char *const PPC64Triples[] = {
-      "powerpc64-unknown-linux-gnu"
+      "powerpc64-unknown-linux-gnu",
+      "powerpc64-suse-linux",
+      "ppc64-redhat-linux"
     };
     LibDirs.append(PPC64LibDirs,
                    PPC64LibDirs + llvm::array_lengthof(PPC64LibDirs));
@@ -1279,6 +1311,16 @@ void Generic_GCC::GCCInstallationDetector::ScanLibDirForGCCTriple(
         continue;
       if (CandidateVersion <= Version)
         continue;
+
+      // Some versions of SUSE and Fedora on ppc64 put 32-bit libs
+      // in what would normally be GccInstallPath and put the 64-bit
+      // libs in a subdirectory named 64. We need the 64-bit libs
+      // for linking.
+      bool UseSlash64 = false;
+      if (HostArch == llvm::Triple::ppc64 &&
+            llvm::sys::fs::exists(LI->path() + "/64/crtbegin.o"))
+        UseSlash64 = true;
+
       if (!llvm::sys::fs::exists(LI->path() + "/crtbegin.o"))
         continue;
 
@@ -1289,6 +1331,7 @@ void Generic_GCC::GCCInstallationDetector::ScanLibDirForGCCTriple(
       // Linux.
       GccInstallPath = LibDir + Suffixes[i] + "/" + VersionText.str();
       GccParentLibPath = GccInstallPath + InstallSuffixes[i];
+      if (UseSlash64) GccInstallPath = GccInstallPath + "/64";
       IsValid = true;
     }
   }
@@ -1363,6 +1406,73 @@ const char *Generic_GCC::GetDefaultRelocationModel() const {
 const char *Generic_GCC::GetForcedPicModel() const {
   return 0;
 }
+/// Hexagon Toolchain
+
+Hexagon_TC::Hexagon_TC(const HostInfo &Host, const llvm::Triple& Triple)
+  : ToolChain(Host, Triple) {
+  getProgramPaths().push_back(getDriver().getInstalledDir());
+  if (getDriver().getInstalledDir() != getDriver().Dir.c_str())
+    getProgramPaths().push_back(getDriver().Dir);
+}
+
+Hexagon_TC::~Hexagon_TC() {
+  // Free tool implementations.
+  for (llvm::DenseMap<unsigned, Tool*>::iterator
+         it = Tools.begin(), ie = Tools.end(); it != ie; ++it)
+    delete it->second;
+}
+
+Tool &Hexagon_TC::SelectTool(const Compilation &C,
+                             const JobAction &JA,
+                             const ActionList &Inputs) const {
+  Action::ActionClass Key;
+  //   if (JA.getKind () == Action::CompileJobClass)
+  //     Key = JA.getKind ();
+  //     else
+
+  if (getDriver().ShouldUseClangCompiler(C, JA, getTriple()))
+    Key = Action::AnalyzeJobClass;
+  else
+    Key = JA.getKind();
+  //   if ((JA.getKind () == Action::CompileJobClass)
+  //     && (JA.getType () != types::TY_LTO_BC)) {
+  //     Key = JA.getKind ();
+  //   }
+
+  Tool *&T = Tools[Key];
+  if (!T) {
+    switch (Key) {
+    case Action::InputClass:
+    case Action::BindArchClass:
+      assert(0 && "Invalid tool kind.");
+    case Action::AnalyzeJobClass:
+      T = new tools::Clang(*this); break;
+    case Action::AssembleJobClass:
+      T = new tools::hexagon::Assemble(*this); break;
+    case Action::LinkJobClass:
+      T = new tools::hexagon::Link(*this); break;
+    default:
+      assert(false && "Unsupported action for Hexagon target.");
+    }
+  }
+
+  return *T;
+}
+
+bool Hexagon_TC::IsUnwindTablesDefault() const {
+  // FIXME: Gross; we should probably have some separate target
+  // definition, possibly even reusing the one in clang.
+  return getArchName() == "x86_64";
+}
+
+const char *Hexagon_TC::GetDefaultRelocationModel() const {
+  return "static";
+}
+
+const char *Hexagon_TC::GetForcedPicModel() const {
+  return 0;
+} // End Hexagon
+
 
 /// TCEToolChain - A tool chain using the llvm bitcode tools to perform
 /// all subcommands. See http://tce.cs.tut.fi for our peculiar target.
@@ -1569,11 +1679,9 @@ Tool &NetBSD::SelectTool(const Compilation &C, const JobAction &JA,
 /// Minix - Minix tool chain which can call as(1) and ld(1) directly.
 
 Minix::Minix(const HostInfo &Host, const llvm::Triple& Triple)
-  : Generic_GCC(Host, Triple) {
+  : Generic_ELF(Host, Triple) {
   getFilePaths().push_back(getDriver().Dir + "/../lib");
   getFilePaths().push_back("/usr/lib");
-  getFilePaths().push_back("/usr/gnu/lib");
-  getFilePaths().push_back("/usr/gnu/lib/gcc/i686-pc-minix/4.4.3");
 }
 
 Tool &Minix::SelectTool(const Compilation &C, const JobAction &JA,
@@ -1841,13 +1949,24 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
   if (Arch == llvm::Triple::arm || Arch == llvm::Triple::thumb)
     ExtraOpts.push_back("-X");
 
-  if (IsRedhat(Distro) || IsOpenSuse(Distro) || Distro == UbuntuMaverick ||
-      Distro == UbuntuNatty || Distro == UbuntuOneiric)
-    ExtraOpts.push_back("--hash-style=gnu");
+  const bool IsMips = Arch == llvm::Triple::mips ||
+                      Arch == llvm::Triple::mipsel ||
+                      Arch == llvm::Triple::mips64 ||
+                      Arch == llvm::Triple::mips64el;
 
-  if (IsDebian(Distro) || IsOpenSuse(Distro) || Distro == UbuntuLucid ||
-      Distro == UbuntuJaunty || Distro == UbuntuKarmic)
-    ExtraOpts.push_back("--hash-style=both");
+  // Do not use 'gnu' hash style for Mips targets because .gnu.hash
+  // and the MIPS ABI require .dynsym to be sorted in different ways.
+  // .gnu.hash needs symbols to be grouped by hash code whereas the MIPS
+  // ABI requires a mapping between the GOT and the symbol table.
+  if (!IsMips) {
+    if (IsRedhat(Distro) || IsOpenSuse(Distro) || Distro == UbuntuMaverick ||
+        Distro == UbuntuNatty || Distro == UbuntuOneiric)
+      ExtraOpts.push_back("--hash-style=gnu");
+
+    if (IsDebian(Distro) || IsOpenSuse(Distro) || Distro == UbuntuLucid ||
+        Distro == UbuntuJaunty || Distro == UbuntuKarmic)
+      ExtraOpts.push_back("--hash-style=both");
+  }
 
   if (IsRedhat(Distro))
     ExtraOpts.push_back("--no-add-needed");
@@ -1874,8 +1993,15 @@ Linux::Linux(const HostInfo &Host, const llvm::Triple &Triple)
                          getArch() == llvm::Triple::mipsel ||
                          getArch() == llvm::Triple::ppc);
 
-  const std::string Suffix32 = Arch == llvm::Triple::x86_64 ? "/32" : "";
-  const std::string Suffix64 = Arch == llvm::Triple::x86_64 ? "" : "/64";
+  StringRef Suffix32;
+  StringRef Suffix64;
+  if (Arch == llvm::Triple::x86_64 || Arch == llvm::Triple::ppc64) {
+    Suffix32 = "/32";
+    Suffix64 = "";
+  } else {
+    Suffix32 = "";
+    Suffix64 = "/64";
+  }
   const std::string Suffix = Is32Bits ? Suffix32 : Suffix64;
   const std::string Multilib = Is32Bits ? "lib32" : "lib64";
   const std::string MultiarchTriple = getMultiarchTriple(Triple, SysRoot);

@@ -94,6 +94,7 @@ namespace clang {
     void VisitUsingShadowDecl(UsingShadowDecl *D);
     void VisitLinkageSpecDecl(LinkageSpecDecl *D);
     void VisitFileScopeAsmDecl(FileScopeAsmDecl *D);
+    void VisitImportDecl(ImportDecl *D);
     void VisitAccessSpecDecl(AccessSpecDecl *D);
     void VisitFriendDecl(FriendDecl *D);
     void VisitFriendTemplateDecl(FriendTemplateDecl *D);
@@ -157,6 +158,7 @@ void ASTDeclWriter::VisitDecl(Decl *D) {
   Record.push_back(D->TopLevelDeclInObjCContainer);
   Record.push_back(D->getAccess());
   Record.push_back(D->ModulePrivate);
+  Record.push_back(Writer.inferSubmoduleIDFromLocation(D->getLocation()));
 }
 
 void ASTDeclWriter::VisitTranslationUnitDecl(TranslationUnitDecl *D) {
@@ -445,39 +447,49 @@ void ASTDeclWriter::VisitObjCContainerDecl(ObjCContainerDecl *D) {
 }
 
 void ASTDeclWriter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
+  VisitRedeclarable(D);
   VisitObjCContainerDecl(D);
   Writer.AddTypeRef(QualType(D->getTypeForDecl(), 0), Record);
-  Writer.AddDeclRef(D->getSuperClass(), Record);
 
-  // Write out the protocols that are directly referenced by the @interface.
-  Record.push_back(D->ReferencedProtocols.size());
-  for (ObjCInterfaceDecl::protocol_iterator P = D->protocol_begin(),
-         PEnd = D->protocol_end();
-       P != PEnd; ++P)
-    Writer.AddDeclRef(*P, Record);
-  for (ObjCInterfaceDecl::protocol_loc_iterator PL = D->protocol_loc_begin(),
-         PLEnd = D->protocol_loc_end();
-       PL != PLEnd; ++PL)
-    Writer.AddSourceLocation(*PL, Record);
-
-  // Write out the protocols that are transitively referenced.
-  Record.push_back(D->AllReferencedProtocols.size());
-  for (ObjCList<ObjCProtocolDecl>::iterator
-        P = D->AllReferencedProtocols.begin(),
-        PEnd = D->AllReferencedProtocols.end();
-       P != PEnd; ++P)
-    Writer.AddDeclRef(*P, Record);
+  ObjCInterfaceDecl *Def = D->getDefinition();
+  Writer.AddDeclRef(Def, Record);
   
-  // Write out the ivars.
-  Record.push_back(D->ivar_size());
-  for (ObjCInterfaceDecl::ivar_iterator I = D->ivar_begin(),
-                                     IEnd = D->ivar_end(); I != IEnd; ++I)
-    Writer.AddDeclRef(*I, Record);
-  Writer.AddDeclRef(D->getCategoryList(), Record);
-  Record.push_back(D->isInitiallyForwardDecl());
-  Record.push_back(D->isForwardDecl());
-  Writer.AddSourceLocation(D->getSuperClassLoc(), Record);
-  Writer.AddSourceLocation(D->getLocEnd(), Record);
+  if (D == Def) {
+    // Write the DefinitionData
+    ObjCInterfaceDecl::DefinitionData &Data = D->data();
+    
+    Writer.AddDeclRef(D->getSuperClass(), Record);
+    Writer.AddSourceLocation(D->getSuperClassLoc(), Record);
+    Writer.AddSourceLocation(D->getEndOfDefinitionLoc(), Record);
+
+    // Write out the protocols that are directly referenced by the @interface.
+    Record.push_back(Data.ReferencedProtocols.size());
+    for (ObjCInterfaceDecl::protocol_iterator P = D->protocol_begin(),
+                                           PEnd = D->protocol_end();
+         P != PEnd; ++P)
+      Writer.AddDeclRef(*P, Record);
+    for (ObjCInterfaceDecl::protocol_loc_iterator PL = D->protocol_loc_begin(),
+         PLEnd = D->protocol_loc_end();
+         PL != PLEnd; ++PL)
+      Writer.AddSourceLocation(*PL, Record);
+    
+    // Write out the protocols that are transitively referenced.
+    Record.push_back(Data.AllReferencedProtocols.size());
+    for (ObjCList<ObjCProtocolDecl>::iterator
+              P = Data.AllReferencedProtocols.begin(),
+           PEnd = Data.AllReferencedProtocols.end();
+         P != PEnd; ++P)
+      Writer.AddDeclRef(*P, Record);
+    
+    // Write out the ivars.
+    Record.push_back(D->ivar_size());
+    for (ObjCInterfaceDecl::ivar_iterator I = D->ivar_begin(),
+                                       IEnd = D->ivar_end(); I != IEnd; ++I)
+      Writer.AddDeclRef(*I, Record);
+    
+    Writer.AddDeclRef(D->getCategoryList(), Record);
+  }  
+  
   Code = serialization::DECL_OBJC_INTERFACE;
 }
 
@@ -524,8 +536,8 @@ void ASTDeclWriter::VisitObjCAtDefsFieldDecl(ObjCAtDefsFieldDecl *D) {
 
 void ASTDeclWriter::VisitObjCClassDecl(ObjCClassDecl *D) {
   VisitDecl(D);
-  Writer.AddDeclRef(D->getForwardInterfaceDecl(), Record);
-  Writer.AddSourceLocation(D->getForwardDecl()->getLocation(), Record);
+  Writer.AddDeclRef(D->Interface, Record);
+  Writer.AddSourceLocation(D->InterfaceLoc, Record);
   Code = serialization::DECL_OBJC_CLASS;
 }
 
@@ -591,6 +603,7 @@ void ASTDeclWriter::VisitObjCImplDecl(ObjCImplDecl *D) {
 void ASTDeclWriter::VisitObjCCategoryImplDecl(ObjCCategoryImplDecl *D) {
   VisitObjCImplDecl(D);
   Writer.AddIdentifierRef(D->getIdentifier(), Record);
+  Writer.AddSourceLocation(D->getCategoryNameLoc(), Record);
   Code = serialization::DECL_OBJC_CATEGORY_IMPL;
 }
 
@@ -971,6 +984,23 @@ void ASTDeclWriter::VisitCXXConversionDecl(CXXConversionDecl *D) {
   Code = serialization::DECL_CXX_CONVERSION;
 }
 
+void ASTDeclWriter::VisitImportDecl(ImportDecl *D) {
+  VisitDecl(D);
+  ArrayRef<SourceLocation> IdentifierLocs = D->getIdentifierLocs();
+  Record.push_back(!IdentifierLocs.empty());
+  if (IdentifierLocs.empty()) {
+    Writer.AddSourceLocation(D->getLocEnd(), Record);
+    Record.push_back(1);
+  } else {
+    for (unsigned I = 0, N = IdentifierLocs.size(); I != N; ++I)
+      Writer.AddSourceLocation(IdentifierLocs[I], Record);
+    Record.push_back(IdentifierLocs.size());
+  }
+  // Note: the number of source locations must always be the last element in
+  // the record.
+  Code = serialization::DECL_IMPORT;
+}
+
 void ASTDeclWriter::VisitAccessSpecDecl(AccessSpecDecl *D) {
   VisitDecl(D);
   Writer.AddSourceLocation(D->getColonLoc(), Record);
@@ -1287,6 +1317,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 2));  // AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name
@@ -1318,6 +1349,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 2));  // AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name
@@ -1354,6 +1386,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(AS_none));                 // C++ AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name
@@ -1400,6 +1433,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(AS_none));                 // C++ AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name
@@ -1440,6 +1474,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(AS_none));                 // C++ AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name
@@ -1487,6 +1522,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(AS_none));                 // C++ AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name
@@ -1514,6 +1550,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                   // TopLevelDeclInObjCContainer
   Abv->Add(BitCodeAbbrevOp(AS_none));                 // C++ AccessSpecifier
   Abv->Add(BitCodeAbbrevOp(0));                       // ModulePrivate
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // SubmoduleID
   // NamedDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // NameKind = Identifier
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Name

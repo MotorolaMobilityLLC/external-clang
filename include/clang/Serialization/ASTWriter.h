@@ -50,6 +50,7 @@ class MemorizeStatCalls;
 class OpaqueValueExpr;
 class OpenCLOptions;
 class ASTReader;
+class Module;
 class PreprocessedEntity;
 class PreprocessingRecord;
 class Preprocessor;
@@ -94,9 +95,15 @@ private:
   /// \brief The ASTContext we're writing.
   ASTContext *Context;
 
+  /// \brief The preprocessor we're writing.
+  Preprocessor *PP;
+
   /// \brief The reader of existing AST files, if we're chaining.
   ASTReader *Chain;
 
+  /// \brief The module we're currently writing, if any.
+  Module *WritingModule;
+                    
   /// \brief Indicates when the AST writing is actively performing
   /// serialization, rather than just queueing updates.
   bool WritingAST;
@@ -203,10 +210,16 @@ private:
   /// table.
   std::vector<uint32_t> IdentifierOffsets;
 
+  /// \brief The first ID number we can use for our own submodules.
+  serialization::SubmoduleID FirstSubmoduleID;
+  
+  /// \brief The submodule ID that will be assigned to the next new submodule.
+  serialization::SubmoduleID NextSubmoduleID;
+
   /// \brief The first ID number we can use for our own selectors.
   serialization::SelectorID FirstSelectorID;
 
-  /// \brief The selector ID that will be assigned to the next new identifier.
+  /// \brief The selector ID that will be assigned to the next new selector.
   serialization::SelectorID NextSelectorID;
 
   /// \brief Map that provides the ID numbers of each Selector.
@@ -311,9 +324,6 @@ private:
   /// \brief Mapping from SwitchCase statements to IDs.
   std::map<SwitchCase *, unsigned> SwitchCaseIDs;
 
-  /// \brief Mapping from OpaqueValueExpr expressions to IDs.
-  llvm::DenseMap<OpaqueValueExpr *, unsigned> OpaqueValues;
-
   /// \brief The number of statements written to the AST file.
   unsigned NumStatements;
 
@@ -357,6 +367,13 @@ private:
   /// in the order they should be written.
   SmallVector<QueuedCXXBaseSpecifiers, 2> CXXBaseSpecifiersToWrite;
 
+  /// \brief A mapping from each known submodule to its ID number, which will
+  /// be a positive integer.
+  llvm::DenseMap<Module *, unsigned> SubmoduleIDs;
+                    
+  /// \brief Retrieve or create a submodule ID for this module.
+  unsigned getSubmoduleID(Module *Mod);
+                    
   /// \brief Write the given subexpression to the bitstream.
   void WriteSubStmt(Stmt *S,
                     llvm::DenseMap<Stmt *, uint64_t> &SubStmtEntries,
@@ -373,6 +390,8 @@ private:
   void WritePreprocessor(const Preprocessor &PP, bool IsModule);
   void WriteHeaderSearch(const HeaderSearch &HS, StringRef isysroot);
   void WritePreprocessorDetail(PreprocessingRecord &PPRec);
+  void WriteSubmodules(Module *WritingModule);
+                                        
   void WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag);
   void WriteCXXBaseSpecifiersOffsets();
   void WriteType(QualType T);
@@ -412,7 +431,7 @@ private:
 
   void WriteASTCore(Sema &SemaRef, MemorizeStatCalls *StatCalls,
                     StringRef isysroot, const std::string &OutputFile,
-                    bool IsModule);
+                    Module *WritingModule);
 
 public:
   /// \brief Create a new precompiled header writer that outputs to
@@ -428,14 +447,14 @@ public:
   /// \param StatCalls the object that cached all of the stat() calls made while
   /// searching for source files and headers.
   ///
-  /// \param IsModule Whether we're writing a module (otherwise, we're writing a
-  /// precompiled header).
+  /// \param WritingModule The module that we are writing. If null, we are
+  /// writing a precompiled header.
   ///
   /// \param isysroot if non-empty, write a relocatable file whose headers
   /// are relative to the given system root.
   void WriteAST(Sema &SemaRef, MemorizeStatCalls *StatCalls,
                 const std::string &OutputFile,
-                bool IsModule, StringRef isysroot);
+                Module *WritingModule, StringRef isysroot);
 
   /// \brief Emit a source location.
   void AddSourceLocation(SourceLocation Loc, RecordDataImpl &Record);
@@ -587,6 +606,10 @@ public:
     return DeclsToRewrite.count(D);
   }
 
+  /// \brief Infer the submodule ID that contains an entity at the given
+  /// source location.
+  serialization::SubmoduleID inferSubmoduleIDFromLocation(SourceLocation Loc);
+
   /// \brief Note that the identifier II occurs at the given offset
   /// within the identifier table.
   void SetIdentifierOffset(const IdentifierInfo *II, uint32_t Offset);
@@ -623,9 +646,6 @@ public:
 
   void ClearSwitchCaseIDs();
 
-  /// \brief Retrieve the ID for the given opaque value expression.
-  unsigned getOpaqueValueID(OpaqueValueExpr *e);
-
   unsigned getDeclParmVarAbbrev() const { return DeclParmVarAbbrev; }
   unsigned getDeclRefExprAbbrev() const { return DeclRefExprAbbrev; }
   unsigned getCharacterLiteralAbbrev() const { return CharacterLiteralAbbrev; }
@@ -647,7 +667,8 @@ public:
   void SelectorRead(serialization::SelectorID ID, Selector Sel);
   void MacroDefinitionRead(serialization::PreprocessedEntityID ID,
                            MacroDefinition *MD);
-
+  void ModuleRead(serialization::SubmoduleID ID, Module *Mod);
+                    
   // ASTMutationListener implementation.
   virtual void CompletedTagDefinition(const TagDecl *D);
   virtual void AddedVisibleDecl(const DeclContext *DC, const Decl *D);
@@ -672,7 +693,7 @@ public:
 class PCHGenerator : public SemaConsumer {
   const Preprocessor &PP;
   std::string OutputFile;
-  bool IsModule;
+  clang::Module *Module;
   std::string isysroot;
   raw_ostream *Out;
   Sema *SemaPtr;
@@ -687,7 +708,7 @@ protected:
 
 public:
   PCHGenerator(const Preprocessor &PP, StringRef OutputFile,
-               bool IsModule,
+               clang::Module *Module,
                StringRef isysroot, raw_ostream *Out);
   ~PCHGenerator();
   virtual void InitializeSema(Sema &S) { SemaPtr = &S; }

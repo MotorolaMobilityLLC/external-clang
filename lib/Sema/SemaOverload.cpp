@@ -2177,6 +2177,12 @@ enum {
 /// parameter types, and different return types.
 void Sema::HandleFunctionTypeMismatch(PartialDiagnostic &PDiag,
                                       QualType FromType, QualType ToType) {
+  // If either type is not valid, include no extra info.
+  if (FromType.isNull() || ToType.isNull()) {
+    PDiag << ft_default;
+    return;
+  }
+
   // Get the function type from the pointers.
   if (FromType->isMemberPointerType() && ToType->isMemberPointerType()) {
     const MemberPointerType *FromMember = FromType->getAs<MemberPointerType>(),
@@ -2188,27 +2194,26 @@ void Sema::HandleFunctionTypeMismatch(PartialDiagnostic &PDiag,
     }
     FromType = FromMember->getPointeeType();
     ToType = ToMember->getPointeeType();
-  } else if (FromType->isPointerType() && ToType->isPointerType()) {
-    FromType = FromType->getPointeeType();
-    ToType = ToType->getPointeeType();
-  } else {
-    PDiag << ft_default;
-    return;
   }
 
+  if (FromType->isPointerType())
+    FromType = FromType->getPointeeType();
+  if (ToType->isPointerType())
+    ToType = ToType->getPointeeType();
+
+  // Remove references.
   FromType = FromType.getNonReferenceType();
   ToType = ToType.getNonReferenceType();
-
-  // If either type is not valid, of the types are the same, no extra info.
-  if (FromType.isNull() || ToType.isNull() ||
-      Context.hasSameType(FromType, ToType)) {
-    PDiag << ft_default;
-    return;
-  }
 
   // Don't print extra info for non-specialized template functions.
   if (FromType->isInstantiationDependentType() &&
       !FromType->getAs<TemplateSpecializationType>()) {
+    PDiag << ft_default;
+    return;
+  }
+
+  // No extra info for same types.
+  if (Context.hasSameType(FromType, ToType)) {
     PDiag << ft_default;
     return;
   }
@@ -2257,7 +2262,7 @@ void Sema::HandleFunctionTypeMismatch(PartialDiagnostic &PDiag,
 }
 
 /// FunctionArgTypesAreEqual - This routine checks two function proto types
-/// for equlity of their argument types. Caller has already checked that
+/// for equality of their argument types. Caller has already checked that
 /// they have same number of arguments. This routine assumes that Objective-C
 /// pointer types which only differ in their protocol qualifiers are equal.
 /// If the parameters are different, ArgPos will have the the parameter index
@@ -2295,7 +2300,9 @@ bool Sema::FunctionArgTypesAreEqual(const FunctionProtoType *OldType,
                  ToType->getAs<ObjCObjectPointerType>()) {
         if (const ObjCObjectPointerType *PTFr =
               FromType->getAs<ObjCObjectPointerType>())
-          if (PTTo->getInterfaceDecl() == PTFr->getInterfaceDecl())
+          if (Context.hasSameUnqualifiedType(
+                PTTo->getObjectType()->getBaseType(),
+                PTFr->getObjectType()->getBaseType()))
             continue;
       }
       if (ArgPos) *ArgPos = O - OldType->arg_type_begin();
@@ -3619,7 +3626,7 @@ FindConversionForRefInit(Sema &S, ImplicitConversionSequence &ICS,
 /// \brief Compute an implicit conversion sequence for reference
 /// initialization.
 static ImplicitConversionSequence
-TryReferenceInit(Sema &S, Expr *&Init, QualType DeclType,
+TryReferenceInit(Sema &S, Expr *Init, QualType DeclType,
                  SourceLocation DeclLoc,
                  bool SuppressUserConversions,
                  bool AllowExplicit) {
@@ -3950,9 +3957,71 @@ TryListConversion(Sema &S, InitListExpr *From, QualType ToType,
 
   // C++11 [over.ics.list]p5:
   //   Otherwise, if the parameter is a reference, see 13.3.3.1.4.
-  // FIXME: Implement this.
-  if (ToType->isReferenceType())
+  if (ToType->isReferenceType()) {
+    // The standard is notoriously unclear here, since 13.3.3.1.4 doesn't
+    // mention initializer lists in any way. So we go by what list-
+    // initialization would do and try to extrapolate from that.
+
+    QualType T1 = ToType->getAs<ReferenceType>()->getPointeeType();
+
+    // If the initializer list has a single element that is reference-related
+    // to the parameter type, we initialize the reference from that.
+    if (From->getNumInits() == 1) {
+      Expr *Init = From->getInit(0);
+
+      QualType T2 = Init->getType();
+
+      // If the initializer is the address of an overloaded function, try
+      // to resolve the overloaded function. If all goes well, T2 is the
+      // type of the resulting function.
+      if (S.Context.getCanonicalType(T2) == S.Context.OverloadTy) {
+        DeclAccessPair Found;
+        if (FunctionDecl *Fn = S.ResolveAddressOfOverloadedFunction(
+                                   Init, ToType, false, Found))
+          T2 = Fn->getType();
+      }
+
+      // Compute some basic properties of the types and the initializer.
+      bool dummy1 = false;
+      bool dummy2 = false;
+      bool dummy3 = false;
+      Sema::ReferenceCompareResult RefRelationship
+        = S.CompareReferenceRelationship(From->getLocStart(), T1, T2, dummy1,
+                                         dummy2, dummy3);
+
+      if (RefRelationship >= Sema::Ref_Related)
+        return TryReferenceInit(S, Init, ToType,
+                                /*FIXME:*/From->getLocStart(),
+                                SuppressUserConversions,
+                                /*AllowExplicit=*/false);
+    }
+
+    // Otherwise, we bind the reference to a temporary created from the
+    // initializer list.
+    Result = TryListConversion(S, From, T1, SuppressUserConversions,
+                               InOverloadResolution,
+                               AllowObjCWritebackConversion);
+    if (Result.isFailure())
+      return Result;
+    assert(!Result.isEllipsis() &&
+           "Sub-initialization cannot result in ellipsis conversion.");
+
+    // Can we even bind to a temporary?
+    if (ToType->isRValueReferenceType() ||
+        (T1.isConstQualified() && !T1.isVolatileQualified())) {
+      StandardConversionSequence &SCS = Result.isStandard() ? Result.Standard :
+                                            Result.UserDefined.After;
+      SCS.ReferenceBinding = true;
+      SCS.IsLvalueReference = ToType->isLValueReferenceType();
+      SCS.BindsToRvalue = true;
+      SCS.BindsToFunctionLvalue = false;
+      SCS.BindsImplicitObjectArgumentWithoutRefQualifier = false;
+      SCS.ObjCLifetimeConversionBinding = false;
+    } else
+      Result.setBad(BadConversionSequence::lvalue_ref_to_rvalue,
+                    From, ToType);
     return Result;
+  }
 
   // C++11 [over.ics.list]p6:
   //   Otherwise, if the parameter type is not a class:
@@ -8825,7 +8894,7 @@ Sema::BuildOverloadedCallExpr(Scope *S, Expr *Fn, UnresolvedLookupExpr *ULE,
     // to instantiation time to be able to search into type dependent base
     // classes.
     if (getLangOptions().MicrosoftMode && CurContext->isDependentContext() && 
-        (isa<CXXMethodDecl>(CurContext) || isa<CXXRecordDecl>(CurContext))) {
+        (isa<FunctionDecl>(CurContext) || isa<CXXRecordDecl>(CurContext))) {
       CallExpr *CE = new (Context) CallExpr(Context, Fn, Args, NumArgs,
                                           Context.DependentTy, VK_RValue,
                                           RParenLoc);

@@ -71,7 +71,11 @@ unsigned ContentCache::getSize() const {
 
 void ContentCache::replaceBuffer(const llvm::MemoryBuffer *B,
                                  bool DoNotFree) {
-  assert(B != Buffer.getPointer());
+  if (B == Buffer.getPointer()) {
+    assert(0 && "Replacing with the same buffer");
+    Buffer.setInt(DoNotFree? DoNotFreeFlag : 0);
+    return;
+  }
   
   if (shouldFreeBuffer())
     delete Buffer.getPointer();
@@ -378,13 +382,17 @@ SourceManager::~SourceManager() {
   // content cache objects are bump pointer allocated, we just have to run the
   // dtors, but we call the deallocate method for completeness.
   for (unsigned i = 0, e = MemBufferInfos.size(); i != e; ++i) {
-    MemBufferInfos[i]->~ContentCache();
-    ContentCacheAlloc.Deallocate(MemBufferInfos[i]);
+    if (MemBufferInfos[i]) {
+      MemBufferInfos[i]->~ContentCache();
+      ContentCacheAlloc.Deallocate(MemBufferInfos[i]);
+    }
   }
   for (llvm::DenseMap<const FileEntry*, SrcMgr::ContentCache*>::iterator
        I = FileInfos.begin(), E = FileInfos.end(); I != E; ++I) {
-    I->second->~ContentCache();
-    ContentCacheAlloc.Deallocate(I->second);
+    if (I->second) {
+      I->second->~ContentCache();
+      ContentCacheAlloc.Deallocate(I->second);
+    }
   }
   
   delete FakeBufferForRecovery;
@@ -947,12 +955,19 @@ const char *SourceManager::getCharacterData(SourceLocation SL,
 unsigned SourceManager::getColumnNumber(FileID FID, unsigned FilePos,
                                         bool *Invalid) const {
   bool MyInvalid = false;
-  const char *Buf = getBuffer(FID, &MyInvalid)->getBufferStart();
+  const llvm::MemoryBuffer *MemBuf = getBuffer(FID, &MyInvalid);
   if (Invalid)
     *Invalid = MyInvalid;
 
   if (MyInvalid)
     return 1;
+
+  const char *Buf = MemBuf->getBufferStart();
+  if (Buf + FilePos >= MemBuf->getBufferEnd()) {
+    if (Invalid)
+      *Invalid = MyInvalid;
+    return 1;
+  }
 
   unsigned LineStart = FilePos;
   while (LineStart && Buf[LineStart-1] != '\n' && Buf[LineStart-1] != '\r')

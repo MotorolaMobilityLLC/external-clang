@@ -23,6 +23,8 @@ set(files
   wmmintrin.h
   x86intrin.h
   xmmintrin.h
+  cpuid.h
+  unwind.h
   )
 
 set(output_dir ${LLVM_BINARY_DIR}/lib/clang/${CLANG_VERSION}/include)
