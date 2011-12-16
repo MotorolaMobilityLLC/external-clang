@@ -23,6 +23,7 @@ clang_frontend_SRC_FILES := \
   ASTMerge.cpp \
   ASTUnit.cpp \
   CacheTokens.cpp \
+  ChainedIncludesSource.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
   CreateInvocationFromCommandLine.cpp \

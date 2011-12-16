@@ -25,6 +25,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   CheckObjCInstMethSignature.cpp \
   CheckSecuritySyntaxOnly.cpp \
   CheckSizeofPointer.cpp \
+  CheckerDocumentation.cpp \
   ChrootChecker.cpp \
   ClangCheckers.cpp \
   DeadStoresChecker.cpp \
@@ -40,6 +41,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   MacOSXAPIChecker.cpp \
   MallocChecker.cpp \
   MallocOverflowSecurityChecker.cpp \
+  MallocSizeofChecker.cpp \
   NSAutoreleasePoolChecker.cpp \
   NSErrorChecker.cpp \
   NoReturnFunctionChecker.cpp \
@@ -55,6 +57,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   ReturnUndefChecker.cpp \
   StackAddrEscapeChecker.cpp \
   StreamChecker.cpp \
+  TaintTesterChecker.cpp \
   UndefBranchChecker.cpp \
   UndefCapturedBlockVarChecker.cpp \
   UndefResultChecker.cpp \

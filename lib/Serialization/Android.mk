@@ -13,11 +13,12 @@ TBLGEN_TABLES := \
   AttrList.inc \
   AttrPCHRead.inc \
   AttrPCHWrite.inc \
+  Attrs.inc \
+  DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \
   DiagnosticSemaKinds.inc \
-  Attrs.inc \
-  DeclNodes.inc \
+  DiagnosticSerializationKinds.inc \
   StmtNodes.inc
 
 clang_serialization_SRC_FILES :=\
@@ -29,7 +30,6 @@ clang_serialization_SRC_FILES :=\
   ASTWriter.cpp \
   ASTWriterDecl.cpp \
   ASTWriterStmt.cpp \
-  ChainedIncludesSource.cpp \
   Module.cpp \
   ModuleManager.cpp
 
