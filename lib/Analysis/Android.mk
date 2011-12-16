@@ -5,31 +5,30 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-TBLGEN_TABLES :=    \
-	AttrList.inc	\
-	Attrs.inc	\
-	DeclNodes.inc	\
-	DiagnosticCommonKinds.inc	\
-	DiagnosticAnalysisKinds.inc	\
-	StmtNodes.inc
+TBLGEN_TABLES := \
+  AttrList.inc \
+  Attrs.inc \
+  DeclNodes.inc \
+  DiagnosticCommonKinds.inc \
+  DiagnosticAnalysisKinds.inc \
+  StmtNodes.inc
 
-clang_analysis_SRC_FILES :=	\
-	AnalysisDeclContext.cpp	\
-	CFG.cpp	\
-	CFGReachabilityAnalysis.cpp	\
-	CFGStmtMap.cpp	\
-	CocoaConventions.cpp	\
-	Dominators.cpp \
-	FormatString.cpp	\
-	LiveVariables.cpp	\
-	PostOrderCFGView.cpp \
-	PrintfFormatString.cpp	\
-	ProgramPoint.cpp \
-	PseudoConstantAnalysis.cpp	\
-	ReachableCode.cpp	\
-	ScanfFormatString.cpp	\
-	ThreadSafety.cpp \
-	UninitializedValues.cpp
+clang_analysis_SRC_FILES := \
+  AnalysisDeclContext.cpp \
+  CFG.cpp \
+  CFGReachabilityAnalysis.cpp \
+  CFGStmtMap.cpp \
+  CocoaConventions.cpp \
+  FormatString.cpp \
+  LiveVariables.cpp \
+  PostOrderCFGView.cpp \
+  PrintfFormatString.cpp \
+  ProgramPoint.cpp \
+  PseudoConstantAnalysis.cpp \
+  ReachableCode.cpp \
+  ScanfFormatString.cpp \
+  ThreadSafety.cpp \
+  UninitializedValues.cpp
 
 
 LOCAL_SRC_FILES := $(clang_analysis_SRC_FILES)
