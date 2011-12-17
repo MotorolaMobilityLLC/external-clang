@@ -17,19 +17,20 @@
 * For Honeycomb MR2: Synced to upstream r119349
 * For Ice Cream Sandwich: Synced to upstream r135574
 * For Ice Cream Sandwich MR1: Synced to upstream r142531
-* For Ice Cream Sandwich MR2: Synced to upstream r145117
+* For Ice Cream Sandwich MR2: Synced to upstream r146715
 
-* Recent downstreaming on 2011/11/26: From r144605 to r145117 (loganchien & sliao for merge questions)
-* Recent downstreaming on 2011/11/17: From r144355 to r144605 (loganchien & sliao for merge questions)
-* Recent downstreaming on 2011/11/14: From r142531 to r144355 (srhines for merge questions)
-* Recent downstreaming on 2011/10/22: From r135574 to r142531 (sliao & logan for merge questions)
-* Recent downstreaming on 2011/7/21: From r135359 to r135574 (sliao & logan for merge questions)
-* Recent downstreaming on 2011/7/18: From r134305 to r135359 (sliao for merge questions)
-* Recent downstreaming on 2011/7/2: From r133721 to r134305 (sliao for merge questions)
-* Recent downstreaming on 2011/6/30: From r133163 to r133721 (sliao for merge questions)
-* Recent downstreaming on 2011/6/22: From r129173 to r133163 (sliao for merge questions)
-* Recent downstreaming on 2011/4/8: From r127120 to r129173 (sliao for merge questions)
-* Recent downstreaming on 2011/3/11: From r119349 to r127120 (sliao for merge questions)
+* Recent downstreaming on 2011/12/17: Synced to r146715 (loganchien & sliao for merge questions)
+* Recent downstreaming on 2011/11/26: Synced to r145117 (loganchien & sliao for merge questions)
+* Recent downstreaming on 2011/11/17: Synced to r144605 (loganchien & sliao for merge questions)
+* Recent downstreaming on 2011/11/14: Synced to r144355 (srhines for merge questions)
+* Recent downstreaming on 2011/10/22: Synced to r142531 (sliao & loganchien for merge questions)
+* Recent downstreaming on 2011/7/21:  Synced to r135574 (sliao & loganchien for merge questions)
+* Recent downstreaming on 2011/7/18:  Synced to r135359 (sliao for merge questions)
+* Recent downstreaming on 2011/7/2:   Synced to r134305 (sliao for merge questions)
+* Recent downstreaming on 2011/6/30:  Synced to r133721 (sliao for merge questions)
+* Recent downstreaming on 2011/6/22:  Synced to r133163 (sliao for merge questions)
+* Recent downstreaming on 2011/4/8:   Synced to r129173 (sliao for merge questions)
+* Recent downstreaming on 2011/3/11:  Synced from r119349 to r127120 (sliao for merge questions)
 
 * We add Android's *.mk files that are specific to Android's build system.
 
