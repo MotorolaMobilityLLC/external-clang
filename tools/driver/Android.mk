@@ -84,3 +84,8 @@ LOCAL_LDLIBS += -lpthread -lm -ldl
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_EXECUTABLE)
+
+# Symlink for clang++
+$(HOST_OUT_EXECUTABLES)/clang++$(HOST_EXECUTABLE_SUFFIX) : $(LOCAL_INSTALLED_MODULE)
+	@echo "Symlink $@ -> $<"
+	$(hide) ln -sf $(notdir $<) $@
