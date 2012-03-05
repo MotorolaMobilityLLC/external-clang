@@ -19,9 +19,9 @@ TBLGEN_TABLES := \
 clang_index_SRC_FILES := \
   ASTLocation.cpp \
   Analyzer.cpp \
-  CallGraph.cpp \
   DeclReferenceMap.cpp \
   Entity.cpp \
+  GlobalCallGraph.cpp \
   GlobalSelector.cpp \
   Handlers.cpp \
   IndexProvider.cpp \

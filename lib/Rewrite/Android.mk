@@ -24,6 +24,7 @@ clang_rewrite_SRC_FILES := \
   HTMLPrint.cpp \
   HTMLRewrite.cpp \
   RewriteMacros.cpp \
+  RewriteModernObjC.cpp \
   RewriteObjC.cpp \
   RewriteRope.cpp \
   RewriteTest.cpp \

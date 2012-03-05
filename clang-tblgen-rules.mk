@@ -58,6 +58,13 @@ $(intermediates)/include/clang/AST/Attrs.inc: $(CLANG_ROOT_PATH)/include/clang/B
 	$(call transform-host-clang-td-to-out,clang-attr-classes)
 endif
 
+ifneq ($(findstring AttrTemplateInstantiate.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Sema/AttrTemplateInstantiate.inc
+$(intermediates)/include/clang/Sema/AttrTemplateInstantiate.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/Sema/AttrTemplateInstantiate.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-attr-template-instantiate)
+endif
+
 ifneq ($(findstring Checkers.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/Checkers.inc
 $(intermediates)/Checkers.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)

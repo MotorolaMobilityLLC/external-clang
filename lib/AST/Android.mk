@@ -41,6 +41,7 @@ clang_ast_SRC_FILES :=	\
 	InheritViz.cpp	\
 	ItaniumCXXABI.cpp	\
 	ItaniumMangle.cpp	\
+	LambdaMangleContext.cpp	\
 	Mangle.cpp	\
 	MicrosoftCXXABI.cpp	\
 	MicrosoftMangle.cpp	\
