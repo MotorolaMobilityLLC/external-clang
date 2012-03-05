@@ -41,6 +41,7 @@ clang_static_analyzer_core_SRC_FILES := \
   SimpleConstraintManager.cpp \
   SimpleSValBuilder.cpp \
   Store.cpp \
+  SubEngine.cpp \
   SymbolManager.cpp \
   TextPathDiagnostics.cpp
 

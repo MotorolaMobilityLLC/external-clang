@@ -21,7 +21,6 @@ clang_driver_SRC_FILES := \
   Compilation.cpp \
   Driver.cpp \
   DriverOptions.cpp \
-  HostInfo.cpp \
   Job.cpp \
   Option.cpp \
   OptTable.cpp \
@@ -30,7 +29,8 @@ clang_driver_SRC_FILES := \
   ToolChain.cpp \
   ToolChains.cpp \
   Tools.cpp \
-  Types.cpp
+  Types.cpp \
+  WindowsToolChain.cpp
 
 LOCAL_SRC_FILES := $(clang_driver_SRC_FILES)
 

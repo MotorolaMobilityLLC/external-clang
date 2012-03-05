@@ -16,8 +16,10 @@ clang_static_analyzer_checkers_SRC_FILES := \
   ArrayBoundCheckerV2.cpp \
   AttrNonNullChecker.cpp \
   BasicObjCFoundationChecks.cpp \
+  BoolAssignmentChecker.cpp \
   BuiltinFunctionChecker.cpp \
   CStringChecker.cpp \
+  CStringSyntaxChecker.cpp \
   CallAndMessageChecker.cpp \
   CastSizeChecker.cpp \
   CastToStructChecker.cpp \
@@ -47,6 +49,8 @@ clang_static_analyzer_checkers_SRC_FILES := \
   NoReturnFunctionChecker.cpp \
   OSAtomicChecker.cpp \
   ObjCAtSyncChecker.cpp \
+  ObjCContainersASTChecker.cpp \
+  ObjCContainersChecker.cpp \
   ObjCSelfInitChecker.cpp \
   ObjCUnusedIVarsChecker.cpp \
   PointerArithChecker.cpp \
@@ -65,6 +69,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   UndefinedAssignmentChecker.cpp \
   UnixAPIChecker.cpp \
   UnreachableCodeChecker.cpp \
+  VirtualCallChecker.cpp \
   VLASizeChecker.cpp
 
 # For the host only

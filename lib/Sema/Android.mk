@@ -8,6 +8,7 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES :=    \
 	AttrList.inc	\
 	Attrs.inc	\
+	AttrTemplateInstantiate.inc	\
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
 	DiagnosticSemaKinds.inc	\
@@ -24,7 +25,6 @@ clang_sema_SRC_FILES :=	\
 	IdentifierResolver.cpp	\
 	DelayedDiagnostic.cpp \
 	JumpDiagnostics.cpp	\
-	MultiInitializer.cpp \
 	Scope.cpp \
 	Sema.cpp	\
 	SemaAccess.cpp	\
@@ -33,6 +33,7 @@ clang_sema_SRC_FILES :=	\
 	SemaCast.cpp \
 	SemaChecking.cpp	\
 	SemaCodeComplete.cpp	\
+	SemaConsumer.cpp	\
 	SemaDecl.cpp	\
 	SemaDeclAttr.cpp	\
 	SemaDeclCXX.cpp	\
@@ -44,6 +45,7 @@ clang_sema_SRC_FILES :=	\
 	SemaExprObjC.cpp	\
 	SemaFixItUtils.cpp \
 	SemaInit.cpp	\
+	SemaLambda.cpp	\
 	SemaLookup.cpp	\
 	SemaObjCProperty.cpp	\
 	SemaOverload.cpp	\

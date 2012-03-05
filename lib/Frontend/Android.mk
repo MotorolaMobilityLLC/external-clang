@@ -23,11 +23,14 @@ clang_frontend_SRC_FILES := \
   ASTMerge.cpp \
   ASTUnit.cpp \
   CacheTokens.cpp \
+  ChainedDiagnosticConsumer.cpp \
   ChainedIncludesSource.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
   CreateInvocationFromCommandLine.cpp \
   DependencyFile.cpp \
+  DependencyGraph.cpp \
+  DiagnosticRenderer.cpp \
   FrontendAction.cpp \
   FrontendActions.cpp \
   FrontendOptions.cpp \
@@ -35,6 +38,7 @@ clang_frontend_SRC_FILES := \
   InitHeaderSearch.cpp \
   InitPreprocessor.cpp \
   LangStandards.cpp \
+  LayoutOverrideSource.cpp \
   LogDiagnosticPrinter.cpp \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
