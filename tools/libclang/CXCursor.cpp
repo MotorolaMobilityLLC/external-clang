@@ -206,6 +206,7 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
   case Stmt::AtomicExprClass:
   case Stmt::BinaryConditionalOperatorClass:
   case Stmt::BinaryTypeTraitExprClass:
+  case Stmt::TypeTraitExprClass:
   case Stmt::CXXBindTemporaryExprClass:
   case Stmt::CXXDefaultArgExprClass:
   case Stmt::CXXScalarValueInitExprClass:
@@ -440,6 +441,10 @@ CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent, CXTranslationUnit TU,
     K = CXCursor_CallExpr;
     break;
       
+  case Stmt::LambdaExprClass:
+    K = CXCursor_LambdaExpr;
+    break;
+      
   case Stmt::ObjCMessageExprClass: {
     K = CXCursor_ObjCMessageExpr;
     int SelectorIdIndex = -1;
@@ -570,6 +575,23 @@ cxcursor::getCursorNamespaceRef(CXCursor C) {
   return std::make_pair(static_cast<NamedDecl *>(C.data[0]),
                         SourceLocation::getFromRawEncoding(
                                        reinterpret_cast<uintptr_t>(C.data[1])));  
+}
+
+CXCursor cxcursor::MakeCursorVariableRef(const VarDecl *Var, SourceLocation Loc, 
+                                         CXTranslationUnit TU) {
+  
+  assert(Var && TU && "Invalid arguments!");
+  void *RawLoc = reinterpret_cast<void *>(Loc.getRawEncoding());
+  CXCursor C = { CXCursor_VariableRef, 0, { (void*)Var, RawLoc, TU } };
+  return C;
+}
+
+std::pair<VarDecl *, SourceLocation> 
+cxcursor::getCursorVariableRef(CXCursor C) {
+  assert(C.kind == CXCursor_VariableRef);
+  return std::make_pair(static_cast<VarDecl *>(C.data[0]),
+                        SourceLocation::getFromRawEncoding(
+                          reinterpret_cast<uintptr_t>(C.data[1])));
 }
 
 CXCursor cxcursor::MakeCursorMemberRef(const FieldDecl *Field, SourceLocation Loc, 
@@ -1021,30 +1043,28 @@ CXCompletionString clang_getCursorCompletionString(CXCursor cursor) {
     Decl *decl = getCursorDecl(cursor);
     if (NamedDecl *namedDecl = dyn_cast_or_null<NamedDecl>(decl)) {
       ASTUnit *unit = getCursorASTUnit(cursor);
-      if (unit->hasSema()) {
-        Sema &S = unit->getSema();
-        CodeCompletionAllocator *Allocator 
-          = unit->getCursorCompletionAllocator().getPtr();
-        CodeCompletionResult Result(namedDecl);
-        CodeCompletionString *String 
-          = Result.CreateCodeCompletionString(S, *Allocator);
-        return String;
-      }
+      CodeCompletionAllocator *Allocator
+        = unit->getCursorCompletionAllocator().getPtr();
+      CodeCompletionResult Result(namedDecl);
+      CodeCompletionString *String
+        = Result.CreateCodeCompletionString(unit->getASTContext(),
+                                            unit->getPreprocessor(),
+                                            *Allocator);
+      return String;
     }
   }
   else if (kind == CXCursor_MacroDefinition) {
     MacroDefinition *definition = getCursorMacroDefinition(cursor);
     const IdentifierInfo *MacroInfo = definition->getName();
     ASTUnit *unit = getCursorASTUnit(cursor);
-    if (unit->hasSema()) {
-      Sema &S = unit->getSema();
-      CodeCompletionAllocator *Allocator
-        = unit->getCursorCompletionAllocator().getPtr();
-      CodeCompletionResult Result(const_cast<IdentifierInfo *>(MacroInfo));
-      CodeCompletionString *String 
-        = Result.CreateCodeCompletionString(S, *Allocator);
-      return String;
-    }
+    CodeCompletionAllocator *Allocator
+      = unit->getCursorCompletionAllocator().getPtr();
+    CodeCompletionResult Result(const_cast<IdentifierInfo *>(MacroInfo));
+    CodeCompletionString *String
+      = Result.CreateCodeCompletionString(unit->getASTContext(),
+                                          unit->getPreprocessor(),
+                                          *Allocator);
+    return String;
   }
   return NULL;
 }

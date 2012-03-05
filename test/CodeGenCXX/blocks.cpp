@@ -203,3 +203,26 @@ namespace test6 {
   // CHECK-NEXT: call void @_ZN5test63barEv()
   // CHECK-NEXT: ret void
 }
+
+namespace test7 {
+  int f() {
+    static int n;
+    int *const p = &n;
+    return ^{ return *p; }();
+  }
+}
+
+namespace test8 {
+  // <rdar://problem/10832617>: failure to capture this after skipping rebuild
+  // of the 'this' pointer.
+  struct X {
+    int x;
+
+    template<typename T>
+    int foo() {
+      return ^ { return x; }();
+    }
+  };
+
+  template int X::foo<int>();
+}

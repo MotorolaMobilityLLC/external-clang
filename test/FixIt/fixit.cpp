@@ -68,14 +68,68 @@ class C {
 };
 
 namespace rdar8488464 {
-int x == 0; // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
+int x = 0;
+int x1 &= 0; // expected-error {{invalid '&=' at end of declaration; did you mean '='?}}
+int x2 *= 0; // expected-error {{invalid '*=' at end of declaration; did you mean '='?}}
+int x3 += 0; // expected-error {{invalid '+=' at end of declaration; did you mean '='?}}
+int x4 -= 0; // expected-error {{invalid '-=' at end of declaration; did you mean '='?}}
+int x5 != 0; // expected-error {{invalid '!=' at end of declaration; did you mean '='?}}
+int x6 /= 0; // expected-error {{invalid '/=' at end of declaration; did you mean '='?}}
+int x7 %= 0; // expected-error {{invalid '%=' at end of declaration; did you mean '='?}}
+int x8 <= 0; // expected-error {{invalid '<=' at end of declaration; did you mean '='?}}
+int x9 <<= 0; // expected-error {{invalid '<<=' at end of declaration; did you mean '='?}}
+int x10 >= 0; // expected-error {{invalid '>=' at end of declaration; did you mean '='?}}
+int x11 >>= 0; // expected-error {{invalid '>>=' at end of declaration; did you mean '='?}}
+int x12 ^= 0; // expected-error {{invalid '^=' at end of declaration; did you mean '='?}}
+int x13 |= 0; // expected-error {{invalid '|=' at end of declaration; did you mean '='?}}
+int x14 == 0; // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
 
 void f() {
-    int x == 0; // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
+    int x = 0;
     (void)x;
-    if (int x == 0) { // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
-      (void)x;
-    }
+    int x1 &= 0; // expected-error {{invalid '&=' at end of declaration; did you mean '='?}}
+    (void)x1;
+    int x2 *= 0; // expected-error {{invalid '*=' at end of declaration; did you mean '='?}}
+    (void)x2;
+    int x3 += 0; // expected-error {{invalid '+=' at end of declaration; did you mean '='?}}
+    (void)x3;
+    int x4 -= 0; // expected-error {{invalid '-=' at end of declaration; did you mean '='?}}
+    (void)x4;
+    int x5 != 0; // expected-error {{invalid '!=' at end of declaration; did you mean '='?}}
+    (void)x5;
+    int x6 /= 0; // expected-error {{invalid '/=' at end of declaration; did you mean '='?}}
+    (void)x6;
+    int x7 %= 0; // expected-error {{invalid '%=' at end of declaration; did you mean '='?}}
+    (void)x7;
+    int x8 <= 0; // expected-error {{invalid '<=' at end of declaration; did you mean '='?}}
+    (void)x8;
+    int x9 <<= 0; // expected-error {{invalid '<<=' at end of declaration; did you mean '='?}}
+    (void)x9;
+    int x10 >= 0; // expected-error {{invalid '>=' at end of declaration; did you mean '='?}}
+    (void)x10;
+    int x11 >>= 0; // expected-error {{invalid '>>=' at end of declaration; did you mean '='?}}
+    (void)x11;
+    int x12 ^= 0; // expected-error {{invalid '^=' at end of declaration; did you mean '='?}}
+    (void)x12;
+    int x13 |= 0; // expected-error {{invalid '|=' at end of declaration; did you mean '='?}}
+    (void)x13;
+    int x14 == 0; // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
+    (void)x14;
+    if (int x = 0)  { (void)x; }
+    if (int x1 &= 0) { (void)x1; } // expected-error {{invalid '&=' at end of declaration; did you mean '='?}}
+    if (int x2 *= 0) { (void)x2; } // expected-error {{invalid '*=' at end of declaration; did you mean '='?}}
+    if (int x3 += 0) { (void)x3; } // expected-error {{invalid '+=' at end of declaration; did you mean '='?}}
+    if (int x4 -= 0) { (void)x4; } // expected-error {{invalid '-=' at end of declaration; did you mean '='?}}
+    if (int x5 != 0) { (void)x5; } // expected-error {{invalid '!=' at end of declaration; did you mean '='?}}
+    if (int x6 /= 0) { (void)x6; } // expected-error {{invalid '/=' at end of declaration; did you mean '='?}}
+    if (int x7 %= 0) { (void)x7; } // expected-error {{invalid '%=' at end of declaration; did you mean '='?}}
+    if (int x8 <= 0) { (void)x8; } // expected-error {{invalid '<=' at end of declaration; did you mean '='?}}
+    if (int x9 <<= 0) { (void)x9; } // expected-error {{invalid '<<=' at end of declaration; did you mean '='?}}
+    if (int x10 >= 0) { (void)x10; } // expected-error {{invalid '>=' at end of declaration; did you mean '='?}}
+    if (int x11 >>= 0) { (void)x11; } // expected-error {{invalid '>>=' at end of declaration; did you mean '='?}}
+    if (int x12 ^= 0) { (void)x12; } // expected-error {{invalid '^=' at end of declaration; did you mean '='?}}
+    if (int x13 |= 0) { (void)x13; } // expected-error {{invalid '|=' at end of declaration; did you mean '='?}}
+    if (int x14 == 0) { (void)x14; } // expected-error {{invalid '==' at end of declaration; did you mean '='?}}
 }
 }
 
@@ -108,9 +162,9 @@ void test (BD &br) {
   aPtr = br; // expected-error {{assigning to 'AD *' from incompatible type 'BD'; take the address with &}}
 }
 
-void foo1() const {} // expected-error {{type qualifier is not allowed on this function}}
-void foo2() volatile {} // expected-error {{type qualifier is not allowed on this function}}
-void foo3() const volatile {} // expected-error {{type qualifier is not allowed on this function}}
+void foo1() const {} // expected-error {{non-member function cannot have 'const' qualifier}}
+void foo2() volatile {} // expected-error {{non-member function cannot have 'volatile' qualifier}}
+void foo3() const volatile {} // expected-error {{non-member function cannot have 'const volatile' qualifier}}
 
 struct S { void f(int, char); };
 int itsAComma,
@@ -125,6 +179,19 @@ AD oopsMoreCommas() {
   AD ad, // expected-error {{expected ';' at end of declaration}}
   return ad;
 }
+struct MoreAccidentalCommas {
+  int a : 5,
+      b : 7,
+        : 4, // expected-error {{expected ';' at end of declaration}}
+  char c, // expected-error {{expected ';' at end of declaration}}
+  double d, // expected-error {{expected ';' at end of declaration}}
+  MoreAccidentalCommas *next, // expected-error {{expected ';' at end of declaration}}
+public:
+  int k, // expected-error {{expected ';' at end of declaration}}
+  friend void f(MoreAccidentalCommas) {}
+  int k2, // expected-error {{expected ';' at end of declaration}}
+  virtual void g(), // expected-error {{expected ';' at end of declaration}}
+};
 
 template<class T> struct Mystery;
 template<class T> typedef Mystery<T>::type getMysteriousThing() { // \

@@ -34,12 +34,12 @@ int a1[Val2];
 int a2[E1::Val1]; // expected-error{{size of array has non-integer type}}
 
 int* p1 = new int[Val2];
-int* p2 = new int[E1::Val1]; // FIXME Expected-error{{must have integral}}
+int* p2 = new int[E1::Val1]; // expected-error{{array size expression must have integral or unscoped enumeration type, not 'E1'}}
 
 enum class E4 {
   e1 = -2147483648, // ok
   e2 = 2147483647, // ok
-  e3 = 2147483648 // expected-error{{value is not representable}}
+  e3 = 2147483648 // expected-error{{enumerator value evaluates to 2147483648, which cannot be narrowed to type 'int'}}
 };
 
 enum class E5 {
@@ -147,3 +147,30 @@ namespace PR11484 {
   const int val = 104;
   enum class test1 { owner_dead = val, };
 }
+
+namespace N2764 {
+  enum class E { a, b };
+  enum E x1 = E::a; // ok
+  enum class E x2 = E::a; // expected-error {{reference to scoped enumeration must use 'enum' not 'enum class'}}
+
+  enum F { a, b };
+  enum F y1 = a; // ok
+  enum class F y2 = a; // expected-error {{reference to enumeration must use 'enum' not 'enum class'}}
+
+  struct S {
+    friend enum class E; // expected-error {{reference to scoped enumeration must use 'enum' not 'enum class'}}
+    friend enum class F; // expected-error {{reference to enumeration must use 'enum' not 'enum class'}}
+
+    friend enum G {}; // expected-error {{forward reference}} expected-error {{cannot define a type in a friend declaration}}
+    friend enum class H {}; // expected-error {{cannot define a type in a friend declaration}}
+
+    enum A : int;
+    A a;
+  } s;
+
+  enum S::A : int {};
+
+  enum class B;
+}
+
+enum class N2764::B {};

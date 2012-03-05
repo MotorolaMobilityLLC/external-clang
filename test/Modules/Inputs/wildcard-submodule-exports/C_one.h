@@ -1,4 +1,4 @@
-__import_module__ A.One;
-__import_module__ B.One;
+@__experimental_modules_import A.One;
+@__experimental_modules_import B.One;
 
 long *C1;

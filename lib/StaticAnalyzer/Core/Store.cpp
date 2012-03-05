@@ -14,6 +14,7 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/Store.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState.h"
 #include "clang/AST/CharUnits.h"
+#include "clang/AST/DeclObjC.h"
 
 using namespace clang;
 using namespace ento;
@@ -22,8 +23,9 @@ StoreManager::StoreManager(ProgramStateManager &stateMgr)
   : svalBuilder(stateMgr.getSValBuilder()), StateMgr(stateMgr),
     MRMgr(svalBuilder.getRegionManager()), Ctx(stateMgr.getContext()) {}
 
-StoreRef StoreManager::enterStackFrame(const ProgramState *state,
-                                       const StackFrameContext *frame) {
+StoreRef StoreManager::enterStackFrame(ProgramStateRef state,
+                                       const LocationContext *callerCtx,
+                                       const StackFrameContext *calleeCtx) {
   return StoreRef(state->getStore(), *this);
 }
 
@@ -101,8 +103,10 @@ const MemRegion *StoreManager::castRegion(const MemRegion *R, QualType CastToTy)
     case MemRegion::StackArgumentsSpaceRegionKind:
     case MemRegion::HeapSpaceRegionKind:
     case MemRegion::UnknownSpaceRegionKind:
-    case MemRegion::NonStaticGlobalSpaceRegionKind:
-    case MemRegion::StaticGlobalSpaceRegionKind: {
+    case MemRegion::StaticGlobalSpaceRegionKind:
+    case MemRegion::GlobalInternalSpaceRegionKind:
+    case MemRegion::GlobalSystemSpaceRegionKind:
+    case MemRegion::GlobalImmutableSpaceRegionKind: {
       llvm_unreachable("Invalid region cast");
     }
 
@@ -116,6 +120,7 @@ const MemRegion *StoreManager::castRegion(const MemRegion *R, QualType CastToTy)
     case MemRegion::CompoundLiteralRegionKind:
     case MemRegion::FieldRegionKind:
     case MemRegion::ObjCIvarRegionKind:
+    case MemRegion::ObjCStringRegionKind:
     case MemRegion::VarRegionKind:
     case MemRegion::CXXTempObjectRegionKind:
     case MemRegion::CXXBaseObjectRegionKind:
@@ -265,6 +270,10 @@ SVal StoreManager::getLValueFieldOrIvar(const Decl *D, SVal Base) {
   return loc::MemRegionVal(MRMgr.getFieldRegion(cast<FieldDecl>(D), BaseR));
 }
 
+SVal StoreManager::getLValueIvar(const ObjCIvarDecl *decl, SVal base) {
+  return getLValueFieldOrIvar(decl, base);
+}
+
 SVal StoreManager::getLValueElement(QualType elementType, NonLoc Offset, 
                                     SVal Base) {
 
@@ -331,3 +340,5 @@ SVal StoreManager::getLValueElement(QualType elementType, NonLoc Offset,
 
 StoreManager::BindingsHandler::~BindingsHandler() {}
 
+void SubRegionMap::anchor() { }
+void SubRegionMap::Visitor::anchor() { }

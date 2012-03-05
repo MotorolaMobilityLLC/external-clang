@@ -287,7 +287,7 @@ void StmtDumper::DumpDeclarator(Decl *D) {
                         PrintingPolicy(UD->getASTContext().getLangOptions()));
     OS << ";\"";
   } else if (LabelDecl *LD = dyn_cast<LabelDecl>(D)) {
-    OS << "label " << LD->getNameAsString();
+    OS << "label " << *LD;
   } else if (StaticAssertDecl *SAD = dyn_cast<StaticAssertDecl>(D)) {
     OS << "\"static_assert(\n";
     DumpSubTree(SAD->getAssertExpr());
@@ -516,7 +516,8 @@ void StmtDumper::VisitBlockExpr(BlockExpr *Node) {
     OS << "(capture ";
     if (i->isByRef()) OS << "byref ";
     if (i->isNested()) OS << "nested ";
-    DumpDeclRef(i->getVariable());
+    if (i->getVariable())
+      DumpDeclRef(i->getVariable());
     if (i->hasCopyExpr()) DumpSubTree(i->getCopyExpr());
     OS << ")";
   }

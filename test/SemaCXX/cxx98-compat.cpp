@@ -1,6 +1,8 @@
 // RUN: %clang_cc1 -fsyntax-only -std=c++11 -Wc++98-compat -verify %s
 // RUN: %clang_cc1 -fsyntax-only -std=c++11 %s
 
+namespace std { struct type_info; }
+
 template<typename ...T>  // expected-warning {{variadic templates are incompatible with C++98}}
 class Variadic1 {};
 
@@ -34,17 +36,21 @@ namespace TemplateParsing {
 }
 
 void Lambda() {
-  []{}; // expected-warning {{lambda expressions are incompatible with C++98}}
+  []{}(); // expected-warning {{lambda expressions are incompatible with C++98}}
 }
 
 int InitList() {
-  (void)new int {}; // expected-warning {{generalized initializer lists are incompatible with C++98}}
-  (void)int{}; // expected-warning {{generalized initializer lists are incompatible with C++98}}
+  (void)new int {}; // expected-warning {{generalized initializer lists are incompatible with C++98}} \
+                    // expected-warning {{scalar initialized from empty initializer list is incompatible with C++98}}
+  (void)int{}; // expected-warning {{generalized initializer lists are incompatible with C++98}} \
+               // expected-warning {{scalar initialized from empty initializer list is incompatible with C++98}}
   int x { 0 }; // expected-warning {{generalized initializer lists are incompatible with C++98}}
+  S<int> s = {}; // ok, aggregate
+  s = {}; // expected-warning {{generalized initializer lists are incompatible with C++98}}
   return { 0 }; // expected-warning {{generalized initializer lists are incompatible with C++98}}
 }
 
-int operator""_hello(const char *); // expected-warning {{literal operators are incompatible with C++98}}
+int operator"" _hello(const char *); // expected-warning {{literal operators are incompatible with C++98}}
 
 enum EnumFixed : int { // expected-warning {{enumeration types with a fixed underlying type are incompatible with C++98}}
 };
@@ -97,6 +103,7 @@ char16_t c16 = 0; // expected-warning {{'char16_t' type specifier is incompatibl
 char32_t c32 = 0; // expected-warning {{'char32_t' type specifier is incompatible with C++98}}
 constexpr int const_expr = 0; // expected-warning {{'constexpr' specifier is incompatible with C++98}}
 decltype(const_expr) decl_type = 0; // expected-warning {{'decltype' type specifier is incompatible with C++98}}
+__decltype(const_expr) decl_type2 = 0; // ok
 void no_except() noexcept; // expected-warning {{noexcept specifications are incompatible with C++98}}
 bool no_except_expr = noexcept(1 + 1); // expected-warning {{noexcept expressions are incompatible with C++98}}
 void *null = nullptr; // expected-warning {{'nullptr' is incompatible with C++98}}
@@ -236,6 +243,11 @@ namespace UnionOrAnonStructMembers {
       NonTrivDtor ntd; // expected-warning {{anonymous struct member 'ntd' with a non-trivial destructor is incompatible with C++98}}
     };
   };
+  union WithStaticDataMember {
+    static constexpr double d = 0.0; // expected-warning {{static data member 'd' in union is incompatible with C++98}} expected-warning {{'constexpr' specifier is incompatible with C++98}}
+    static const int n = 0; // expected-warning {{static data member 'n' in union is incompatible with C++98}}
+    static int k; // expected-warning {{static data member 'k' in union is incompatible with C++98}}
+  };
 }
 
 int EnumNNS = Enum::enum_val; // expected-warning {{enumeration type in nested name specifier is incompatible with C++98}}
@@ -259,4 +271,13 @@ Later: // expected-note {{possible target of indirect goto}}
   default: // expected-warning {{switch case would be in a protected scope in C++98}}
     return;
   }
+}
+
+namespace UnevaluatedMemberAccess {
+  struct S {
+    int n;
+    int f() { return sizeof(S::n); } // ok
+  };
+  int k = sizeof(S::n); // expected-warning {{use of non-static data member 'n' in an unevaluated context is incompatible with C++98}}
+  const std::type_info &ti = typeid(S::n); // expected-warning {{use of non-static data member 'n' in an unevaluated context is incompatible with C++98}}
 }

@@ -24,7 +24,7 @@ EVAL_EXPR(14, (1 ^ l_19) && 1); // expected-error {{fields must have a constant 
 void f()
 {
   int a;
-  EVAL_EXPR(15, (_Bool)&a); // expected-error {{fields must have a constant size}}
+  EVAL_EXPR(15, (_Bool)&a);
 }
 
 // FIXME: Turn into EVAL_EXPR test once we have more folding.
@@ -112,3 +112,8 @@ int castViaInt[*(int*)(unsigned long)"test"]; // expected-error {{variable lengt
 // PR11391.
 struct PR11391 { _Complex float f; } pr11391;
 EVAL_EXPR(42, __builtin_constant_p(pr11391.f = 1))
+
+// PR12043
+float varfloat;
+const float constfloat = 0;
+EVAL_EXPR(43, varfloat && constfloat) // expected-error {{must have a constant size}}

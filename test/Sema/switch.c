@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -verify %s
+// RUN: %clang_cc1 -fsyntax-only -verify -Wswitch-enum -Wcovered-switch-default %s
 void f (int z) { 
   while (z) { 
     default: z--;            // expected-error {{statement not in switch}}
@@ -24,7 +24,9 @@ void foo(int X) {
 
 void test3(void) { 
   // empty switch;
-  switch (0); // expected-warning {{no case matching constant switch condition '0'}}
+  switch (0); // expected-warning {{no case matching constant switch condition '0'}} \
+              // expected-warning {{switch statement has empty body}} \
+              // expected-note{{put the semicolon on a separate line to silence this warning}}
 }
 
 extern int g();
@@ -50,12 +52,15 @@ void test4()
   }
   
   switch (cond) {
-  case g() && 0: // expected-error {{expression is not an integer constant expression}} // expected-note {{subexpression not valid in a constant expression}}
+  case g() // expected-error {{expression is not an integer constant expression}}
+      && 0:
     break;
   }
   
   switch (cond) {
-  case 0 ... g() || 1: // expected-error {{expression is not an integer constant expression}} // expected-note {{subexpression not valid in a constant expression}}
+  case 0 ...
+      g() // expected-error {{expression is not an integer constant expression}}
+      || 1:
     break;
   }
 }
@@ -203,7 +208,7 @@ void test11() {
       break;
   }
 
-  switch(a) {
+  switch(a) { //expected-warning{{enumeration value 'A' not explicitly handled in switch}}
     case B:
     case C:
       break;
@@ -286,5 +291,15 @@ void test17(int x) {
 
   switch ((int) (x <= 17)) {
   case 0: return;
+  }
+}
+
+int test18() {
+  enum { A, B } a;
+  switch (a) {
+  case A: return 0;
+  case B: return 1;
+  case 7: return 1; // expected-warning {{case value not in enumerated type}}
+  default: return 2; // expected-warning {{default label in switch which covers all enumeration values}}
   }
 }

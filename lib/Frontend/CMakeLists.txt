@@ -13,11 +13,14 @@ add_clang_library(clangFrontend
   ASTMerge.cpp
   ASTUnit.cpp
   CacheTokens.cpp
+  ChainedDiagnosticConsumer.cpp
   ChainedIncludesSource.cpp
   CompilerInstance.cpp
   CompilerInvocation.cpp
   CreateInvocationFromCommandLine.cpp
   DependencyFile.cpp
+  DependencyGraph.cpp
+  DiagnosticRenderer.cpp
   FrontendAction.cpp
   FrontendActions.cpp
   FrontendOptions.cpp
@@ -25,6 +28,7 @@ add_clang_library(clangFrontend
   InitHeaderSearch.cpp
   InitPreprocessor.cpp
   LangStandards.cpp
+  LayoutOverrideSource.cpp
   LogDiagnosticPrinter.cpp
   MultiplexConsumer.cpp
   PrintPreprocessedOutput.cpp

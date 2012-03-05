@@ -69,8 +69,12 @@ namespace {
 
 void StmtProfiler::VisitStmt(const Stmt *S) {
   ID.AddInteger(S->getStmtClass());
-  for (Stmt::const_child_range C = S->children(); C; ++C)
-    Visit(*C);
+  for (Stmt::const_child_range C = S->children(); C; ++C) {
+    if (*C)
+      Visit(*C);
+    else
+      ID.AddInteger(0);
+  }
 }
 
 void StmtProfiler::VisitDeclStmt(const DeclStmt *S) {
@@ -503,7 +507,6 @@ static Stmt::StmtClass DecodeOperatorCall(const CXXOperatorCallExpr *S,
   case OO_Conditional:
   case NUM_OVERLOADED_OPERATORS:
     llvm_unreachable("Invalid operator call kind");
-    return Stmt::ArraySubscriptExprClass;
       
   case OO_Plus:
     if (S->getNumArgs() == 1) {
@@ -791,6 +794,24 @@ StmtProfiler::VisitCXXTemporaryObjectExpr(const CXXTemporaryObjectExpr *S) {
 }
 
 void
+StmtProfiler::VisitLambdaExpr(const LambdaExpr *S) {
+  VisitExpr(S);
+  for (LambdaExpr::capture_iterator C = S->explicit_capture_begin(),
+                                 CEnd = S->explicit_capture_end();
+       C != CEnd; ++C) {
+    ID.AddInteger(C->getCaptureKind());
+    if (C->capturesVariable()) {
+      VisitDecl(C->getCapturedVar());
+      ID.AddBoolean(C->isPackExpansion());
+    }
+  }
+  // Note: If we actually needed to be able to match lambda
+  // expressions, we would have to consider parameters and return type
+  // here, among other things.
+  VisitStmt(S->getBody());
+}
+
+void
 StmtProfiler::VisitCXXScalarValueInitExpr(const CXXScalarValueInitExpr *S) {
   VisitExpr(S);
 }
@@ -808,13 +829,11 @@ void StmtProfiler::VisitCXXNewExpr(const CXXNewExpr *S) {
   VisitType(S->getAllocatedType());
   VisitDecl(S->getOperatorNew());
   VisitDecl(S->getOperatorDelete());
-  VisitDecl(S->getConstructor());
   ID.AddBoolean(S->isArray());
   ID.AddInteger(S->getNumPlacementArgs());
   ID.AddBoolean(S->isGlobalNew());
   ID.AddBoolean(S->isParenTypeId());
-  ID.AddBoolean(S->hasInitializer());
-  ID.AddInteger(S->getNumConstructorArgs());
+  ID.AddInteger(S->getInitializationStyle());
 }
 
 void
@@ -851,6 +870,14 @@ void StmtProfiler::VisitBinaryTypeTraitExpr(const BinaryTypeTraitExpr *S) {
   ID.AddInteger(S->getTrait());
   VisitType(S->getLhsType());
   VisitType(S->getRhsType());
+}
+
+void StmtProfiler::VisitTypeTraitExpr(const TypeTraitExpr *S) {
+  VisitExpr(S);
+  ID.AddInteger(S->getTrait());
+  ID.AddInteger(S->getNumArgs());
+  for (unsigned I = 0, N = S->getNumArgs(); I != N; ++I)
+    VisitType(S->getArg(I)->getType());
 }
 
 void StmtProfiler::VisitArrayTypeTraitExpr(const ArrayTypeTraitExpr *S) {

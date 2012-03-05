@@ -25,6 +25,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/Bitcode/BitstreamWriter.h"
 #include <map>
 #include <queue>
@@ -206,6 +207,18 @@ private:
   /// IdentifierInfo.
   llvm::DenseMap<const IdentifierInfo *, serialization::IdentID> IdentifierIDs;
 
+  /// @name FlushStmt Caches
+  /// @{
+
+  /// \brief Set of parent Stmts for the currently serializing sub stmt.
+  llvm::DenseSet<Stmt *> ParentStmts;
+
+  /// \brief Offsets of sub stmts already serialized. The offset points
+  /// just after the stmt record.
+  llvm::DenseMap<Stmt *, uint64_t> SubStmtEntries;
+
+  /// @}
+
   /// \brief Offsets of each of the identifier IDs into the identifier
   /// table.
   std::vector<uint32_t> IdentifierOffsets;
@@ -283,17 +296,10 @@ private:
   /// \brief Decls that will be replaced in the current dependent AST file.
   DeclsToRewriteTy DeclsToRewrite;
 
-  struct ChainedObjCCategoriesData {
-    /// \brief The interface in the imported module.
-    const ObjCInterfaceDecl *Interface;
-    /// \brief The local tail category ID that got chained to the imported
-    /// interface.
-    const ObjCCategoryDecl *TailCategory;
-  };
-  /// \brief ObjC categories that got chained to an interface imported from
-  /// another module.
-  SmallVector<ChainedObjCCategoriesData, 16> LocalChainedObjCCategories;
-
+  /// \brief The set of Objective-C class that have categories we
+  /// should serialize.
+  llvm::SetVector<ObjCInterfaceDecl *> ObjCClassesWithCategories;
+                    
   struct ReplacedDeclInfo {
     serialization::DeclID ID;
     uint64_t Offset;
@@ -312,7 +318,12 @@ private:
   /// serialized again. In this case, it is registered here, so that the reader
   /// knows to read the updated version.
   SmallVector<ReplacedDeclInfo, 16> ReplacedDecls;
-
+                 
+  /// \brief The set of declarations that may have redeclaration chains that
+  /// need to be serialized.
+  llvm::SetVector<Decl *, llvm::SmallVector<Decl *, 4>, 
+                  llvm::SmallPtrSet<Decl *, 4> > Redeclarations;
+                                      
   /// \brief Statements that we've encountered while serializing a
   /// declaration or type.
   SmallVector<Stmt *, 16> StmtsToEmit;
@@ -407,11 +418,13 @@ private:
   void ResolveDeclUpdatesBlocks();
   void WriteDeclUpdatesBlocks();
   void WriteDeclReplacementsBlock();
-  void WriteChainedObjCCategories();
   void WriteDeclContextVisibleUpdate(const DeclContext *DC);
   void WriteFPPragmaOptions(const FPOptions &Opts);
   void WriteOpenCLExtensions(Sema &SemaRef);
-
+  void WriteObjCCategories();
+  void WriteRedeclarations();
+  void WriteMergedDecls();
+                        
   unsigned DeclParmVarAbbrev;
   unsigned DeclContextLexicalAbbrev;
   unsigned DeclContextVisibleLookupAbbrev;
@@ -663,10 +676,10 @@ public:
   void ReaderInitialized(ASTReader *Reader);
   void IdentifierRead(serialization::IdentID ID, IdentifierInfo *II);
   void TypeRead(serialization::TypeIdx Idx, QualType T);
-  void DeclRead(serialization::DeclID ID, const Decl *D);
   void SelectorRead(serialization::SelectorID ID, Selector Sel);
   void MacroDefinitionRead(serialization::PreprocessedEntityID ID,
                            MacroDefinition *MD);
+  void MacroVisible(IdentifierInfo *II);
   void ModuleRead(serialization::SubmoduleID ID, Module *Mod);
                     
   // ASTMutationListener implementation.
@@ -681,11 +694,9 @@ public:
   virtual void StaticDataMemberInstantiated(const VarDecl *D);
   virtual void AddedObjCCategoryToInterface(const ObjCCategoryDecl *CatD,
                                             const ObjCInterfaceDecl *IFD);
-  virtual void CompletedObjCForwardRef(const ObjCContainerDecl *D);
   virtual void AddedObjCPropertyInClassExtension(const ObjCPropertyDecl *Prop,
                                             const ObjCPropertyDecl *OrigProp,
                                             const ObjCCategoryDecl *ClassExt);
-  virtual void UpdatedAttributeList(const Decl *D);
 };
 
 /// \brief AST and semantic-analysis consumer that generates a
@@ -698,7 +709,7 @@ class PCHGenerator : public SemaConsumer {
   raw_ostream *Out;
   Sema *SemaPtr;
   MemorizeStatCalls *StatCalls; // owned by the FileManager
-  std::vector<unsigned char> Buffer;
+  llvm::SmallVector<char, 128> Buffer;
   llvm::BitstreamWriter Stream;
   ASTWriter Writer;
 

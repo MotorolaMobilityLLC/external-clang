@@ -37,7 +37,8 @@ template void initializer_list_expansion<1, 2, 3, 4, 5, 6>(); // expected-note{{
 namespace PR8977 {
   struct A { };
   template<typename T, typename... Args> void f(Args... args) {
-    T t(args...);
+    // An empty expression-list performs value initialization.
+    constexpr T t(args...);
   };
 
   template void f<A>();
@@ -89,6 +90,16 @@ struct X {
 
   X() : member()... { } // expected-error{{pack expansion for initialization of member 'member'}}
 };
+
+// There was a bug in the delayed parsing code for the
+// following case.
+template<typename ...T>
+struct DelayedParseTest : T...
+{
+  int a;
+  DelayedParseTest(T... i) : T{i}..., a{10} {}
+};
+
 
 // In a template-argument-list (14.3); the pattern is a template-argument.
 template<typename ...Types>

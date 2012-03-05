@@ -1,7 +1,7 @@
 // RUN: %clang_cc1 -fsyntax-only -verify %s
 
-@class FOO, BAR; 
 @class FOO, BAR; // expected-note {{forward declaration of class here}}
+@class FOO, BAR; 
 
 @interface INTF : FOO	// expected-error {{attempting to use the forward class 'FOO' as superclass of 'INTF'}}
 @end
@@ -31,14 +31,14 @@
 
 @protocol XCElementP @end
 
-typedef NSObject <XCElementP> XCElement;
+typedef NSObject <XCElementP> XCElement; // expected-note {{previous definition is here}}
 
 @interface XCElementMainImp  {
   XCElement * _editingElement;
 }
 @end
 
-@class XCElement;
+@class XCElement; // expected-warning {{redefinition of forward class 'XCElement' of a typedef name of an object type is ignored}}
 
 @implementation XCElementMainImp
 - (XCElement *)editingElement  { return _editingElement;  }

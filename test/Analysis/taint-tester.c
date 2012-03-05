@@ -4,6 +4,7 @@
 
 int scanf(const char *restrict format, ...);
 int getchar(void);
+typedef __typeof(sizeof(int)) size_t;
 
 #define BUFSIZE 10
 int Buffer[BUFSIZE];
@@ -111,10 +112,6 @@ int fscanfTest(void) {
   fprintf(fp, "%s %d", s, t); // expected-warning + {{tainted}}
   fclose(fp); // expected-warning + {{tainted}}
 
-  // Check if we propagate taint from stdin when it's used in an assignment.
-  FILE *pfstd = stdin;
-  fscanf(pfstd, "%s %d", s, &t); // TODO: This should be tainted as well.
-
   // Test fscanf and fopen.
   if((fp=fopen("test","r")) == 0) // expected-warning + {{tainted}}
     return 1;
@@ -122,3 +119,86 @@ int fscanfTest(void) {
   fprintf(stdout, "%s %d", s, t); // expected-warning + {{tainted}}
   return 0;
 }
+
+// Check if we propagate taint from stdin when it's used in an assignment.
+void stdinTest1() {
+  int i;
+  fscanf(stdin, "%d", &i);
+  int j = i; // expected-warning + {{tainted}}
+}
+void stdinTest2(FILE *pIn) {
+  FILE *p = stdin;
+  FILE *pp = p;
+  int ii;
+
+  fscanf(pp, "%d", &ii);
+  int jj = ii;// expected-warning + {{tainted}}
+
+  fscanf(p, "%d", &ii);
+  int jj2 = ii;// expected-warning + {{tainted}}
+
+  ii = 3;
+  int jj3 = ii;// no warning
+
+  p = pIn;
+  fscanf(p, "%d", &ii);
+  int jj4 = ii;// no warning
+}
+
+void stdinTest3() {
+  FILE **ppp = &stdin;
+  int iii;
+  fscanf(*ppp, "%d", &iii);
+  int jjj = iii;// expected-warning + {{tainted}}
+}
+
+// Test that stdin does not get invalidated by calls.
+void foo();
+void stdinTest4() {
+  int i;
+  fscanf(stdin, "%d", &i);
+  foo();
+  int j = i; // expected-warning + {{tainted}}
+}
+
+int getw(FILE *);
+void getwTest() {
+  int i = getw(stdin); // expected-warning + {{tainted}}
+}
+
+typedef long ssize_t;
+ssize_t getline(char ** __restrict, size_t * __restrict, FILE * __restrict);
+int  printf(const char * __restrict, ...);
+void free(void *ptr);
+void getlineTest(void) {
+  FILE *fp;
+  char *line = 0;
+  size_t len = 0;
+  ssize_t read;
+  while ((read = getline(&line, &len, stdin)) != -1) {
+    printf("%s", line); // expected-warning + {{tainted}}
+  }
+  free(line); // expected-warning + {{tainted}}
+}
+
+// Test propagation functions - the ones that propagate taint from arguments to
+// return value, ptr arguments.
+
+int atoi(const char *nptr);
+long atol(const char *nptr);
+long long atoll(const char *nptr);
+
+void atoiTest() {
+  char s[80];
+  scanf("%s", s);
+  int d = atoi(s); // expected-warning + {{tainted}}
+  int td = d; // expected-warning + {{tainted}}
+
+  long l = atol(s); // expected-warning + {{tainted}}
+  int tl = l; // expected-warning + {{tainted}}
+
+  long long ll = atoll(s); // expected-warning + {{tainted}}
+  int tll = ll; // expected-warning + {{tainted}}
+
+}
+
