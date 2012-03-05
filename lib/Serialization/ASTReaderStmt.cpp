@@ -16,6 +16,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/StmtVisitor.h"
+#include "llvm/ADT/SmallString.h"
 using namespace clang;
 using namespace clang::serialization;
 
@@ -78,7 +79,10 @@ namespace clang {
     /// \brief The number of record fields required for the Expr class
     /// itself.
     static const unsigned NumExprFields = NumStmtFields + 7;
-    
+
+    /// \brief Read and initialize a ExplicitTemplateArgumentList structure.
+    void ReadTemplateKWAndArgsInfo(ASTTemplateKWAndArgsInfo &Args,
+                                   unsigned NumTemplateArgs);
     /// \brief Read and initialize a ExplicitTemplateArgumentList structure.
     void ReadExplicitTemplateArgumentList(ASTTemplateArgumentListInfo &ArgList,
                                           unsigned NumTemplateArgs);
@@ -91,15 +95,16 @@ namespace clang {
 }
 
 void ASTStmtReader::
-ReadExplicitTemplateArgumentList(ASTTemplateArgumentListInfo &ArgList,
-                                 unsigned NumTemplateArgs) {
+ReadTemplateKWAndArgsInfo(ASTTemplateKWAndArgsInfo &Args,
+                          unsigned NumTemplateArgs) {
+  SourceLocation TemplateKWLoc = ReadSourceLocation(Record, Idx);
   TemplateArgumentListInfo ArgInfo;
   ArgInfo.setLAngleLoc(ReadSourceLocation(Record, Idx));
   ArgInfo.setRAngleLoc(ReadSourceLocation(Record, Idx));
   for (unsigned i = 0; i != NumTemplateArgs; ++i)
     ArgInfo.addArgument(
         Reader.ReadTemplateArgumentLoc(F, Record, Idx));
-  ArgList.initializeFrom(ArgInfo);
+  Args.initializeFrom(TemplateKWLoc, ArgInfo);
 }
 
 void ASTStmtReader::VisitStmt(Stmt *S) {
@@ -326,10 +331,10 @@ void ASTStmtReader::VisitDeclRefExpr(DeclRefExpr *E) {
 
   E->DeclRefExprBits.HasQualifier = Record[Idx++];
   E->DeclRefExprBits.HasFoundDecl = Record[Idx++];
-  E->DeclRefExprBits.HasExplicitTemplateArgs = Record[Idx++];
+  E->DeclRefExprBits.HasTemplateKWAndArgsInfo = Record[Idx++];
   E->DeclRefExprBits.HadMultipleCandidates = Record[Idx++];
   unsigned NumTemplateArgs = 0;
-  if (E->hasExplicitTemplateArgs())
+  if (E->hasTemplateKWAndArgsInfo())
     NumTemplateArgs = Record[Idx++];
 
   if (E->hasQualifier())
@@ -339,9 +344,9 @@ void ASTStmtReader::VisitDeclRefExpr(DeclRefExpr *E) {
   if (E->hasFoundDecl())
     E->getInternalFoundDecl() = ReadDeclAs<NamedDecl>(Record, Idx);
 
-  if (E->hasExplicitTemplateArgs())
-    ReadExplicitTemplateArgumentList(E->getExplicitTemplateArgs(),
-                                     NumTemplateArgs);
+  if (E->hasTemplateKWAndArgsInfo())
+    ReadTemplateKWAndArgsInfo(*E->getTemplateKWAndArgsInfo(),
+                              NumTemplateArgs);
 
   E->setDecl(ReadDeclAs<ValueDecl>(Record, Idx));
   E->setLocation(ReadSourceLocation(Record, Idx));
@@ -377,7 +382,7 @@ void ASTStmtReader::VisitStringLiteral(StringLiteral *E) {
   bool isPascal = Record[Idx++];
 
   // Read string data
-  llvm::SmallString<16> Str(&Record[Idx], &Record[Idx] + Len);
+  SmallString<16> Str(&Record[Idx], &Record[Idx] + Len);
   E->setString(Reader.getContext(), Str.str(), kind, isPascal);
   Idx += Len;
 
@@ -613,6 +618,7 @@ void ASTStmtReader::VisitInitListExpr(InitListExpr *E) {
   } else
     E->ArrayFillerOrUnionFieldInit = ReadDeclAs<FieldDecl>(Record, Idx);
   E->sawArrayRangeDesignator(Record[Idx++]);
+  E->setInitializesStdInitializerList(Record[Idx++]);
   unsigned NumInits = Record[Idx++];
   E->reserveInits(Reader.getContext(), NumInits);
   if (isArrayFiller) {
@@ -879,6 +885,7 @@ void ASTStmtReader::VisitObjCMessageExpr(ObjCMessageExpr *E) {
   unsigned NumStoredSelLocs = Record[Idx++];
   E->SelLocsKind = Record[Idx++]; 
   E->setDelegateInitCall(Record[Idx++]);
+  E->IsImplicit = Record[Idx++];
   ObjCMessageExpr::ReceiverKind Kind
     = static_cast<ObjCMessageExpr::ReceiverKind>(Record[Idx++]);
   switch (Kind) {
@@ -1042,6 +1049,35 @@ void ASTStmtReader::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *E) {
   E->Type = GetTypeSourceInfo(Record, Idx);
 }
 
+void ASTStmtReader::VisitLambdaExpr(LambdaExpr *E) {
+  VisitExpr(E);
+  unsigned NumCaptures = Record[Idx++];
+  assert(NumCaptures == E->NumCaptures);(void)NumCaptures;
+  unsigned NumArrayIndexVars = Record[Idx++];
+  E->IntroducerRange = ReadSourceRange(Record, Idx);
+  E->CaptureDefault = static_cast<LambdaCaptureDefault>(Record[Idx++]);
+  E->ExplicitParams = Record[Idx++];
+  E->ExplicitResultType = Record[Idx++];
+  E->ClosingBrace = ReadSourceLocation(Record, Idx);
+  
+  // Read capture initializers.
+  for (LambdaExpr::capture_init_iterator C = E->capture_init_begin(),
+                                      CEnd = E->capture_init_end();
+       C != CEnd; ++C)
+    *C = Reader.ReadSubExpr();
+  
+  // Read array capture index variables.
+  if (NumArrayIndexVars > 0) {
+    unsigned *ArrayIndexStarts = E->getArrayIndexStarts();
+    for (unsigned I = 0; I != NumCaptures + 1; ++I)
+      ArrayIndexStarts[I] = Record[Idx++];
+    
+    VarDecl **ArrayIndexVars = E->getArrayIndexVars();
+    for (unsigned I = 0; I != NumArrayIndexVars; ++I)
+      ArrayIndexVars[I] = ReadDeclAs<VarDecl>(Record, Idx);
+  }
+}
+
 void ASTStmtReader::VisitCXXNamedCastExpr(CXXNamedCastExpr *E) {
   VisitExplicitCastExpr(E);
   SourceRange R = ReadSourceRange(Record, Idx);
@@ -1132,27 +1168,19 @@ void ASTStmtReader::VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *E) {
 void ASTStmtReader::VisitCXXNewExpr(CXXNewExpr *E) {
   VisitExpr(E);
   E->GlobalNew = Record[Idx++];
-  E->Initializer = Record[Idx++];
-  E->UsualArrayDeleteWantsSize = Record[Idx++];
   bool isArray = Record[Idx++];
-  E->setHadMultipleCandidates(Record[Idx++]);
+  E->UsualArrayDeleteWantsSize = Record[Idx++];
   unsigned NumPlacementArgs = Record[Idx++];
-  unsigned NumCtorArgs = Record[Idx++];
+  E->StoredInitializationStyle = Record[Idx++];
   E->setOperatorNew(ReadDeclAs<FunctionDecl>(Record, Idx));
   E->setOperatorDelete(ReadDeclAs<FunctionDecl>(Record, Idx));
-  E->setConstructor(ReadDeclAs<CXXConstructorDecl>(Record, Idx));
   E->AllocatedTypeInfo = GetTypeSourceInfo(Record, Idx);
-  SourceRange TypeIdParens;
-  TypeIdParens.setBegin(ReadSourceLocation(Record, Idx));
-  TypeIdParens.setEnd(ReadSourceLocation(Record, Idx));
-  E->TypeIdParens = TypeIdParens;
+  E->TypeIdParens = ReadSourceRange(Record, Idx);
   E->StartLoc = ReadSourceLocation(Record, Idx);
-  E->EndLoc = ReadSourceLocation(Record, Idx);
-  E->ConstructorLParen = ReadSourceLocation(Record, Idx);
-  E->ConstructorRParen = ReadSourceLocation(Record, Idx);
+  E->DirectInitRange = ReadSourceRange(Record, Idx);
 
   E->AllocateArgsArray(Reader.getContext(), isArray, NumPlacementArgs,
-                       NumCtorArgs);
+                       E->StoredInitializationStyle != 0);
 
   // Install all the subexpressions.
   for (CXXNewExpr::raw_arg_iterator I = E->raw_arg_begin(),e = E->raw_arg_end();
@@ -1203,10 +1231,10 @@ void ASTStmtReader::VisitExprWithCleanups(ExprWithCleanups *E) {
 void
 ASTStmtReader::VisitCXXDependentScopeMemberExpr(CXXDependentScopeMemberExpr *E){
   VisitExpr(E);
-  
-  if (Record[Idx++])
-    ReadExplicitTemplateArgumentList(E->getExplicitTemplateArgs(),
-                                     Record[Idx++]);
+
+  if (Record[Idx++]) // HasTemplateKWAndArgsInfo
+    ReadTemplateKWAndArgsInfo(*E->getTemplateKWAndArgsInfo(),
+                              /*NumTemplateArgs=*/Record[Idx++]);
 
   E->Base = Reader.ReadSubExpr();
   E->BaseType = Reader.readType(F, Record, Idx);
@@ -1220,10 +1248,10 @@ ASTStmtReader::VisitCXXDependentScopeMemberExpr(CXXDependentScopeMemberExpr *E){
 void
 ASTStmtReader::VisitDependentScopeDeclRefExpr(DependentScopeDeclRefExpr *E) {
   VisitExpr(E);
-  
-  if (Record[Idx++])
-    ReadExplicitTemplateArgumentList(E->getExplicitTemplateArgs(), 
-                                     Record[Idx++]);
+
+  if (Record[Idx++]) // HasTemplateKWAndArgsInfo
+    ReadTemplateKWAndArgsInfo(*E->getTemplateKWAndArgsInfo(),
+                              /*NumTemplateArgs=*/Record[Idx++]);
 
   E->QualifierLoc = Reader.ReadNestedNameSpecifierLoc(F, Record, Idx);
   ReadDeclarationNameInfo(E->NameInfo, Record, Idx);
@@ -1243,11 +1271,10 @@ ASTStmtReader::VisitCXXUnresolvedConstructExpr(CXXUnresolvedConstructExpr *E) {
 
 void ASTStmtReader::VisitOverloadExpr(OverloadExpr *E) {
   VisitExpr(E);
-  
-  // Read the explicit template argument list, if available.
-  if (Record[Idx++])
-    ReadExplicitTemplateArgumentList(E->getExplicitTemplateArgs(),
-                                     Record[Idx++]);
+
+  if (Record[Idx++]) // HasTemplateKWAndArgsInfo
+    ReadTemplateKWAndArgsInfo(*E->getTemplateKWAndArgsInfo(),
+                              /*NumTemplateArgs=*/Record[Idx++]);
 
   unsigned NumDecls = Record[Idx++];
   UnresolvedSet<8> Decls;
@@ -1299,6 +1326,17 @@ void ASTStmtReader::VisitBinaryTypeTraitExpr(BinaryTypeTraitExpr *E) {
   E->RParen = Range.getEnd();
   E->LhsType = GetTypeSourceInfo(Record, Idx);
   E->RhsType = GetTypeSourceInfo(Record, Idx);
+}
+
+void ASTStmtReader::VisitTypeTraitExpr(TypeTraitExpr *E) {
+  VisitExpr(E);
+  E->TypeTraitExprBits.NumArgs = Record[Idx++];
+  E->TypeTraitExprBits.Kind = Record[Idx++];
+  E->TypeTraitExprBits.Value = Record[Idx++];
+  
+  TypeSourceInfo **Args = E->getTypeSourceInfos();
+  for (unsigned I = 0, N = E->getNumArgs(); I != N; ++I)
+    Args[I] = GetTypeSourceInfo(Record, Idx);
 }
 
 void ASTStmtReader::VisitArrayTypeTraitExpr(ArrayTypeTraitExpr *E) {
@@ -1446,7 +1484,6 @@ Stmt *ASTReader::ReadStmt(ModuleFile &F) {
   }
 
   llvm_unreachable("ReadingKind not set ?");
-  return 0;
 }
 
 Expr *ASTReader::ReadExpr(ModuleFile &F) {
@@ -1605,7 +1642,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
         Context,
         /*HasQualifier=*/Record[ASTStmtReader::NumExprFields],
         /*HasFoundDecl=*/Record[ASTStmtReader::NumExprFields + 1],
-        /*HasExplicitTemplateArgs=*/Record[ASTStmtReader::NumExprFields + 2],
+        /*HasTemplateKWAndArgsInfo=*/Record[ASTStmtReader::NumExprFields + 2],
         /*NumTemplateArgs=*/Record[ASTStmtReader::NumExprFields + 2] ?
           Record[ASTStmtReader::NumExprFields + 4] : 0);
       break;
@@ -1672,9 +1709,11 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
         QualifierLoc = ReadNestedNameSpecifierLoc(F, Record, Idx);
       }
 
+      SourceLocation TemplateKWLoc;
       TemplateArgumentListInfo ArgInfo;
-      bool HasExplicitTemplateArgs = Record[Idx++];
-      if (HasExplicitTemplateArgs) {
+      bool HasTemplateKWAndArgsInfo = Record[Idx++];
+      if (HasTemplateKWAndArgsInfo) {
+        TemplateKWLoc = ReadSourceLocation(F, Record, Idx);
         unsigned NumTemplateArgs = Record[Idx++];
         ArgInfo.setLAngleLoc(ReadSourceLocation(F, Record, Idx));
         ArgInfo.setRAngleLoc(ReadSourceLocation(F, Record, Idx));
@@ -1698,8 +1737,9 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       bool IsArrow = Record[Idx++];
 
       S = MemberExpr::Create(Context, Base, IsArrow, QualifierLoc,
-                             MemberD, FoundDecl, MemberNameInfo,
-                             HasExplicitTemplateArgs ? &ArgInfo : 0, T, VK, OK);
+                             TemplateKWLoc, MemberD, FoundDecl, MemberNameInfo,
+                             HasTemplateKWAndArgsInfo ? &ArgInfo : 0,
+                             T, VK, OK);
       ReadDeclarationNameLoc(F, cast<MemberExpr>(S)->MemberDNLoc,
                              MemberD->getDeclName(), Record, Idx);
       if (HadMultipleCandidates)
@@ -1811,7 +1851,6 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       break;
     case EXPR_OBJC_KVC_REF_EXPR:
       llvm_unreachable("mismatching AST file");
-      break;
     case EXPR_OBJC_MESSAGE_EXPR:
       S = ObjCMessageExpr::CreateEmpty(Context,
                                      Record[ASTStmtReader::NumExprFields],
@@ -1976,7 +2015,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       
     case EXPR_CXX_DEPENDENT_SCOPE_MEMBER:
       S = CXXDependentScopeMemberExpr::CreateEmpty(Context,
-          /*HasExplicitTemplateArgs=*/Record[ASTStmtReader::NumExprFields],
+         /*HasTemplateKWAndArgsInfo=*/Record[ASTStmtReader::NumExprFields],
                   /*NumTemplateArgs=*/Record[ASTStmtReader::NumExprFields]
                                    ? Record[ASTStmtReader::NumExprFields + 1] 
                                    : 0);
@@ -1984,7 +2023,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       
     case EXPR_CXX_DEPENDENT_SCOPE_DECL_REF:
       S = DependentScopeDeclRefExpr::CreateEmpty(Context,
-          /*HasExplicitTemplateArgs=*/Record[ASTStmtReader::NumExprFields],
+         /*HasTemplateKWAndArgsInfo=*/Record[ASTStmtReader::NumExprFields],
                   /*NumTemplateArgs=*/Record[ASTStmtReader::NumExprFields]
                                    ? Record[ASTStmtReader::NumExprFields + 1] 
                                    : 0);
@@ -1997,7 +2036,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       
     case EXPR_CXX_UNRESOLVED_MEMBER:
       S = UnresolvedMemberExpr::CreateEmpty(Context,
-          /*HasExplicitTemplateArgs=*/Record[ASTStmtReader::NumExprFields],
+         /*HasTemplateKWAndArgsInfo=*/Record[ASTStmtReader::NumExprFields],
                   /*NumTemplateArgs=*/Record[ASTStmtReader::NumExprFields]
                                    ? Record[ASTStmtReader::NumExprFields + 1] 
                                    : 0);
@@ -2005,7 +2044,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       
     case EXPR_CXX_UNRESOLVED_LOOKUP:
       S = UnresolvedLookupExpr::CreateEmpty(Context,
-          /*HasExplicitTemplateArgs=*/Record[ASTStmtReader::NumExprFields],
+         /*HasTemplateKWAndArgsInfo=*/Record[ASTStmtReader::NumExprFields],
                   /*NumTemplateArgs=*/Record[ASTStmtReader::NumExprFields]
                                    ? Record[ASTStmtReader::NumExprFields + 1] 
                                    : 0);
@@ -2019,6 +2058,11 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       S = new (Context) BinaryTypeTraitExpr(Empty);
       break;
 
+    case EXPR_TYPE_TRAIT:
+      S = TypeTraitExpr::CreateDeserialized(Context, 
+            Record[ASTStmtReader::NumExprFields]);
+      break;
+        
     case EXPR_ARRAY_TYPE_TRAIT:
       S = new (Context) ArrayTypeTraitExpr(Empty);
       break;
@@ -2072,6 +2116,14 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
     case EXPR_ATOMIC:
       S = new (Context) AtomicExpr(Empty);
       break;
+        
+    case EXPR_LAMBDA: {
+      unsigned NumCaptures = Record[ASTStmtReader::NumExprFields];
+      unsigned NumArrayIndexVars = Record[ASTStmtReader::NumExprFields + 1];
+      S = LambdaExpr::CreateDeserialized(Context, NumCaptures, 
+                                         NumArrayIndexVars);
+      break;
+    }
     }
     
     // We hit a STMT_STOP, so we're done with this expression.

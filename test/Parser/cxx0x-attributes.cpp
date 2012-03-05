@@ -20,11 +20,11 @@ int scope_attr [[foo::]]; // expected-error {{expected identifier}}
 unsigned [[]] int attr_in_decl_spec; // expected-error {{expected unqualified-id}}
 int & [[]] ref_attr = after_attr; // expected-error {{an attribute list cannot appear here}}
 class foo {
-  void after_const_attr () const [[]]; // expected-error {{expected body of lambda expression}} expected-error {{array has incomplete element type 'void'}}
+  void after_const_attr () const [[]]; // expected-error {{expected body of lambda expression}}
 };
 extern "C++" [[]] { } // expected-error {{an attribute list cannot appear here}}
 [[]] template <typename T> void before_template_attr (); // expected-error {{an attribute list cannot appear here}}
-[[]] namespace ns { int i; } // expected-error {{an attribute list cannot appear here}}
+[[]] namespace ns { int i; } // expected-error {{an attribute list cannot appear here}} expected-note {{declared here}}
 [[]] static_assert(true, ""); //expected-error {{an attribute list cannot appear here}}
 [[]] asm(""); // expected-error {{an attribute list cannot appear here}}
 
@@ -33,7 +33,7 @@ extern "C++" [[]] { } // expected-error {{an attribute list cannot appear here}}
 
 // Argument tests
 alignas int aligned_no_params; // expected-error {{expected '('}}
-alignas(i) int aligned_nonconst; // expected-error {{'aligned' attribute requires integer constant}}
+alignas(i) int aligned_nonconst; // expected-error {{'aligned' attribute requires integer constant}} expected-note {{read of non-const variable 'i'}}
 
 // Statement tests
 void foo () {

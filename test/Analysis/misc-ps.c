@@ -1,24 +1,6 @@
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -disable-free -analyzer-eagerly-assume -analyzer-checker=core -analyzer-checker=deadcode -verify %s
 
-unsigned long strlen(const char *);
-
 int size_rdar9373039 = 1;
-int rdar9373039() {
-  int x;
-  int j = 0;
-
-  for (int i = 0 ; i < size_rdar9373039 ; ++i)
-    x = 1;
-    
-  // strlen doesn't invalidate the value of 'size_rdar9373039'.
-  int extra = (2 + strlen ("Clang") + ((4 - ((unsigned int) (2 + strlen ("Clang")) % 4)) % 4)) + (2 + strlen ("1.0") + ((4 - ((unsigned int) (2 + strlen ("1.0")) % 4)) % 4));
-
-  for (int i = 0 ; i < size_rdar9373039 ; ++i)
-    j += x; // no-warning
-
-  return j;
-}
-
 int foo_rdar9373039(const char *);
 
 int rdar93730392() {
@@ -129,3 +111,18 @@ struct rdar10385775 {
 void RDar10385775(struct rdar10385775* p) {
     p->name = L"a";
 }
+
+// Test double loop of array and array literals.  Previously this
+// resulted in a false positive uninitailized value warning.
+void rdar10686586() {
+    int array1[] = { 1, 2, 3, 0 };
+    int array2[] = { 1, 2, 3, 0 };
+    int *array[] = { array1, array2 };
+    int sum = 0;
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 4; j++) {
+            sum += array[i][j]; // no-warning
+        }
+    }
+}
+

@@ -49,14 +49,10 @@ public:
   unsigned DetailedRecord : 1; /// Whether we should maintain a detailed
                                /// record of all macro definitions and
                                /// expansions.
-  
-  /// \brief Whether we should automatically translate #include or #import
-  /// operations into module imports when possible.
-  unsigned AutoModuleImport : 1;
-
-  /// \brief Whether the detailed preprocessing record includes nested macro 
-  /// expansions.
-  unsigned DetailedRecordIncludesNestedMacroExpansions : 1;
+  unsigned DetailedRecordConditionalDirectives : 1; /// Whether in the
+                               /// preprocessing record we should also keep
+                               /// track of locations of conditional directives
+                               /// in non-system files.
   
   /// The implicit PCH included at the start of the translation unit, or empty.
   std::string ImplicitPCHInclude;
@@ -166,8 +162,7 @@ public:
   
 public:
   PreprocessorOptions() : UsePredefines(true), DetailedRecord(false),
-                          AutoModuleImport(false),
-                          DetailedRecordIncludesNestedMacroExpansions(true),
+                          DetailedRecordConditionalDirectives(false),
                           DisablePCHValidation(false), DisableStatCache(false),
                           DumpDeserializedPCHDecls(false),
                           PrecompiledPreambleBytes(0, true),

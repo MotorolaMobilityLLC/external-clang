@@ -63,6 +63,9 @@ namespace CodeGen {
 /// Implements runtime-specific code generation functions.
 class CGObjCRuntime {
 protected:
+  CodeGen::CodeGenModule &CGM;
+  CGObjCRuntime(CodeGen::CodeGenModule &CGM) : CGM(CGM) {}
+
   // Utility functions for unified ivar access. These need to
   // eventually be folded into other places (the structure layout
   // code).
@@ -140,6 +143,9 @@ public:
   /// Generate a class structure for this class.
   virtual void GenerateClass(const ObjCImplementationDecl *OID) = 0;
 
+  /// Register an class alias.
+  virtual void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) = 0;
+
   /// Generate an Objective-C message send operation.
   ///
   /// \param Method - The method being called, this may be null if synthesizing
@@ -200,6 +206,9 @@ public:
   virtual llvm::Constant *GetGetStructFunction() = 0;
   // API for atomic copying of qualified aggregates in setter.
   virtual llvm::Constant *GetSetStructFunction() = 0;
+  // API for atomic copying of qualified aggregates with non-trivial copy
+  // assignment (c++) in setter/getter.
+  virtual llvm::Constant *GetCppAtomicObjectFunction() = 0;
   
   /// GetClass - Return a reference to the class for the given
   /// interface decl.
@@ -249,6 +258,19 @@ public:
   virtual llvm::Constant *BuildGCBlockLayout(CodeGen::CodeGenModule &CGM,
                                   const CodeGen::CGBlockInfo &blockInfo) = 0;
   virtual llvm::GlobalVariable *GetClassGlobal(const std::string &Name) = 0;
+
+  struct MessageSendInfo {
+    const CGFunctionInfo &CallInfo;
+    llvm::PointerType *MessengerType;
+
+    MessageSendInfo(const CGFunctionInfo &callInfo,
+                    llvm::PointerType *messengerType)
+      : CallInfo(callInfo), MessengerType(messengerType) {}
+  };
+
+  MessageSendInfo getMessageSendInfo(const ObjCMethodDecl *method,
+                                     QualType resultType,
+                                     CallArgList &callArgs);
 };
 
 /// Creates an instance of an Objective-C runtime class.

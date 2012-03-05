@@ -198,9 +198,9 @@ clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
     case 'z': lmKind = LengthModifier::AsSizeT;      ++I; break;
     case 't': lmKind = LengthModifier::AsPtrDiff;    ++I; break;
     case 'L': lmKind = LengthModifier::AsLongDouble; ++I; break;
-    case 'q': lmKind = LengthModifier::AsLongLong;   ++I; break;
+    case 'q': lmKind = LengthModifier::AsQuad;       ++I; break;
     case 'a':
-      if (IsScanf && !LO.C99 && !LO.CPlusPlus) {
+      if (IsScanf && !LO.C99 && !LO.CPlusPlus0x) {
         // For scanf in C90, look at the next character to see if this should
         // be parsed as the GNU extension 'a' length modifier. If not, this
         // will be parsed as a conversion specifier.
@@ -210,6 +210,13 @@ clang::analyze_format_string::ParseLengthModifier(FormatSpecifier &FS,
           break;
         }
         --I;
+      }
+      return false;
+    case 'm':
+      if (IsScanf) {
+        lmKind = LengthModifier::AsMAllocate;
+        ++I;
+        break;
       }
       return false;
   }
@@ -329,13 +336,26 @@ bool ArgTypeResult::matchesType(ASTContext &C, QualType argTy) const {
       return argTy->isPointerType() || argTy->isObjCObjectPointerType() ||
         argTy->isNullPtrType();
 
-    case ObjCPointerTy:
-      return argTy->getAs<ObjCObjectPointerType>() != NULL;
+    case ObjCPointerTy: {
+      if (argTy->getAs<ObjCObjectPointerType>() ||
+          argTy->getAs<BlockPointerType>())
+        return true;
+      
+      // Handle implicit toll-free bridging.
+      if (const PointerType *PT = argTy->getAs<PointerType>()) {
+        // Things such as CFTypeRef are really just opaque pointers
+        // to C structs representing CF types that can often be bridged
+        // to Objective-C objects.  Since the compiler doesn't know which
+        // structs can be toll-free bridged, we just accept them all.
+        QualType pointee = PT->getPointeeType();
+        if (pointee->getAsStructureType() || pointee->isVoidType())
+          return true;
+      }
+      return false;      
+    }
   }
 
-  // FIXME: Should be unreachable, but Clang is currently emitting
-  // a warning.
-  return false;
+  llvm_unreachable("Invalid ArgTypeResult Kind!");
 }
 
 QualType ArgTypeResult::getRepresentativeType(ASTContext &C) const {
@@ -362,14 +382,12 @@ QualType ArgTypeResult::getRepresentativeType(ASTContext &C) const {
     }
   }
 
-  // FIXME: Should be unreachable, but Clang is currently emitting
-  // a warning.
-  return QualType();
+  llvm_unreachable("Invalid ArgTypeResult Kind!");
 }
 
 std::string ArgTypeResult::getRepresentativeTypeName(ASTContext &C) const {
   std::string S = getRepresentativeType(C).getAsString();
-  if (Name)
+  if (Name && S != Name)
     return std::string("'") + Name + "' (aka '" + S + "')";
   return std::string("'") + S + "'";
 }
@@ -399,6 +417,8 @@ analyze_format_string::LengthModifier::toString() const {
     return "l";
   case AsLongLong:
     return "ll";
+  case AsQuad:
+    return "q";
   case AsIntMax:
     return "j";
   case AsSizeT:
@@ -409,6 +429,8 @@ analyze_format_string::LengthModifier::toString() const {
     return "L";
   case AsAllocate:
     return "a";
+  case AsMAllocate:
+    return "m";
   case None:
     return "";
   }
@@ -486,10 +508,11 @@ bool FormatSpecifier::hasValidLengthModifier() const {
     case LengthModifier::None:
       return true;
       
-        // Handle most integer flags
+    // Handle most integer flags
     case LengthModifier::AsChar:
     case LengthModifier::AsShort:
     case LengthModifier::AsLongLong:
+    case LengthModifier::AsQuad:
     case LengthModifier::AsIntMax:
     case LengthModifier::AsSizeT:
     case LengthModifier::AsPtrDiff:
@@ -506,7 +529,7 @@ bool FormatSpecifier::hasValidLengthModifier() const {
           return false;
       }
       
-        // Handle 'l' flag
+    // Handle 'l' flag
     case LengthModifier::AsLong:
       switch (CS.getKind()) {
         case ConversionSpecifier::dArg:
@@ -526,6 +549,7 @@ bool FormatSpecifier::hasValidLengthModifier() const {
         case ConversionSpecifier::nArg:
         case ConversionSpecifier::cArg:
         case ConversionSpecifier::sArg:
+        case ConversionSpecifier::ScanListArg:
           return true;
         default:
           return false;
@@ -542,6 +566,14 @@ bool FormatSpecifier::hasValidLengthModifier() const {
         case ConversionSpecifier::gArg:
         case ConversionSpecifier::GArg:
           return true;
+        // GNU extension.
+        case ConversionSpecifier::dArg:
+        case ConversionSpecifier::iArg:
+        case ConversionSpecifier::oArg:
+        case ConversionSpecifier::uArg:
+        case ConversionSpecifier::xArg:
+        case ConversionSpecifier::XArg:
+          return true;
         default:
           return false;
       }
@@ -550,10 +582,94 @@ bool FormatSpecifier::hasValidLengthModifier() const {
       switch (CS.getKind()) {
         case ConversionSpecifier::sArg:
         case ConversionSpecifier::SArg:
+        case ConversionSpecifier::ScanListArg:
+          return true;
+        default:
+          return false;
+      }
+
+    case LengthModifier::AsMAllocate:
+      switch (CS.getKind()) {
+        case ConversionSpecifier::cArg:
+        case ConversionSpecifier::CArg:
+        case ConversionSpecifier::sArg:
+        case ConversionSpecifier::SArg:
+        case ConversionSpecifier::ScanListArg:
           return true;
         default:
           return false;
       }
   }
-  return false;
+  llvm_unreachable("Invalid LengthModifier Kind!");
+}
+
+bool FormatSpecifier::hasStandardLengthModifier() const {
+  switch (LM.getKind()) {
+    case LengthModifier::None:
+    case LengthModifier::AsChar:
+    case LengthModifier::AsShort:
+    case LengthModifier::AsLong:
+    case LengthModifier::AsLongLong:
+    case LengthModifier::AsIntMax:
+    case LengthModifier::AsSizeT:
+    case LengthModifier::AsPtrDiff:
+    case LengthModifier::AsLongDouble:
+      return true;
+    case LengthModifier::AsAllocate:
+    case LengthModifier::AsMAllocate:
+    case LengthModifier::AsQuad:
+      return false;
+  }
+  llvm_unreachable("Invalid LengthModifier Kind!");
+}
+
+bool FormatSpecifier::hasStandardConversionSpecifier(const LangOptions &LangOpt) const {
+  switch (CS.getKind()) {
+    case ConversionSpecifier::cArg:
+    case ConversionSpecifier::dArg:
+    case ConversionSpecifier::iArg:
+    case ConversionSpecifier::oArg:
+    case ConversionSpecifier::uArg:
+    case ConversionSpecifier::xArg:
+    case ConversionSpecifier::XArg:
+    case ConversionSpecifier::fArg:
+    case ConversionSpecifier::FArg:
+    case ConversionSpecifier::eArg:
+    case ConversionSpecifier::EArg:
+    case ConversionSpecifier::gArg:
+    case ConversionSpecifier::GArg:
+    case ConversionSpecifier::aArg:
+    case ConversionSpecifier::AArg:
+    case ConversionSpecifier::sArg:
+    case ConversionSpecifier::pArg:
+    case ConversionSpecifier::nArg:
+    case ConversionSpecifier::ObjCObjArg:
+    case ConversionSpecifier::ScanListArg:
+    case ConversionSpecifier::PercentArg:
+      return true;
+    case ConversionSpecifier::CArg:
+    case ConversionSpecifier::SArg:
+      return LangOpt.ObjC1 || LangOpt.ObjC2;
+    case ConversionSpecifier::InvalidSpecifier:
+    case ConversionSpecifier::PrintErrno:
+      return false;
+  }
+  llvm_unreachable("Invalid ConversionSpecifier Kind!");
+}
+
+bool FormatSpecifier::hasStandardLengthConversionCombination() const {
+  if (LM.getKind() == LengthModifier::AsLongDouble) {
+    switch(CS.getKind()) {
+        case ConversionSpecifier::dArg:
+        case ConversionSpecifier::iArg:
+        case ConversionSpecifier::oArg:
+        case ConversionSpecifier::uArg:
+        case ConversionSpecifier::xArg:
+        case ConversionSpecifier::XArg:
+          return false;
+        default:
+          return true;
+    }
+  }
+  return true;
 }

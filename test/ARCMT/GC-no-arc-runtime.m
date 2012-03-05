@@ -3,6 +3,7 @@
 // RUN: diff %t %s.result
 // RUN: arcmt-test --args -triple x86_64-apple-macosx10.6 -fsyntax-only -fobjc-gc-only -x objective-c++ %s > %t
 // RUN: diff %t %s.result
+// DISABLE: mingw32
 
 #include "Common.h"
 #include "GC.h"
@@ -11,9 +12,7 @@ void test1(CFTypeRef *cft) {
   id x = NSMakeCollectable(cft);
 }
 
-@interface I1 {
-  __strong I1 *myivar;
-}
+@interface I1
 @end
 
 @implementation I1

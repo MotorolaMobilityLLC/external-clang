@@ -1,13 +1,22 @@
 // RUN: %clang_cc1 -E -std=c++11 %s -o - | FileCheck --check-prefix=CHECK-0X %s
 // RUN: %clang_cc1 -E %s -o - | FileCheck --check-prefix=CHECK-NO-0X %s
 
+#if __has_feature(cxx_atomic)
+int has_atomic();
+#else
+int no_atomic();
+#endif
+
+// CHECK-0X: has_atomic
+// CHECK-NO-0X: no_atomic
+
 #if __has_feature(cxx_lambdas)
 int has_lambdas();
 #else
 int no_lambdas();
 #endif
 
-// CHECK-0X: no_lambdas
+// CHECK-0X: has_lambdas
 // CHECK-NO-0X: no_lambdas
 
 
@@ -208,3 +217,30 @@ int no_unicode_literals();
 
 // CHECK-0X: has_unicode_literals
 // CHECK-NO-0X: no_unicode_literals
+
+#if __has_feature(cxx_constexpr)
+int has_constexpr();
+#else
+int no_constexpr();
+#endif
+
+// CHECK-0X: has_constexpr
+// CHECK-NO-0X: no_constexpr
+
+#if __has_feature(cxx_generalized_initializers)
+int has_generalized_initializers();
+#else
+int no_generalized_initializers();
+#endif
+
+// CHECK-0X: has_generalized_initializers
+// CHECK-NO-0X: no_generalized_initializers
+
+#if __has_feature(cxx_unrestricted_unions)
+int has_unrestricted_unions();
+#else
+int no_unrestricted_unions();
+#endif
+
+// CHECK-0X: has_unrestricted_unions
+// CHECK-NO-0X: no_unrestricted_unions
