@@ -12,6 +12,7 @@ LOCAL_MODULE_TAGS := optional
 TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
+  AttrParsedAttrList.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \
   DeclNodes.inc \

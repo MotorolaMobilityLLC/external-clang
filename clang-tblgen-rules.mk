@@ -58,6 +58,20 @@ $(intermediates)/include/clang/AST/Attrs.inc: $(CLANG_ROOT_PATH)/include/clang/B
 	$(call transform-host-clang-td-to-out,clang-attr-classes)
 endif
 
+ifneq ($(findstring AttrParsedAttrKinds.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Sema/AttrParsedAttrKinds.inc
+$(intermediates)/include/clang/Sema/AttrParsedAttrKinds.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/Sema/AttrParsedAttrKinds.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-attr-parsed-attr-kinds)
+endif
+
+ifneq ($(findstring AttrParsedAttrList.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Sema/AttrParsedAttrList.inc
+$(intermediates)/include/clang/Sema/AttrParsedAttrList.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/Sema/AttrParsedAttrList.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-attr-parsed-attr-list)
+endif
+
 ifneq ($(findstring AttrTemplateInstantiate.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Sema/AttrTemplateInstantiate.inc
 $(intermediates)/include/clang/Sema/AttrTemplateInstantiate.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
