@@ -3,6 +3,7 @@ LOCAL_PATH:= $(call my-dir)
 clang_static_analyzer_checkers_TBLGEN_TABLES := \
   AttrKinds.inc \
   AttrList.inc \
+  AttrParsedAttrList.inc \
   Attrs.inc \
   Checkers.inc \
   DeclNodes.inc \

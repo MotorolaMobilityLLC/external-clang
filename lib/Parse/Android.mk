@@ -8,10 +8,11 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES :=    \
 	AttrList.inc	\
 	AttrLateParsed.inc \
+        AttrParsedAttrList.inc \
 	Attrs.inc	\
 	DeclNodes.inc	\
 	DiagnosticParseKinds.inc	\
-    DiagnosticCommonKinds.inc	\
+        DiagnosticCommonKinds.inc	\
 	StmtNodes.inc
 
 clang_parse_SRC_FILES :=	\

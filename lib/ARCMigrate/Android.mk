@@ -8,6 +8,7 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES := \
   Attrs.inc \
   AttrList.inc \
+  AttrParsedAttrList.inc    \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticGroups.inc \
@@ -18,6 +19,7 @@ clang_arc_migrate_SRC_FILES := \
   ARCMT.cpp \
   ARCMTActions.cpp \
   FileRemapper.cpp \
+  ObjCMT.cpp \
   PlistReporter.cpp \
   TransAPIUses.cpp \
   TransARCAssign.cpp \

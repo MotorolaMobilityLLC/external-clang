@@ -40,6 +40,7 @@ LOCAL_STATIC_LIBRARIES := \
   libclangAnalysis \
   libclangIndex \
   libclangRewrite \
+  libclangEdit \
   libclangAST \
   libclangLex \
   libclangBasic \

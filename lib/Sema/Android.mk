@@ -8,6 +8,8 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES :=    \
 	AttrList.inc	\
 	Attrs.inc	\
+	AttrParsedAttrKinds.inc    \
+	AttrParsedAttrList.inc    \
 	AttrTemplateInstantiate.inc	\
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\

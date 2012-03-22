@@ -46,6 +46,7 @@ clang_ast_SRC_FILES :=	\
 	MicrosoftCXXABI.cpp	\
 	MicrosoftMangle.cpp	\
 	NestedNameSpecifier.cpp	\
+        NSAPI.cpp       \
 	ParentMap.cpp	\
 	RecordLayout.cpp	\
 	RecordLayoutBuilder.cpp	\

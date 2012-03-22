@@ -11,6 +11,7 @@ LOCAL_MODULE_TAGS := optional
 
 TBLGEN_TABLES := \
   AttrList.inc \
+  AttrParsedAttrList.inc \
   AttrPCHRead.inc \
   AttrPCHWrite.inc \
   Attrs.inc \

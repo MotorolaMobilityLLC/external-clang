@@ -8,7 +8,6 @@ clang_static_analyzer_core_TBLGEN_TABLES := \
   StmtNodes.inc
 
 clang_static_analyzer_core_SRC_FILES := \
-  AggExprVisitor.cpp \
   AnalysisManager.cpp \
   BasicConstraintManager.cpp \
   BasicValueFactory.cpp \

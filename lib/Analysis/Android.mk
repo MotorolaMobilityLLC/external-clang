@@ -15,6 +15,7 @@ TBLGEN_TABLES := \
 
 clang_analysis_SRC_FILES := \
   AnalysisDeclContext.cpp \
+  CallGraph.cpp \
   CFG.cpp \
   CFGReachabilityAnalysis.cpp \
   CFGStmtMap.cpp \
