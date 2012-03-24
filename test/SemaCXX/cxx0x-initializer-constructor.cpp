@@ -218,3 +218,49 @@ namespace PR12117 {
   struct B { B(A); } b{{0}};
   struct C { C(int); } c{0};
 }
+
+namespace PR12167 {
+  template<int N> struct string {};
+
+  struct X {
+    X(const char v);
+    template<typename T> bool operator()(T) const;
+  };
+
+  template<int N, class Comparator> bool g(const string<N>& s, Comparator cmp) {
+    return cmp(s);
+  }
+  template<int N> bool f(const string<N> &s) {
+    return g(s, X{'x'});
+  }
+
+  bool s = f(string<1>());
+}
+
+namespace PR12257 {
+  struct command_pair
+  {
+    command_pair(int, int);
+  };
+
+  struct command_map
+  {
+    command_map(std::initializer_list<command_pair>);
+  };
+
+  struct generator_pair
+  {
+    generator_pair(const command_map);
+  };
+
+  const std::initializer_list<generator_pair> x =
+  {
+    {
+      {
+        {
+          {3, 4}
+        }
+      }
+    }
+  };
+}

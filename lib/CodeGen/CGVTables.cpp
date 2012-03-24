@@ -52,7 +52,7 @@ bool CodeGenVTables::ShouldEmitVTableInThisTU(const CXXRecordDecl *RD) {
   // If we're building with optimization, we always emit VTables since that
   // allows for virtual function calls to be devirtualized.
   // (We don't want to do this in -fapple-kext mode however).
-  if (CGM.getCodeGenOpts().OptimizationLevel && !CGM.getLangOptions().AppleKext)
+  if (CGM.getCodeGenOpts().OptimizationLevel && !CGM.getLangOpts().AppleKext)
     return true;
 
   return KeyFunction->hasBody();
@@ -584,8 +584,8 @@ CodeGenVTables::CreateVTableInitializer(const CXXRecordDecl *RD,
             VTableThunks[NextVTableThunkIndex].first == I) {
           const ThunkInfo &Thunk = VTableThunks[NextVTableThunkIndex].second;
         
-          Init = CGM.GetAddrOfThunk(GD, Thunk);
           MaybeEmitThunkAvailableExternally(GD, Thunk);
+          Init = CGM.GetAddrOfThunk(GD, Thunk);
 
           NextVTableThunkIndex++;
         } else {
