@@ -23,6 +23,7 @@
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/ParentMap.h"
 #include "clang/AST/StmtObjC.h"
+#include "clang/AST/StmtCXX.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/SourceManager.h"
@@ -57,10 +58,11 @@ static inline Selector GetNullarySelector(const char* name, ASTContext &Ctx) {
 // Engine construction and deletion.
 //===----------------------------------------------------------------------===//
 
-ExprEngine::ExprEngine(AnalysisManager &mgr, bool gcEnabled)
+ExprEngine::ExprEngine(AnalysisManager &mgr, bool gcEnabled,
+                       SetOfDecls *VisitedCallees)
   : AMgr(mgr),
     AnalysisDeclContexts(mgr.getAnalysisDeclContextManager()),
-    Engine(*this),
+    Engine(*this, VisitedCallees),
     G(Engine.getGraph()),
     StateMgr(getContext(), mgr.getStoreManagerCreator(),
              mgr.getConstraintManagerCreator(), G.getAllocator(),
@@ -361,29 +363,22 @@ void ExprEngine::ProcessInitializer(const CFGInitializer Init,
   SVal thisVal = Pred->getState()->getSVal(thisReg);
 
   if (BMI->isAnyMemberInitializer()) {
-    ExplodedNodeSet AfterEval;
-
     // Evaluate the initializer.
-    Visit(BMI->getInit(), Pred, AfterEval);
 
-    StmtNodeBuilder Bldr(AfterEval, Dst, *currentBuilderContext);
-    for (ExplodedNodeSet::iterator I = AfterEval.begin(),
-                                   E = AfterEval.end(); I != E; ++I){
-      ExplodedNode *P = *I;
-      ProgramStateRef state = P->getState();
+    StmtNodeBuilder Bldr(Pred, Dst, *currentBuilderContext);
+    ProgramStateRef state = Pred->getState();
 
-      const FieldDecl *FD = BMI->getAnyMember();
+    const FieldDecl *FD = BMI->getAnyMember();
 
-      SVal FieldLoc = state->getLValue(FD, thisVal);
-      SVal InitVal = state->getSVal(BMI->getInit(), Pred->getLocationContext());
-      state = state->bindLoc(FieldLoc, InitVal);
+    SVal FieldLoc = state->getLValue(FD, thisVal);
+    SVal InitVal = state->getSVal(BMI->getInit(), Pred->getLocationContext());
+    state = state->bindLoc(FieldLoc, InitVal);
 
-      // Use a custom node building process.
-      PostInitializer PP(BMI, stackFrame);
-      // Builder automatically add the generated node to the deferred set,
-      // which are processed in the builder's dtor.
-      Bldr.generateNode(PP, P, state);
-    }
+    // Use a custom node building process.
+    PostInitializer PP(BMI, stackFrame);
+    // Builder automatically add the generated node to the deferred set,
+    // which are processed in the builder's dtor.
+    Bldr.generateNode(PP, Pred, state);
   } else {
     assert(BMI->isBaseInitializer());
 
@@ -480,10 +475,8 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
   switch (S->getStmtClass()) {
     // C++ and ARC stuff we don't support yet.
     case Expr::ObjCIndirectCopyRestoreExprClass:
-    case Stmt::CXXCatchStmtClass:
     case Stmt::CXXDependentScopeMemberExprClass:
     case Stmt::CXXPseudoDestructorExprClass:
-    case Stmt::CXXThrowExprClass:
     case Stmt::CXXTryStmtClass:
     case Stmt::CXXTypeidExprClass:
     case Stmt::CXXUuidofExprClass:
@@ -504,7 +497,8 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::SEHExceptStmtClass:
     case Stmt::LambdaExprClass:
     case Stmt::SEHFinallyStmtClass: {
-      const ExplodedNode *node = Bldr.generateNode(S, Pred, Pred->getState());
+      const ExplodedNode *node = Bldr.generateNode(S, Pred, Pred->getState(),
+                                                   /* sink */ true);
       Engine.addAbortedBlock(node, currentBuilderContext->getBlock());
       break;
     }
@@ -555,6 +549,10 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
       Bldr.addNodes(Dst);
       break;
 
+    // FIXME.
+    case Stmt::ObjCSubscriptRefExprClass:
+      break;
+      
     case Stmt::ObjCPropertyRefExprClass:
       // Implicitly handled by Environment::getSVal().
       break;
@@ -569,9 +567,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     }
       
     case Stmt::ExprWithCleanupsClass:
-      Bldr.takeNodes(Pred);
-      Visit(cast<ExprWithCleanups>(S)->getSubExpr(), Pred, Dst);
-      Bldr.addNodes(Dst);
+      // Handled due to fully linearised CFG.
       break;
 
     // Cases not handled yet; but will handle some day.
@@ -586,6 +582,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::ObjCIsaExprClass:
     case Stmt::ObjCProtocolExprClass:
     case Stmt::ObjCSelectorExprClass:
+    case Expr::ObjCNumericLiteralClass:
     case Stmt::ParenListExprClass:
     case Stmt::PredefinedExprClass:
     case Stmt::ShuffleVectorExprClass:
@@ -594,14 +591,20 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::OpaqueValueExprClass:
     case Stmt::AsTypeExprClass:
     case Stmt::AtomicExprClass:
-        // Fall through.
+      // Fall through.
 
+    // Currently all handling of 'throw' just falls to the CFG.  We
+    // can consider doing more if necessary.
+    case Stmt::CXXThrowExprClass:
+      // Fall through.
+      
     // Cases we intentionally don't evaluate, since they don't need
     // to be explicitly evaluated.
     case Stmt::AddrLabelExprClass:
     case Stmt::IntegerLiteralClass:
     case Stmt::CharacterLiteralClass:
     case Stmt::CXXBoolLiteralExprClass:
+    case Stmt::ObjCBoolLiteralExprClass:
     case Stmt::FloatingLiteralClass:
     case Stmt::SizeOfPackExprClass:
     case Stmt::StringLiteralClass:
@@ -616,6 +619,36 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
       break;
     }
 
+    case Expr::ObjCArrayLiteralClass:
+    case Expr::ObjCDictionaryLiteralClass: {
+      Bldr.takeNodes(Pred);
+
+      ExplodedNodeSet preVisit;
+      getCheckerManager().runCheckersForPreStmt(preVisit, Pred, S, *this);
+      
+      // FIXME: explicitly model with a region and the actual contents
+      // of the container.  For now, conjure a symbol.
+      ExplodedNodeSet Tmp;
+      StmtNodeBuilder Bldr2(preVisit, Tmp, *currentBuilderContext);
+
+      for (ExplodedNodeSet::iterator it = preVisit.begin(), et = preVisit.end();
+           it != et; ++it) {      
+        ExplodedNode *N = *it;
+        const Expr *Ex = cast<Expr>(S);
+        QualType resultType = Ex->getType();
+        const LocationContext *LCtx = N->getLocationContext();
+        SVal result =
+          svalBuilder.getConjuredSymbolVal(0, Ex, LCtx, resultType, 
+                                 currentBuilderContext->getCurrentBlockCount());
+        ProgramStateRef state = N->getState()->BindExpr(Ex, LCtx, result);
+        Bldr2.generateNode(S, N, state);
+      }
+      
+      getCheckerManager().runCheckersForPostStmt(Dst, Tmp, S, *this);
+      Bldr.addNodes(Dst);
+      break;      
+    }
+
     case Stmt::ArraySubscriptExprClass:
       Bldr.takeNodes(Pred);
       VisitLvalArraySubscriptExpr(cast<ArraySubscriptExpr>(S), Pred, Dst);
@@ -627,14 +660,6 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
       VisitAsmStmt(cast<AsmStmt>(S), Pred, Dst);
       Bldr.addNodes(Dst);
       break;
-
-    case Stmt::BlockDeclRefExprClass: {
-      Bldr.takeNodes(Pred);
-      const BlockDeclRefExpr *BE = cast<BlockDeclRefExpr>(S);
-      VisitCommonDeclRefExpr(BE, BE->getDecl(), Pred, Dst);
-      Bldr.addNodes(Dst);
-      break;
-    }
 
     case Stmt::BlockExprClass:
       Bldr.takeNodes(Pred);
@@ -676,9 +701,17 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
 
     case Stmt::CallExprClass:
     case Stmt::CXXOperatorCallExprClass:
-    case Stmt::CXXMemberCallExprClass: {
+    case Stmt::CXXMemberCallExprClass:
+    case Stmt::UserDefinedLiteralClass: {
       Bldr.takeNodes(Pred);
       VisitCallExpr(cast<CallExpr>(S), Pred, Dst);
+      Bldr.addNodes(Dst);
+      break;
+    }
+    
+    case Stmt::CXXCatchStmtClass: {
+      Bldr.takeNodes(Pred);
+      VisitCXXCatchStmt(cast<CXXCatchStmt>(S), Pred, Dst);
       Bldr.addNodes(Dst);
       break;
     }
@@ -793,10 +826,10 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
       Bldr.takeNodes(Pred);
       const MaterializeTemporaryExpr *Materialize
                                             = cast<MaterializeTemporaryExpr>(S);
-      if (!Materialize->getType()->isRecordType())
-        CreateCXXTemporaryObject(Materialize, Pred, Dst);
+      if (Materialize->getType()->isRecordType())
+        Dst.Add(Pred);
       else
-        Visit(Materialize->GetTemporaryExpr(), Pred, Dst);
+        CreateCXXTemporaryObject(Materialize, Pred, Dst);
       Bldr.addNodes(Dst);
       break;
     }
@@ -1421,21 +1454,22 @@ void ExprEngine::VisitMemberExpr(const MemberExpr *M, ExplodedNode *Pred,
 ///  This method is used by evalStore and (soon) VisitDeclStmt, and others.
 void ExprEngine::evalBind(ExplodedNodeSet &Dst, const Stmt *StoreE,
                           ExplodedNode *Pred,
-                          SVal location, SVal Val, bool atDeclInit,
-                          ProgramPoint::Kind PointKind) {
+                          SVal location, SVal Val, bool atDeclInit) {
 
   // Do a previsit of the bind.
   ExplodedNodeSet CheckedSet;
   getCheckerManager().runCheckersForBind(CheckedSet, Pred, location, Val,
-                                         StoreE, *this, PointKind);
+                                         StoreE, *this,
+                                         ProgramPoint::PostStmtKind);
 
-  // TODO:AZ Remove TmpDst after NB refactoring is done.
   ExplodedNodeSet TmpDst;
   StmtNodeBuilder Bldr(CheckedSet, TmpDst, *currentBuilderContext);
 
+  const LocationContext *LC = Pred->getLocationContext();
   for (ExplodedNodeSet::iterator I = CheckedSet.begin(), E = CheckedSet.end();
        I!=E; ++I) {
-    ProgramStateRef state = (*I)->getState();
+    ExplodedNode *PredI = *I;
+    ProgramStateRef state = PredI->getState();
 
     if (atDeclInit) {
       const VarRegion *VR =
@@ -1446,7 +1480,12 @@ void ExprEngine::evalBind(ExplodedNodeSet &Dst, const Stmt *StoreE,
       state = state->bindLoc(location, Val);
     }
 
-    Bldr.generateNode(StoreE, *I, state, false, 0, PointKind);
+    const MemRegion *LocReg = 0;
+    if (loc::MemRegionVal *LocRegVal = dyn_cast<loc::MemRegionVal>(&location))
+      LocReg = LocRegVal->getRegion();
+
+    const ProgramPoint L = PostStore(StoreE, LC, LocReg, 0);
+    Bldr.generateNode(L, PredI, state, false);
   }
 
   Dst.insert(TmpDst);
@@ -1484,8 +1523,7 @@ void ExprEngine::evalStore(ExplodedNodeSet &Dst, const Expr *AssignE,
     return;
 
   for (ExplodedNodeSet::iterator NI=Tmp.begin(), NE=Tmp.end(); NI!=NE; ++NI)
-    evalBind(Dst, StoreE, *NI, location, Val, false,
-             ProgramPoint::PostStoreKind);
+    evalBind(Dst, StoreE, *NI, location, Val, false);
 }
 
 void ExprEngine::evalLoad(ExplodedNodeSet &Dst, const Expr *Ex,

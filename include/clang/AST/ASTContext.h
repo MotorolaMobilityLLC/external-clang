@@ -27,12 +27,12 @@
 #include "clang/AST/TemplateName.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/CanonicalType.h"
-#include "clang/AST/UsuallyTinyPtrVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Support/Allocator.h"
 #include <vector>
 
@@ -146,6 +146,11 @@ class ASTContext : public RefCountedBase<ASTContext> {
     ASTRecordLayouts;
   mutable llvm::DenseMap<const ObjCContainerDecl*, const ASTRecordLayout*>
     ObjCLayouts;
+
+  /// TypeInfoMap - A cache from types to size and alignment information.
+  typedef llvm::DenseMap<const Type*,
+                         std::pair<uint64_t, unsigned> > TypeInfoMap;
+  mutable TypeInfoMap MemoizedTypeInfo;
 
   /// KeyFunctions - A cache mapping from CXXRecordDecls to key functions.
   llvm::DenseMap<const CXXRecordDecl*, const CXXMethodDecl*> KeyFunctions;
@@ -322,7 +327,7 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// Since most C++ member functions aren't virtual and therefore
   /// don't override anything, we store the overridden functions in
   /// this map on the side rather than within the CXXMethodDecl structure.
-  typedef UsuallyTinyPtrVector<const CXXMethodDecl> CXXMethodVector;
+  typedef llvm::TinyPtrVector<const CXXMethodDecl*> CXXMethodVector;
   llvm::DenseMap<const CXXMethodDecl *, CXXMethodVector> OverriddenMethods;
 
   /// \brief Mapping from each declaration context to its corresponding lambda 
@@ -406,7 +411,7 @@ public:
 
   const TargetInfo &getTargetInfo() const { return *Target; }
   
-  const LangOptions& getLangOptions() const { return LangOpts; }
+  const LangOptions& getLangOpts() const { return LangOpts; }
 
   DiagnosticsEngine &getDiagnostics() const;
 
@@ -480,7 +485,7 @@ public:
                                   const FieldDecl *LastFD) const;
 
   // Access to the set of methods overridden by the given C++ method.
-  typedef CXXMethodVector::iterator overridden_cxx_method_iterator;
+  typedef CXXMethodVector::const_iterator overridden_cxx_method_iterator;
   overridden_cxx_method_iterator
   overridden_methods_begin(const CXXMethodDecl *Method) const;
 
@@ -564,6 +569,7 @@ public:
   CanQualType DependentTy, OverloadTy, BoundMemberTy, UnknownAnyTy;
   CanQualType PseudoObjectTy, ARCUnbridgedCastTy;
   CanQualType ObjCBuiltinIdTy, ObjCBuiltinClassTy, ObjCBuiltinSelTy;
+  CanQualType ObjCBuiltinBoolTy;
 
   // Types for deductions in C++0x [stmt.ranged]'s desugaring. Built on demand.
   mutable QualType AutoDeductTy;     // Deduction against 'auto'.
@@ -1052,7 +1058,7 @@ public:
 
   /// \brief The result type of logical operations, '<', '>', '!=', etc.
   QualType getLogicalOperationType() const {
-    return getLangOptions().CPlusPlus ? BoolTy : IntTy;
+    return getLangOpts().CPlusPlus ? BoolTy : IntTy;
   }
 
   /// getObjCEncodingForType - Emit the ObjC type encoding for the
@@ -1219,6 +1225,7 @@ public:
 
 private:
   CanQualType getFromTargetType(unsigned Type) const;
+  std::pair<uint64_t, unsigned> getTypeInfoImpl(const Type *T) const;
 
   //===--------------------------------------------------------------------===//
   //                         Type Predicates.
@@ -1912,6 +1919,9 @@ static inline Selector GetUnarySelector(StringRef name, ASTContext& Ctx) {
 ///
 /// This placement form of operator new uses the ASTContext's allocator for
 /// obtaining memory.
+///
+/// IMPORTANT: These are also declared in clang/AST/Attr.h! Any changes here
+/// need to also be made there.
 ///
 /// We intentionally avoid using a nothrow specification here so that the calls
 /// to this operator will not perform a null check on the result -- the
