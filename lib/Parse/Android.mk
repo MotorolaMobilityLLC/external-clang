@@ -5,29 +5,29 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-TBLGEN_TABLES :=    \
-	AttrList.inc	\
-	AttrLateParsed.inc \
-        AttrParsedAttrList.inc \
-	Attrs.inc	\
-	DeclNodes.inc	\
-	DiagnosticParseKinds.inc	\
-        DiagnosticCommonKinds.inc	\
+TBLGEN_TABLES :=  \
+	AttrList.inc  \
+	AttrLateParsed.inc  \
+	AttrParsedAttrList.inc  \
+	Attrs.inc  \
+	DeclNodes.inc  \
+	DiagnosticParseKinds.inc  \
+        DiagnosticCommonKinds.inc  \
 	StmtNodes.inc
 
-clang_parse_SRC_FILES :=	\
-	ParseAST.cpp	\
-	ParseCXXInlineMethods.cpp	\
-	ParseDecl.cpp	\
-	ParseDeclCXX.cpp	\
-	ParseExpr.cpp	\
-	ParseExprCXX.cpp	\
-	ParseInit.cpp	\
-	ParseObjc.cpp	\
-	ParsePragma.cpp	\
-	ParseStmt.cpp	\
-	ParseTemplate.cpp	\
-	ParseTentative.cpp	\
+clang_parse_SRC_FILES :=  \
+	ParseAST.cpp  \
+	ParseCXXInlineMethods.cpp  \
+	ParseDecl.cpp  \
+	ParseDeclCXX.cpp  \
+	ParseExpr.cpp  \
+	ParseExprCXX.cpp  \
+	ParseInit.cpp  \
+	ParseObjc.cpp  \
+	ParsePragma.cpp  \
+	ParseStmt.cpp  \
+	ParseTemplate.cpp  \
+	ParseTentative.cpp  \
 	Parser.cpp
 
 LOCAL_SRC_FILES := $(clang_parse_SRC_FILES)
