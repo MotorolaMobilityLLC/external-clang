@@ -87,7 +87,14 @@ include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_EXECUTABLE)
 
+# Make sure if clang (i.e. $(LOCAL_MODULE)) get installed,
+# clang++ will get installed as well.
+ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
+    $(ALL_MODULES.$(LOCAL_MODULE).INSTALLED) $(CLANG_CXX)
+# the additional dependency is needed when you run mm/mmm.
+$(LOCAL_MODULE) : $(CLANG_CXX)
+
 # Symlink for clang++
-$(HOST_OUT_EXECUTABLES)/clang++$(HOST_EXECUTABLE_SUFFIX) : $(LOCAL_INSTALLED_MODULE)
+$(CLANG_CXX) : $(LOCAL_INSTALLED_MODULE)
 	@echo "Symlink $@ -> $<"
 	$(hide) ln -sf $(notdir $<) $@
