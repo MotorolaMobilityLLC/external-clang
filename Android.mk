@@ -13,6 +13,7 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/Edit \
   lib/Frontend \
   lib/FrontendTool \
+  lib/Headers \
   lib/Index \
   lib/Lex \
   lib/Parse \
