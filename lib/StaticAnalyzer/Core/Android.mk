@@ -27,6 +27,7 @@ clang_static_analyzer_core_SRC_FILES := \
   ExprEngineCXX.cpp \
   ExprEngineCallAndReturn.cpp \
   ExprEngineObjC.cpp \
+  FunctionSummary.cpp \
   HTMLDiagnostics.cpp \
   MemRegion.cpp \
   ObjCMessage.cpp \

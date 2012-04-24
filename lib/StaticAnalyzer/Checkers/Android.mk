@@ -31,6 +31,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   CheckerDocumentation.cpp \
   ChrootChecker.cpp \
   ClangCheckers.cpp \
+  CommonBugCategories.cpp \
   DeadStoresChecker.cpp \
   DebugCheckers.cpp \
   DereferenceChecker.cpp \

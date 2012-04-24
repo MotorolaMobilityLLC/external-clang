@@ -38,7 +38,6 @@ LOCAL_STATIC_LIBRARIES := \
   libclangStaticAnalyzerCheckers \
   libclangStaticAnalyzerCore \
   libclangAnalysis \
-  libclangIndex \
   libclangRewrite \
   libclangEdit \
   libclangAST \

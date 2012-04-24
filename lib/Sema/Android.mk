@@ -53,6 +53,7 @@ clang_sema_SRC_FILES :=	\
 	SemaOverload.cpp	\
 	SemaPseudoObject.cpp	\
 	SemaStmt.cpp	\
+        SemaStmtAttr.cpp \
 	SemaTemplate.cpp	\
 	SemaTemplateDeduction.cpp	\
 	SemaTemplateInstantiate.cpp	\
