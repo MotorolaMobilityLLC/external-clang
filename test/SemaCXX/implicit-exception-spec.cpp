@@ -39,24 +39,18 @@ namespace InClassInitializers {
   bool z = noexcept(Nested::Inner());
 }
 
-// FIXME:
-// The same problem arises in delayed parsing of exception specifications,
-// which clang does not yet support.
 namespace ExceptionSpecification {
-  struct Nested { // expected-note {{not complete}}
+  struct Nested {
     struct T {
-      T() noexcept(!noexcept(Nested())); // expected-error {{incomplete type}}
+      T() noexcept(!noexcept(Nested())); // expected-error{{exception specification is not available until end of class definition}}
     } t;
   };
 }
 
-// FIXME:
-// The same problem arises in delayed parsing of default arguments,
-// which clang does not yet support.
 namespace DefaultArgument {
-  struct Default { // expected-note {{defined here}}
+  struct Default {
     struct T {
       T(int = ExceptionIf<noexcept(Default())::f()); // expected-error {{call to implicitly-deleted default constructor}}
-    } t;
+    } t; // expected-note {{has no default constructor}}
   };
 }

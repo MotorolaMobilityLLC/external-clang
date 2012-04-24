@@ -49,8 +49,8 @@ Driver::Driver(StringRef ClangExecutable,
                bool IsProduction,
                DiagnosticsEngine &Diags)
   : Opts(createDriverOptTable()), Diags(Diags),
-    ClangExecutable(ClangExecutable), UseStdLib(true),
-    DefaultTargetTriple(DefaultTargetTriple), 
+    ClangExecutable(ClangExecutable), SysRoot(DEFAULT_SYSROOT),
+    UseStdLib(true), DefaultTargetTriple(DefaultTargetTriple),
     DefaultImageName(DefaultImageName),
     DriverTitle("clang \"gcc-compatible\" driver"),
     CCPrintOptionsFilename(0), CCPrintHeadersFilename(0),
@@ -141,6 +141,7 @@ const {
     // -{fsyntax-only,-analyze,emit-ast,S} only run up to the compiler.
   } else if ((PhaseArg = DAL.getLastArg(options::OPT_fsyntax_only)) ||
              (PhaseArg = DAL.getLastArg(options::OPT_rewrite_objc)) ||
+             (PhaseArg = DAL.getLastArg(options::OPT_rewrite_legacy_objc)) ||
              (PhaseArg = DAL.getLastArg(options::OPT__migrate)) ||
              (PhaseArg = DAL.getLastArg(options::OPT__analyze,
                                         options::OPT__analyze_auto)) ||
@@ -659,9 +660,7 @@ bool Driver::HandleImmediateArgs(const Compilation &C) {
     llvm::outs() << "\n";
     llvm::outs() << "libraries: =" << ResourceDir;
 
-    std::string sysroot;
-    if (Arg *A = C.getArgs().getLastArg(options::OPT__sysroot_EQ))
-      sysroot = A->getValue(C.getArgs());
+    StringRef sysroot = C.getSysRoot();
 
     for (ToolChain::path_list::const_iterator it = TC.getFilePaths().begin(),
            ie = TC.getFilePaths().end(); it != ie; ++it) {
@@ -871,30 +870,30 @@ void Driver::BuildUniversalActions(const ToolChain &TC,
 
     // Handle debug info queries.
     Arg *A = Args.getLastArg(options::OPT_g_Group);
-      if (A && !A->getOption().matches(options::OPT_g0) &&
-          !A->getOption().matches(options::OPT_gstabs) &&
-          ContainsCompileOrAssembleAction(Actions.back())) {
-   
-        // Add a 'dsymutil' step if necessary, when debug info is enabled and we
-        // have a compile input. We need to run 'dsymutil' ourselves in such cases
-        // because the debug info will refer to a temporary object file which is
-        // will be removed at the end of the compilation process.
-        if (Act->getType() == types::TY_Image) {
-          ActionList Inputs;
-          Inputs.push_back(Actions.back());
-          Actions.pop_back();
-          Actions.push_back(new DsymutilJobAction(Inputs, types::TY_dSYM));
-        }
-
-        // Verify the output (debug information only) if we passed '-verify'.
-        if (Args.hasArg(options::OPT_verify)) {
-          ActionList VerifyInputs;
-	  VerifyInputs.push_back(Actions.back());
-	  Actions.pop_back();
-	  Actions.push_back(new VerifyJobAction(VerifyInputs,
-						types::TY_Nothing));
-	}
+    if (A && !A->getOption().matches(options::OPT_g0) &&
+        !A->getOption().matches(options::OPT_gstabs) &&
+        ContainsCompileOrAssembleAction(Actions.back())) {
+ 
+      // Add a 'dsymutil' step if necessary, when debug info is enabled and we
+      // have a compile input. We need to run 'dsymutil' ourselves in such cases
+      // because the debug info will refer to a temporary object file which is
+      // will be removed at the end of the compilation process.
+      if (Act->getType() == types::TY_Image) {
+        ActionList Inputs;
+        Inputs.push_back(Actions.back());
+        Actions.pop_back();
+        Actions.push_back(new DsymutilJobAction(Inputs, types::TY_dSYM));
       }
+
+      // Verify the output (debug information only) if we passed '-verify'.
+      if (Args.hasArg(options::OPT_verify)) {
+        ActionList VerifyInputs;
+        VerifyInputs.push_back(Actions.back());
+        Actions.pop_back();
+        Actions.push_back(new VerifyJobAction(VerifyInputs,
+                                              types::TY_Nothing));
+      }
+    }
   }
 }
 
@@ -1002,6 +1001,7 @@ void Driver::BuildInputs(const ToolChain &TC, const DerivedArgList &Args,
     } else if (A->getOption().matches(options::OPT_x)) {
       InputTypeArg = A;
       InputType = types::lookupTypeForTypeSpecifier(A->getValue(Args));
+      A->claim();
 
       // Follow gcc behavior and treat as linker input for invalid -x
       // options. Its not clear why we shouldn't just revert to unknown; but
@@ -1143,6 +1143,8 @@ Action *Driver::ConstructPhaseAction(const ArgList &Args, phases::ID Phase,
       return new CompileJobAction(Input, types::TY_Nothing);
     } else if (Args.hasArg(options::OPT_rewrite_objc)) {
       return new CompileJobAction(Input, types::TY_RewrittenObjC);
+    } else if (Args.hasArg(options::OPT_rewrite_legacy_objc)) {
+      return new CompileJobAction(Input, types::TY_RewrittenLegacyObjC);
     } else if (Args.hasArg(options::OPT__analyze, options::OPT__analyze_auto)) {
       return new AnalyzeJobAction(Input, types::TY_Plist);
     } else if (Args.hasArg(options::OPT__migrate)) {

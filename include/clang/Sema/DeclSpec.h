@@ -245,6 +245,7 @@ public:
   static const TST TST_char16 = clang::TST_char16;
   static const TST TST_char32 = clang::TST_char32;
   static const TST TST_int = clang::TST_int;
+  static const TST TST_int128 = clang::TST_int128;
   static const TST TST_half = clang::TST_half;
   static const TST TST_float = clang::TST_float;
   static const TST TST_double = clang::TST_double;
@@ -1149,6 +1150,10 @@ struct DeclaratorChunk {
       /// \brief Pointer to the expression in the noexcept-specifier of this
       /// function, if it has one.
       Expr *NoexceptExpr;
+  
+      /// \brief Pointer to the cached tokens for an exception-specification
+      /// that has not yet been parsed.
+      CachedTokens *ExceptionSpecTokens;
     };
 
     /// TrailingReturnType - If this isn't null, it's the trailing return type
@@ -1171,6 +1176,8 @@ struct DeclaratorChunk {
         delete[] ArgInfo;
       if (getExceptionSpecType() == EST_Dynamic)
         delete[] Exceptions;
+      else if (getExceptionSpecType() == EST_Delayed)
+        delete ExceptionSpecTokens;
     }
 
     /// isKNRPrototype - Return true if this is a K&R style identifier list,
@@ -1346,6 +1353,7 @@ struct DeclaratorChunk {
                                      SourceRange *ExceptionRanges,
                                      unsigned NumExceptions,
                                      Expr *NoexceptExpr,
+                                     CachedTokens *ExceptionSpecTokens,
                                      SourceLocation LocalRangeBegin,
                                      SourceLocation LocalRangeEnd,
                                      Declarator &TheDeclarator,
@@ -1653,6 +1661,10 @@ public:
 
     if (getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_extern &&
         Context != FileContext)
+      return false;
+
+    // Special names can't have direct initializers.
+    if (Name.getKind() != UnqualifiedId::IK_Identifier)
       return false;
 
     switch (Context) {

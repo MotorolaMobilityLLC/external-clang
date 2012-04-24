@@ -365,7 +365,7 @@ void ASTTypeWriter::VisitElaboratedType(const ElaboratedType *T) {
 }
 
 void ASTTypeWriter::VisitInjectedClassNameType(const InjectedClassNameType *T) {
-  Writer.AddDeclRef(T->getDecl(), Record);
+  Writer.AddDeclRef(T->getDecl()->getCanonicalDecl(), Record);
   Writer.AddTypeRef(T->getInjectedSpecializationType(), Record);
   Code = TYPE_INJECTED_CLASS_NAME;
 }
@@ -651,6 +651,7 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(STMT_CASE);
   RECORD(STMT_DEFAULT);
   RECORD(STMT_LABEL);
+  RECORD(STMT_ATTRIBUTED);
   RECORD(STMT_IF);
   RECORD(STMT_SWITCH);
   RECORD(STMT_WHILE);
@@ -695,7 +696,7 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(EXPR_BLOCK);
   RECORD(EXPR_GENERIC_SELECTION);
   RECORD(EXPR_OBJC_STRING_LITERAL);
-  RECORD(EXPR_OBJC_NUMERIC_LITERAL);
+  RECORD(EXPR_OBJC_BOXED_EXPRESSION);
   RECORD(EXPR_OBJC_ARRAY_LITERAL);
   RECORD(EXPR_OBJC_DICTIONARY_LITERAL);
   RECORD(EXPR_OBJC_ENCODE);

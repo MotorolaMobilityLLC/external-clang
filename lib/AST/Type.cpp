@@ -1428,13 +1428,13 @@ const char *BuiltinType::getName(const PrintingPolicy &Policy) const {
   case Int:               return "int";
   case Long:              return "long";
   case LongLong:          return "long long";
-  case Int128:            return "__int128_t";
+  case Int128:            return "__int128";
   case UChar:             return "unsigned char";
   case UShort:            return "unsigned short";
   case UInt:              return "unsigned int";
   case ULong:             return "unsigned long";
   case ULongLong:         return "unsigned long long";
-  case UInt128:           return "__uint128_t";
+  case UInt128:           return "unsigned __int128";
   case Half:              return "half";
   case Float:             return "float";
   case Double:            return "double";
@@ -1546,6 +1546,14 @@ FunctionProtoType::FunctionProtoType(QualType result, const QualType *args,
       else if (epi.NoexceptExpr->isInstantiationDependent())
         setInstantiationDependent();
     }
+  } else if (getExceptionSpecType() == EST_Uninstantiated) {
+    // Store the function decl from which we will resolve our
+    // exception specification.
+    FunctionDecl **slot = reinterpret_cast<FunctionDecl**>(argSlot + numArgs);
+    slot[0] = epi.ExceptionSpecDecl;
+    slot[1] = epi.ExceptionSpecTemplate;
+    // This exception specification doesn't make the type dependent, because
+    // it's not instantiated as part of instantiating the type.
   }
 
   if (epi.ConsumedArguments) {
@@ -1629,6 +1637,8 @@ void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID, QualType Result,
       ID.AddPointer(epi.Exceptions[i].getAsOpaquePtr());
   } else if (epi.ExceptionSpecType == EST_ComputedNoexcept && epi.NoexceptExpr){
     epi.NoexceptExpr->Profile(ID, Context, false);
+  } else if (epi.ExceptionSpecType == EST_Uninstantiated) {
+    ID.AddPointer(epi.ExceptionSpecDecl->getCanonicalDecl());
   }
   if (epi.ConsumedArguments) {
     for (unsigned i = 0; i != NumArgs; ++i)

@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Serialization/ASTWriter.h"
+#include "clang/Serialization/ASTReader.h"
 #include "ASTCommon.h"
 #include "clang/AST/DeclVisitor.h"
 #include "clang/AST/DeclCXX.h"
@@ -774,6 +775,9 @@ void ASTDeclWriter::VisitBlockDecl(BlockDecl *D) {
   for (FunctionDecl::param_iterator P = D->param_begin(), PEnd = D->param_end();
        P != PEnd; ++P)
     Writer.AddDeclRef(*P, Record);
+  Record.push_back(D->isVariadic());
+  Record.push_back(D->blockMissingReturnType());
+  Record.push_back(D->isConversionFromLambda());
   Record.push_back(D->capturesCXXThis());
   Record.push_back(D->getNumCaptures());
   for (BlockDecl::capture_iterator
@@ -1640,19 +1644,6 @@ void ASTWriter::WriteDecl(ASTContext &Context, Decl *D) {
   RecordData Record;
   ASTDeclWriter W(*this, Context, Record);
 
-  // If this declaration is also a DeclContext, write blocks for the
-  // declarations that lexically stored inside its context and those
-  // declarations that are visible from its context. These blocks
-  // are written before the declaration itself so that we can put
-  // their offsets into the record for the declaration.
-  uint64_t LexicalOffset = 0;
-  uint64_t VisibleOffset = 0;
-  DeclContext *DC = dyn_cast<DeclContext>(D);
-  if (DC) {
-    LexicalOffset = WriteDeclContextLexicalBlock(Context, DC);
-    VisibleOffset = WriteDeclContextVisibleBlock(Context, DC);
-  }
-
   // Determine the ID for this declaration.
   serialization::DeclID ID;
   if (D->isFromASTFile())
@@ -1664,8 +1655,31 @@ void ASTWriter::WriteDecl(ASTContext &Context, Decl *D) {
     
     ID= IDR;
   }
+
+  bool isReplacingADecl = ID < FirstDeclID;
+
+  // If this declaration is also a DeclContext, write blocks for the
+  // declarations that lexically stored inside its context and those
+  // declarations that are visible from its context. These blocks
+  // are written before the declaration itself so that we can put
+  // their offsets into the record for the declaration.
+  uint64_t LexicalOffset = 0;
+  uint64_t VisibleOffset = 0;
+  DeclContext *DC = dyn_cast<DeclContext>(D);
+  if (DC) {
+    if (isReplacingADecl) {
+      // It is replacing a decl from a chained PCH; make sure that the
+      // DeclContext is fully loaded.
+      if (DC->hasExternalLexicalStorage())
+        DC->LoadLexicalDeclsFromExternalStorage();
+      if (DC->hasExternalVisibleStorage())
+        Chain->completeVisibleDeclsMap(DC);
+    }
+    LexicalOffset = WriteDeclContextLexicalBlock(Context, DC);
+    VisibleOffset = WriteDeclContextVisibleBlock(Context, DC);
+  }
   
-  if (ID < FirstDeclID) {
+  if (isReplacingADecl) {
     // We're replacing a decl in a previous file.
     ReplacedDecls.push_back(ReplacedDeclInfo(ID, Stream.GetCurrentBitNo(),
                                              D->getLocation()));
