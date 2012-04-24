@@ -555,15 +555,17 @@ static void EmitMemberInitializer(CodeGenFunction &CGF,
   QualType FieldType = Field->getType();
 
   llvm::Value *ThisPtr = CGF.LoadCXXThis();
+  QualType RecordTy = CGF.getContext().getTypeDeclType(ClassDecl);
   LValue LHS;
-  
+
   // If we are initializing an anonymous union field, drill down to the field.
   if (MemberInit->isIndirectMemberInitializer()) {
     LHS = CGF.EmitLValueForAnonRecordField(ThisPtr,
                                            MemberInit->getIndirectMember(), 0);
     FieldType = MemberInit->getIndirectMember()->getAnonField()->getType();
   } else {
-    LHS = CGF.EmitLValueForFieldInitialization(ThisPtr, Field, 0);
+    LValue ThisLHSLV = CGF.MakeNaturalAlignAddrLValue(ThisPtr, RecordTy);
+    LHS = CGF.EmitLValueForFieldInitialization(ThisLHSLV, Field);
   }
 
   // Special case: if we are in a copy or move constructor, and we are copying
@@ -585,7 +587,8 @@ static void EmitMemberInitializer(CodeGenFunction &CGF,
       unsigned SrcArgIndex = Args.size() - 1;
       llvm::Value *SrcPtr
         = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(Args[SrcArgIndex]));
-      LValue Src = CGF.EmitLValueForFieldInitialization(SrcPtr, Field, 0);
+      LValue ThisRHSLV = CGF.MakeNaturalAlignAddrLValue(SrcPtr, RecordTy);
+      LValue Src = CGF.EmitLValueForFieldInitialization(ThisRHSLV, Field);
       
       // Copy the aggregate.
       CGF.EmitAggregateCopy(LHS.getAddress(), Src.getAddress(), FieldType,
@@ -730,6 +733,9 @@ void CodeGenFunction::EmitConstructorBody(FunctionArgList &Args) {
     EnterCXXTryStmt(*cast<CXXTryStmt>(Body), true);
 
   EHScopeStack::stable_iterator CleanupDepth = EHStack.stable_begin();
+
+  // TODO: in restricted cases, we can emit the vbase initializers of
+  // a complete ctor and then delegate to the base ctor.
 
   // Emit the constructor prologue, i.e. the base and member
   // initializers.
@@ -975,7 +981,9 @@ namespace {
     void Emit(CodeGenFunction &CGF, Flags flags) {
       // Find the address of the field.
       llvm::Value *thisValue = CGF.LoadCXXThis();
-      LValue LV = CGF.EmitLValueForField(thisValue, field, /*CVRQualifiers=*/0);
+      QualType RecordTy = CGF.getContext().getTagDeclType(field->getParent());
+      LValue ThisLV = CGF.MakeAddrLValue(thisValue, RecordTy);
+      LValue LV = CGF.EmitLValueForField(ThisLV, field);
       assert(LV.isSimple());
       
       CGF.emitDestroy(LV.getAddress(), field->getType(), destroyer,
@@ -1514,7 +1522,8 @@ CodeGenFunction::InitializeVTablePointer(BaseSubobject Base,
   llvm::Type *AddressPointPtrTy =
     VTableAddressPoint->getType()->getPointerTo();
   VTableField = Builder.CreateBitCast(VTableField, AddressPointPtrTy);
-  Builder.CreateStore(VTableAddressPoint, VTableField);
+  llvm::StoreInst *Store = Builder.CreateStore(VTableAddressPoint, VTableField);
+  CGM.DecorateInstruction(Store, CGM.getTBAAInfoForVTablePtr());
 }
 
 void
@@ -1597,7 +1606,9 @@ void CodeGenFunction::InitializeVTablePointers(const CXXRecordDecl *RD) {
 llvm::Value *CodeGenFunction::GetVTablePtr(llvm::Value *This,
                                            llvm::Type *Ty) {
   llvm::Value *VTablePtrSrc = Builder.CreateBitCast(This, Ty->getPointerTo());
-  return Builder.CreateLoad(VTablePtrSrc, "vtable");
+  llvm::Instruction *VTable = Builder.CreateLoad(VTablePtrSrc, "vtable");
+  CGM.DecorateInstruction(VTable, CGM.getTBAAInfoForVTablePtr());
+  return VTable;
 }
 
 static const CXXRecordDecl *getMostDerivedClassDecl(const Expr *Base) {

@@ -229,6 +229,16 @@ public:
   /// For DerivedToBase casts, create a CXXBaseObjectRegion and return it.
   virtual SVal evalDerivedToBase(SVal derived, QualType basePtrType);
 
+  /// \brief Evaluates C++ dynamic_cast cast.
+  /// The callback may result in the following 3 scenarios:
+  ///  - Successful cast (ex: derived is subclass of base).
+  ///  - Failed cast (ex: derived is definitely not a subclass of base).
+  ///  - We don't know (base is a symbolic region and we don't have 
+  ///    enough info to determine if the cast will succeed at run time).
+  /// The function returns an SVal representing the derived class; it's
+  /// valid only if Failed flag is set to false.
+  virtual SVal evalDynamicCast(SVal base, QualType derivedPtrType,bool &Failed);
+
   StoreRef getInitialStore(const LocationContext *InitLoc) {
     return StoreRef(RBFactory.getEmptyMap().getRootWithoutRetain(), *this);
   }
@@ -877,6 +887,75 @@ SVal RegionStoreManager::evalDerivedToBase(SVal derived, QualType baseType) {
   return loc::MemRegionVal(baseReg);
 }
 
+SVal RegionStoreManager::evalDynamicCast(SVal base, QualType derivedType,
+                                         bool &Failed) {
+  Failed = false;
+
+  loc::MemRegionVal *baseRegVal = dyn_cast<loc::MemRegionVal>(&base);
+  if (!baseRegVal)
+    return UnknownVal();
+  const MemRegion *BaseRegion = baseRegVal->stripCasts();
+
+  // Assume the derived class is a pointer or a reference to a CXX record.
+  derivedType = derivedType->getPointeeType();
+  assert(!derivedType.isNull());
+  const CXXRecordDecl *DerivedDecl = derivedType->getAsCXXRecordDecl();
+  if (!DerivedDecl && !derivedType->isVoidType())
+    return UnknownVal();
+
+  // Drill down the CXXBaseObject chains, which represent upcasts (casts from
+  // derived to base).
+  const MemRegion *SR = BaseRegion;
+  while (const TypedRegion *TSR = dyn_cast_or_null<TypedRegion>(SR)) {
+    QualType BaseType = TSR->getLocationType()->getPointeeType();
+    assert(!BaseType.isNull());
+    const CXXRecordDecl *SRDecl = BaseType->getAsCXXRecordDecl();
+    if (!SRDecl)
+      return UnknownVal();
+
+    // If found the derived class, the cast succeeds.
+    if (SRDecl == DerivedDecl)
+      return loc::MemRegionVal(TSR);
+
+    // If the region type is a subclass of the derived type.
+    if (!derivedType->isVoidType() && SRDecl->isDerivedFrom(DerivedDecl)) {
+      // This occurs in two cases.
+      // 1) We are processing an upcast.
+      // 2) We are processing a downcast but we jumped directly from the
+      // ancestor to a child of the cast value, so conjure the
+      // appropriate region to represent value (the intermediate node).
+      return loc::MemRegionVal(MRMgr.getCXXBaseObjectRegion(DerivedDecl,
+                                                            BaseRegion));
+    }
+
+    // If super region is not a parent of derived class, the cast definitely
+    // fails.
+    if (!derivedType->isVoidType() &&
+        DerivedDecl->isProvablyNotDerivedFrom(SRDecl)) {
+      Failed = true;
+      return UnknownVal();
+    }
+
+    if (const CXXBaseObjectRegion *R = dyn_cast<CXXBaseObjectRegion>(TSR))
+      // Drill down the chain to get the derived classes.
+      SR = R->getSuperRegion();
+    else {
+      // We reached the bottom of the hierarchy.
+
+      // If this is a cast to void*, return the region.
+      if (derivedType->isVoidType())
+        return loc::MemRegionVal(TSR);
+
+      // We did not find the derived class. We we must be casting the base to
+      // derived, so the cast should fail.
+      Failed = true;
+      return UnknownVal();
+    }
+  }
+
+  return UnknownVal();
+}
+
 //===----------------------------------------------------------------------===//
 // Loading values from regions.
 //===----------------------------------------------------------------------===//
@@ -1194,14 +1273,23 @@ SVal RegionStoreManager::getBindingForFieldOrElementCommon(Store store,
 
   // At this point we have already checked in either getBindingForElement or
   // getBindingForField if 'R' has a direct binding.
-
   RegionBindings B = GetRegionBindings(store);
+  
+  // Record whether or not we see a symbolic index.  That can completely
+  // be out of scope of our lookup.
+  bool hasSymbolicIndex = false;
 
   while (superR) {
     if (const Optional<SVal> &D =
         getBindingForDerivedDefaultValue(B, superR, R, Ty))
       return *D;
 
+    if (const ElementRegion *ER = dyn_cast<ElementRegion>(superR)) {
+      NonLoc index = ER->getIndex();
+      if (!index.isConstant())
+        hasSymbolicIndex = true;
+    }
+    
     // If our super region is a field or element itself, walk up the region
     // hierarchy to see if there is a default value installed in an ancestor.
     if (const SubRegion *SR = dyn_cast<SubRegion>(superR)) {
@@ -1220,7 +1308,7 @@ SVal RegionStoreManager::getBindingForFieldOrElementCommon(Store store,
     return getLazyBinding(lazyBindingRegion, lazyBindingStore);
 
   if (R->hasStackNonParametersStorage()) {
-    if (const ElementRegion *ER = dyn_cast<ElementRegion>(R)) {
+    if (isa<ElementRegion>(R)) {
       // Currently we don't reason specially about Clang-style vectors.  Check
       // if superR is a vector and if so return Unknown.
       if (const TypedValueRegion *typedSuperR = 
@@ -1228,13 +1316,15 @@ SVal RegionStoreManager::getBindingForFieldOrElementCommon(Store store,
         if (typedSuperR->getValueType()->isVectorType())
           return UnknownVal();
       }
-      
-      // FIXME: We also need to take ElementRegions with symbolic indexes into
-      // account.
-      if (!ER->getIndex().isConstant())
-        return UnknownVal();
     }
 
+    // FIXME: We also need to take ElementRegions with symbolic indexes into
+    // account.  This case handles both directly accessing an ElementRegion
+    // with a symbolic offset, but also fields within an element with
+    // a symbolic offset.
+    if (hasSymbolicIndex)
+      return UnknownVal();
+    
     return UndefinedVal();
   }
 

@@ -64,6 +64,9 @@ public:
 
   /// \brief Return the TypeLoc wrapper for the type source info.
   TypeLoc getTypeLoc() const; // implemented in TypeLoc.h
+  
+  /// \brief Override the type stored in this TypeSourceInfo. Use with caution!
+  void overrideType(QualType T) { Ty = T; }
 };
 
 /// TranslationUnitDecl - The top declaration context.
@@ -242,11 +245,7 @@ public:
     bool visibilityExplicit() const { return explicit_; }
 
     void setLinkage(Linkage L) { linkage_ = L; }
-    void setVisibility(Visibility V) { visibility_ = V; }
     void setVisibility(Visibility V, bool E) { visibility_ = V; explicit_ = E; }
-    void setVisibility(LinkageInfo Other) {
-      setVisibility(Other.visibility(), Other.visibilityExplicit());
-    }
 
     void mergeLinkage(Linkage L) {
       setLinkage(minLinkage(linkage(), L));
@@ -2704,13 +2703,6 @@ class EnumDecl : public TagDecl {
   /// information.
   MemberSpecializationInfo *SpecializationInfo;
 
-  // The number of positive and negative bits required by the
-  // enumerators are stored in the SubclassBits field.
-  enum {
-    NumBitsWidth = 8,
-    NumBitsMask = (1 << NumBitsWidth) - 1
-  };
-
   EnumDecl(DeclContext *DC, SourceLocation StartLoc, SourceLocation IdLoc,
            IdentifierInfo *Id, EnumDecl *PrevDecl,
            bool Scoped, bool ScopedUsingClassTag, bool Fixed)
@@ -2868,6 +2860,16 @@ public:
   /// from which this enumeration type was instantiated, or NULL if
   /// this enumeration was not instantiated from any template.
   EnumDecl *getInstantiatedFromMemberEnum() const;
+
+  /// \brief If this enumeration is a member of a specialization of a
+  /// templated class, determine what kind of template specialization
+  /// or instantiation this is.
+  TemplateSpecializationKind getTemplateSpecializationKind() const;
+
+  /// \brief For an enumeration member that was instantiated from a member
+  /// enumeration of a templated class, set the template specialiation kind.
+  void setTemplateSpecializationKind(TemplateSpecializationKind TSK,
+                        SourceLocation PointOfInstantiation = SourceLocation());
 
   /// \brief If this enumeration is an instantiation of a member enumeration of
   /// a class template specialization, retrieves the member specialization

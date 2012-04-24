@@ -26,6 +26,7 @@
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
+#include "clang/Parse/ParseDiagnostic.h"
 #include "clang/Sema/DeclSpec.h"
 #include "clang/Sema/DelayedDiagnostic.h"
 #include "clang/Sema/Lookup.h"
@@ -560,7 +561,7 @@ static void maybeSynthesizeBlockSignature(TypeProcessingState &state,
                              /*const qualifier*/SourceLocation(),
                              /*volatile qualifier*/SourceLocation(),
                              /*mutable qualifier*/SourceLocation(),
-                             /*EH*/ EST_None, SourceLocation(), 0, 0, 0, 0,
+                             /*EH*/ EST_None, SourceLocation(), 0, 0, 0, 0, 0,
                              /*parens*/ loc, loc,
                              declarator));
 
@@ -720,6 +721,12 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     }
     break;
   }
+  case DeclSpec::TST_int128:
+    if (DS.getTypeSpecSign() == DeclSpec::TSS_unsigned)
+      Result = Context.UnsignedInt128Ty;
+    else
+      Result = Context.Int128Ty;
+    break;
   case DeclSpec::TST_half: Result = Context.HalfTy; break;
   case DeclSpec::TST_float: Result = Context.FloatTy; break;
   case DeclSpec::TST_double:
@@ -971,6 +978,25 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
         TypeQuals && Result->isReferenceType()) {
       TypeQuals &= ~DeclSpec::TQ_const;
       TypeQuals &= ~DeclSpec::TQ_volatile;
+    }
+
+    // C90 6.5.3 constraints: "The same type qualifier shall not appear more
+    // than once in the same specifier-list or qualifier-list, either directly
+    // or via one or more typedefs."
+    if (!S.getLangOpts().C99 && !S.getLangOpts().CPlusPlus 
+        && TypeQuals & Result.getCVRQualifiers()) {
+      if (TypeQuals & DeclSpec::TQ_const && Result.isConstQualified()) {
+        S.Diag(DS.getConstSpecLoc(), diag::ext_duplicate_declspec) 
+          << "const";
+      }
+
+      if (TypeQuals & DeclSpec::TQ_volatile && Result.isVolatileQualified()) {
+        S.Diag(DS.getVolatileSpecLoc(), diag::ext_duplicate_declspec) 
+          << "volatile";
+      }
+
+      // C90 doesn't have restrict, so it doesn't force us to produce a warning
+      // in this case.
     }
 
     Qualifiers Quals = Qualifiers::fromCVRMask(TypeQuals);
@@ -2345,34 +2371,33 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
           EPI.ConsumedArguments = ConsumedArguments.data();
 
         SmallVector<QualType, 4> Exceptions;
-        EPI.ExceptionSpecType = FTI.getExceptionSpecType();
+        SmallVector<ParsedType, 2> DynamicExceptions;
+        SmallVector<SourceRange, 2> DynamicExceptionRanges;
+        Expr *NoexceptExpr = 0;
+        
         if (FTI.getExceptionSpecType() == EST_Dynamic) {
-          Exceptions.reserve(FTI.NumExceptions);
-          for (unsigned ei = 0, ee = FTI.NumExceptions; ei != ee; ++ei) {
-            // FIXME: Preserve type source info.
-            QualType ET = S.GetTypeFromParser(FTI.Exceptions[ei].Ty);
-            // Check that the type is valid for an exception spec, and
-            // drop it if not.
-            if (!S.CheckSpecifiedExceptionType(ET, FTI.Exceptions[ei].Range))
-              Exceptions.push_back(ET);
+          // FIXME: It's rather inefficient to have to split into two vectors
+          // here.
+          unsigned N = FTI.NumExceptions;
+          DynamicExceptions.reserve(N);
+          DynamicExceptionRanges.reserve(N);
+          for (unsigned I = 0; I != N; ++I) {
+            DynamicExceptions.push_back(FTI.Exceptions[I].Ty);
+            DynamicExceptionRanges.push_back(FTI.Exceptions[I].Range);
           }
-          EPI.NumExceptions = Exceptions.size();
-          EPI.Exceptions = Exceptions.data();
         } else if (FTI.getExceptionSpecType() == EST_ComputedNoexcept) {
-          // If an error occurred, there's no expression here.
-          if (Expr *NoexceptExpr = FTI.NoexceptExpr) {
-            assert((NoexceptExpr->isTypeDependent() ||
-                    NoexceptExpr->getType()->getCanonicalTypeUnqualified() ==
-                        Context.BoolTy) &&
-                 "Parser should have made sure that the expression is boolean");
-            if (!NoexceptExpr->isValueDependent())
-              NoexceptExpr = S.VerifyIntegerConstantExpression(NoexceptExpr, 0,
-                S.PDiag(diag::err_noexcept_needs_constant_expression),
-                /*AllowFold*/ false).take();
-            EPI.NoexceptExpr = NoexceptExpr;
-          }
-        } else if (FTI.getExceptionSpecType() == EST_None &&
-                   ImplicitlyNoexcept && chunkIndex == 0) {
+          NoexceptExpr = FTI.NoexceptExpr;
+        }
+              
+        S.checkExceptionSpecification(FTI.getExceptionSpecType(),
+                                      DynamicExceptions,
+                                      DynamicExceptionRanges,
+                                      NoexceptExpr,
+                                      Exceptions,
+                                      EPI);
+        
+        if (FTI.getExceptionSpecType() == EST_None &&
+            ImplicitlyNoexcept && chunkIndex == 0) {
           // Only the outermost chunk is marked noexcept, of course.
           EPI.ExceptionSpecType = EST_BasicNoexcept;
         }
@@ -4181,12 +4206,12 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
                                                       /*Complain=*/diag != 0);
     } else if (CXXRecordDecl *Rec
                  = dyn_cast<CXXRecordDecl>(Record->getDecl())) {
-      if (CXXRecordDecl *Pattern = Rec->getInstantiatedFromMemberClass()) {
-        MemberSpecializationInfo *MSInfo = Rec->getMemberSpecializationInfo();
-        assert(MSInfo && "Missing member specialization information?");
+      CXXRecordDecl *Pattern = Rec->getInstantiatedFromMemberClass();
+      if (!Rec->isBeingDefined() && Pattern) {
+        MemberSpecializationInfo *MSI = Rec->getMemberSpecializationInfo();
+        assert(MSI && "Missing member specialization information?");
         // This record was instantiated from a class within a template.
-        if (MSInfo->getTemplateSpecializationKind() 
-                                               != TSK_ExplicitSpecialization)
+        if (MSI->getTemplateSpecializationKind() != TSK_ExplicitSpecialization)
           return InstantiateClass(Loc, Rec, Pattern,
                                   getTemplateInstantiationArgs(Rec),
                                   TSK_ImplicitInstantiation,

@@ -340,7 +340,7 @@ public:
   /// element, sets the element index.
   void setElementIndex(unsigned Index) {
     assert(getKind() == EK_ArrayElement || getKind() == EK_VectorElement ||
-           EK_ComplexElement);
+           getKind() == EK_ComplexElement);
     this->Index = Index;
   }
 
@@ -719,7 +719,9 @@ public:
     FK_PlaceholderType,
     /// \brief Failed to initialize a std::initializer_list because copy
     /// construction of some element failed.
-    FK_InitListElementCopyFailure
+    FK_InitListElementCopyFailure,
+    /// \brief List-copy-initialization chose an explicit constructor.
+    FK_ExplicitConstructor
   };
   
 private:
@@ -732,6 +734,9 @@ private:
   /// \brief The candidate set created when initialization failed.
   OverloadCandidateSet FailedCandidateSet;
 
+  /// \brief The incomplete type that caused a failure.
+  QualType FailedIncompleteType;
+  
   /// \brief Prints a follow-up note that highlights the location of
   /// the initialized entity, if it's remote.
   void PrintInitLocationNote(Sema &S, const InitializedEntity &Entity);
@@ -947,6 +952,8 @@ public:
   void SetFailed(FailureKind Failure) {
     SequenceKind = FailedSequence;
     this->Failure = Failure;
+    assert((Failure != FK_Incomplete || !FailedIncompleteType.isNull()) &&
+           "Incomplete type failure requires a type!");
   }
   
   /// \brief Note that this initialization sequence failed due to failed
@@ -963,6 +970,13 @@ public:
   /// sequence failed due to a bad overload.
   OverloadingResult getFailedOverloadResult() const {
     return FailedOverloadResult;
+  }
+
+  /// \brief Note that this initialization sequence failed due to an
+  /// incomplete type.
+  void setIncompleteTypeFailure(QualType IncompleteType) {
+    FailedIncompleteType = IncompleteType;
+    SetFailed(FK_Incomplete);
   }
 
   /// \brief Determine why initialization failed.

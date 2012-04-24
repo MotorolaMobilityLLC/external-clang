@@ -39,6 +39,8 @@ static unsigned getDefaultParsingOptions() {
     options |= CXTranslationUnit_CacheCompletionResults;
   if (getenv("CINDEXTEST_COMPLETION_NO_CACHING"))
     options &= ~CXTranslationUnit_CacheCompletionResults;
+  if (getenv("CINDEXTEST_SKIP_FUNCTION_BODIES"))
+    options |= CXTranslationUnit_SkipFunctionBodies;
   
   return options;
 }
@@ -171,7 +173,8 @@ static void PrintRange(CXSourceRange R, const char *str) {
   if (!begin_file || !end_file)
     return;
 
-  printf(" %s=", str);
+  if (str)
+    printf(" %s=", str);
   PrintExtent(stdout, begin_line, begin_column, end_line, end_column);
 }
 
@@ -662,6 +665,23 @@ static enum CXChildVisitResult PrintTypeKind(CXCursor cursor, CXCursor p,
         clang_disposeString(RS);
       }
     }
+    /* Print the argument types if they exist. */
+    {
+      int numArgs = clang_Cursor_getNumArguments(cursor);
+      if (numArgs != -1 && numArgs != 0) {
+        int i;
+        printf(" [args=");
+        for (i = 0; i < numArgs; ++i) {
+          CXType T = clang_getCursorType(clang_Cursor_getArgument(cursor, i));
+          if (T.kind != CXType_Invalid) {
+            CXString S = clang_getTypeKindSpelling(T.kind);
+            printf(" %s", clang_getCString(S));
+            clang_disposeString(S);
+          }
+        }
+        printf("]");
+      }
+    }
     /* Print if this is a non-POD type. */
     printf(" [isPOD=%d]", clang_isPODType(T));
 
@@ -1082,7 +1102,9 @@ void print_completion_result(CXCompletionResult *completion_result,
   FILE *file = (FILE *)client_data;
   CXString ks = clang_getCursorKindSpelling(completion_result->CursorKind);
   unsigned annotationCount;
-
+  enum CXCursorKind ParentKind;
+  CXString ParentName;
+  
   fprintf(file, "%s:", clang_getCString(ks));
   clang_disposeString(ks);
 
@@ -1121,6 +1143,19 @@ void print_completion_result(CXCompletionResult *completion_result,
     fprintf(file, ")");
   }
 
+  if (!getenv("CINDEXTEST_NO_COMPLETION_PARENTS")) {
+    ParentName = clang_getCompletionParent(completion_result->CompletionString,
+                                           &ParentKind);
+    if (ParentKind != CXCursor_NotImplemented) {
+      CXString KindSpelling = clang_getCursorKindSpelling(ParentKind);
+      fprintf(file, " (parent: %s '%s')",
+              clang_getCString(KindSpelling),
+              clang_getCString(ParentName));
+      clang_disposeString(KindSpelling);
+    }
+    clang_disposeString(ParentName);
+  }
+  
   fprintf(file, "\n");
 }
 
@@ -1424,7 +1459,31 @@ static int inspect_cursor_at(int argc, const char **argv) {
       if (I + 1 == Repeats) {
         CXCompletionString completionString = clang_getCursorCompletionString(
                                                                         Cursor);
+        CXSourceLocation CursorLoc = clang_getCursorLocation(Cursor);
+        CXString Spelling;
+        const char *cspell;
+        unsigned line, column;
+        clang_getSpellingLocation(CursorLoc, 0, &line, &column, 0);
+        printf("%d:%d ", line, column);
         PrintCursor(Cursor);
+        PrintCursorExtent(Cursor);
+        Spelling = clang_getCursorSpelling(Cursor);
+        cspell = clang_getCString(Spelling);
+        if (cspell && strlen(cspell) != 0) {
+          unsigned pieceIndex;
+          printf(" Spelling=%s (", cspell);
+          for (pieceIndex = 0; ; ++pieceIndex) {
+            CXSourceRange range =
+              clang_Cursor_getSpellingNameRange(Cursor, pieceIndex, 0);
+            if (clang_Range_isNull(range))
+              break;
+            PrintRange(range, 0);
+          }
+          printf(")");
+        }
+        clang_disposeString(Spelling);
+        if (clang_Cursor_getObjCSelectorIndex(Cursor) != -1)
+          printf(" Selector index=%d",clang_Cursor_getObjCSelectorIndex(Cursor));
         if (completionString != NULL) {
           printf("\nCompletion string: ");
           print_completion_string(completionString, stdout);
@@ -2184,6 +2243,7 @@ int perform_token_annotation(int argc, const char **argv) {
     clang_getSpellingLocation(clang_getRangeEnd(extent),
                               0, &end_line, &end_column, 0);
     printf("%s: \"%s\" ", kind, clang_getCString(spelling));
+    clang_disposeString(spelling);
     PrintExtent(stdout, start_line, start_column, end_line, end_column);
     if (!clang_isInvalid(cursors[i].kind)) {
       printf(" ");
@@ -2529,9 +2589,9 @@ static void printDiagnosticSet(CXDiagnosticSet Diags, unsigned indent) {
     CXSourceLocation DiagLoc;
     CXDiagnostic D;
     CXFile File;
-    CXString FileName, DiagSpelling, DiagOption;
+    CXString FileName, DiagSpelling, DiagOption, DiagCat;
     unsigned line, column, offset;
-    const char *DiagOptionStr = 0;
+    const char *DiagOptionStr = 0, *DiagCatStr = 0;
     
     D = clang_getDiagnosticInSet(Diags, i);
     DiagLoc = clang_getDiagnosticLocation(D);
@@ -2552,6 +2612,12 @@ static void printDiagnosticSet(CXDiagnosticSet Diags, unsigned indent) {
     DiagOptionStr = clang_getCString(DiagOption);
     if (DiagOptionStr) {
       fprintf(stderr, " [%s]", DiagOptionStr);
+    }
+    
+    DiagCat = clang_getDiagnosticCategoryText(D);
+    DiagCatStr = clang_getCString(DiagCat);
+    if (DiagCatStr) {
+      fprintf(stderr, " [%s]", DiagCatStr);
     }
     
     fprintf(stderr, "\n");
@@ -2741,6 +2807,9 @@ typedef struct thread_info {
 void thread_runner(void *client_data_v) {
   thread_info *client_data = client_data_v;
   client_data->result = cindextest_main(client_data->argc, client_data->argv);
+#ifdef __CYGWIN__
+  fflush(stdout);  /* stdout is not flushed on Cygwin. */
+#endif
 }
 
 int main(int argc, const char **argv) {

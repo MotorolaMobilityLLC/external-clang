@@ -35,6 +35,16 @@ extern "C" {
   #define CINDEX_LINKAGE
 #endif
 
+#ifdef __GNUC__
+  #define CINDEX_DEPRECATED __attribute__((deprecated))
+#else
+  #ifdef _MSC_VER
+    #define CINDEX_DEPRECATED __declspec(deprecated)
+  #else
+    #define CINDEX_DEPRECATED
+  #endif
+#endif
+
 /** \defgroup CINDEX libclang: C Interface to Clang
  *
  * The C Interface to Clang provides a relatively small API that exposes
@@ -203,6 +213,61 @@ CINDEX_LINKAGE CXIndex clang_createIndex(int excludeDeclarationsFromPCH,
  * within that index have been destroyed.
  */
 CINDEX_LINKAGE void clang_disposeIndex(CXIndex index);
+
+typedef enum {
+  /**
+   * \brief Used to indicate that no special CXIndex options are needed.
+   */
+  CXGlobalOpt_None = 0x0,
+
+  /**
+   * \brief Used to indicate that threads that libclang creates for indexing
+   * purposes should use background priority.
+   * Affects \see clang_indexSourceFile, \see clang_indexTranslationUnit,
+   * \see clang_parseTranslationUnit, \see clang_saveTranslationUnit.
+   */
+  CXGlobalOpt_ThreadBackgroundPriorityForIndexing = 0x1,
+
+  /**
+   * \brief Used to indicate that threads that libclang creates for editing
+   * purposes should use background priority.
+   * Affects \see clang_reparseTranslationUnit, \see clang_codeCompleteAt,
+   * \see clang_annotateTokens
+   */
+  CXGlobalOpt_ThreadBackgroundPriorityForEditing = 0x2,
+
+  /**
+   * \brief Used to indicate that all threads that libclang creates should use
+   * background priority.
+   */
+  CXGlobalOpt_ThreadBackgroundPriorityForAll =
+      CXGlobalOpt_ThreadBackgroundPriorityForIndexing |
+      CXGlobalOpt_ThreadBackgroundPriorityForEditing
+
+} CXGlobalOptFlags;
+
+/**
+ * \brief Sets general options associated with a CXIndex. 
+ *
+ * For example:
+ * \code
+ * CXIndex idx = ...;
+ * clang_CXIndex_setGlobalOptions(idx,
+ *     clang_CXIndex_getGlobalOptions(idx) |
+ *     CXGlobalOpt_ThreadBackgroundPriorityForIndexing);
+ * \endcode
+ *
+ * \param options A bitmask of options, a bitwise OR of CXGlobalOpt_XXX flags.
+ */
+CINDEX_LINKAGE void clang_CXIndex_setGlobalOptions(CXIndex, unsigned options);
+
+/**
+ * \brief Gets the general options associated with a CXIndex.
+ *
+ * \returns A bitmask of options, a bitwise OR of CXGlobalOpt_XXX flags that
+ * are associated with the given CXIndex object.
+ */
+CINDEX_LINKAGE unsigned clang_CXIndex_getGlobalOptions(CXIndex);
 
 /**
  * \defgroup CINDEX_FILES File manipulation routines
@@ -775,14 +840,25 @@ CINDEX_LINKAGE CXString clang_getDiagnosticOption(CXDiagnostic Diag,
 CINDEX_LINKAGE unsigned clang_getDiagnosticCategory(CXDiagnostic);
 
 /**
- * \brief Retrieve the name of a particular diagnostic category.
+ * \brief Retrieve the name of a particular diagnostic category.  This
+ *  is now deprecated.  Use clang_getDiagnosticCategoryText()
+ *  instead.
  *
  * \param Category A diagnostic category number, as returned by 
  * \c clang_getDiagnosticCategory().
  *
  * \returns The name of the given diagnostic category.
  */
-CINDEX_LINKAGE CXString clang_getDiagnosticCategoryName(unsigned Category);
+CINDEX_DEPRECATED CINDEX_LINKAGE
+CXString clang_getDiagnosticCategoryName(unsigned Category);
+
+/**
+ * \brief Retrieve the diagnostic category text for a given diagnostic.
+ *
+ *
+ * \returns The text of the given diagnostic category.
+ */
+CINDEX_LINKAGE CXString clang_getDiagnosticCategoryText(CXDiagnostic);
   
 /**
  * \brief Determine the number of source ranges associated with the given
@@ -993,7 +1069,16 @@ enum CXTranslationUnit_Flags {
    * Note: this is a *temporary* option that is available only while
    * we are testing C++ precompiled preamble support. It is deprecated.
    */
-  CXTranslationUnit_CXXChainedPCH = 0x20
+  CXTranslationUnit_CXXChainedPCH = 0x20,
+
+  /**
+   * \brief Used to indicate that function/method bodies should be skipped while
+   * parsing.
+   *
+   * This option can be used to search for declarations/definitions while
+   * ignoring the usages.
+   */
+  CXTranslationUnit_SkipFunctionBodies = 0x40
 };
 
 /**
@@ -2470,6 +2555,22 @@ CINDEX_LINKAGE long long clang_getEnumConstantDeclValue(CXCursor C);
 CINDEX_LINKAGE unsigned long long clang_getEnumConstantDeclUnsignedValue(CXCursor C);
 
 /**
+ * \brief Retrieve the number of non-variadic arguments associated with a given
+ * cursor.
+ *
+ * If a cursor that is not a function or method is passed in, -1 is returned.
+ */
+CINDEX_LINKAGE int clang_Cursor_getNumArguments(CXCursor C);
+
+/**
+ * \brief Retrieve the argument cursor of a function or method.
+ *
+ * If a cursor that is not a function or method is passed in or the index
+ * exceeds the number of arguments, an invalid cursor is returned.
+ */
+CINDEX_LINKAGE CXCursor clang_Cursor_getArgument(CXCursor C, unsigned i);
+
+/**
  * \determine Determine whether two CXTypes represent the same type.
  *
  * \returns non-zero if the CXTypes represent the same type and 
@@ -2543,9 +2644,9 @@ CINDEX_LINKAGE CXType clang_getResultType(CXType T);
 /**
  * \brief Retrieve the number of non-variadic arguments associated with a function type.
  *
- * If a non-function type is passed in, UINT_MAX is returned.
+ * If a non-function type is passed in, -1 is returned.
  */
-CINDEX_LINKAGE unsigned clang_getNumArgTypes(CXType T);
+CINDEX_LINKAGE int clang_getNumArgTypes(CXType T);
 
 /**
  * \brief Retrieve the type of an argument of a function type.
@@ -2849,6 +2950,21 @@ CINDEX_LINKAGE CXString clang_constructUSR_ObjCProperty(const char *property,
 CINDEX_LINKAGE CXString clang_getCursorSpelling(CXCursor);
 
 /**
+ * \brief Retrieve a range for a piece that forms the cursors spelling name.
+ * Most of the times there is only one range for the complete spelling but for
+ * objc methods and objc message expressions, there are multiple pieces for each
+ * selector identifier.
+ * 
+ * \param pieceIndex the index of the spelling name piece. If this is greater
+ * than the actual number of pieces, it will return a NULL (invalid) range.
+ *  
+ * \param options Reserved.
+ */
+CINDEX_LINKAGE CXSourceRange clang_Cursor_getSpellingNameRange(CXCursor,
+                                                          unsigned pieceIndex,
+                                                          unsigned options);
+
+/**
  * \brief Retrieve the display name for the entity referenced by this cursor.
  *
  * The display name contains extra information that helps identify the cursor,
@@ -2930,6 +3046,20 @@ CINDEX_LINKAGE unsigned clang_isCursorDefinition(CXCursor);
  * \returns The canonical cursor for the entity referred to by the given cursor.
  */
 CINDEX_LINKAGE CXCursor clang_getCanonicalCursor(CXCursor);
+
+
+/**
+ * \brief If the cursor points to a selector identifier in a objc method or
+ * message expression, this returns the selector index.
+ *
+ * After getting a cursor with \see clang_getCursor, this can be called to
+ * determine if the location points to a selector identifier.
+ *
+ * \returns The selector index if the cursor is an objc method or message
+ * expression and the cursor is pointing to a selector identifier, or -1
+ * otherwise.
+ */
+CINDEX_LINKAGE int clang_Cursor_getObjCSelectorIndex(CXCursor);
 
 /**
  * @}
@@ -3542,6 +3672,26 @@ CINDEX_LINKAGE CXString
 clang_getCompletionAnnotation(CXCompletionString completion_string,
                               unsigned annotation_number);
 
+/**
+ * \brief Retrieve the parent context of the given completion string.
+ *
+ * The parent context of a completion string is the semantic parent of 
+ * the declaration (if any) that the code completion represents. For example,
+ * a code completion for an Objective-C method would have the method's class
+ * or protocol as its context.
+ *
+ * \param completion_string The code completion string whose parent is
+ * being queried.
+ *
+ * \param kind If non-NULL, will be set to the kind of the parent context,
+ * or CXCursor_NotImplemented if there is no context.
+ *
+ * \param Returns the name of the completion parent, e.g., "NSObject" if
+ * the completion string represents a method in the NSObject class.
+ */
+CINDEX_LINKAGE CXString
+clang_getCompletionParent(CXCompletionString completion_string,
+                          enum CXCursorKind *kind);
 /**
  * \brief Retrieve a completion string for an arbitrary declaration or macro
  * definition cursor.
@@ -4494,7 +4644,12 @@ typedef enum {
    * \brief Implicit function/class template instantiations should be indexed.
    * If this is not set, implicit instantiations will be ignored.
    */
-  CXIndexOpt_IndexImplicitTemplateInstantiations = 0x4
+  CXIndexOpt_IndexImplicitTemplateInstantiations = 0x4,
+
+  /**
+   * \brief Suppress all compiler warnings when parsing for indexing.
+   */
+  CXIndexOpt_SuppressWarnings = 0x8
 } CXIndexOptFlags;
 
 /**

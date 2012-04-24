@@ -44,6 +44,14 @@ STATISTIC(NumRemoveDeadBindings,
             "The # of times RemoveDeadBindings is called");
 STATISTIC(NumRemoveDeadBindingsSkipped,
             "The # of times RemoveDeadBindings is skipped");
+STATISTIC(NumMaxBlockCountReached,
+            "The # of aborted paths due to reaching the maximum block count in "
+            "a top level function");
+STATISTIC(NumMaxBlockCountReachedInInlined,
+            "The # of aborted paths due to reaching the maximum block count in "
+            "an inlined function");
+STATISTIC(NumTimesRetriedWithoutInlining,
+            "The # of times we re-evaluated a call without inlining");
 
 //===----------------------------------------------------------------------===//
 // Utility functions.
@@ -59,10 +67,11 @@ static inline Selector GetNullarySelector(const char* name, ASTContext &Ctx) {
 //===----------------------------------------------------------------------===//
 
 ExprEngine::ExprEngine(AnalysisManager &mgr, bool gcEnabled,
-                       SetOfDecls *VisitedCallees)
+                       SetOfConstDecls *VisitedCallees,
+                       FunctionSummariesTy *FS)
   : AMgr(mgr),
     AnalysisDeclContexts(mgr.getAnalysisDeclContextManager()),
-    Engine(*this, VisitedCallees),
+    Engine(*this, VisitedCallees, FS),
     G(Engine.getGraph()),
     StateMgr(getContext(), mgr.getStoreManagerCreator(),
              mgr.getConstraintManagerCreator(), G.getAllocator(),
@@ -527,6 +536,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::IfStmtClass:
     case Stmt::IndirectGotoStmtClass:
     case Stmt::LabelStmtClass:
+    case Stmt::AttributedStmtClass:
     case Stmt::NoStmtClass:
     case Stmt::NullStmtClass:
     case Stmt::SwitchStmtClass:
@@ -582,7 +592,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::ObjCIsaExprClass:
     case Stmt::ObjCProtocolExprClass:
     case Stmt::ObjCSelectorExprClass:
-    case Expr::ObjCNumericLiteralClass:
+    case Expr::ObjCBoxedExprClass:
     case Stmt::ParenListExprClass:
     case Stmt::PredefinedExprClass:
     case Stmt::ShuffleVectorExprClass:
@@ -966,15 +976,96 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
   }
 }
 
+bool ExprEngine::replayWithoutInlining(ExplodedNode *N,
+                                       const LocationContext *CalleeLC) {
+  const StackFrameContext *CalleeSF = CalleeLC->getCurrentStackFrame();
+  const StackFrameContext *CallerSF = CalleeSF->getParent()->getCurrentStackFrame();
+  assert(CalleeSF && CallerSF);
+  ExplodedNode *BeforeProcessingCall = 0;
+
+  // Find the first node before we started processing the call expression.
+  while (N) {
+    ProgramPoint L = N->getLocation();
+    BeforeProcessingCall = N;
+    N = N->pred_empty() ? NULL : *(N->pred_begin());
+
+    // Skip the nodes corresponding to the inlined code.
+    if (L.getLocationContext()->getCurrentStackFrame() != CallerSF)
+      continue;
+    // We reached the caller. Find the node right before we started
+    // processing the CallExpr.
+    if (isa<PostPurgeDeadSymbols>(L))
+      continue;
+    if (const StmtPoint *SP = dyn_cast<StmtPoint>(&L))
+      if (SP->getStmt() == CalleeSF->getCallSite())
+        continue;
+    break;
+  }
+
+  if (!BeforeProcessingCall)
+    return false;
+
+  // TODO: Clean up the unneeded nodes.
+
+  // Build an Epsilon node from which we will restart the analyzes.
+  const Stmt *CE = CalleeSF->getCallSite();
+  ProgramPoint NewNodeLoc =
+               EpsilonPoint(BeforeProcessingCall->getLocationContext(), CE);
+  // Add the special flag to GDM to signal retrying with no inlining.
+  // Note, changing the state ensures that we are not going to cache out.
+  ProgramStateRef NewNodeState = BeforeProcessingCall->getState();
+  NewNodeState = NewNodeState->set<ReplayWithoutInlining>((void*)CE);
+
+  // Make the new node a successor of BeforeProcessingCall.
+  bool IsNew = false;
+  ExplodedNode *NewNode = G.getNode(NewNodeLoc, NewNodeState, false, &IsNew);
+  // We cached out at this point. Caching out is common due to us backtracking
+  // from the inlined function, which might spawn several paths.
+  if (!IsNew)
+    return true;
+
+  NewNode->addPredecessor(BeforeProcessingCall, G);
+
+  // Add the new node to the work list.
+  Engine.enqueueStmtNode(NewNode, CalleeSF->getCallSiteBlock(),
+                                  CalleeSF->getIndex());
+  NumTimesRetriedWithoutInlining++;
+  return true;
+}
+
 /// Block entrance.  (Update counters).
-void ExprEngine::processCFGBlockEntrance(NodeBuilderWithSinks &nodeBuilder) {
+void ExprEngine::processCFGBlockEntrance(const BlockEdge &L,
+                                         NodeBuilderWithSinks &nodeBuilder) {
   
   // FIXME: Refactor this into a checker.
   ExplodedNode *pred = nodeBuilder.getContext().getPred();
   
   if (nodeBuilder.getContext().getCurrentBlockCount() >= AMgr.getMaxVisit()) {
     static SimpleProgramPointTag tag("ExprEngine : Block count exceeded");
-    nodeBuilder.generateNode(pred->getState(), pred, &tag, true);
+    const ExplodedNode *Sink =
+                   nodeBuilder.generateNode(pred->getState(), pred, &tag, true);
+
+    // Check if we stopped at the top level function or not.
+    // Root node should have the location context of the top most function.
+    const LocationContext *CalleeLC = pred->getLocation().getLocationContext();
+    const LocationContext *CalleeSF = CalleeLC->getCurrentStackFrame();
+    const LocationContext *RootLC =
+                        (*G.roots_begin())->getLocation().getLocationContext();
+    if (RootLC->getCurrentStackFrame() != CalleeSF) {
+      Engine.FunctionSummaries->markReachedMaxBlockCount(CalleeSF->getDecl());
+
+      // Re-run the call evaluation without inlining it, by storing the
+      // no-inlining policy in the state and enqueuing the new work item on
+      // the list. Replay should almost never fail. Use the stats to catch it
+      // if it does.
+      if ((!AMgr.NoRetryExhausted && replayWithoutInlining(pred, CalleeLC)))
+        return;
+      NumMaxBlockCountReachedInInlined++;
+    } else
+      NumMaxBlockCountReached++;
+
+    // Make sink nodes as exhausted(for stats) only if retry failed.
+    Engine.blocksExhausted.push_back(std::make_pair(L, Sink));
   }
 }
 
@@ -1370,6 +1461,13 @@ void ExprEngine::VisitCommonDeclRefExpr(const Expr *Ex, const NamedDecl *D,
                       ProgramPoint::PostLValueKind);
     return;
   }
+  if (isa<FieldDecl>(D)) {
+    // FIXME: Compute lvalue of fields.
+    Bldr.generateNode(Ex, Pred, state->BindExpr(Ex, LCtx, UnknownVal()),
+		      false, 0, ProgramPoint::PostLValueKind);
+    return;
+  }
+
   assert (false &&
           "ValueDecl support for this ValueDecl not implemented.");
 }
@@ -1445,7 +1543,7 @@ void ExprEngine::VisitMemberExpr(const MemberExpr *M, ExplodedNode *Pred,
                       ProgramPoint::PostLValueKind);
   else {
     Bldr.takeNodes(Pred);
-    evalLoad(Dst, M, Pred, state, L);
+    evalLoad(Dst, M, M, Pred, state, L);
     Bldr.addNodes(Dst);
   }
 }
@@ -1514,7 +1612,7 @@ void ExprEngine::evalStore(ExplodedNodeSet &Dst, const Expr *AssignE,
 
   // Evaluate the location (checks for bad dereferences).
   ExplodedNodeSet Tmp;
-  evalLocation(Tmp, LocationE, Pred, state, location, tag, false);
+  evalLocation(Tmp, AssignE, LocationE, Pred, state, location, tag, false);
 
   if (Tmp.empty())
     return;
@@ -1526,15 +1624,17 @@ void ExprEngine::evalStore(ExplodedNodeSet &Dst, const Expr *AssignE,
     evalBind(Dst, StoreE, *NI, location, Val, false);
 }
 
-void ExprEngine::evalLoad(ExplodedNodeSet &Dst, const Expr *Ex,
-                            ExplodedNode *Pred,
-                            ProgramStateRef state, SVal location,
-                            const ProgramPointTag *tag, QualType LoadTy) {
+void ExprEngine::evalLoad(ExplodedNodeSet &Dst,
+                          const Expr *NodeEx,
+                          const Expr *BoundEx,
+                          ExplodedNode *Pred,
+                          ProgramStateRef state,
+                          SVal location,
+                          const ProgramPointTag *tag,
+                          QualType LoadTy)
+{
   assert(!isa<NonLoc>(location) && "location cannot be a NonLoc.");
-
-  if (isa<loc::ObjCPropRef>(location)) {
-    assert(false);
-  }
+  assert(!isa<loc::ObjCPropRef>(location));
 
   // Are we loading from a region?  This actually results in two loads; one
   // to fetch the address of the referenced value and one to fetch the
@@ -1547,30 +1647,36 @@ void ExprEngine::evalLoad(ExplodedNodeSet &Dst, const Expr *Ex,
       static SimpleProgramPointTag
              loadReferenceTag("ExprEngine : Load Reference");
       ExplodedNodeSet Tmp;
-      evalLoadCommon(Tmp, Ex, Pred, state, location, &loadReferenceTag,
+      evalLoadCommon(Tmp, NodeEx, BoundEx, Pred, state,
+                     location, &loadReferenceTag,
                      getContext().getPointerType(RT->getPointeeType()));
 
       // Perform the load from the referenced value.
       for (ExplodedNodeSet::iterator I=Tmp.begin(), E=Tmp.end() ; I!=E; ++I) {
         state = (*I)->getState();
-        location = state->getSVal(Ex, (*I)->getLocationContext());
-        evalLoadCommon(Dst, Ex, *I, state, location, tag, LoadTy);
+        location = state->getSVal(BoundEx, (*I)->getLocationContext());
+        evalLoadCommon(Dst, NodeEx, BoundEx, *I, state, location, tag, LoadTy);
       }
       return;
     }
   }
 
-  evalLoadCommon(Dst, Ex, Pred, state, location, tag, LoadTy);
+  evalLoadCommon(Dst, NodeEx, BoundEx, Pred, state, location, tag, LoadTy);
 }
 
-void ExprEngine::evalLoadCommon(ExplodedNodeSet &Dst, const Expr *Ex,
-                                  ExplodedNode *Pred,
-                                  ProgramStateRef state, SVal location,
-                                  const ProgramPointTag *tag, QualType LoadTy) {
-
+void ExprEngine::evalLoadCommon(ExplodedNodeSet &Dst,
+                                const Expr *NodeEx,
+                                const Expr *BoundEx,
+                                ExplodedNode *Pred,
+                                ProgramStateRef state,
+                                SVal location,
+                                const ProgramPointTag *tag,
+                                QualType LoadTy) {
+  assert(NodeEx);
+  assert(BoundEx);
   // Evaluate the location (checks for bad dereferences).
   ExplodedNodeSet Tmp;
-  evalLocation(Tmp, Ex, Pred, state, location, tag, true);
+  evalLocation(Tmp, NodeEx, BoundEx, Pred, state, location, tag, true);
   if (Tmp.empty())
     return;
 
@@ -1585,24 +1691,30 @@ void ExprEngine::evalLoadCommon(ExplodedNodeSet &Dst, const Expr *Ex,
 
     if (location.isUnknown()) {
       // This is important.  We must nuke the old binding.
-      Bldr.generateNode(Ex, *NI, state->BindExpr(Ex, LCtx, UnknownVal()),
-                        false, tag, ProgramPoint::PostLoadKind);
+      Bldr.generateNode(NodeEx, *NI,
+                        state->BindExpr(BoundEx, LCtx, UnknownVal()),
+                        false, tag,
+                        ProgramPoint::PostLoadKind);
     }
     else {
       if (LoadTy.isNull())
-        LoadTy = Ex->getType();
+        LoadTy = BoundEx->getType();
       SVal V = state->getSVal(cast<Loc>(location), LoadTy);
-      Bldr.generateNode(Ex, *NI, state->bindExprAndLocation(Ex, LCtx,
-                                                            location, V),
+      Bldr.generateNode(NodeEx, *NI,
+                        state->bindExprAndLocation(BoundEx, LCtx, location, V),
                         false, tag, ProgramPoint::PostLoadKind);
     }
   }
 }
 
-void ExprEngine::evalLocation(ExplodedNodeSet &Dst, const Stmt *S,
-                                ExplodedNode *Pred,
-                                ProgramStateRef state, SVal location,
-                                const ProgramPointTag *tag, bool isLoad) {
+void ExprEngine::evalLocation(ExplodedNodeSet &Dst,
+                              const Stmt *NodeEx,
+                              const Stmt *BoundEx,
+                              ExplodedNode *Pred,
+                              ProgramStateRef state,
+                              SVal location,
+                              const ProgramPointTag *tag,
+                              bool isLoad) {
   StmtNodeBuilder BldrTop(Pred, Dst, *currentBuilderContext);
   // Early checks for performance reason.
   if (location.isUnknown()) {
@@ -1624,12 +1736,11 @@ void ExprEngine::evalLocation(ExplodedNodeSet &Dst, const Stmt *S,
     
     // FIXME: why is 'tag' not used instead of etag?
     static SimpleProgramPointTag etag("ExprEngine: Location");
-
-    Bldr.generateNode(S, Pred, state, false, &etag);
+    Bldr.generateNode(NodeEx, Pred, state, false, &etag);
   }
   ExplodedNodeSet Tmp;
-  getCheckerManager().runCheckersForLocation(Tmp, Src, location, isLoad, S,
-                                             *this);
+  getCheckerManager().runCheckersForLocation(Tmp, Src, location, isLoad,
+                                             NodeEx, BoundEx, *this);
   BldrTop.addNodes(Tmp);
 }
 
@@ -1765,6 +1876,10 @@ struct DOTGraphTraits<ExplodedNode*> :
 
       case ProgramPoint::CallExitKind:
         Out << "CallExit";
+        break;
+
+      case ProgramPoint::EpsilonKind:
+        Out << "Epsilon Point";
         break;
 
       default: {
@@ -1925,9 +2040,7 @@ void ExprEngine::ViewGraph(bool trim) {
     // Iterate through the reports and get their nodes.
     for (BugReporter::EQClasses_iterator
            EI = BR.EQClasses_begin(), EE = BR.EQClasses_end(); EI != EE; ++EI) {
-      BugReportEquivClass& EQ = *EI;
-      const BugReport &R = **EQ.begin();
-      ExplodedNode *N = const_cast<ExplodedNode*>(R.getErrorNode());
+      ExplodedNode *N = const_cast<ExplodedNode*>(EI->begin()->getErrorNode());
       if (N) Src.push_back(N);
     }
 
