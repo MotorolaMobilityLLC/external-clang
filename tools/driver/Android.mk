@@ -48,7 +48,9 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMARMDisassembler \
   libLLVMARMDesc \
   libLLVMARMInfo \
+  libLLVMMipsAsmParser \
   libLLVMMipsCodeGen \
+  libLLVMMipsDisassembler \
   libLLVMMipsAsmPrinter \
   libLLVMMipsDesc \
   libLLVMMipsInfo \
