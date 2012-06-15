@@ -256,6 +256,10 @@ def OpenCLKernel : Attr {
   let Spellings = ["opencl_kernel_function"];
 }
 
+def Kernel : Attr {
+  let Spellings = ["kernel"];
+}
+
 def Deprecated : InheritableAttr {
   let Spellings = ["deprecated"];
   let Args = [StringArgument<"Message">];

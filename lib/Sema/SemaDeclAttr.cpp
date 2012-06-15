@@ -2861,6 +2861,14 @@ static void handleNoInstrumentFunctionAttr(Sema &S, Decl *D,
                                                         S.Context));
 }
 
+static void handleKernelAttr(Sema &S, Decl *D, const AttributeList &Attr) {
+  if (S.LangOpts.Renderscript) {
+    D->addAttr(::new (S.Context) KernelAttr(Attr.getRange(), S.Context));
+  } else {
+    S.Diag(Attr.getLoc(), diag::warn_attribute_ignored) << "kernel";
+  }
+}
+
 static void handleConstantAttr(Sema &S, Decl *D, const AttributeList &Attr) {
   if (S.LangOpts.CUDA) {
     // check the attribute arguments.
@@ -3562,6 +3570,7 @@ static void ProcessNonInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_device:      handleDeviceAttr      (S, D, Attr); break;
   case AttributeList::AT_host:        handleHostAttr        (S, D, Attr); break;
   case AttributeList::AT_overloadable:handleOverloadableAttr(S, D, Attr); break;
+  case AttributeList::AT_kernel:      handleKernelAttr      (S, D, Attr); break;
   default:
     break;
   }
@@ -3586,6 +3595,7 @@ static void ProcessInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_device:
   case AttributeList::AT_host:
   case AttributeList::AT_overloadable:
+  case AttributeList::AT_kernel:
     // Ignore, this is a non-inheritable attribute, handled
     // by ProcessNonInheritableDeclAttr.
     break;
