@@ -92,7 +92,10 @@ endif
 ifneq ($(filter Diagnostic%Kinds.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(addprefix $(intermediates)/include/clang/Basic/,$(filter Diagnostic%Kinds.inc,$(TBLGEN_TABLES)))
 $(intermediates)/include/clang/Basic/Diagnostic%Kinds.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
-$(intermediates)/include/clang/Basic/Diagnostic%Kinds.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Diagnostic.td $(CLANG_TBLGEN)
+$(intermediates)/include/clang/Basic/Diagnostic%Kinds.inc: \
+  $(CLANG_ROOT_PATH)/include/clang/Basic/Diagnostic.td \
+  $(CLANG_ROOT_PATH)/include/clang/Basic/Diagnostic%Kinds.td \
+  $(CLANG_TBLGEN)
 	$(call transform-host-clang-td-to-out,clang-diags-defs -clang-component=$(patsubst Diagnostic%Kinds.inc,%,$(@F)))
 endif
 
