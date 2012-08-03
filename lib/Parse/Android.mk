@@ -10,6 +10,7 @@ TBLGEN_TABLES :=  \
 	AttrLateParsed.inc  \
 	AttrParsedAttrList.inc  \
 	Attrs.inc  \
+	CommentNodes.inc \
 	DeclNodes.inc  \
 	DiagnosticParseKinds.inc  \
         DiagnosticCommonKinds.inc  \

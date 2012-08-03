@@ -6,6 +6,7 @@ clang_static_analyzer_checkers_TBLGEN_TABLES := \
   AttrParsedAttrList.inc \
   Attrs.inc \
   Checkers.inc \
+  CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   StmtNodes.inc
@@ -36,6 +37,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   DebugCheckers.cpp \
   DereferenceChecker.cpp \
   DivZeroChecker.cpp \
+  ExprInspectionChecker.cpp \
   FixedAddressChecker.cpp \
   GenericTaintChecker.cpp \
   IdempotentOperationChecker.cpp \
@@ -64,6 +66,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   StackAddrEscapeChecker.cpp \
   StreamChecker.cpp \
   TaintTesterChecker.cpp \
+  TraversalChecker.cpp \
   UndefBranchChecker.cpp \
   UndefCapturedBlockVarChecker.cpp \
   UndefResultChecker.cpp \

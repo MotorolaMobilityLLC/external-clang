@@ -15,6 +15,7 @@ TBLGEN_TABLES := \
   AttrPCHRead.inc \
   AttrPCHWrite.inc \
   Attrs.inc \
+  CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \

@@ -89,6 +89,15 @@ $(intermediates)/Checkers.inc: \
 	$(call transform-host-clang-td-to-out,clang-sa-checkers)
 endif
 
+ifneq ($(findstring CommentNodes.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/CommentNodes.inc
+$(intermediates)/include/clang/AST/CommentNodes.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/AST/CommentNodes.inc: \
+  $(CLANG_ROOT_PATH)/include/clang/Basic/CommentNodes.td \
+  $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-comment-nodes)
+endif
+
 ifneq ($(filter Diagnostic%Kinds.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(addprefix $(intermediates)/include/clang/Basic/,$(filter Diagnostic%Kinds.inc,$(TBLGEN_TABLES)))
 $(intermediates)/include/clang/Basic/Diagnostic%Kinds.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
@@ -137,14 +146,7 @@ endif
 ifneq ($(findstring Options.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Driver/Options.inc
 $(intermediates)/include/clang/Driver/Options.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
-$(intermediates)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td $(CLANG_TBLGEN)
-	$(call transform-host-clang-td-to-out,opt-parser-defs)
-endif
-
-ifneq ($(findstring CC1Options.inc,$(TBLGEN_TABLES)),)
-LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Driver/CC1Options.inc
-$(intermediates)/include/clang/Driver/CC1Options.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
-$(intermediates)/include/clang/Driver/CC1Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td $(CLANG_TBLGEN)
+$(intermediates)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td $(CLANG_TBLGEN) $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td
 	$(call transform-host-clang-td-to-out,opt-parser-defs)
 endif
 

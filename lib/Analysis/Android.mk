@@ -8,6 +8,7 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
+  CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticAnalysisKinds.inc \

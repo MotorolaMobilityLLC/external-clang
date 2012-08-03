@@ -13,6 +13,7 @@ TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
   AttrParsedAttrList.inc \
+  CommentNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \
   DeclNodes.inc \
@@ -24,6 +25,7 @@ clang_rewrite_SRC_FILES := \
   FrontendActions.cpp \
   HTMLPrint.cpp \
   HTMLRewrite.cpp \
+  InclusionRewriter.cpp \
   RewriteMacros.cpp \
   RewriteModernObjC.cpp \
   RewriteObjC.cpp \
