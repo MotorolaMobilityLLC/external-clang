@@ -7115,14 +7115,6 @@ ParmVarDecl *Sema::CheckParameter(DeclContext *DC, SourceLocation StartLoc,
     T = Context.getLifetimeQualifiedType(T, lifetime);
   }
 
-  if (Context.getLangOpts().Renderscript && T->isArrayType()) {
-    // Generate Diag
-    Diag(StartLoc,
-         Diags.getCustomDiagID(clang::DiagnosticsEngine::Error,
-                               "parameters may not have array type: %0"))
-      << T;
-  }
-
   ParmVarDecl *New = ParmVarDecl::Create(Context, DC, StartLoc, NameLoc, Name,
                                          Context.getAdjustedParameterType(T), 
                                          TSInfo,
