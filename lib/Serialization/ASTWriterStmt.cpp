@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Serialization/ASTWriter.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
@@ -108,6 +109,7 @@ void ASTStmtWriter::VisitLabelStmt(LabelStmt *S) {
 
 void ASTStmtWriter::VisitAttributedStmt(AttributedStmt *S) {
   VisitStmt(S);
+  Record.push_back(S->getAttrs().size());
   Writer.WriteAttributes(S->getAttrs(), Record);
   Writer.AddStmt(S->getSubStmt());
   Writer.AddSourceLocation(S->getAttrLoc(), Record);
@@ -247,6 +249,11 @@ void ASTStmtWriter::VisitAsmStmt(AsmStmt *S) {
     Writer.AddStmt(S->getClobber(I));
 
   Code = serialization::STMT_ASM;
+}
+
+void ASTStmtWriter::VisitMSAsmStmt(MSAsmStmt *S) {
+  // FIXME: Statement writer not yet implemented for MS style inline asm.
+  VisitStmt(S);
 }
 
 void ASTStmtWriter::VisitExpr(Expr *E) {
@@ -837,6 +844,7 @@ void ASTStmtWriter::VisitObjCProtocolExpr(ObjCProtocolExpr *E) {
   VisitExpr(E);
   Writer.AddDeclRef(E->getProtocol(), Record);
   Writer.AddSourceLocation(E->getAtLoc(), Record);
+  Writer.AddSourceLocation(E->ProtoLoc, Record);
   Writer.AddSourceLocation(E->getRParenLoc(), Record);
   Code = serialization::EXPR_OBJC_PROTOCOL_EXPR;
 }
@@ -1045,6 +1053,7 @@ void ASTStmtWriter::VisitMSDependentExistsStmt(MSDependentExistsStmt *S) {
 void ASTStmtWriter::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
   VisitCallExpr(E);
   Record.push_back(E->getOperator());
+  Writer.AddSourceRange(E->Range, Record);
   Code = serialization::EXPR_CXX_OPERATOR_CALL;
 }
 

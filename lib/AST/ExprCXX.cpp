@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Basic/IdentifierTable.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
@@ -126,13 +127,6 @@ SourceLocation CXXNewExpr::getEndLoc() const {
 // CXXDeleteExpr
 QualType CXXDeleteExpr::getDestroyedType() const {
   const Expr *Arg = getArgument();
-  while (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(Arg)) {
-    if (ICE->getCastKind() != CK_UserDefinedConversion &&
-        ICE->getType()->isVoidPointerType())
-      Arg = ICE->getSubExpr();
-    else
-      break;
-  }
   // The type-to-delete may not be a pointer if it's a dependent type.
   const QualType ArgType = Arg->getType();
 
@@ -415,30 +409,27 @@ SourceRange CXXConstructExpr::getSourceRange() const {
   return SourceRange(Loc, End);
 }
 
-SourceRange CXXOperatorCallExpr::getSourceRange() const {
+SourceRange CXXOperatorCallExpr::getSourceRangeImpl() const {
   OverloadedOperatorKind Kind = getOperator();
   if (Kind == OO_PlusPlus || Kind == OO_MinusMinus) {
     if (getNumArgs() == 1)
       // Prefix operator
-      return SourceRange(getOperatorLoc(),
-                         getArg(0)->getSourceRange().getEnd());
+      return SourceRange(getOperatorLoc(), getArg(0)->getLocEnd());
     else
       // Postfix operator
-      return SourceRange(getArg(0)->getSourceRange().getBegin(),
-                         getOperatorLoc());
+      return SourceRange(getArg(0)->getLocStart(), getOperatorLoc());
   } else if (Kind == OO_Arrow) {
     return getArg(0)->getSourceRange();
   } else if (Kind == OO_Call) {
-    return SourceRange(getArg(0)->getSourceRange().getBegin(), getRParenLoc());
+    return SourceRange(getArg(0)->getLocStart(), getRParenLoc());
   } else if (Kind == OO_Subscript) {
-    return SourceRange(getArg(0)->getSourceRange().getBegin(), getRParenLoc());
+    return SourceRange(getArg(0)->getLocStart(), getRParenLoc());
   } else if (getNumArgs() == 1) {
-    return SourceRange(getOperatorLoc(), getArg(0)->getSourceRange().getEnd());
+    return SourceRange(getOperatorLoc(), getArg(0)->getLocEnd());
   } else if (getNumArgs() == 2) {
-    return SourceRange(getArg(0)->getSourceRange().getBegin(),
-                       getArg(1)->getSourceRange().getEnd());
+    return SourceRange(getArg(0)->getLocStart(), getArg(1)->getLocEnd());
   } else {
-    return SourceRange();
+    return getOperatorLoc();
   }
 }
 
@@ -461,7 +452,7 @@ CXXMethodDecl *CXXMemberCallExpr::getMethodDecl() const {
 }
 
 
-CXXRecordDecl *CXXMemberCallExpr::getRecordDecl() {
+CXXRecordDecl *CXXMemberCallExpr::getRecordDecl() const {
   Expr* ThisArg = getImplicitObjectArgument();
   if (!ThisArg)
     return 0;
@@ -555,6 +546,9 @@ bool CXXDynamicCastExpr::isAlwaysNull() const
     SrcType = SrcPTy->getPointeeType();
     DestType = DestType->castAs<PointerType>()->getPointeeType();
   }
+
+  if (DestType->isVoidType())
+    return false;
 
   const CXXRecordDecl *SrcRD = 
     cast<CXXRecordDecl>(SrcType->castAs<RecordType>()->getDecl());

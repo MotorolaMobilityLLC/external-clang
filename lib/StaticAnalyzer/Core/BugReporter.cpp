@@ -48,6 +48,10 @@ static inline const Stmt *GetStmt(const ProgramPoint &P) {
     return SP->getStmt();
   else if (const BlockEdge *BE = dyn_cast<BlockEdge>(&P))
     return BE->getSrc()->getTerminator();
+  else if (const CallEnter *CE = dyn_cast<CallEnter>(&P))
+    return CE->getCallExpr();
+  else if (const CallExitEnd *CEE = dyn_cast<CallExitEnd>(&P))
+    return CEE->getCalleeContext()->getCallSite();
 
   return 0;
 }
@@ -427,7 +431,7 @@ static void GenerateMinimalPathDiagnostic(PathDiagnostic& PD,
 
     ProgramPoint P = N->getLocation();
     
-    if (const CallExit *CE = dyn_cast<CallExit>(&P)) {
+    if (const CallExitEnd *CE = dyn_cast<CallExitEnd>(&P)) {
       PathDiagnosticCallPiece *C =
         PathDiagnosticCallPiece::construct(N, *CE, SMgr);
       PD.getActivePath().push_front(C);
@@ -440,7 +444,7 @@ static void GenerateMinimalPathDiagnostic(PathDiagnostic& PD,
       PD.popActivePath();
       // The current active path should never be empty.  Either we
       // just added a bunch of stuff to the top-level path, or
-      // we have a previous CallExit.  If the front of the active
+      // we have a previous CallExitEnd.  If the front of the active
       // path is not a PathDiagnosticCallPiece, it means that the
       // path terminated within a function call.  We must then take the
       // current contents of the active path and place it within
@@ -1051,6 +1055,78 @@ void EdgeBuilder::addContext(const Stmt *S) {
   CLocs.push_back(L);
 }
 
+// Cone-of-influence: support the reverse propagation of "interesting" symbols
+// and values by tracing interesting calculations backwards through evaluated
+// expressions along a path.  This is probably overly complicated, but the idea
+// is that if an expression computed an "interesting" value, the child
+// expressions are are also likely to be "interesting" as well (which then
+// propagates to the values they in turn compute).  This reverse propagation
+// is needed to track interesting correlations across function call boundaries,
+// where formal arguments bind to actual arguments, etc.  This is also needed
+// because the constraint solver sometimes simplifies certain symbolic values
+// into constants when appropriate, and this complicates reasoning about
+// interesting values.
+typedef llvm::DenseSet<const Expr *> InterestingExprs;
+
+static void reversePropagateIntererstingSymbols(BugReport &R,
+                                                InterestingExprs &IE,
+                                                const ProgramState *State,
+                                                const Expr *Ex,
+                                                const LocationContext *LCtx) {
+  SVal V = State->getSVal(Ex, LCtx);
+  if (!(R.isInteresting(V) || IE.count(Ex)))
+    return;
+  
+  switch (Ex->getStmtClass()) {
+    default:
+      if (!isa<CastExpr>(Ex))
+        break;
+      // Fall through.
+    case Stmt::BinaryOperatorClass:
+    case Stmt::UnaryOperatorClass: {
+      for (Stmt::const_child_iterator CI = Ex->child_begin(),
+            CE = Ex->child_end();
+            CI != CE; ++CI) {
+        if (const Expr *child = dyn_cast_or_null<Expr>(*CI)) {
+          IE.insert(child);
+          SVal ChildV = State->getSVal(child, LCtx);
+          R.markInteresting(ChildV);
+        }
+        break;
+      }
+    }
+  }
+  
+  R.markInteresting(V);
+}
+
+static void reversePropagateInterestingSymbols(BugReport &R,
+                                               InterestingExprs &IE,
+                                               const ProgramState *State,
+                                               const LocationContext *CalleeCtx,
+                                               const LocationContext *CallerCtx)
+{
+  // FIXME: Handle non-CallExpr-based CallEvents.
+  const StackFrameContext *Callee = CalleeCtx->getCurrentStackFrame();
+  const Stmt *CallSite = Callee->getCallSite();
+  if (const CallExpr *CE = dyn_cast_or_null<CallExpr>(CallSite)) {
+    if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CalleeCtx->getDecl())) {
+      FunctionDecl::param_const_iterator PI = FD->param_begin(), 
+                                         PE = FD->param_end();
+      CallExpr::const_arg_iterator AI = CE->arg_begin(), AE = CE->arg_end();
+      for (; AI != AE && PI != PE; ++AI, ++PI) {
+        if (const Expr *ArgE = *AI) {
+          if (const ParmVarDecl *PD = *PI) {
+            Loc LV = State->getLValue(PD, CalleeCtx);
+            if (R.isInteresting(LV) || R.isInteresting(State->getRawSVal(LV)))
+              IE.insert(ArgE);
+          }
+        }
+      }
+    }
+  }
+}
+                                               
 static void GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
                                             PathDiagnosticBuilder &PDB,
                                             const ExplodedNode *N,
@@ -1058,6 +1134,7 @@ static void GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
   EdgeBuilder EB(PD, PDB);
   const SourceManager& SM = PDB.getSourceManager();
   StackDiagVector CallStack;
+  InterestingExprs IE;
 
   const ExplodedNode *NextNode = N->pred_empty() ? NULL : *(N->pred_begin());
   while (NextNode) {
@@ -1066,19 +1143,33 @@ static void GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
     ProgramPoint P = N->getLocation();
 
     do {
-      if (const CallExit *CE = dyn_cast<CallExit>(&P)) {
+      if (const PostStmt *PS = dyn_cast<PostStmt>(&P)) {
+        if (const Expr *Ex = PS->getStmtAs<Expr>())
+          reversePropagateIntererstingSymbols(*PDB.getBugReport(), IE,
+                                              N->getState().getPtr(), Ex,
+                                              N->getLocationContext());
+      }
+      
+      if (const CallExitEnd *CE = dyn_cast<CallExitEnd>(&P)) {
         const StackFrameContext *LCtx =
-        CE->getLocationContext()->getCurrentStackFrame();
-        PathDiagnosticLocation Loc(LCtx->getCallSite(),
-                                   PDB.getSourceManager(),
-                                   LCtx);
-        EB.addEdge(Loc, true);
-        EB.flushLocations();
-        PathDiagnosticCallPiece *C =
-          PathDiagnosticCallPiece::construct(N, *CE, SM);
-        PD.getActivePath().push_front(C);
-        PD.pushActivePath(&C->path);
-        CallStack.push_back(StackDiagPair(C, N));
+          CE->getLocationContext()->getCurrentStackFrame();
+        // FIXME: This needs to handle implicit calls.
+        if (const Stmt *S = CE->getCalleeContext()->getCallSite()) {
+          if (const Expr *Ex = dyn_cast<Expr>(S))
+            reversePropagateIntererstingSymbols(*PDB.getBugReport(), IE,
+                                                N->getState().getPtr(), Ex,
+                                                N->getLocationContext());
+          PathDiagnosticLocation Loc(S,
+                                     PDB.getSourceManager(),
+                                     LCtx);
+          EB.addEdge(Loc, true);
+          EB.flushLocations();
+          PathDiagnosticCallPiece *C =
+            PathDiagnosticCallPiece::construct(N, *CE, SM);
+          PD.getActivePath().push_front(C);
+          PD.pushActivePath(&C->path);
+          CallStack.push_back(StackDiagPair(C, N));
+        }
         break;
       }
       
@@ -1099,7 +1190,7 @@ static void GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
 
         // The current active path should never be empty.  Either we
         // just added a bunch of stuff to the top-level path, or
-        // we have a previous CallExit.  If the front of the active
+        // we have a previous CallExitEnd.  If the front of the active
         // path is not a PathDiagnosticCallPiece, it means that the
         // path terminated within a function call.  We must then take the
         // current contents of the active path and place it within
@@ -1110,8 +1201,12 @@ static void GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
           const Decl * Caller = CE->getLocationContext()->getDecl();
           C = PathDiagnosticCallPiece::construct(PD.getActivePath(), Caller);
         }
-        C->setCallee(*CE, SM);
-        EB.addContext(CE->getCallExpr());
+
+        // FIXME: We still need a location for implicit calls.
+        if (CE->getCallExpr()) {
+          C->setCallee(*CE, SM);
+          EB.addContext(CE->getCallExpr());
+        }
 
         if (!CallStack.empty()) {
           assert(CallStack.back().first == C);
@@ -1127,7 +1222,19 @@ static void GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
       PDB.LC = N->getLocationContext();
 
       // Block edges.
-      if (const BlockEdge *BE = dyn_cast<BlockEdge>(&P)) {        
+      if (const BlockEdge *BE = dyn_cast<BlockEdge>(&P)) {
+        // Does this represent entering a call?  If so, look at propagating
+        // interesting symbols across call boundaries.
+        if (NextNode) {
+          const LocationContext *CallerCtx = NextNode->getLocationContext();
+          const LocationContext *CalleeCtx = PDB.LC;
+          if (CallerCtx != CalleeCtx) {
+            reversePropagateInterestingSymbols(*PDB.getBugReport(), IE,
+                                               N->getState().getPtr(),
+                                               CalleeCtx, CallerCtx);
+          }
+        }
+       
         const CFGBlock &Blk = *BE->getSrc();
         const Stmt *Term = Blk.getTerminator();
 
@@ -1768,9 +1875,11 @@ void GRBugReporter::GeneratePathDiagnostic(PathDiagnostic& PD,
   } while(finalReportConfigToken != originalReportConfigToken);
 
   // Finally, prune the diagnostic path of uninteresting stuff.
-  bool hasSomethingInteresting = RemoveUneededCalls(PD.getMutablePieces());
-  assert(hasSomethingInteresting);
-  (void) hasSomethingInteresting;
+  if (R->shouldPrunePath()) {
+    bool hasSomethingInteresting = RemoveUneededCalls(PD.getMutablePieces());
+    assert(hasSomethingInteresting);
+    (void) hasSomethingInteresting;
+  }
 }
 
 void BugReporter::Register(BugType *BT) {

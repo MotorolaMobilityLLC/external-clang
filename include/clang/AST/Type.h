@@ -29,6 +29,7 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PointerUnion.h"
+#include "llvm/ADT/Twine.h"
 #include "clang/Basic/LLVM.h"
 
 namespace clang {
@@ -412,12 +413,11 @@ public:
   }
 
   std::string getAsString() const;
-  std::string getAsString(const PrintingPolicy &Policy) const {
-    std::string Buffer;
-    getAsStringInternal(Buffer, Policy);
-    return Buffer;
-  }
-  void getAsStringInternal(std::string &S, const PrintingPolicy &Policy) const;
+  std::string getAsString(const PrintingPolicy &Policy) const;
+
+  bool isEmptyWhenPrinted(const PrintingPolicy &Policy) const;
+  void print(raw_ostream &OS, const PrintingPolicy &Policy,
+             bool appendSpaceIfNonEmpty = false) const;
 
   void Profile(llvm::FoldingSetNodeID &ID) const {
     ID.AddInteger(Mask);
@@ -522,8 +522,6 @@ public:
   void setLocalFastQualifiers(unsigned Quals) { Value.setInt(Quals); }
 
   /// Retrieves a pointer to the underlying (unqualified) type.
-  /// This should really return a const Type, but it's not worth
-  /// changing all the users right now.
   ///
   /// This function requires that the type not be NULL. If the type might be
   /// NULL, use the (slightly less efficient) \c getTypePtrOrNull().
@@ -633,6 +631,11 @@ public:
 
   /// \brief Determine whether this is a Plain Old Data (POD) type (C++ 3.9p10).
   bool isPODType(ASTContext &Context) const;
+
+  /// isCXX98PODType() - Return true if this is a POD type according to the
+  /// rules of the C++98 standard, regardless of the current compilation's
+  /// language.
+  bool isCXX98PODType(ASTContext &Context) const;
 
   /// isCXX11PODType() - Return true if this is a POD type according to the
   /// more relaxed rules of the C++11 standard, regardless of the current
@@ -824,11 +827,20 @@ public:
   }
   static std::string getAsString(const Type *ty, Qualifiers qs);
 
-  std::string getAsString(const PrintingPolicy &Policy) const {
-    std::string S;
-    getAsStringInternal(S, Policy);
-    return S;
+  std::string getAsString(const PrintingPolicy &Policy) const;
+
+  void print(raw_ostream &OS, const PrintingPolicy &Policy,
+             const Twine &PlaceHolder = Twine()) const {
+    print(split(), OS, Policy, PlaceHolder);
   }
+  static void print(SplitQualType split, raw_ostream &OS,
+                    const PrintingPolicy &policy, const Twine &PlaceHolder) {
+    return print(split.Ty, split.Quals, OS, policy, PlaceHolder);
+  }
+  static void print(const Type *ty, Qualifiers qs,
+                    raw_ostream &OS, const PrintingPolicy &policy,
+                    const Twine &PlaceHolder);
+
   void getAsStringInternal(std::string &Str,
                            const PrintingPolicy &Policy) const {
     return getAsStringInternal(split(), Str, Policy);
@@ -840,6 +852,27 @@ public:
   static void getAsStringInternal(const Type *ty, Qualifiers qs,
                                   std::string &out,
                                   const PrintingPolicy &policy);
+
+  class StreamedQualTypeHelper {
+    const QualType &T;
+    const PrintingPolicy &Policy;
+    const Twine &PlaceHolder;
+  public:
+    StreamedQualTypeHelper(const QualType &T, const PrintingPolicy &Policy,
+                           const Twine &PlaceHolder)
+      : T(T), Policy(Policy), PlaceHolder(PlaceHolder) { }
+
+    friend raw_ostream &operator<<(raw_ostream &OS,
+                                   const StreamedQualTypeHelper &SQT) {
+      SQT.T.print(OS, SQT.Policy, SQT.PlaceHolder);
+      return OS;
+    }
+  };
+
+  StreamedQualTypeHelper stream(const PrintingPolicy &Policy,
+                                const Twine &PlaceHolder = Twine()) const {
+    return StreamedQualTypeHelper(*this, Policy, PlaceHolder);
+  }
 
   void dump(const char *s) const;
   void dump() const;
@@ -1614,7 +1647,7 @@ public:
   AutoType *getContainedAutoType() const;
 
   /// Member-template getAs<specific type>'.  Look through sugar for
-  /// an instance of <specific type>.   This scheme will eventually
+  /// an instance of \<specific type>.   This scheme will eventually
   /// replace the specific getAsXXXX methods above.
   ///
   /// There are some specializations of this member template listed
@@ -1626,7 +1659,7 @@ public:
   const ArrayType *getAsArrayTypeUnsafe() const;
 
   /// Member-template castAs<specific type>.  Look through sugar for
-  /// the underlying instance of <specific type>.
+  /// the underlying instance of \<specific type>.
   ///
   /// This method has the same relationship to getAs<T> as cast<T> has
   /// to dyn_cast<T>; which is to say, the underlying type *must*
@@ -1715,9 +1748,9 @@ public:
   friend class ASTWriter;
 };
 
-template <> inline const TypedefType *Type::getAs() const {
-  return dyn_cast<TypedefType>(this);
-}
+/// \brief This will check for a TypedefType by removing any existing sugar
+/// until it reaches a TypedefType or a non-sugared type.
+template <> const TypedefType *Type::getAs() const;
 
 // We can do canonical leaf types faster, because we don't have to
 // worry about preserving child type decoration.
@@ -1752,7 +1785,13 @@ public:
   }
 
   Kind getKind() const { return static_cast<Kind>(BuiltinTypeBits.Kind); }
-  const char *getName(const PrintingPolicy &Policy) const;
+  StringRef getName(const PrintingPolicy &Policy) const;
+  const char *getNameAsCString(const PrintingPolicy &Policy) const {
+    // The StringRef is null-terminated.
+    StringRef str = getName(Policy);
+    assert(!str.empty() && str.data()[str.size()] == '\0');
+    return str.data();
+  }
 
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
@@ -2928,7 +2967,10 @@ public:
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
 
+  // FIXME: Remove the string version.
   void printExceptionSpecification(std::string &S, 
+                                   PrintingPolicy Policy) const;
+  void printExceptionSpecification(raw_ostream &OS, 
                                    PrintingPolicy Policy) const;
 
   static bool classof(const Type *T) {
@@ -3582,6 +3624,7 @@ public:
 
   /// \brief Print a template argument list, including the '<' and '>'
   /// enclosing the template arguments.
+  // FIXME: remove the string ones.
   static std::string PrintTemplateArgumentList(const TemplateArgument *Args,
                                                unsigned NumArgs,
                                                const PrintingPolicy &Policy,
@@ -3593,6 +3636,23 @@ public:
 
   static std::string PrintTemplateArgumentList(const TemplateArgumentListInfo &,
                                                const PrintingPolicy &Policy);
+
+  /// \brief Print a template argument list, including the '<' and '>'
+  /// enclosing the template arguments.
+  static void PrintTemplateArgumentList(raw_ostream &OS,
+                                        const TemplateArgument *Args,
+                                        unsigned NumArgs,
+                                        const PrintingPolicy &Policy,
+                                        bool SkipBrackets = false);
+
+  static void PrintTemplateArgumentList(raw_ostream &OS,
+                                        const TemplateArgumentLoc *Args,
+                                        unsigned NumArgs,
+                                        const PrintingPolicy &Policy);
+
+  static void PrintTemplateArgumentList(raw_ostream &OS,
+                                        const TemplateArgumentListInfo &,
+                                        const PrintingPolicy &Policy);
 
   /// True if this template specialization type matches a current
   /// instantiation in the context in which it is found.
@@ -3641,7 +3701,7 @@ public:
   unsigned getNumArgs() const { return NumArgs; }
 
   /// \brief Retrieve a specific template argument as a type.
-  /// \precondition @c isArgType(Arg)
+  /// \pre @c isArgType(Arg)
   const TemplateArgument &getArg(unsigned Idx) const; // in TemplateBase.h
 
   bool isSugared() const {
@@ -4045,7 +4105,7 @@ class PackExpansionType : public Type, public llvm::FoldingSetNode {
 
   PackExpansionType(QualType Pattern, QualType Canon,
                     llvm::Optional<unsigned> NumExpansions)
-    : Type(PackExpansion, Canon, /*Dependent=*/true,
+    : Type(PackExpansion, Canon, /*Dependent=*/Pattern->isDependentType(),
            /*InstantiationDependent=*/true,
            /*VariableModified=*/Pattern->isVariablyModifiedType(),
            /*ContainsUnexpandedParameterPack=*/false),
@@ -4097,8 +4157,10 @@ public:
 /// list of protocols.
 ///
 /// Given the following declarations:
-///   @class C;
-///   @protocol P;
+/// \code
+///   \@class C;
+///   \@protocol P;
+/// \endcode
 ///
 /// 'C' is an ObjCInterfaceType C.  It is sugar for an ObjCObjectType
 /// with base C and no protocols.
@@ -4312,11 +4374,13 @@ public:
   /// This method is equivalent to getPointeeType() except that
   /// it discards any typedefs (or other sugar) between this
   /// type and the "outermost" object type.  So for:
-  ///   @class A; @protocol P; @protocol Q;
+  /// \code
+  ///   \@class A; \@protocol P; \@protocol Q;
   ///   typedef A<P> AP;
   ///   typedef A A1;
   ///   typedef A1<P> A1P;
   ///   typedef A1P<Q> A1PQ;
+  /// \endcode
   /// For 'A*', getObjectType() will return 'A'.
   /// For 'A<P>*', getObjectType() will return 'A<P>'.
   /// For 'AP*', getObjectType() will return 'A<P>'.
@@ -4333,7 +4397,7 @@ public:
   }
 
   /// getInterfaceType - If this pointer points to an Objective C
-  /// @interface type, gets the type for that interface.  Any protocol
+  /// \@interface type, gets the type for that interface.  Any protocol
   /// qualifiers on the interface are ignored.
   ///
   /// \return null if the base type for this pointer is 'id' or 'Class'
@@ -4341,7 +4405,7 @@ public:
     return getObjectType()->getBaseType()->getAs<ObjCInterfaceType>();
   }
 
-  /// getInterfaceDecl - If this pointer points to an Objective @interface
+  /// getInterfaceDecl - If this pointer points to an Objective \@interface
   /// type, gets the declaration for that interface.
   ///
   /// \return null if the base type for this pointer is 'id' or 'Class'
@@ -4970,7 +5034,7 @@ struct ArrayType_cannot_be_used_with_getAs { };
 template<typename T>
 struct ArrayType_cannot_be_used_with_getAs<T, true>;
 
-/// Member-template getAs<specific type>'.
+// Member-template getAs<specific type>'.
 template <typename T> const T *Type::getAs() const {
   ArrayType_cannot_be_used_with_getAs<T> at;
   (void)at;

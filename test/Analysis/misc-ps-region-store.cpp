@@ -578,3 +578,37 @@ void rdar10924675(unsigned short x[], int index, int index2) {
   if (y == 0)
     return;
 }
+
+// Test handling CXXScalarValueInitExprs.
+void rdar11401827() {
+  int x = int();
+  if (!x) {
+    int *p = 0;
+    *p = 0xDEADBEEF; // expected-warning {{null pointer}}
+  }
+  else {
+    int *p = 0;
+    *p = 0xDEADBEEF;
+  }
+}
+
+//===---------------------------------------------------------------------===//
+// Handle inlining of C++ method calls.
+//===---------------------------------------------------------------------===//
+
+struct A {
+  int *p;
+  void foo(int *q) {
+    p = q;
+  }
+  void bar() {
+    *p = 0; // expected-warning {{null pointer}}
+  }
+};
+
+void test_inline() {
+  A a;
+  a.foo(0);
+  a.bar();
+}
+

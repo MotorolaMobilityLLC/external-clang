@@ -1,7 +1,7 @@
 // RUN: %clang_cc1 -E %s -o %t.mm
 // RUN: %clang_cc1 -x objective-c++ -fblocks -fms-extensions -rewrite-objc %t.mm -o - | FileCheck %s
 // RUN: %clang_cc1 -x objective-c++ -fblocks -fms-extensions -rewrite-objc %t.mm -o %t-rw.cpp
-// RUN: %clang_cc1 -fsyntax-only -fblocks -Wno-address-of-temporary -D"Class=void*" -D"id=void*" -D"SEL=void*" -D"__declspec(X)=" %t-rw.cpp -Wno-attributes -Werror
+// RUN: %clang_cc1 -fsyntax-only -Werror -Wno-address-of-temporary -D"Class=void*" -D"id=void*" -D"SEL=void*" -U__declspec -D"__declspec(X)=" %t-rw.cpp -Wno-attributes
 
 extern char *strdup(const char *str);
 extern "C" void *sel_registerName(const char *);
@@ -54,6 +54,9 @@ int main(int argc, const char *argv[]) {
   NSNumber *piFloat = @(3.141592654F);    // equivalent to [NSNumber numberWithFloat:(3.141592654F)]
   NSNumber *piDouble = @(3.1415926535);   // equivalent to [NSNumber numberWithDouble:(3.1415926535)]
 
+  BOOL b;
+  NSNumber *nsb = @(b);
+
   // Strings.
   NSString *duplicateString = @(strdup("Hello"));
 }
@@ -65,4 +68,5 @@ int main(int argc, const char *argv[]) {
 // CHECK:  NSNumber *fortyTwoLongLong = ((NSNumber *(*)(id, SEL, long long))(void *)objc_msgSend)(objc_getClass("NSNumber"), sel_registerName("numberWithLongLong:"), (42LL));
 // CHECK:  NSNumber *piFloat = ((NSNumber *(*)(id, SEL, float))(void *)objc_msgSend)(objc_getClass("NSNumber"), sel_registerName("numberWithFloat:"), (3.1415927));
 // CHECK:  NSNumber *piDouble = ((NSNumber *(*)(id, SEL, double))(void *)objc_msgSend)(objc_getClass("NSNumber"), sel_registerName("numberWithDouble:"), (3.1415926535));
+// CHECK:  NSNumber *nsb = ((NSNumber *(*)(id, SEL, BOOL))(void *)objc_msgSend)(objc_getClass("NSNumber"), sel_registerName("numberWithBool:"), (BOOL)(b));
 // CHECK:  NSString *duplicateString = ((NSString *(*)(id, SEL, const char *))(void *)objc_msgSend)(objc_getClass("NSString"), sel_registerName("stringWithUTF8String:"), (const char *)(strdup("Hello")));

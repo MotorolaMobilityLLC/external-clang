@@ -1,9 +1,5 @@
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease,osx.cocoa.RetainCount -analyzer-store=region -analyzer-output=text -verify %s
 
-// This actually still works after the pseudo-object refactor, it just
-// uses messages that say 'method' instead of 'property'.  Ted wanted
-// this xfailed and filed as a bug.  rdar://problem/10402993
-
 /***
 This file is for testing the path-sensitive notes for retain/release errors.
 Its goal is to have simple branch coverage of any path-based diagnostics,
@@ -28,6 +24,9 @@ GC-specific notes should go in retain-release-path-notes-gc.m.
 @interface Foo : NSObject
 - (id)methodWithValue;
 @property(retain) id propertyValue;
+
+- (id)objectAtIndexedSubscript:(unsigned)index;
+- (id)objectForKeyedSubscript:(id)key;
 @end
 
 typedef struct CFType *CFTypeRef;
@@ -119,6 +118,16 @@ CFTypeRef CFGetRuleViolation () {
   return result; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}} expected-note{{Object returned to caller with a +0 retain count}} expected-note{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
 }
 
+- (id)copyViolationIndexedSubscript {
+  id result = self[0]; // expected-note{{Subscript returns an Objective-C object with a +0 retain count}}
+  return result; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}} expected-note{{Object returned to caller with a +0 retain count}} expected-note{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
+}
+
+- (id)copyViolationKeyedSubscript {
+  id result = self[self]; // expected-note{{Subscript returns an Objective-C object with a +0 retain count}}
+  return result; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}} expected-note{{Object returned to caller with a +0 retain count}} expected-note{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
+}
+
 - (id)getViolation {
   id result = [[Foo alloc] init]; // expected-warning{{leak}} expected-note{{Method returns an Objective-C object with a +1 retain count}}
   return result; // expected-note{{Object returned to caller as an owning reference (single retain count transferred to caller)}} expected-note{{Object leaked: object allocated and stored into 'result' is returned from a method whose name ('getViolation') does not start with 'copy', 'mutableCopy', 'alloc' or 'new'.  This violates the naming convention rules given in the Memory Management Guide for Cocoa}}
@@ -130,3 +139,51 @@ CFTypeRef CFGetRuleViolation () {
   return result; // expected-warning{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}} expected-note{{Object returned to caller with a +0 retain count}} expected-note{{Object with a +0 retain count returned to caller where a +1 (owning) retain count is expected}}
 }
 @end
+
+
+typedef unsigned long NSUInteger;
+
+@interface NSValue : NSObject
+@end
+
+@interface NSNumber : NSValue
++ (NSNumber *)numberWithInt:(int)i;
+@end
+
+@interface NSString : NSObject
++ (NSString *)stringWithUTF8String:(const char *)str;
+@end
+
+@interface NSArray : NSObject
++ (NSArray *)arrayWithObjects:(const id [])objects count:(NSUInteger)count;
+@end
+
+@interface NSDictionary : NSObject
++ (id)dictionaryWithObjects:(const id [])objects forKeys:(const id /* <NSCopying> */ [])keys count:(NSUInteger)count;
+@end
+
+
+void testNumericLiteral() {
+  id result = @1; // expected-note{{NSNumber literal is an object with a +0 retain count}}
+  [result release]; // expected-warning{{decrement}} expected-note{{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+void testBoxedInt(int x) {
+  id result = @(x); // expected-note{{NSNumber boxed expression produces an object with a +0 retain count}}
+  [result release]; // expected-warning{{decrement}} expected-note{{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+void testBoxedString(const char *str) {
+  id result = @(str); // expected-note{{NSString boxed expression produces an object with a +0 retain count}}
+  [result release]; // expected-warning{{decrement}} expected-note{{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+void testArray(id obj) {
+  id result = @[obj]; // expected-note{{NSArray literal is an object with a +0 retain count}}
+  [result release]; // expected-warning{{decrement}} expected-note{{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}
+
+void testDictionary(id key, id value) {
+  id result = @{key: value}; // expected-note{{NSDictionary literal is an object with a +0 retain count}}
+  [result release]; // expected-warning{{decrement}} expected-note{{Incorrect decrement of the reference count of an object that is not owned at this point by the caller}}
+}

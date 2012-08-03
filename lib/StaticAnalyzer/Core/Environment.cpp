@@ -71,6 +71,11 @@ SVal Environment::getSVal(const EnvironmentEntry &Entry,
         else 
           return svalBuilder.makeBoolVal(cast<CXXBoolLiteralExpr>(E));
       }
+      case Stmt::CXXScalarValueInitExprClass:
+      case Stmt::ImplicitValueInitExprClass: {
+        QualType Ty = cast<Expr>(E)->getType();
+        return svalBuilder.makeZeroVal(Ty);
+      }
       case Stmt::IntegerLiteralClass: {
         // In C++, this expression may have been bound to a temporary object.
         SVal const *X = ExprBindings.lookup(EnvironmentEntry(E, LCtx));
@@ -91,8 +96,6 @@ SVal Environment::getSVal(const EnvironmentEntry &Entry,
       case Stmt::CXXBindTemporaryExprClass:
         E = cast<CXXBindTemporaryExpr>(E)->getSubExpr();
         continue;
-      case Stmt::ObjCPropertyRefExprClass:
-        return loc::ObjCPropRef(cast<ObjCPropertyRefExpr>(E));
       case Stmt::ObjCStringLiteralClass: {
         MemRegionManager &MRMgr = svalBuilder.getRegionManager();
         const ObjCStringLiteral *SL = cast<ObjCStringLiteral>(E);

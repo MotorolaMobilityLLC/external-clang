@@ -49,7 +49,7 @@ static void DefineBuiltinMacro(MacroBuilder &Builder, StringRef Macro,
   }
 }
 
-/// AddImplicitInclude - Add an implicit #include of the specified file to the
+/// AddImplicitInclude - Add an implicit \#include of the specified file to the
 /// predefines buffer.
 static void AddImplicitInclude(MacroBuilder &Builder, StringRef File,
                                FileManager &FileMgr) {
@@ -66,8 +66,8 @@ static void AddImplicitIncludeMacros(MacroBuilder &Builder,
   Builder.append("##"); // ##?
 }
 
-/// AddImplicitIncludePTH - Add an implicit #include using the original file
-///  used to generate a PTH cache.
+/// AddImplicitIncludePTH - Add an implicit \#include using the original file
+/// used to generate a PTH cache.
 static void AddImplicitIncludePTH(MacroBuilder &Builder, Preprocessor &PP,
                                   StringRef ImplicitIncludePTH) {
   PTHManager *P = PP.getPTHManager();
@@ -288,20 +288,16 @@ static void InitializeStandardPredefinedMacros(const TargetInfo &TI,
     else if (!LangOpts.GNUMode && LangOpts.Digraphs)
       Builder.defineMacro("__STDC_VERSION__", "199409L");
   } else {
-    if (LangOpts.GNUMode)
-      Builder.defineMacro("__cplusplus");
-    else {
-      // C++0x [cpp.predefined]p1:
-      //   The name_ _cplusplus is defined to the value 201103L when compiling a
-      //   C++ translation unit.
-      if (LangOpts.CPlusPlus0x)
-        Builder.defineMacro("__cplusplus", "201103L");
-      // C++03 [cpp.predefined]p1:
-      //   The name_ _cplusplus is defined to the value 199711L when compiling a
-      //   C++ translation unit.
-      else
-        Builder.defineMacro("__cplusplus", "199711L");
-    }
+    // C++11 [cpp.predefined]p1:
+    //   The name __cplusplus is defined to the value 201103L when compiling a
+    //   C++ translation unit.
+    if (LangOpts.CPlusPlus0x)
+      Builder.defineMacro("__cplusplus", "201103L");
+    // C++03 [cpp.predefined]p1:
+    //   The name __cplusplus is defined to the value 199711L when compiling a
+    //   C++ translation unit.
+    else
+      Builder.defineMacro("__cplusplus", "199711L");
   }
 
   if (LangOpts.ObjC1)
@@ -369,7 +365,7 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     Builder.defineMacro("__GXX_EXPERIMENTAL_CXX0X__");
 
   if (LangOpts.ObjC1) {
-    if (LangOpts.ObjCNonFragileABI) {
+    if (LangOpts.ObjCRuntime.isNonFragile()) {
       Builder.defineMacro("__OBJC2__");
       
       if (LangOpts.ObjCExceptions)
@@ -379,8 +375,13 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     if (LangOpts.getGC() != LangOptions::NonGC)
       Builder.defineMacro("__OBJC_GC__");
 
-    if (LangOpts.NeXTRuntime)
+    if (LangOpts.ObjCRuntime.isNeXTFamily())
       Builder.defineMacro("__NEXT_RUNTIME__");
+
+    Builder.defineMacro("IBOutlet", "__attribute__((iboutlet))");
+    Builder.defineMacro("IBOutletCollection(ClassName)",
+                        "__attribute__((iboutletcollection(ClassName)))");
+    Builder.defineMacro("IBAction", "void)__attribute__((ibaction)");
   }
 
   // darwin_constant_cfstrings controls this. This is also dependent
@@ -501,6 +502,9 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (!LangOpts.CharIsSigned)
     Builder.defineMacro("__CHAR_UNSIGNED__");
 
+  if (!TargetInfo::isTypeSigned(TI.getWCharType()))
+    Builder.defineMacro("__WCHAR_UNSIGNED__");
+
   if (!TargetInfo::isTypeSigned(TI.getWIntType()))
     Builder.defineMacro("__WINT_UNSIGNED__");
 
@@ -520,15 +524,13 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (TI.getLongLongWidth() > TI.getLongWidth())
     DefineExactWidthIntType(TargetInfo::SignedLongLong, TI, Builder);
 
-  // Add __builtin_va_list typedef.
-  Builder.append(TI.getVAListDeclaration());
-
   if (const char *Prefix = TI.getUserLabelPrefix())
     Builder.defineMacro("__USER_LABEL_PREFIX__", Prefix);
 
-  // Build configuration options.  FIXME: these should be controlled by
-  // command line options or something.
-  Builder.defineMacro("__FINITE_MATH_ONLY__", "0");
+  if (LangOpts.FastMath || LangOpts.FiniteMathOnly)
+    Builder.defineMacro("__FINITE_MATH_ONLY__", "1");
+  else
+    Builder.defineMacro("__FINITE_MATH_ONLY__", "0");
 
   if (LangOpts.GNUInline)
     Builder.defineMacro("__GNUC_GNU_INLINE__");
