@@ -312,7 +312,7 @@ def OpenCLImageAccess : Attr {
 }
 
 def Kernel : Attr {
-  let Spellings = ["kernel"];
+  let Spellings = [GNU<"kernel">];
 }
 
 def Deprecated : InheritableAttr {

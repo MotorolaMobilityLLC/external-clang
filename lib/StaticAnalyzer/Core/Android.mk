@@ -3,17 +3,20 @@ LOCAL_PATH:= $(call my-dir)
 clang_static_analyzer_core_TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
+  CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   StmtNodes.inc
 
 clang_static_analyzer_core_SRC_FILES := \
   AnalysisManager.cpp \
+  APSIntType.cpp \
   BasicConstraintManager.cpp \
   BasicValueFactory.cpp \
   BlockCounter.cpp \
   BugReporter.cpp \
   BugReporterVisitors.cpp \
+  Calls.cpp \
   Checker.cpp \
   CheckerContext.cpp \
   CheckerHelpers.cpp \
@@ -30,7 +33,6 @@ clang_static_analyzer_core_SRC_FILES := \
   FunctionSummary.cpp \
   HTMLDiagnostics.cpp \
   MemRegion.cpp \
-  ObjCMessage.cpp \
   PathDiagnostic.cpp \
   PlistDiagnostics.cpp \
   ProgramState.cpp \

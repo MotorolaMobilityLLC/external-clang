@@ -16,7 +16,6 @@ clang_driver_SRC_FILES := \
   Action.cpp \
   Arg.cpp \
   ArgList.cpp \
-  CC1Options.cpp \
   CC1AsOptions.cpp \
   Compilation.cpp \
   Driver.cpp \

@@ -11,10 +11,12 @@ TBLGEN_TABLES :=    \
 	AttrParsedAttrKinds.inc    \
 	AttrParsedAttrList.inc    \
 	AttrTemplateInstantiate.inc	\
+	CommentNodes.inc \
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
 	DiagnosticSemaKinds.inc	\
 	DiagnosticParseKinds.inc	\
+	DiagnosticCommentKinds.inc \
 	DiagnosticCommonKinds.inc	\
 	StmtNodes.inc	\
 	arm_neon.inc

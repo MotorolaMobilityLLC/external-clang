@@ -8,6 +8,7 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES := \
   DiagnosticASTKinds.inc \
   DiagnosticAnalysisKinds.inc \
+  DiagnosticCommentKinds.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticDriverKinds.inc \
   DiagnosticFrontendKinds.inc \
@@ -22,6 +23,7 @@ TBLGEN_TABLES := \
 clang_basic_SRC_FILES := \
   Builtins.cpp \
   ConvertUTF.c \
+  ConvertUTFWrapper.cpp \
   Diagnostic.cpp \
   DiagnosticIDs.cpp \
   FileManager.cpp \
@@ -29,6 +31,7 @@ clang_basic_SRC_FILES := \
   IdentifierTable.cpp \
   LangOptions.cpp \
   Module.cpp \
+  ObjCRuntime.cpp \
   SourceLocation.cpp \
   SourceManager.cpp \
   TargetInfo.cpp \

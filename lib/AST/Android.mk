@@ -9,8 +9,10 @@ TBLGEN_TABLES :=    \
 	AttrImpl.inc	\
 	AttrList.inc	\
 	Attrs.inc	\
+	CommentNodes.inc \
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
+	DiagnosticCommentKinds.inc \
 	DiagnosticCommonKinds.inc	\
 	DiagnosticSemaKinds.inc	\
 	StmtNodes.inc
@@ -22,6 +24,12 @@ clang_ast_SRC_FILES :=	\
 	ASTDiagnostic.cpp	\
 	ASTImporter.cpp	\
 	AttrImpl.cpp	\
+	Comment.cpp \
+	CommentBriefParser.cpp \
+	CommentDumper.cpp \
+	CommentLexer.cpp \
+	CommentParser.cpp \
+	CommentSema.cpp \
 	CXXInheritance.cpp	\
 	Decl.cpp	\
 	DeclarationName.cpp	\
@@ -50,6 +58,7 @@ clang_ast_SRC_FILES :=	\
 	ParentMap.cpp	\
 	RecordLayout.cpp	\
 	RecordLayoutBuilder.cpp	\
+	RawCommentList.cpp \
 	SelectorLocationsKind.cpp \
 	Stmt.cpp	\
 	StmtDumper.cpp	\

@@ -14,6 +14,7 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES := \
   Attrs.inc \
   AttrList.inc \
+  CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   StmtNodes.inc
