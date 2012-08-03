@@ -4092,7 +4092,7 @@ static void ProcessNonInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_CUDADevice:  handleDeviceAttr      (S, D, Attr); break;
   case AttributeList::AT_CUDAHost:    handleHostAttr        (S, D, Attr); break;
   case AttributeList::AT_Overloadable:handleOverloadableAttr(S, D, Attr); break;
-  case AttributeList::AT_kernel:      handleKernelAttr      (S, D, Attr); break;
+  case AttributeList::AT_Kernel:      handleKernelAttr      (S, D, Attr); break;
   default:
     break;
   }
