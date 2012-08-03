@@ -339,6 +339,9 @@ PathDiagnosticLocation
   else if (const PostStmt *PS = dyn_cast<PostStmt>(&P)) {
     S = PS->getStmt();
   }
+  else if (const CallExitEnd *CEE = dyn_cast<CallExitEnd>(&P)) {
+    S = CEE->getCalleeContext()->getCallSite();
+  }
 
   return PathDiagnosticLocation(S, SMng, P.getLocationContext());
 }
@@ -501,6 +504,10 @@ static PathDiagnosticLocation getLastStmtLoc(const ExplodedNode *N,
     ProgramPoint PP = N->getLocation();
     if (const StmtPoint *SP = dyn_cast<StmtPoint>(&PP))
       return PathDiagnosticLocation(SP->getStmt(), SM, PP.getLocationContext());
+    // FIXME: Handle implicit calls.
+    if (const CallExitEnd *CEE = dyn_cast<CallExitEnd>(&PP))
+      if (const Stmt *CallSite = CEE->getCalleeContext()->getCallSite())
+        return PathDiagnosticLocation(CallSite, SM, PP.getLocationContext());
     if (N->pred_empty())
       break;
     N = *N->pred_begin();
@@ -510,9 +517,9 @@ static PathDiagnosticLocation getLastStmtLoc(const ExplodedNode *N,
 
 PathDiagnosticCallPiece *
 PathDiagnosticCallPiece::construct(const ExplodedNode *N,
-                                   const CallExit &CE,
+                                   const CallExitEnd &CE,
                                    const SourceManager &SM) {
-  const Decl *caller = CE.getLocationContext()->getParent()->getDecl();
+  const Decl *caller = CE.getLocationContext()->getDecl();
   PathDiagnosticLocation pos = getLastStmtLoc(N, SM);
   return new PathDiagnosticCallPiece(caller, pos);
 }
@@ -667,16 +674,14 @@ StackHintGenerator::~StackHintGenerator() {}
 
 std::string StackHintGeneratorForSymbol::getMessage(const ExplodedNode *N){
   ProgramPoint P = N->getLocation();
-  const CallExit *CExit = dyn_cast<CallExit>(&P);
-  assert(CExit && "Stack Hints should be constructed at CallExit points.");
+  const CallExitEnd *CExit = dyn_cast<CallExitEnd>(&P);
+  assert(CExit && "Stack Hints should be constructed at CallExitEnd points.");
 
-  const CallExpr *CE = dyn_cast_or_null<CallExpr>(CExit->getStmt());
+  const Stmt *CallSite = CExit->getCalleeContext()->getCallSite();
+  const CallExpr *CE = dyn_cast_or_null<CallExpr>(CallSite);
   if (!CE)
     return "";
 
-  // Get the successor node to make sure the return statement is evaluated and
-  // CE is set to the result value.
-  N = *N->succ_begin();
   if (!N)
     return getMessageForSymbolNotFound();
 

@@ -41,8 +41,6 @@ class AnalysisManager : public BugReporterData {
 
   CheckerManager *CheckerMgr;
 
-  enum AnalysisScope { ScopeTU, ScopeDecl } AScope;
-
   /// \brief The maximum number of exploded nodes the analyzer will generate.
   unsigned MaxNodes;
 
@@ -188,10 +186,6 @@ public:
 
   AnalysisDeclContext *getAnalysisDeclContext(const Decl *D) {
     return AnaCtxMgr.getContext(D);
-  }
-
-  AnalysisDeclContext *getAnalysisDeclContext(const Decl *D, idx::TranslationUnit *TU) {
-    return AnaCtxMgr.getContext(D, TU);
   }
 
 };
