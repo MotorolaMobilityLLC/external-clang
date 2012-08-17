@@ -7,8 +7,6 @@ include $(CLEAR_TBLGEN_VARS)
 
 LOCAL_MODULE := clang
 
-LOCAL_MODULE_TAGS := optional tests
-
 LOCAL_MODULE_CLASS := EXECUTABLES
 
 TBLGEN_TABLES := \
