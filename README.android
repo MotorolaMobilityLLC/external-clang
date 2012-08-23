@@ -19,8 +19,9 @@
 * For Ice Cream Sandwich MR1: Synced to upstream r142531
 * For Ice Cream Sandwich MR2: Synced to upstream r146715
 * For Jellybean: Synced to upstream r155088
-* For Jellybean: Synced to upstream r160673
+* For Jellybean MR1: Synced to upstream r162325.
 
+* Recent downstreaming on 2012/8/23: Synced to r162325 (srhines for merge questions)
 * Recent downstreaming on 2012/8/3: Synced to r160673 (sliao for merge questions)
 * Recent downstreaming on 2012/4/24: Synced to r155088 (sliao for merge questions)
 * Recent downstreaming on 2012/3/24: Synced to r153220 (sliao & srhines for merge questions)
