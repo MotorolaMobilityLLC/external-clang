@@ -619,6 +619,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("address_sanitizer", LangOpts.AddressSanitizer)
            .Case("attribute_analyzer_noreturn", true)
            .Case("attribute_availability", true)
+           .Case("attribute_availability_with_message", true)
            .Case("attribute_cf_returns_not_retained", true)
            .Case("attribute_cf_returns_retained", true)
            .Case("attribute_deprecated_with_message", true)
@@ -640,8 +641,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            // Objective-C features
            .Case("objc_arr", LangOpts.ObjCAutoRefCount) // FIXME: REMOVE?
            .Case("objc_arc", LangOpts.ObjCAutoRefCount)
-           .Case("objc_arc_weak", LangOpts.ObjCAutoRefCount && 
-                 LangOpts.ObjCRuntimeHasWeak)
+           .Case("objc_arc_weak", LangOpts.ObjCARCWeak)
            .Case("objc_default_synthesize_properties", LangOpts.ObjC2)
            .Case("objc_fixed_enum", LangOpts.ObjC2)
            .Case("objc_instancetype", LangOpts.ObjC2)
@@ -1053,7 +1053,7 @@ void Preprocessor::ExpandBuiltinMacro(Token &Tok) {
     if (Tok.is(tok::l_paren)) {
       // Read the identifier
       Lex(Tok);
-      if (Tok.is(tok::identifier)) {
+      if (Tok.is(tok::identifier) || Tok.is(tok::kw_const)) {
         FeatureII = Tok.getIdentifierInfo();
 
         // Read the ')'.
