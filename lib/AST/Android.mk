@@ -26,6 +26,7 @@ clang_ast_SRC_FILES :=	\
 	AttrImpl.cpp	\
 	Comment.cpp \
 	CommentBriefParser.cpp \
+	CommentCommandTraits.cpp \
 	CommentDumper.cpp \
 	CommentLexer.cpp \
 	CommentParser.cpp \
