@@ -499,6 +499,10 @@ public:
       Operand = (TypeSourceInfo*)0;
   }
 
+  /// Determine whether this typeid has a type operand which is potentially
+  /// evaluated, per C++11 [expr.typeid]p3.
+  bool isPotentiallyEvaluated() const;
+
   bool isTypeOperand() const { return Operand.is<TypeSourceInfo *>(); }
 
   /// \brief Retrieves the type operand of this typeid() expression after
@@ -1254,7 +1258,8 @@ private:
              ArrayRef<Expr *> CaptureInits,
              ArrayRef<VarDecl *> ArrayIndexVars,
              ArrayRef<unsigned> ArrayIndexStarts,
-             SourceLocation ClosingBrace);
+             SourceLocation ClosingBrace,
+             bool ContainsUnexpandedParameterPack);
 
   /// \brief Construct an empty lambda expression.
   LambdaExpr(EmptyShell Empty, unsigned NumCaptures, bool HasArrayIndexVars)
@@ -1276,8 +1281,11 @@ private:
   
   /// \brief Retrieve the complete set of array-index variables.
   VarDecl **getArrayIndexVars() const {
+    unsigned ArrayIndexSize =
+        llvm::RoundUpToAlignment(sizeof(unsigned) * (NumCaptures + 1),
+                                 llvm::alignOf<VarDecl*>());
     return reinterpret_cast<VarDecl **>(
-             getArrayIndexStarts() + NumCaptures + 1);
+        reinterpret_cast<char*>(getArrayIndexStarts()) + ArrayIndexSize);
   }
 
 public:
@@ -1292,7 +1300,8 @@ public:
                             ArrayRef<Expr *> CaptureInits,
                             ArrayRef<VarDecl *> ArrayIndexVars,
                             ArrayRef<unsigned> ArrayIndexStarts,
-                            SourceLocation ClosingBrace);
+                            SourceLocation ClosingBrace,
+                            bool ContainsUnexpandedParameterPack);
 
   /// \brief Construct a new lambda expression that will be deserialized from
   /// an external source.

@@ -33,6 +33,8 @@ class MicrosoftCXXNameMangler {
   MangleContext &Context;
   raw_ostream &Out;
 
+  // FIXME: audit the performance of BackRefMap as it might do way too many
+  // copying of strings.
   typedef std::map<std::string, unsigned> BackRefMap;
   BackRefMap NameBackReferences;
   bool UseNameBackReferences;
@@ -1057,8 +1059,6 @@ void MicrosoftCXXNameMangler::mangleType(const FunctionProtoType *T,
                                          SourceRange) {
   // Structors only appear in decls, so at this point we know it's not a
   // structor type.
-  // I'll probably have mangleType(MemberPointerType) call the mangleType()
-  // method directly.
   mangleType(T, NULL, false, false);
 }
 void MicrosoftCXXNameMangler::mangleType(const FunctionNoProtoType *T,
@@ -1088,8 +1088,15 @@ void MicrosoftCXXNameMangler::mangleType(const FunctionType *T,
   else {
     QualType Result = Proto->getResultType();
     const Type* RT = Result.getTypePtr();
-    if(isa<TagType>(RT) && !RT->isAnyPointerType() && !RT->isReferenceType())
-        Out << "?A";
+    if (!RT->isAnyPointerType() && !RT->isReferenceType()) {
+      if (Result.hasQualifiers() || !RT->isBuiltinType())
+        Out << '?';
+      if (!RT->isBuiltinType() && !Result.hasQualifiers()) {
+        // Lack of qualifiers for user types is mangled as 'A'.
+        Out << 'A';
+      }
+    }
+
     // FIXME: Get the source range for the result type. Or, better yet,
     // implement the unimplemented stuff so we don't need accurate source
     // location info anymore :).

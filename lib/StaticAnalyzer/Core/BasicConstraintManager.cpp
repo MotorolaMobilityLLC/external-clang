@@ -363,7 +363,6 @@ const llvm::APSInt* BasicConstraintManager::getSymVal(ProgramStateRef state,
 bool BasicConstraintManager::isNotEqual(ProgramStateRef state,
                                         SymbolRef sym,
                                         const llvm::APSInt& V) const {
-
   // Retrieve the NE-set associated with the given symbol.
   const ConstNotEqTy::data_type* T = state->get<ConstNotEq>(sym);
 
