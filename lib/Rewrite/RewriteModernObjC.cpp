@@ -241,7 +241,7 @@ namespace {
       // Get the new text.
       std::string SStr;
       llvm::raw_string_ostream S(SStr);
-      New->printPretty(S, *Context, 0, PrintingPolicy(LangOpts));
+      New->printPretty(S, 0, PrintingPolicy(LangOpts));
       const std::string &Str = S.str();
 
       // If replacement succeeded or warning disabled return with no warning.
@@ -2549,8 +2549,7 @@ Stmt *RewriteModernObjC::RewriteObjCStringLiteral(ObjCStringLiteral *Exp) {
   // The pretty printer for StringLiteral handles escape characters properly.
   std::string prettyBufS;
   llvm::raw_string_ostream prettyBuf(prettyBufS);
-  Exp->getString()->printPretty(prettyBuf, *Context, 0,
-                                PrintingPolicy(LangOpts));
+  Exp->getString()->printPretty(prettyBuf, 0, PrintingPolicy(LangOpts));
   Preamble += prettyBuf.str();
   Preamble += ",";
   Preamble += utostr(Exp->getString()->getByteLength()) + "};\n";
@@ -3103,7 +3102,9 @@ Expr *RewriteModernObjC::SynthMsgSendStretCallExpr(FunctionDecl *MsgSendStretFla
   // build type for containing the objc_msgSend_stret object.
   static unsigned stretCount=0;
   std::string name = "__Stret"; name += utostr(stretCount);
-  std::string str = "struct "; str += name;
+  std::string str = 
+    "extern \"C\" void * __cdecl memset(void *_Dst, int _Val, size_t _Size);\n";
+  str += "struct "; str += name;
   str += " {\n\t";
   str += name;
   str += "(id receiver, SEL sel";
@@ -3139,7 +3140,14 @@ Expr *RewriteModernObjC::SynthMsgSendStretCallExpr(FunctionDecl *MsgSendStretFla
   str += "\t"; str += returnType.getAsString(Context->getPrintingPolicy());
   str += " s;\n";
   str += "};\n\n";
-  SourceLocation FunLocStart = getFunctionSourceLocation(*this, CurFunctionDef);
+  SourceLocation FunLocStart;
+  if (CurFunctionDef)
+    FunLocStart = getFunctionSourceLocation(*this, CurFunctionDef);
+  else {
+    assert(CurMethodDef && "SynthMsgSendStretCallExpr - CurMethodDef is null");
+    FunLocStart = CurMethodDef->getLocStart();
+  }
+
   InsertText(FunLocStart, str);
   ++stretCount;
   
@@ -4339,7 +4347,7 @@ void RewriteModernObjC::SynthesizeBlockLiterals(SourceLocation FunLocStart,
     std::string SStr;
   
     llvm::raw_string_ostream constructorExprBuf(SStr);
-    GlobalConstructionExp->printPretty(constructorExprBuf, *Context, 0,
+    GlobalConstructionExp->printPretty(constructorExprBuf, 0,
                                          PrintingPolicy(LangOpts));
     globalBuf += constructorExprBuf.str();
     globalBuf += ";\n";
@@ -5608,7 +5616,7 @@ Stmt *RewriteModernObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
     // Get the new text.
     std::string SStr;
     llvm::raw_string_ostream Buf(SStr);
-    Replacement->printPretty(Buf, *Context);
+    Replacement->printPretty(Buf);
     const std::string &Str = Buf.str();
 
     printf("CAST = %s\n", &Str[0]);
@@ -5959,11 +5967,6 @@ void RewriteModernObjC::Initialize(ASTContext &context) {
     Preamble += "#define __block\n";
     Preamble += "#define __weak\n";
   }
-  Preamble += "\n#if defined(_MSC_VER)\n";
-  Preamble += "#include <string.h>\n";
-  Preamble += "#else\n";
-  Preamble += "extern \"C\" void * memset(void *b, int c, unsigned long len);\n";
-  Preamble += "#endif\n";
   
   // Declarations required for modern objective-c array and dictionary literals.
   Preamble += "\n#include <stdarg.h>\n";

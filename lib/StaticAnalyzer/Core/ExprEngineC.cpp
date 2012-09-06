@@ -211,8 +211,7 @@ void ExprEngine::VisitBlockExpr(const BlockExpr *BE, ExplodedNode *Pred,
   StmtNodeBuilder Bldr(Pred, Tmp, *currentBuilderContext);
   Bldr.generateNode(BE, Pred,
                     State->BindExpr(BE, Pred->getLocationContext(), V),
-                    false, 0,
-                    ProgramPoint::PostLValueKind);
+                    0, ProgramPoint::PostLValueKind);
   
   // FIXME: Move all post/pre visits to ::Visit().
   getCheckerManager().runCheckersForPostStmt(Dst, Tmp, BE, *this);
@@ -318,7 +317,7 @@ void ExprEngine::VisitCast(const CastExpr *CastE, const Expr *Ex,
         ProgramStateRef state = Pred->getState();
         const LocationContext *LCtx = Pred->getLocationContext();
         SVal val = state->getSVal(Ex, LCtx);
-        val = getStoreManager().evalDerivedToBase(val, T);
+        val = getStoreManager().evalDerivedToBase(val, CastE);
         state = state->BindExpr(CastE, LCtx, val);
         Bldr.generateNode(CastE, Pred, state);
         continue;
@@ -347,7 +346,7 @@ void ExprEngine::VisitCast(const CastExpr *CastE, const Expr *Ex,
           if (T->isReferenceType()) {
             // A bad_cast exception is thrown if input value is a reference.
             // Currently, we model this, by generating a sink.
-            Bldr.generateNode(CastE, Pred, state, true);
+            Bldr.generateSink(CastE, Pred, state);
             continue;
           } else {
             // If the cast fails on a pointer, bind to 0.
@@ -453,16 +452,17 @@ void ExprEngine::VisitDeclStmt(const DeclStmt *DS, ExplodedNode *Pred,
     const LocationContext *LC = N->getLocationContext();
     
     if (const Expr *InitEx = VD->getInit()) {
-      SVal InitVal = state->getSVal(InitEx, Pred->getLocationContext());
+      SVal InitVal = state->getSVal(InitEx, LC);
 
-      if (InitVal == state->getLValue(VD, LC)) {
+      if (InitVal == state->getLValue(VD, LC) ||
+          (VD->getType()->isArrayType() &&
+           isa<CXXConstructExpr>(InitEx->IgnoreImplicit()))) {
         // We constructed the object directly in the variable.
         // No need to bind anything.
         B.generateNode(DS, N, state);
       } else {
         // We bound the temp obj region to the CXXConstructExpr. Now recover
         // the lazy compound value when the variable is not a reference.
-        // FIXME: This is probably not correct for most constructors!
         if (AMgr.getLangOpts().CPlusPlus && VD->getType()->isRecordType() && 
             !VD->getType()->isReferenceType() && isa<loc::MemRegionVal>(InitVal)){
           InitVal = state->getSVal(cast<loc::MemRegionVal>(InitVal).getRegion());
@@ -530,10 +530,28 @@ void ExprEngine::VisitLogicalExpr(const BinaryOperator* B, ExplodedNode *Pred,
   else {
     // If there is no terminator, by construction the last statement
     // in SrcBlock is the value of the enclosing expression.
+    // However, we still need to constrain that value to be 0 or 1.
     assert(!SrcBlock->empty());
     CFGStmt Elem = cast<CFGStmt>(*SrcBlock->rbegin());
-    const Stmt *S = Elem.getStmt();
-    X = N->getState()->getSVal(S, Pred->getLocationContext());
+    const Expr *RHS = cast<Expr>(Elem.getStmt());
+    SVal RHSVal = N->getState()->getSVal(RHS, Pred->getLocationContext());
+
+    DefinedOrUnknownSVal DefinedRHS = cast<DefinedOrUnknownSVal>(RHSVal);
+    ProgramStateRef StTrue, StFalse;
+    llvm::tie(StTrue, StFalse) = N->getState()->assume(DefinedRHS);
+    if (StTrue) {
+      if (StFalse) {
+        // We can't constrain the value to 0 or 1; the best we can do is a cast.
+        X = getSValBuilder().evalCast(RHSVal, B->getType(), RHS->getType());
+      } else {
+        // The value is known to be true.
+        X = getSValBuilder().makeIntVal(1, B->getType());
+      }
+    } else {
+      // The value is known to be false.
+      assert(StFalse && "Infeasible path!");
+      X = getSValBuilder().makeIntVal(0, B->getType());
+    }
   }
 
   Bldr.generateNode(B, Pred, state->BindExpr(B, Pred->getLocationContext(), X));
@@ -590,17 +608,41 @@ void ExprEngine::VisitGuardedExpr(const Expr *Ex,
                                   ExplodedNode *Pred,
                                   ExplodedNodeSet &Dst) {
   StmtNodeBuilder B(Pred, Dst, *currentBuilderContext);
-  
   ProgramStateRef state = Pred->getState();
   const LocationContext *LCtx = Pred->getLocationContext();
-  SVal X = state->getSVal(Ex, LCtx);  
-  assert (X.isUndef());  
-  const Expr *SE = (Expr*) cast<UndefinedVal>(X).getData();
-  assert(SE);
-  X = state->getSVal(SE, LCtx);
-  
-  // Make sure that we invalidate the previous binding.
-  B.generateNode(Ex, Pred, state->BindExpr(Ex, LCtx, X, true));
+  const CFGBlock *SrcBlock = 0;
+
+  for (const ExplodedNode *N = Pred ; N ; N = *N->pred_begin()) {
+    ProgramPoint PP = N->getLocation();
+    if (isa<PreStmtPurgeDeadSymbols>(PP) || isa<BlockEntrance>(PP)) {
+      assert(N->pred_size() == 1);
+      continue;
+    }
+    SrcBlock = cast<BlockEdge>(&PP)->getSrc();
+    break;
+  }
+
+  // Find the last expression in the predecessor block.  That is the
+  // expression that is used for the value of the ternary expression.
+  bool hasValue = false;
+  SVal V;
+
+  for (CFGBlock::const_reverse_iterator I = SrcBlock->rbegin(),
+                                        E = SrcBlock->rend(); I != E; ++I) {
+    CFGElement CE = *I;
+    if (CFGStmt *CS = dyn_cast<CFGStmt>(&CE)) {
+      const Expr *ValEx = cast<Expr>(CS->getStmt());
+      hasValue = true;
+      V = state->getSVal(ValEx, LCtx);
+      break;
+    }
+  }
+
+  assert(hasValue);
+  (void) hasValue;
+
+  // Generate a new node with the binding from the appropriate path.
+  B.generateNode(Ex, Pred, state->BindExpr(Ex, LCtx, V, true));
 }
 
 void ExprEngine::
