@@ -16,7 +16,7 @@ clang_static_analyzer_core_SRC_FILES := \
   BlockCounter.cpp \
   BugReporter.cpp \
   BugReporterVisitors.cpp \
-  Calls.cpp \
+  CallEvent.cpp \
   Checker.cpp \
   CheckerContext.cpp \
   CheckerHelpers.cpp \

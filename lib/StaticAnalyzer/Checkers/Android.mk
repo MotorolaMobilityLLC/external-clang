@@ -37,11 +37,11 @@ clang_static_analyzer_checkers_SRC_FILES := \
   DebugCheckers.cpp \
   DereferenceChecker.cpp \
   DivZeroChecker.cpp \
+  DynamicTypePropagation.cpp \
   ExprInspectionChecker.cpp \
   FixedAddressChecker.cpp \
   GenericTaintChecker.cpp \
   IdempotentOperationChecker.cpp \
-  IteratorsChecker.cpp \
   LLVMConventionsChecker.cpp \
   MacOSKeychainAPIChecker.cpp \
   MacOSXAPIChecker.cpp \
