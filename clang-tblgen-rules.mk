@@ -89,6 +89,24 @@ $(intermediates)/Checkers.inc: \
 	$(call transform-host-clang-td-to-out,clang-sa-checkers)
 endif
 
+ifneq ($(findstring CommentCommandInfo.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/CommentCommandInfo.inc
+$(intermediates)/include/clang/AST/CommentCommandInfo.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/AST/CommentCommandInfo.inc: \
+  $(CLANG_ROOT_PATH)/include/clang/AST/CommentCommands.td \
+  $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-comment-command-info)
+endif
+
+ifneq ($(findstring CommentHTMLTagsProperties.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/CommentHTMLTagsProperties.inc
+$(intermediates)/include/clang/AST/CommentHTMLTagsProperties.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/AST/CommentHTMLTagsProperties.inc: \
+  $(CLANG_ROOT_PATH)/include/clang/AST/CommentHTMLTags.td \
+  $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-comment-html-tags-properties)
+endif
+
 ifneq ($(findstring CommentNodes.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/CommentNodes.inc
 $(intermediates)/include/clang/AST/CommentNodes.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)

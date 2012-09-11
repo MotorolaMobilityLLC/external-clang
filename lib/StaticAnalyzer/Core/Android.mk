@@ -10,8 +10,8 @@ clang_static_analyzer_core_TBLGEN_TABLES := \
 
 clang_static_analyzer_core_SRC_FILES := \
   AnalysisManager.cpp \
+  AnalyzerOptions.cpp \
   APSIntType.cpp \
-  BasicConstraintManager.cpp \
   BasicValueFactory.cpp \
   BlockCounter.cpp \
   BugReporter.cpp \
@@ -22,6 +22,7 @@ clang_static_analyzer_core_SRC_FILES := \
   CheckerHelpers.cpp \
   CheckerManager.cpp \
   CheckerRegistry.cpp \
+  ConstraintManager.cpp \
   CoreEngine.cpp \
   Environment.cpp \
   ExplodedGraph.cpp \
