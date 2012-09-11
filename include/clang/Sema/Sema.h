@@ -2186,7 +2186,8 @@ public:
                              bool EnteringContext = false,
                              const ObjCObjectPointerType *OPT = 0);
 
-  void FindAssociatedClassesAndNamespaces(llvm::ArrayRef<Expr *> Args,
+  void FindAssociatedClassesAndNamespaces(SourceLocation InstantiationLoc,
+                                          llvm::ArrayRef<Expr *> Args,
                                    AssociatedNamespaceSet &AssociatedNamespaces,
                                    AssociatedClassSet &AssociatedClasses);
 
@@ -2437,7 +2438,7 @@ public:
     FullExprArg(const FullExprArg& Other) : E(Other.E) {}
 
     ExprResult release() {
-      return move(E);
+      return E;
     }
 
     Expr *get() const { return E; }
@@ -2568,20 +2569,15 @@ public:
   StmtResult ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp);
   StmtResult ActOnCapScopeReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp);
 
-  StmtResult ActOnAsmStmt(SourceLocation AsmLoc,
-                          bool IsSimple, bool IsVolatile,
-                          unsigned NumOutputs, unsigned NumInputs,
-                          IdentifierInfo **Names,
-                          MultiExprArg Constraints,
-                          MultiExprArg Exprs,
-                          Expr *AsmString,
-                          MultiExprArg Clobbers,
-                          SourceLocation RParenLoc);
+  StmtResult ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
+                             bool IsVolatile, unsigned NumOutputs,
+                             unsigned NumInputs, IdentifierInfo **Names,
+                             MultiExprArg Constraints, MultiExprArg Exprs,
+                             Expr *AsmString, MultiExprArg Clobbers,
+                             SourceLocation RParenLoc);
 
-  StmtResult ActOnMSAsmStmt(SourceLocation AsmLoc,
-                            SourceLocation LBraceLoc,
-                            ArrayRef<Token> AsmToks,
-                            SourceLocation EndLoc);
+  StmtResult ActOnMSAsmStmt(SourceLocation AsmLoc, SourceLocation LBraceLoc,
+                            ArrayRef<Token> AsmToks, SourceLocation EndLoc);
 
   VarDecl *BuildObjCExceptionDecl(TypeSourceInfo *TInfo, QualType ExceptionType,
                                   SourceLocation StartLoc,
@@ -3554,7 +3550,7 @@ public:
   bool CompleteConstructorCall(CXXConstructorDecl *Constructor,
                                MultiExprArg ArgsPtr,
                                SourceLocation Loc,
-                               ASTOwningVector<Expr*> &ConvertedArgs,
+                               SmallVectorImpl<Expr*> &ConvertedArgs,
                                bool AllowExplicit = false);
 
   ParsedType getDestructorName(SourceLocation TildeLoc,
@@ -4661,8 +4657,6 @@ public:
 
   /// \brief Parsed an elaborated-type-specifier that refers to a template-id,
   /// such as \c class T::template apply<U>.
-  ///
-  /// \param TUK
   TypeResult ActOnTagTemplateIdType(TagUseKind TUK,
                                     TypeSpecifierType TagSpec,
                                     SourceLocation TagLoc,
@@ -4838,7 +4832,8 @@ public:
                                    TemplateArgument &Converted,
                                CheckTemplateArgumentKind CTAK = CTAK_Specified);
   bool CheckTemplateArgument(TemplateTemplateParmDecl *Param,
-                             const TemplateArgumentLoc &Arg);
+                             const TemplateArgumentLoc &Arg,
+                             unsigned ArgumentPackIndex);
 
   ExprResult
   BuildExpressionFromDeclTemplateArgument(const TemplateArgument &Arg,
@@ -6802,6 +6797,7 @@ public:
   /// \return true iff there were any incompatible types.
   bool CheckMessageArgumentTypes(QualType ReceiverType,
                                  Expr **Args, unsigned NumArgs, Selector Sel,
+                                 ArrayRef<SourceLocation> SelectorLocs,
                                  ObjCMethodDecl *Method, bool isClassMessage,
                                  bool isSuperMessage,
                                  SourceLocation lbrac, SourceLocation rbrac,
@@ -7249,6 +7245,14 @@ public:
   }
 
   AvailabilityResult getCurContextAvailability() const;
+  
+  const DeclContext *getCurObjCLexicalContext() const {
+    const DeclContext *DC = getCurLexicalContext();
+    // A category implicitly has the attribute of the interface.
+    if (const ObjCCategoryDecl *CatD = dyn_cast<ObjCCategoryDecl>(DC))
+      DC = CatD->getClassInterface();
+    return DC;
+  }
 };
 
 /// \brief RAII object that enters a new expression evaluation context.

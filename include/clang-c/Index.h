@@ -1904,9 +1904,9 @@ enum CXCursorKind {
    */
   CXCursor_ReturnStmt                    = 214,
 
-  /** \brief A GNU inline assembly statement extension.
+  /** \brief A GCC inline assembly statement extension.
    */
-  CXCursor_AsmStmt                       = 215,
+  CXCursor_GCCAsmStmt                    = 215,
 
   /** \brief Objective-C's overall \@try-\@catch-\@finally statement.
    */
@@ -2040,7 +2040,8 @@ typedef struct {
  * \brief A comment AST node.
  */
 typedef struct {
-  const void *Data;
+  const void *ASTNode;
+  CXTranslationUnit TranslationUnit;
 } CXComment;
 
 /**
@@ -3272,7 +3273,7 @@ enum CXCommentKind {
    * \brief A \\param or \\arg command that describes the function parameter
    * (name, passing direction, description).
    *
-   * \brief For example: \\param [in] ParamName description.
+   * For example: \\param [in] ParamName description.
    */
   CXComment_ParamCommand = 7,
 
@@ -3280,7 +3281,7 @@ enum CXCommentKind {
    * \brief A \\tparam command that describes a template parameter (name and
    * description).
    *
-   * \brief For example: \\tparam T description.
+   * For example: \\tparam T description.
    */
   CXComment_TParamCommand = 8,
 
@@ -3379,7 +3380,7 @@ CINDEX_LINKAGE unsigned clang_Comment_getNumChildren(CXComment Comment);
 /**
  * \param Comment AST node of any kind.
  *
- * \param ArgIdx argument index (zero-based).
+ * \param ChildIdx child index (zero-based).
  *
  * \returns the specified child of the AST node.
  */
@@ -3692,14 +3693,11 @@ CINDEX_LINKAGE CXString clang_FullComment_getAsHTML(CXComment Comment);
  * A Relax NG schema for the XML can be found in comment-xml-schema.rng file
  * inside clang source tree.
  *
- * \param TU the translation unit \c Comment belongs to.
- *
  * \param Comment a \c CXComment_FullComment AST node.
  *
  * \returns string containing an XML document.
  */
-CINDEX_LINKAGE CXString clang_FullComment_getAsXML(CXTranslationUnit TU,
-                                                   CXComment Comment);
+CINDEX_LINKAGE CXString clang_FullComment_getAsXML(CXComment Comment);
 
 /**
  * @}
@@ -4965,7 +4963,8 @@ typedef enum {
   CXIdxEntity_CXXConstructor        = 22,
   CXIdxEntity_CXXDestructor         = 23,
   CXIdxEntity_CXXConversionFunction = 24,
-  CXIdxEntity_CXXTypeAlias          = 25
+  CXIdxEntity_CXXTypeAlias          = 25,
+  CXIdxEntity_CXXInterface          = 26
 
 } CXIdxEntityKind;
 

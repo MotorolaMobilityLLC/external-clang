@@ -68,15 +68,22 @@ public:
   }
 };
 
+/// \class RuntimeDefinition 
 /// \brief Defines the runtime definition of the called function.
+/// 
+/// Encapsulates the information we have about which Decl will be used 
+/// when the call is executed on the given path. When dealing with dynamic
+/// dispatch, the information is based on DynamicTypeInfo and might not be 
+/// precise.
 class RuntimeDefinition {
-  /// The Declaration of the function which will be called at runtime.
-  /// 0 if not available.
+  /// The Declaration of the function which could be called at runtime.
+  /// NULL if not available.
   const Decl *D;
 
   /// The region representing an object (ObjC/C++) on which the method is
   /// called. With dynamic dispatch, the method definition depends on the
-  /// runtime type of this object. 0 when there is no dynamic dispatch.
+  /// runtime type of this object. NULL when the DynamicTypeInfo is
+  /// precise.
   const MemRegion *R;
 
 public:
@@ -84,8 +91,15 @@ public:
   RuntimeDefinition(const Decl *InD): D(InD), R(0) {}
   RuntimeDefinition(const Decl *InD, const MemRegion *InR): D(InD), R(InR) {}
   const Decl *getDecl() { return D; }
-  const MemRegion *getDispatchRegion() { return R; }
+    
+  /// \brief Check if the definition we have is precise. 
+  /// If not, it is possible that the call dispatches to another definition at 
+  /// execution time.
   bool mayHaveOtherDefinitions() { return R != 0; }
+  
+  /// When other definitions are possible, returns the region whose runtime type 
+  /// determines the method definition.
+  const MemRegion *getDispatchRegion() { return R; }
 };
 
 /// \brief Represents an abstract call to a function or method along a
@@ -139,16 +153,6 @@ protected:
     : State(Original.State), LCtx(Original.LCtx), Origin(Original.Origin),
       Data(Original.Data), Location(Original.Location), RefCount(0) {}
 
-
-  ProgramStateRef getState() const {
-    return State;
-  }
-
-  const LocationContext *getLocationContext() const {
-    return LCtx;
-  }
-
-
   /// Copies this CallEvent, with vtable intact, into a new block of memory.
   virtual void cloneTo(void *Dest) const = 0;
 
@@ -164,8 +168,6 @@ protected:
   /// result of this call.
   virtual void getExtraInvalidatedRegions(RegionList &Regions) const {}
 
-  virtual QualType getDeclaredResultType() const = 0;
-
 public:
   virtual ~CallEvent() {}
 
@@ -176,6 +178,16 @@ public:
   /// called. May be null.
   virtual const Decl *getDecl() const {
     return Origin.dyn_cast<const Decl *>();
+  }
+
+  /// \brief The state in which the call is being evaluated.
+  ProgramStateRef getState() const {
+    return State;
+  }
+
+  /// \brief The context in which the call is being evaluated.
+  const LocationContext *getLocationContext() const {
+    return LCtx;
   }
 
   /// \brief Returns the definition of the function or method that will be
@@ -277,12 +289,9 @@ public:
     return cloneWithState<CallEvent>(NewState);
   }
 
-  /// \brief Returns true if this is a statement that can be considered for
-  /// inlining.
-  ///
-  /// FIXME: This should go away once CallEvents are cheap and easy to
-  /// construct from ExplodedNodes.
-  static bool mayBeInlined(const Stmt *S);
+  /// \brief Returns true if this is a statement is a function or method call
+  /// of some kind.
+  static bool isCallStmt(const Stmt *S);
 
   // Iterator access to formal parameters and their types.
 private:
@@ -345,8 +354,6 @@ protected:
                   const LocationContext *LCtx)
     : CallEvent(D, St, LCtx) {}
   AnyFunctionCall(const AnyFunctionCall &Other) : CallEvent(Other) {}
-
-  virtual QualType getDeclaredResultType() const;
 
 public:
   // This function is overridden by subclasses, but they must return
@@ -442,8 +449,6 @@ protected:
 
   virtual void getExtraInvalidatedRegions(RegionList &Regions) const;
 
-  virtual QualType getDeclaredResultType() const;
-
 public:
   /// \brief Returns the region associated with this instance of the block.
   ///
@@ -499,13 +504,7 @@ public:
   virtual const Expr *getCXXThisExpr() const { return 0; }
 
   /// \brief Returns the value of the implicit 'this' object.
-  virtual SVal getCXXThisVal() const {
-    const Expr *Base = getCXXThisExpr();
-    // FIXME: This doesn't handle an overloaded ->* operator.
-    if (!Base)
-      return UnknownVal();
-    return getSVal(Base);
-  }
+  virtual SVal getCXXThisVal() const;
 
   virtual const FunctionDecl *getDecl() const;
 
@@ -605,6 +604,8 @@ class CXXDestructorCall : public CXXInstanceCall {
   friend class CallEventManager;
 
 protected:
+  typedef llvm::PointerIntPair<const MemRegion *, 1, bool> DtorDataTy;
+
   /// Creates an implicit destructor.
   ///
   /// \param DD The destructor that will be called.
@@ -613,10 +614,10 @@ protected:
   /// \param St The path-sensitive state at this point in the program.
   /// \param LCtx The location context at this point in the program.
   CXXDestructorCall(const CXXDestructorDecl *DD, const Stmt *Trigger,
-                    const MemRegion *Target, ProgramStateRef St,
-                    const LocationContext *LCtx)
+                    const MemRegion *Target, bool IsBaseDestructor,
+                    ProgramStateRef St, const LocationContext *LCtx)
     : CXXInstanceCall(DD, St, LCtx) {
-    Data = Target;
+    Data = DtorDataTy(Target, IsBaseDestructor).getOpaqueValue();
     Location = Trigger->getLocEnd();
   }
 
@@ -627,8 +628,15 @@ public:
   virtual SourceRange getSourceRange() const { return Location; }
   virtual unsigned getNumArgs() const { return 0; }
 
+  virtual RuntimeDefinition getRuntimeDefinition() const;
+
   /// \brief Returns the value of the implicit 'this' object.
   virtual SVal getCXXThisVal() const;
+
+  /// Returns true if this is a call to a base class destructor.
+  bool isBaseDestructor() const {
+    return DtorDataTy::getFromOpaqueValue(Data).getInt();
+  }
 
   virtual Kind getKind() const { return CE_CXXDestructor; }
 
@@ -651,10 +659,10 @@ protected:
   ///               a new symbolic region will be used.
   /// \param St The path-sensitive state at this point in the program.
   /// \param LCtx The location context at this point in the program.
-  CXXConstructorCall(const CXXConstructExpr *CE, const MemRegion *target,
+  CXXConstructorCall(const CXXConstructExpr *CE, const MemRegion *Target,
                      ProgramStateRef St, const LocationContext *LCtx)
     : AnyFunctionCall(CE, St, LCtx) {
-    Data = target;
+    Data = Target;
   }
 
   CXXConstructorCall(const CXXConstructorCall &Other) : AnyFunctionCall(Other){}
@@ -761,8 +769,6 @@ protected:
 
   virtual void getExtraInvalidatedRegions(RegionList &Regions) const;
 
-  virtual QualType getDeclaredResultType() const;
-
   /// Check if the selector may have multiple definitions (may have overrides).
   virtual bool canBeOverridenInSubclass(ObjCInterfaceDecl *IDecl,
                                         Selector Sel) const;
@@ -796,6 +802,9 @@ public:
   /// \brief Returns the value of the receiver at the time of this call.
   SVal getReceiverSVal() const;
 
+  /// \brief Return the value of 'self' if available.
+  SVal getSelfSVal() const;
+
   /// \brief Get the interface for the receiver.
   ///
   /// This works whether this is an instance message or a class message.
@@ -803,6 +812,9 @@ public:
   const ObjCInterfaceDecl *getReceiverInterface() const {
     return getOriginExpr()->getReceiverInterface();
   }
+
+  /// \brief Checks if the receiver refers to 'self' or 'super'.
+  bool isReceiverSelfOrSuper() const;
 
   /// Returns how the message was written in the source (property access,
   /// subscript, or explicit message send).
@@ -879,6 +891,13 @@ class CallEventManager {
     return new (allocate()) T(A1, A2, A3, St, LCtx);
   }
 
+  template <typename T, typename Arg1, typename Arg2, typename Arg3,
+            typename Arg4>
+  T *create(Arg1 A1, Arg2 A2, Arg3 A3, Arg4 A4, ProgramStateRef St,
+            const LocationContext *LCtx) {
+    return new (allocate()) T(A1, A2, A3, A4, St, LCtx);
+  }
+
 public:
   CallEventManager(llvm::BumpPtrAllocator &alloc) : Alloc(alloc) {}
 
@@ -905,9 +924,9 @@ public:
 
   CallEventRef<CXXDestructorCall>
   getCXXDestructorCall(const CXXDestructorDecl *DD, const Stmt *Trigger,
-                       const MemRegion *Target, ProgramStateRef State,
-                       const LocationContext *LCtx) {
-    return create<CXXDestructorCall>(DD, Trigger, Target, State, LCtx);
+                       const MemRegion *Target, bool IsBase,
+                       ProgramStateRef State, const LocationContext *LCtx) {
+    return create<CXXDestructorCall>(DD, Trigger, Target, IsBase, State, LCtx);
   }
 
   CallEventRef<CXXAllocatorCall>

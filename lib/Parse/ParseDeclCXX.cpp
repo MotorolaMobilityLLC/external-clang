@@ -581,7 +581,7 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
 
   if (IsAliasDecl) {
     TemplateParameterLists *TemplateParams = TemplateInfo.TemplateParams;
-    MultiTemplateParamsArg TemplateParamsArg(Actions,
+    MultiTemplateParamsArg TemplateParamsArg(
       TemplateParams ? TemplateParams->data() : 0,
       TemplateParams ? TemplateParams->size() : 0);
     // FIXME: Propagate attributes.
@@ -1034,6 +1034,8 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   DeclSpec::TST TagType;
   if (TagTokKind == tok::kw_struct)
     TagType = DeclSpec::TST_struct;
+  else if (TagTokKind == tok::kw___interface)
+    TagType = DeclSpec::TST_interface;
   else if (TagTokKind == tok::kw_class)
     TagType = DeclSpec::TST_class;
   else {
@@ -1151,7 +1153,8 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
         << (TemplateInfo.Kind == ParsedTemplateInfo::ExplicitInstantiation)
         << (TagType == DeclSpec::TST_class? 0
             : TagType == DeclSpec::TST_struct? 1
-            : 2)
+            : TagType == DeclSpec::TST_interface? 2
+            : 3)
         << Name
         << SourceRange(LAngleLoc, RAngleLoc);
 
@@ -1243,8 +1246,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
     if (Tok.isNot(tok::semi)) {
       // A semicolon was missing after this declaration. Diagnose and recover.
       ExpectAndConsume(tok::semi, diag::err_expected_semi_after_tagdecl,
-                       TagType == DeclSpec::TST_class ? "class" :
-                       TagType == DeclSpec::TST_struct ? "struct" : "union");
+        DeclSpec::getSpecifierName(TagType));
       PP.EnterToken(Tok);
       Tok.setKind(tok::semi);
     }
@@ -1279,8 +1281,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   if (TemplateId) {
     // Explicit specialization, class template partial specialization,
     // or explicit instantiation.
-    ASTTemplateArgsPtr TemplateArgsPtr(Actions,
-                                       TemplateId->getTemplateArgs(),
+    ASTTemplateArgsPtr TemplateArgsPtr(TemplateId->getTemplateArgs(),
                                        TemplateId->NumArgs);
     if (TemplateInfo.Kind == ParsedTemplateInfo::ExplicitInstantiation &&
         TUK == Sema::TUK_Declaration) {
@@ -1362,7 +1363,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
                        TemplateArgsPtr,
                        TemplateId->RAngleLoc,
                        attrs.getList(),
-                       MultiTemplateParamsArg(Actions,
+                       MultiTemplateParamsArg(
                                     TemplateParams? &(*TemplateParams)[0] : 0,
                                  TemplateParams? TemplateParams->size() : 0));
     }
@@ -1389,7 +1390,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
       Actions.ActOnTemplatedFriendTag(getCurScope(), DS.getFriendSpecLoc(),
                                       TagType, StartLoc, SS,
                                       Name, NameLoc, attrs.getList(),
-                                      MultiTemplateParamsArg(Actions,
+                                      MultiTemplateParamsArg(
                                     TemplateParams? &(*TemplateParams)[0] : 0,
                                  TemplateParams? TemplateParams->size() : 0));
   } else {
@@ -1470,8 +1471,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   if (TUK == Sema::TUK_Definition &&
       (TemplateInfo.Kind || !isValidAfterTypeSpecifier(false))) {
     ExpectAndConsume(tok::semi, diag::err_expected_semi_after_tagdecl,
-                     TagType == DeclSpec::TST_class ? "class" :
-                     TagType == DeclSpec::TST_struct ? "struct" : "union");
+      DeclSpec::getSpecifierName(TagType));
     // Push this token back into the preprocessor and change our current token
     // to ';' so that the rest of the code recovers as though there were an
     // ';' after the definition.
@@ -1869,7 +1869,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
   ParseDeclarationSpecifiers(DS, TemplateInfo, AS, DSC_class,
                              &CommonLateParsedAttrs);
 
-  MultiTemplateParamsArg TemplateParams(Actions,
+  MultiTemplateParamsArg TemplateParams(
       TemplateInfo.TemplateParams? TemplateInfo.TemplateParams->data() : 0,
       TemplateInfo.TemplateParams? TemplateInfo.TemplateParams->size() : 0);
 
@@ -2052,11 +2052,11 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     if (DS.isFriendSpecified()) {
       // TODO: handle initializers, bitfields, 'delete'
       ThisDecl = Actions.ActOnFriendFunctionDecl(getCurScope(), DeclaratorInfo,
-                                                 move(TemplateParams));
+                                                 TemplateParams);
     } else {
       ThisDecl = Actions.ActOnCXXMemberDeclarator(getCurScope(), AS,
                                                   DeclaratorInfo,
-                                                  move(TemplateParams),
+                                                  TemplateParams,
                                                   BitfieldSize.release(),
                                                   VS, HasInClassInit);
       if (AccessAttrs)
@@ -2240,6 +2240,7 @@ ExprResult Parser::ParseCXXMemberInitializer(Decl *D, bool IsFunction,
 void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
                                          unsigned TagType, Decl *TagDecl) {
   assert((TagType == DeclSpec::TST_struct ||
+         TagType == DeclSpec::TST_interface ||
          TagType == DeclSpec::TST_union  ||
          TagType == DeclSpec::TST_class) && "Invalid TagType!");
 
@@ -2571,7 +2572,7 @@ Parser::MemInitResult Parser::ParseMemInitializer(Decl *ConstructorDecl) {
     T.consumeOpen();
 
     // Parse the optional expression-list.
-    ExprVector ArgExprs(Actions);
+    ExprVector ArgExprs;
     CommaLocsTy CommaLocs;
     if (Tok.isNot(tok::r_paren) && ParseExpressionList(ArgExprs, CommaLocs)) {
       SkipUntil(tok::r_paren);
@@ -2586,7 +2587,7 @@ Parser::MemInitResult Parser::ParseMemInitializer(Decl *ConstructorDecl) {
 
     return Actions.ActOnMemInitializer(ConstructorDecl, getCurScope(), SS, II,
                                        TemplateTypeTy, DS, IdLoc,
-                                       T.getOpenLocation(), ArgExprs.take(),
+                                       T.getOpenLocation(), ArgExprs.data(),
                                        ArgExprs.size(), T.getCloseLocation(),
                                        EllipsisLoc);
   }
@@ -2773,9 +2774,6 @@ void Parser::DeallocateParsedClasses(Parser::ParsingClass *Class) {
 /// This routine should be called when we have finished parsing the
 /// definition of a class, but have not yet popped the Scope
 /// associated with the class's definition.
-///
-/// \returns true if the class we've popped is a top-level class,
-/// false otherwise.
 void Parser::PopParsingClass(Sema::ParsingClassState state) {
   assert(!ClassStack.empty() && "Mismatched push/pop for class parsing");
 
