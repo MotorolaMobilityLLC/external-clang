@@ -430,9 +430,11 @@ bool ScanfSpecifier::fixType(QualType QT, const LangOptions &LangOpt,
     namedTypeToLengthModifier(PT, LM);
 
   // If fixing the length modifier was enough, we are done.
-  const analyze_scanf::ArgType &AT = getArgType(Ctx);
-  if (hasValidLengthModifier() && AT.isValid() && AT.matchesType(Ctx, QT))
-    return true;
+  if (hasValidLengthModifier(Ctx.getTargetInfo())) {
+    const analyze_scanf::ArgType &AT = getArgType(Ctx);
+    if (AT.isValid() && AT.matchesType(Ctx, QT))
+      return true;
+  }
 
   // Figure out the conversion specifier.
   if (PT->isRealFloatingType())
@@ -474,7 +476,7 @@ bool clang::analyze_format_string::ParseScanfString(FormatStringHandler &H,
     // Did a fail-stop error of any kind occur when parsing the specifier?
     // If so, don't do any more processing.
     if (FSR.shouldStop())
-      return true;;
+      return true;
       // Did we exhaust the string or encounter an error that
       // we can recover from?
     if (!FSR.hasValue())

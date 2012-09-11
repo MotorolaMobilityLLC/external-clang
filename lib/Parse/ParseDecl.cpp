@@ -236,7 +236,7 @@ void Parser::ParseGNUAttributeArgs(IdentifierInfo *AttrName,
     break;
   }
 
-  ExprVector ArgExprs(Actions);
+  ExprVector ArgExprs;
 
   if (!BuiltinType &&
       (ParmLoc.isValid() ? Tok.is(tok::comma) : Tok.isNot(tok::r_paren))) {
@@ -279,7 +279,7 @@ void Parser::ParseGNUAttributeArgs(IdentifierInfo *AttrName,
   if (!ExpectAndConsume(tok::r_paren, diag::err_expected_rparen)) {
     AttributeList *attr =
       Attrs.addNew(AttrName, SourceRange(AttrNameLoc, RParen), 0, AttrNameLoc,
-                   ParmName, ParmLoc, ArgExprs.take(), ArgExprs.size(),
+                   ParmName, ParmLoc, ArgExprs.data(), ArgExprs.size(),
                    AttributeList::AS_GNU);
     if (BuiltinType && attr->getKind() == AttributeList::AT_IBOutletCollection)
       Diag(Tok, diag::err_iboutletcollection_builtintype);
@@ -1003,7 +1003,7 @@ void Parser::ParseThreadSafetyAttribute(IdentifierInfo &AttrName,
   BalancedDelimiterTracker T(*this, tok::l_paren);
   T.consumeOpen();
 
-  ExprVector ArgExprs(Actions);
+  ExprVector ArgExprs;
   bool ArgExprsOk = true;
 
   // now parse the list of expressions
@@ -1023,7 +1023,7 @@ void Parser::ParseThreadSafetyAttribute(IdentifierInfo &AttrName,
   // Match the ')'.
   if (ArgExprsOk && !T.consumeClose()) {
     Attrs.addNew(&AttrName, AttrNameLoc, 0, AttrNameLoc, 0, SourceLocation(),
-                 ArgExprs.take(), ArgExprs.size(), AttributeList::AS_GNU);
+                 ArgExprs.data(), ArgExprs.size(), AttributeList::AS_GNU);
   }
   if (EndLoc)
     *EndLoc = T.getCloseLocation();
@@ -1592,9 +1592,7 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
   case ParsedTemplateInfo::Template:
   case ParsedTemplateInfo::ExplicitSpecialization:
     ThisDecl = Actions.ActOnTemplateDeclarator(getCurScope(),
-                             MultiTemplateParamsArg(Actions,
-                                          TemplateInfo.TemplateParams->data(),
-                                          TemplateInfo.TemplateParams->size()),
+                                               *TemplateInfo.TemplateParams,
                                                D);
     break;
 
@@ -1665,7 +1663,7 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
     BalancedDelimiterTracker T(*this, tok::l_paren);
     T.consumeOpen();
 
-    ExprVector Exprs(Actions);
+    ExprVector Exprs;
     CommaLocsTy CommaLocs;
 
     if (getLangOpts().CPlusPlus && D.getCXXScopeSpec().isSet()) {
@@ -1694,7 +1692,7 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
 
       ExprResult Initializer = Actions.ActOnParenListExpr(T.getOpenLocation(),
                                                           T.getCloseLocation(),
-                                                          move_arg(Exprs));
+                                                          Exprs);
       Actions.AddInitializerToDecl(ThisDecl, Initializer.take(),
                                    /*DirectInit=*/true, TypeContainsAuto);
     }
@@ -1877,6 +1875,9 @@ bool Parser::ParseImplicitInt(DeclSpec &DS, CXXScopeSpec *SS,
         TagName="union" ; FixitTagName = "union " ;TagKind=tok::kw_union ;break;
       case DeclSpec::TST_struct:
         TagName="struct"; FixitTagName = "struct ";TagKind=tok::kw_struct;break;
+      case DeclSpec::TST_interface:
+        TagName="__interface"; FixitTagName = "__interface ";
+        TagKind=tok::kw___interface;break;
       case DeclSpec::TST_class:
         TagName="class" ; FixitTagName = "class " ;TagKind=tok::kw_class ;break;
     }
@@ -2074,13 +2075,13 @@ void Parser::ParseAlignmentSpecifier(ParsedAttributes &Attrs,
     return;
   }
 
-  ExprVector ArgExprs(Actions);
+  ExprVector ArgExprs;
   ArgExprs.push_back(ArgExpr.release());
   // FIXME: This should not be GNU, but we since the attribute used is
   //        based on the spelling, and there is no true spelling for
   //        C++11 attributes, this isn't accepted.
   Attrs.addNew(PP.getIdentifierInfo("aligned"), KWLoc, 0, KWLoc,
-               0, T.getOpenLocation(), ArgExprs.take(), 1,
+               0, T.getOpenLocation(), ArgExprs.data(), 1,
                AttributeList::AS_GNU);
 }
 
@@ -2711,6 +2712,7 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
     // class-specifier:
     case tok::kw_class:
     case tok::kw_struct:
+    case tok::kw___interface:
     case tok::kw_union: {
       tok::TokenKind Kind = Tok.getKind();
       ConsumeToken();
@@ -3533,6 +3535,7 @@ bool Parser::isKnownToBeTypeSpecifier(const Token &Tok) const {
     // struct-or-union-specifier (C99) or class-specifier (C++)
   case tok::kw_class:
   case tok::kw_struct:
+  case tok::kw___interface:
   case tok::kw_union:
     // enum-specifier
   case tok::kw_enum:
@@ -3604,6 +3607,7 @@ bool Parser::isTypeSpecifierQualifier() {
     // struct-or-union-specifier (C99) or class-specifier (C++)
   case tok::kw_class:
   case tok::kw_struct:
+  case tok::kw___interface:
   case tok::kw_union:
     // enum-specifier
   case tok::kw_enum:
@@ -3742,6 +3746,7 @@ bool Parser::isDeclarationSpecifier(bool DisambiguatingWithExpression) {
   case tok::kw_class:
   case tok::kw_struct:
   case tok::kw_union:
+  case tok::kw___interface:
     // enum-specifier
   case tok::kw_enum:
 

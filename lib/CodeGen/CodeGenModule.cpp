@@ -1051,12 +1051,10 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
   // Lookup the entry, lazily creating it if necessary.
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
-    if (WeakRefReferences.count(Entry)) {
+    if (WeakRefReferences.erase(Entry)) {
       const FunctionDecl *FD = cast_or_null<FunctionDecl>(D.getDecl());
       if (FD && !FD->hasAttr<WeakAttr>())
         Entry->setLinkage(llvm::Function::ExternalLinkage);
-
-      WeakRefReferences.erase(Entry);
     }
 
     if (Entry->getType()->getElementType() == Ty)
@@ -1197,11 +1195,9 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
   // Lookup the entry, lazily creating it if necessary.
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
-    if (WeakRefReferences.count(Entry)) {
+    if (WeakRefReferences.erase(Entry)) {
       if (D && !D->hasAttr<WeakAttr>())
         Entry->setLinkage(llvm::Function::ExternalLinkage);
-
-      WeakRefReferences.erase(Entry);
     }
 
     if (UnnamedAddr)
@@ -1473,10 +1469,10 @@ CodeGenModule::MaybeEmitGlobalStdInitializerListInitializer(const VarDecl *D,
   // Now clone the InitListExpr to initialize the array instead.
   // Incredible hack: we want to use the existing InitListExpr here, so we need
   // to tell it that it no longer initializes a std::initializer_list.
-  Expr *arrayInit = new (ctx) InitListExpr(ctx, init->getLBraceLoc(),
-                                    const_cast<InitListExpr*>(init)->getInits(),
-                                                   init->getNumInits(),
-                                                   init->getRBraceLoc());
+  ArrayRef<Expr*> Inits(const_cast<InitListExpr*>(init)->getInits(),
+                        init->getNumInits());
+  Expr *arrayInit = new (ctx) InitListExpr(ctx, init->getLBraceLoc(), Inits,
+                                           init->getRBraceLoc());
   arrayInit->setType(arrayType);
 
   if (!cleanups.empty())
@@ -1999,7 +1995,7 @@ GetConstantCFStringEntry(llvm::StringMap<llvm::Constant*> &Map,
   IsUTF16 = true;
 
   SmallVector<UTF16, 128> ToBuf(NumBytes + 1); // +1 for ending nulls.
-  const UTF8 *FromPtr = (UTF8 *)String.data();
+  const UTF8 *FromPtr = (const UTF8 *)String.data();
   UTF16 *ToPtr = &ToBuf[0];
 
   (void)ConvertUTF8toUTF16(&FromPtr, FromPtr + NumBytes,
