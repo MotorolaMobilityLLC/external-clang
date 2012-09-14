@@ -661,7 +661,13 @@ DiagnoseClassAndClassExtPropertyMismatch(Sema &S, ObjCInterfaceDecl *ClassDecl,
       // property.
       if (Attributes & ObjCDeclSpec::DQ_PR_readonly) {
         if (!classExtPropertyAttr ||
-            (classExtPropertyAttr & ObjCDeclSpec::DQ_PR_readwrite))
+            (classExtPropertyAttr & 
+              (ObjCDeclSpec::DQ_PR_readwrite|
+               ObjCDeclSpec::DQ_PR_assign |
+               ObjCDeclSpec::DQ_PR_unsafe_unretained |
+               ObjCDeclSpec::DQ_PR_copy |
+               ObjCDeclSpec::DQ_PR_retain |
+               ObjCDeclSpec::DQ_PR_strong)))
           continue;
         warn = true;
         break;
@@ -886,12 +892,14 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
           if (lifetime == Qualifiers::OCL_Weak) {
             bool err = false;
             if (const ObjCObjectPointerType *ObjT =
-                PropertyIvarType->getAs<ObjCObjectPointerType>())
-              if (ObjT->getInterfaceDecl()->isArcWeakrefUnavailable()) {
+                PropertyIvarType->getAs<ObjCObjectPointerType>()) {
+              const ObjCInterfaceDecl *ObjI = ObjT->getInterfaceDecl();
+              if (ObjI && ObjI->isArcWeakrefUnavailable()) {
                 Diag(PropertyDiagLoc, diag::err_arc_weak_unavailable_property);
                 Diag(property->getLocation(), diag::note_property_declare);
                 err = true;
               }
+            }
             if (!err && !getLangOpts().ObjCARCWeak) {
               Diag(PropertyDiagLoc, diag::err_arc_weak_no_runtime);
               Diag(property->getLocation(), diag::note_property_declare);
@@ -1491,8 +1499,8 @@ static void CollectClassPropertyImplementations(ObjCContainerDecl *CDecl,
     for (ObjCProtocolDecl::prop_iterator P = PDecl->prop_begin(),
          E = PDecl->prop_end(); P != E; ++P) {
       ObjCPropertyDecl *Prop = *P;
-      if (!PropMap.count(Prop->getIdentifier()))
-        PropMap[Prop->getIdentifier()] = Prop;
+      // Insert into PropMap if not there already.
+      PropMap.insert(std::make_pair(Prop->getIdentifier(), Prop));
     }
     // scan through protocol's protocols.
     for (ObjCProtocolDecl::protocol_iterator PI = PDecl->protocol_begin(),
