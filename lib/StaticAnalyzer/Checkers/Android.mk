@@ -12,7 +12,6 @@ clang_static_analyzer_checkers_TBLGEN_TABLES := \
   StmtNodes.inc
 
 clang_static_analyzer_checkers_SRC_FILES := \
-  AdjustedReturnValueChecker.cpp \
   AnalyzerStatsChecker.cpp \
   ArrayBoundChecker.cpp \
   ArrayBoundCheckerV2.cpp \

@@ -5,7 +5,7 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-LOCAL_MODULE:= libclangRewrite
+LOCAL_MODULE:= libclangRewriteCore
 
 LOCAL_MODULE_TAGS := optional
 
@@ -14,27 +14,19 @@ TBLGEN_TABLES := \
   Attrs.inc \
   AttrParsedAttrList.inc \
   CommentNodes.inc \
+  DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \
-  DeclNodes.inc \
   StmtNodes.inc
 
-clang_rewrite_SRC_FILES := \
+clang_rewrite_core_SRC_FILES := \
   DeltaTree.cpp \
-  FixItRewriter.cpp \
-  FrontendActions.cpp \
-  HTMLPrint.cpp \
   HTMLRewrite.cpp \
-  InclusionRewriter.cpp \
-  RewriteMacros.cpp \
-  RewriteModernObjC.cpp \
-  RewriteObjC.cpp \
   RewriteRope.cpp \
-  RewriteTest.cpp \
   Rewriter.cpp \
   TokenRewriter.cpp
 
-LOCAL_SRC_FILES := $(clang_rewrite_SRC_FILES)
+LOCAL_SRC_FILES := $(clang_rewrite_core_SRC_FILES)
 
 
 include $(CLANG_HOST_BUILD_MK)
