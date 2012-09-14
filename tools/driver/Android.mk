@@ -30,13 +30,14 @@ LOCAL_STATIC_LIBRARIES := \
   libclangDriver \
   libclangSerialization \
   libclangCodeGen \
+  libclangRewriteFrontend \
+  libclangRewriteCore \
   libclangParse \
   libclangSema \
   libclangStaticAnalyzerFrontend \
   libclangStaticAnalyzerCheckers \
   libclangStaticAnalyzerCore \
   libclangAnalysis \
-  libclangRewrite \
   libclangEdit \
   libclangAST \
   libclangLex \

@@ -3,6 +3,8 @@ LOCAL_PATH:= $(call my-dir)
 clang_tablegen_SRC_FILES := \
   ClangASTNodesEmitter.cpp \
   ClangAttrEmitter.cpp \
+  ClangCommentCommandInfoEmitter.cpp \
+  ClangCommentHTMLTagsEmitter.cpp \
   ClangDiagnosticsEmitter.cpp \
   ClangSACheckersEmitter.cpp \
   NeonEmitter.cpp \

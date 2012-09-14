@@ -9,6 +9,8 @@ TBLGEN_TABLES :=    \
 	AttrImpl.inc	\
 	AttrList.inc	\
 	Attrs.inc	\
+	CommentCommandInfo.inc \
+	CommentHTMLTagsProperties.inc \
 	CommentNodes.inc \
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\
