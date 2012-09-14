@@ -1303,7 +1303,7 @@ public:
 
   /// \brief Function type used by forallBases() as a callback.
   ///
-  /// \param Base the definition of the base class
+  /// \param BaseDefinition the definition of the base class
   ///
   /// \returns true if this base matched the search criteria
   typedef bool ForallBasesCallback(const CXXRecordDecl *BaseDefinition,
@@ -1556,7 +1556,9 @@ public:
     CXXMethodDecl *CD =
       cast<CXXMethodDecl>(const_cast<CXXMethodDecl*>(this)->getCanonicalDecl());
 
-    if (CD->isVirtualAsWritten())
+    // Methods declared in interfaces are automatically (pure) virtual
+    if (CD->isVirtualAsWritten() ||
+        CD->getParent()->getTagKind() == TTK_Interface)
       return true;
 
     return (CD->begin_overridden_methods() != CD->end_overridden_methods());

@@ -64,6 +64,10 @@ public:
     return Eng.getStoreManager();
   }
 
+  const AnalyzerOptions::ConfigTable &getConfig() const {
+    return Eng.getAnalysisManager().options.Config;
+  }
+  
   /// \brief Returns the previous node in the exploded graph, which includes
   /// the state of the program before the checker ran. Note, checkers should
   /// not retain the node in their state since the nodes might get invalidated.
@@ -76,8 +80,8 @@ public:
 
   /// \brief Returns the number of times the current block has been visited
   /// along the analyzed path.
-  unsigned getCurrentBlockCount() const {
-    return NB.getContext().getCurrentBlockCount();
+  unsigned blockCount() const {
+    return NB.getContext().blockCount();
   }
 
   ASTContext &getASTContext() {
@@ -94,6 +98,11 @@ public:
 
   const StackFrameContext *getStackFrame() const {
     return Pred->getStackFrame();
+  }
+
+  /// Returns true if the predecessor is within an inlined function/method.
+  bool isWithinInlined() {
+    return (getStackFrame()->getParent() != 0);
   }
 
   BugReporter &getBugReporter() {
@@ -162,8 +171,6 @@ public:
   /// @param Pred The transition will be generated from the specified Pred node
   ///             to the newly generated node.
   /// @param Tag The tag to uniquely identify the creation site.
-  /// @param IsSink Mark the new node as sink, which will stop exploration of
-  ///               the given path.
   ExplodedNode *addTransition(ProgramStateRef State,
                               ExplodedNode *Pred,
                               const ProgramPointTag *Tag = 0) {

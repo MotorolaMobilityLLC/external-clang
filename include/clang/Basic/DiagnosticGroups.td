@@ -35,6 +35,8 @@ def BoolConversion : DiagGroup<"bool-conversion">;
 def IntConversion : DiagGroup<"int-conversion">;
 def NonLiteralNullConversion : DiagGroup<"non-literal-null-conversion">;
 def NullConversion : DiagGroup<"null-conversion">;
+def ImplicitConversionFloatingPointToBool :
+  DiagGroup<"implicit-conversion-floating-point-to-bool">;
 def BuiltinRequiresHeader : DiagGroup<"builtin-requires-header">;
 def CXXCompat: DiagGroup<"c++-compat">;
 def CastAlign : DiagGroup<"cast-align">;
@@ -195,6 +197,7 @@ def StringPlusInt : DiagGroup<"string-plus-int">;
 def StrncatSize : DiagGroup<"strncat-size">;
 def TautologicalCompare : DiagGroup<"tautological-compare">;
 def HeaderHygiene : DiagGroup<"header-hygiene">;
+def DuplicateDeclSpecifier : DiagGroup<"duplicate-decl-specifier">;
 
 // Preprocessor warnings.
 def : DiagGroup<"builtin-macro-redefined">;
@@ -383,9 +386,12 @@ def Most : DiagGroup<"most", [
 
 // Thread Safety warnings 
 def ThreadSafetyAttributes : DiagGroup<"thread-safety-attributes">;
-def ThreadSafetyAnalysis : DiagGroup<"thread-safety-analysis">;
-def ThreadSafety : DiagGroup<"thread-safety", 
-                             [ThreadSafetyAttributes, ThreadSafetyAnalysis]>;
+def ThreadSafetyAnalysis   : DiagGroup<"thread-safety-analysis">;
+def ThreadSafetyPrecise    : DiagGroup<"thread-safety-precise">;
+def ThreadSafety : DiagGroup<"thread-safety",
+                             [ThreadSafetyAttributes, 
+                              ThreadSafetyAnalysis,
+                              ThreadSafetyPrecise]>;
 
 // Note that putting warnings in -Wall will not disable them by default. If a
 // warning should be active _only_ when -Wall is passed in, mark it as
