@@ -14,6 +14,7 @@ TBLGEN_TABLES :=  \
 	DeclNodes.inc  \
 	DiagnosticParseKinds.inc  \
         DiagnosticCommonKinds.inc  \
+	DiagnosticSemaKinds.inc	\
 	StmtNodes.inc
 
 clang_parse_SRC_FILES :=  \

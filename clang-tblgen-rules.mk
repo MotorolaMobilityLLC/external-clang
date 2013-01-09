@@ -9,6 +9,13 @@ ifneq ($(strip $(TBLGEN_TABLES)),)
 
 intermediates := $(call local-intermediates-dir)
 
+ifneq ($(findstring AttrDump.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/AttrDump.inc
+$(intermediates)/include/clang/AST/AttrDump.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/AST/AttrDump.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-attr-dump)
+endif
+
 ifneq ($(findstring AttrImpl.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/AttrImpl.inc
 $(intermediates)/include/clang/AST/AttrImpl.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
