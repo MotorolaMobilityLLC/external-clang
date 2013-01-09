@@ -20,6 +20,7 @@ clang_lex_SRC_FILES := \
   ModuleMap.cpp \
   PPCaching.cpp \
   PPCallbacks.cpp \
+  PPConditionalDirectiveRecord.cpp \
   PPDirectives.cpp \
   PPExpressions.cpp \
   PPLexerChange.cpp \

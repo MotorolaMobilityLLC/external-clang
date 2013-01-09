@@ -50,7 +50,6 @@ clang_static_analyzer_checkers_SRC_FILES := \
   NSAutoreleasePoolChecker.cpp \
   NSErrorChecker.cpp \
   NoReturnFunctionChecker.cpp \
-  OSAtomicChecker.cpp \
   ObjCAtSyncChecker.cpp \
   ObjCContainersASTChecker.cpp \
   ObjCContainersChecker.cpp \

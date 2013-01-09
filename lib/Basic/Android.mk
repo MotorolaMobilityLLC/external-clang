@@ -32,6 +32,7 @@ clang_basic_SRC_FILES := \
   LangOptions.cpp \
   Module.cpp \
   ObjCRuntime.cpp \
+  OperatorPrecedence.cpp \
   SourceLocation.cpp \
   SourceManager.cpp \
   TargetInfo.cpp \
