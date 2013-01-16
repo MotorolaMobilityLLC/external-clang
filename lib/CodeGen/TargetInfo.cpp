@@ -3434,12 +3434,9 @@ bool ARMABIInfo::isIllegalVectorType(QualType Ty) const {
   if (const VectorType *VT = Ty->getAs<VectorType>()) {
     // Check whether VT is legal.
     unsigned NumElements = VT->getNumElements();
-    uint64_t Size = getContext().getTypeSize(VT);
     // NumElements should be power of 2.
-    if ((NumElements & (NumElements - 1)) != 0)
+    if (((NumElements & (NumElements - 1)) != 0) && NumElements != 3)
       return true;
-    // Size should be greater than 32 bits.
-    return Size <= 32;
   }
   return false;
 }
@@ -3464,8 +3461,8 @@ llvm::Value *ARMABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
     TyAlign = std::min(std::max(TyAlign, (uint64_t)4), (uint64_t)8);
   else
     TyAlign = 4;
-  // Use indirect if size of the illegal vector is bigger than 16 bytes.
-  if (isIllegalVectorType(Ty) && Size > 16) {
+  // Use indirect if size of the illegal vector is bigger than 32 bytes.
+  if (isIllegalVectorType(Ty) && Size > 32) {
     IsIndirect = true;
     Size = 4;
     TyAlign = 4;
