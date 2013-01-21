@@ -14,13 +14,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/StaticAnalyzer/Core/PathSensitive/MemRegion.h"
-#include "clang/StaticAnalyzer/Core/PathSensitive/SValBuilder.h"
-#include "clang/Analysis/AnalysisContext.h"
-#include "clang/Analysis/Support/BumpVector.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/RecordLayout.h"
+#include "clang/Analysis/AnalysisContext.h"
+#include "clang/Analysis/Support/BumpVector.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/SValBuilder.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
@@ -272,10 +273,11 @@ void ObjCStringRegion::ProfileRegion(llvm::FoldingSetNodeID& ID,
 
 void AllocaRegion::ProfileRegion(llvm::FoldingSetNodeID& ID,
                                  const Expr *Ex, unsigned cnt,
-                                 const MemRegion *) {
+                                 const MemRegion *superRegion) {
   ID.AddInteger((unsigned) AllocaRegionKind);
   ID.AddPointer(Ex);
   ID.AddInteger(cnt);
+  ID.AddPointer(superRegion);
 }
 
 void AllocaRegion::Profile(llvm::FoldingSetNodeID& ID) const {
@@ -352,7 +354,7 @@ void ElementRegion::Profile(llvm::FoldingSetNodeID& ID) const {
 }
 
 void FunctionTextRegion::ProfileRegion(llvm::FoldingSetNodeID& ID,
-                                       const FunctionDecl *FD,
+                                       const NamedDecl *FD,
                                        const MemRegion*) {
   ID.AddInteger(MemRegion::FunctionTextRegionKind);
   ID.AddPointer(FD);
@@ -748,11 +750,11 @@ const VarRegion* MemRegionManager::getVarRegion(const VarDecl *D,
       }
       else {
         assert(D->isStaticLocal());
-        const Decl *D = STC->getDecl();
-        if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
+        const Decl *STCD = STC->getDecl();
+        if (isa<FunctionDecl>(STCD) || isa<ObjCMethodDecl>(STCD))
           sReg = getGlobalsRegion(MemRegion::StaticGlobalSpaceRegionKind,
-                                  getFunctionTextRegion(FD));
-        else if (const BlockDecl *BD = dyn_cast<BlockDecl>(D)) {
+                                  getFunctionTextRegion(cast<NamedDecl>(STCD)));
+        else if (const BlockDecl *BD = dyn_cast<BlockDecl>(STCD)) {
           const BlockTextRegion *BTR =
             getBlockTextRegion(BD,
                      C.getCanonicalType(BD->getSignatureAsWritten()->getType()),
@@ -761,8 +763,6 @@ const VarRegion* MemRegionManager::getVarRegion(const VarDecl *D,
                                   BTR);
         }
         else {
-          // FIXME: For ObjC-methods, we need a new CodeTextRegion.  For now
-          // just use the main global memspace.
           sReg = getGlobalsRegion();
         }
       }
@@ -845,7 +845,7 @@ MemRegionManager::getElementRegion(QualType elementType, NonLoc Idx,
 }
 
 const FunctionTextRegion *
-MemRegionManager::getFunctionTextRegion(const FunctionDecl *FD) {
+MemRegionManager::getFunctionTextRegion(const NamedDecl *FD) {
   return getSubRegion<FunctionTextRegion>(FD, getCodeRegion());
 }
 
@@ -990,6 +990,10 @@ const MemRegion *MemRegion::getBaseRegion() const {
   return R;
 }
 
+bool MemRegion::isSubRegionOf(const MemRegion *R) const {
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // View handling.
 //===----------------------------------------------------------------------===//
@@ -1107,7 +1111,7 @@ RegionOffset MemRegion::getAsOffset() const {
         // If our base region is symbolic, we don't know what type it really is.
         // Pretend the type of the symbol is the true dynamic type.
         // (This will at least be self-consistent for the life of the symbol.)
-        Ty = SR->getSymbol()->getType(getContext())->getPointeeType();
+        Ty = SR->getSymbol()->getType()->getPointeeType();
       }
       
       const CXXRecordDecl *Child = Ty->getAsCXXRecordDecl();
@@ -1166,8 +1170,12 @@ RegionOffset MemRegion::getAsOffset() const {
       R = FR->getSuperRegion();
 
       const RecordDecl *RD = FR->getDecl()->getParent();
-      if (!RD->isCompleteDefinition()) {
+      if (RD->isUnion() || !RD->isCompleteDefinition()) {
         // We cannot compute offset for incomplete type.
+        // For unions, we could treat everything as offset 0, but we'd rather
+        // treat each field as a symbolic offset so they aren't stored on top
+        // of each other, since we depend on things in typed regions actually
+        // matching their types.
         SymbolicOffsetBase = R;
       }
 
@@ -1201,6 +1209,29 @@ RegionOffset MemRegion::getAsOffset() const {
 // BlockDataRegion
 //===----------------------------------------------------------------------===//
 
+std::pair<const VarRegion *, const VarRegion *>
+BlockDataRegion::getCaptureRegions(const VarDecl *VD) {
+  MemRegionManager &MemMgr = *getMemRegionManager();
+  const VarRegion *VR = 0;
+  const VarRegion *OriginalVR = 0;
+
+  if (!VD->getAttr<BlocksAttr>() && VD->hasLocalStorage()) {
+    VR = MemMgr.getVarRegion(VD, this);
+    OriginalVR = MemMgr.getVarRegion(VD, LC);
+  }
+  else {
+    if (LC) {
+      VR = MemMgr.getVarRegion(VD, LC);
+      OriginalVR = VR;
+    }
+    else {
+      VR = MemMgr.getVarRegion(VD, MemMgr.getUnknownRegion());
+      OriginalVR = MemMgr.getVarRegion(VD, LC);
+    }
+  }
+  return std::make_pair(VR, OriginalVR);
+}
+
 void BlockDataRegion::LazyInitializeReferencedVars() {
   if (ReferencedVars)
     return;
@@ -1225,25 +1256,9 @@ void BlockDataRegion::LazyInitializeReferencedVars() {
   new (BVOriginal) VarVec(BC, E - I);
 
   for ( ; I != E; ++I) {
-    const VarDecl *VD = *I;
     const VarRegion *VR = 0;
     const VarRegion *OriginalVR = 0;
-
-    if (!VD->getAttr<BlocksAttr>() && VD->hasLocalStorage()) {
-      VR = MemMgr.getVarRegion(VD, this);
-      OriginalVR = MemMgr.getVarRegion(VD, LC);
-    }
-    else {
-      if (LC) {
-        VR = MemMgr.getVarRegion(VD, LC);
-        OriginalVR = VR;
-      }
-      else {
-        VR = MemMgr.getVarRegion(VD, MemMgr.getUnknownRegion());
-        OriginalVR = MemMgr.getVarRegion(VD, LC);
-      }
-    }
-
+    llvm::tie(VR, OriginalVR) = getCaptureRegions(*I);
     assert(VR);
     assert(OriginalVR);
     BV->push_back(VR, BC);

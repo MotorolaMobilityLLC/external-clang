@@ -11,18 +11,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaInternal.h"
-#include "clang/Sema/Template.h"
-#include "clang/Basic/OpenCL.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTMutationListener.h"
 #include "clang/AST/CXXInheritance.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Expr.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/AST/TypeLocVisitor.h"
-#include "clang/AST/Expr.h"
+#include "clang/Basic/OpenCL.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
@@ -30,6 +28,8 @@
 #include "clang/Sema/DeclSpec.h"
 #include "clang/Sema/DelayedDiagnostic.h"
 #include "clang/Sema/Lookup.h"
+#include "clang/Sema/ScopeInfo.h"
+#include "clang/Sema/Template.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/ErrorHandling.h"
 using namespace clang;
@@ -105,7 +105,9 @@ static void diagnoseBadTypeAttribute(Sema &S, const AttributeList &attr,
     case AttributeList::AT_ThisCall: \
     case AttributeList::AT_Pascal: \
     case AttributeList::AT_Regparm: \
-    case AttributeList::AT_Pcs \
+    case AttributeList::AT_Pcs: \
+    case AttributeList::AT_PnaclCall: \
+    case AttributeList::AT_IntelOclBicc \
 
 namespace {
   /// An object which stores processing state for the entire
@@ -552,19 +554,28 @@ static void maybeSynthesizeBlockSignature(TypeProcessingState &state,
   SourceLocation loc = declarator.getLocStart();
 
   // ...and *prepend* it to the declarator.
+  SourceLocation NoLoc;
   declarator.AddInnermostTypeInfo(DeclaratorChunk::getFunction(
-                             /*proto*/ true,
-                             /*variadic*/ false,
-                             /*ambiguous*/ false, SourceLocation(),
-                             /*args*/ 0, 0,
-                             /*type quals*/ 0,
-                             /*ref-qualifier*/true, SourceLocation(),
-                             /*const qualifier*/SourceLocation(),
-                             /*volatile qualifier*/SourceLocation(),
-                             /*mutable qualifier*/SourceLocation(),
-                             /*EH*/ EST_None, SourceLocation(), 0, 0, 0, 0,
-                             /*parens*/ loc, loc,
-                             declarator));
+                             /*HasProto=*/true,
+                             /*IsAmbiguous=*/false,
+                             /*LParenLoc=*/NoLoc,
+                             /*ArgInfo=*/0,
+                             /*NumArgs=*/0,
+                             /*EllipsisLoc=*/NoLoc,
+                             /*RParenLoc=*/NoLoc,
+                             /*TypeQuals=*/0,
+                             /*RefQualifierIsLvalueRef=*/true,
+                             /*RefQualifierLoc=*/NoLoc,
+                             /*ConstQualifierLoc=*/NoLoc,
+                             /*VolatileQualifierLoc=*/NoLoc,
+                             /*MutableLoc=*/NoLoc,
+                             EST_None,
+                             /*ESpecLoc=*/NoLoc,
+                             /*Exceptions=*/0,
+                             /*ExceptionRanges=*/0,
+                             /*NumExceptions=*/0,
+                             /*NoexceptExpr=*/0,
+                             loc, loc, declarator));
 
   // For consistency, make sure the state still has us as processing
   // the decl spec.
@@ -698,11 +709,15 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
       case DeclSpec::TSW_longlong:
         Result = Context.LongLongTy;
 
-        // long long is a C99 feature.
-        if (!S.getLangOpts().C99)
-          S.Diag(DS.getTypeSpecWidthLoc(),
-                 S.getLangOpts().CPlusPlus0x ?
-                   diag::warn_cxx98_compat_longlong : diag::ext_longlong);
+        // 'long long' is a C99 or C++11 feature.
+        if (!S.getLangOpts().C99) {
+          if (S.getLangOpts().CPlusPlus)
+            S.Diag(DS.getTypeSpecWidthLoc(),
+                   S.getLangOpts().CPlusPlus11 ?
+                   diag::warn_cxx98_compat_longlong : diag::ext_cxx11_longlong);
+          else
+            S.Diag(DS.getTypeSpecWidthLoc(), diag::ext_c99_longlong);
+        }
         break;
       }
     } else {
@@ -713,17 +728,23 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
       case DeclSpec::TSW_longlong:
         Result = Context.UnsignedLongLongTy;
 
-        // long long is a C99 feature.
-        if (!S.getLangOpts().C99)
-          S.Diag(DS.getTypeSpecWidthLoc(),
-                 S.getLangOpts().CPlusPlus0x ?
-                   diag::warn_cxx98_compat_longlong : diag::ext_longlong);
+        // 'long long' is a C99 or C++11 feature.
+        if (!S.getLangOpts().C99) {
+          if (S.getLangOpts().CPlusPlus)
+            S.Diag(DS.getTypeSpecWidthLoc(),
+                   S.getLangOpts().CPlusPlus11 ?
+                   diag::warn_cxx98_compat_longlong : diag::ext_cxx11_longlong);
+          else
+            S.Diag(DS.getTypeSpecWidthLoc(), diag::ext_c99_longlong);
+        }
         break;
       }
     }
     break;
   }
   case DeclSpec::TST_int128:
+    if (!S.PP.getTargetInfo().hasInt128Type())
+      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_int128_unsupported);
     if (DS.getTypeSpecSign() == DeclSpec::TSS_unsigned)
       Result = Context.UnsignedInt128Ty;
     else
@@ -881,6 +902,30 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
       Result = Context.IntTy;
       declarator.setInvalidType(true);
     }
+    break;
+
+  case DeclSpec::TST_image1d_t:
+    Result = Context.OCLImage1dTy;
+    break;
+
+  case DeclSpec::TST_image1d_array_t:
+    Result = Context.OCLImage1dArrayTy;
+    break;
+
+  case DeclSpec::TST_image1d_buffer_t:
+    Result = Context.OCLImage1dBufferTy;
+    break;
+
+  case DeclSpec::TST_image2d_t:
+    Result = Context.OCLImage2dTy;
+    break;
+
+  case DeclSpec::TST_image2d_array_t:
+    Result = Context.OCLImage2dArrayTy;
+    break;
+
+  case DeclSpec::TST_image3d_t:
+    Result = Context.OCLImage3dTy;
     break;
 
   case DeclSpec::TST_error:
@@ -1320,7 +1365,7 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
 
   // C99 6.7.5.2p1: The size expression shall have integer type.
   // C++11 allows contextual conversions to such types.
-  if (!getLangOpts().CPlusPlus0x &&
+  if (!getLangOpts().CPlusPlus11 &&
       ArraySize && !ArraySize->isTypeDependent() &&
       !ArraySize->getType()->isIntegralOrUnscopedEnumerationType()) {
     Diag(ArraySize->getLocStart(), diag::err_array_size_non_int)
@@ -1341,7 +1386,7 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
              isArraySizeVLA(*this, ArraySize, ConstVal)) {
     // Even in C++11, don't allow contextual conversions in the array bound
     // of a VLA.
-    if (getLangOpts().CPlusPlus0x &&
+    if (getLangOpts().CPlusPlus11 &&
         !ArraySize->getType()->isIntegralOrUnscopedEnumerationType()) {
       Diag(ArraySize->getLocStart(), diag::err_array_size_non_int)
         << ArraySize->getType() << ArraySize->getSourceRange();
@@ -1833,7 +1878,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
   // type (this is checked later) and we can skip this. In other languages
   // using auto, we need to check regardless.
   if (D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_auto &&
-      (!SemaRef.getLangOpts().CPlusPlus0x || !D.isFunctionDeclarator())) {
+      (!SemaRef.getLangOpts().CPlusPlus11 || !D.isFunctionDeclarator())) {
     int Error = -1;
 
     switch (D.getContext()) {
@@ -1899,7 +1944,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
     // contains a trailing return type. That is only legal at the outermost
     // level. Check all declarator chunks (outermost first) anyway, to give
     // better diagnostics.
-    if (SemaRef.getLangOpts().CPlusPlus0x && Error != -1) {
+    if (SemaRef.getLangOpts().CPlusPlus11 && Error != -1) {
       for (unsigned i = 0, e = D.getNumTypeObjects(); i != e; ++i) {
         unsigned chunkIndex = e - i - 1;
         state.setCurrentChunkIndex(chunkIndex);
@@ -2132,7 +2177,7 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
         << FixItHint::CreateRemoval(ParenRange);
     else {
       std::string Init = S.getFixItZeroInitializerForType(RT);
-      if (Init.empty() && S.LangOpts.CPlusPlus0x)
+      if (Init.empty() && S.LangOpts.CPlusPlus11)
         Init = "{}";
       if (!Init.empty())
         S.Diag(DeclType.Loc, diag::note_empty_parens_zero_initialize)
@@ -2150,16 +2195,6 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
   Sema &S = state.getSema();
   ASTContext &Context = S.Context;
   const LangOptions &LangOpts = S.getLangOpts();
-
-  bool ImplicitlyNoexcept = false;
-  if (D.getName().getKind() == UnqualifiedId::IK_OperatorFunctionId &&
-      LangOpts.CPlusPlus0x) {
-    OverloadedOperatorKind OO = D.getName().OperatorFunctionId.Operator;
-    /// In C++0x, deallocation functions (normal and array operator delete)
-    /// are implicitly noexcept.
-    if (OO == OO_Delete || OO == OO_Array_Delete)
-      ImplicitlyNoexcept = true;
-  }
 
   // The name we're declaring, if any.
   DeclarationName Name;
@@ -2560,12 +2595,6 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
                                       Exceptions,
                                       EPI);
 
-        if (FTI.getExceptionSpecType() == EST_None &&
-            ImplicitlyNoexcept && chunkIndex == 0) {
-          // Only the outermost chunk is marked noexcept, of course.
-          EPI.ExceptionSpecType = EST_BasicNoexcept;
-        }
-
         T = Context.getFunctionType(T, ArgTys.data(), ArgTys.size(), EPI);
       }
 
@@ -2659,6 +2688,9 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
     // C++0x [dcl.constexpr]p8: A constexpr specifier for a non-static member
     // function that is not a constructor declares that function to be const.
+    // FIXME: This should be deferred until we know whether this is a static
+    //        member function (for an out-of-class definition, we don't know
+    //        this until we perform redeclaration lookup).
     if (D.getDeclSpec().isConstexprSpecified() && !FreeFunction &&
         D.getDeclSpec().getStorageClassSpec() != DeclSpec::SCS_static &&
         D.getName().getKind() != UnqualifiedId::IK_ConstructorName &&
@@ -2670,6 +2702,12 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       T = Context.getFunctionType(FnTy->getResultType(),
                                   FnTy->arg_type_begin(),
                                   FnTy->getNumArgs(), EPI);
+      // Rebuild any parens around the identifier in the function type.
+      for (unsigned i = 0, e = D.getNumTypeObjects(); i != e; ++i) {
+        if (D.getTypeObject(i).Kind != DeclaratorChunk::Paren)
+          break;
+        T = S.BuildParenType(T);
+      }
     }
 
     // C++11 [dcl.fct]p6 (w/DR1417):
@@ -2723,6 +2761,12 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       T = Context.getFunctionType(FnTy->getResultType(),
                                   FnTy->arg_type_begin(),
                                   FnTy->getNumArgs(), EPI);
+      // Rebuild any parens around the identifier in the function type.
+      for (unsigned i = 0, e = D.getNumTypeObjects(); i != e; ++i) {
+        if (D.getTypeObject(i).Kind != DeclaratorChunk::Paren)
+          break;
+        T = S.BuildParenType(T);
+      }
     }
   }
 
@@ -2782,7 +2826,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         T = Context.getPackExpansionType(T, llvm::Optional<unsigned>());
       else
         S.Diag(D.getEllipsisLoc(),
-               LangOpts.CPlusPlus0x
+               LangOpts.CPlusPlus11
                  ? diag::warn_cxx98_compat_variadic_templates
                  : diag::ext_variadic_templates);
       break;
@@ -2987,6 +3031,10 @@ static AttributeList::Kind getAttrListKind(AttributedType::Kind kind) {
     return AttributeList::AT_Pascal;
   case AttributedType::attr_pcs:
     return AttributeList::AT_Pcs;
+  case AttributedType::attr_pnaclcall:
+    return AttributeList::AT_PnaclCall;
+  case AttributedType::attr_inteloclbicc:
+    return AttributeList::AT_IntelOclBicc;
   }
   llvm_unreachable("unexpected attribute kind!");
 }
@@ -3273,6 +3321,8 @@ namespace {
       TL.setLocalRangeEnd(Chunk.EndLoc);
 
       const DeclaratorChunk::FunctionTypeInfo &FTI = Chunk.Fun;
+      TL.setLParenLoc(FTI.getLParenLoc());
+      TL.setRParenLoc(FTI.getRParenLoc());
       for (unsigned i = 0, e = TL.getNumArgs(), tpi = 0; i != e; ++i) {
         ParmVarDecl *Param = cast<ParmVarDecl>(FTI.ArgInfo[i].Param);
         TL.setArg(tpi++, Param);
@@ -3878,13 +3928,13 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state,
     return true;
   }
 
+  // Delay if the type didn't work out to a function.
+  if (!unwrapped.isFunctionType()) return false;
+
   // Otherwise, a calling convention.
   CallingConv CC;
   if (S.CheckCallingConvAttr(attr, CC))
     return true;
-
-  // Delay if the type didn't work out to a function.
-  if (!unwrapped.isFunctionType()) return false;
 
   const FunctionType *fn = unwrapped.get();
   CallingConv CCOld = fn->getCallConv();
@@ -4541,6 +4591,8 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
     Diag(Dtor->getLocation(), Dtor->isUserProvided() ?
          diag::note_non_literal_user_provided_dtor :
          diag::note_non_literal_nontrivial_dtor) << RD;
+    if (!Dtor->isUserProvided())
+      SpecialMemberIsTrivial(Dtor, CXXDestructor, /*Diagnose*/true);
   }
 
   return true;
@@ -4595,15 +4647,21 @@ static QualType getDecltypeForExpr(Sema &S, Expr *E) {
   //       member access (5.2.5), decltype(e) is the type of the entity named
   //       by e. If there is no such entity, or if e names a set of overloaded
   //       functions, the program is ill-formed;
+  //
+  // We apply the same rules for Objective-C ivar and property references.
   if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
     if (const ValueDecl *VD = dyn_cast<ValueDecl>(DRE->getDecl()))
       return VD->getType();
-  }
-  if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
+  } else if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
     if (const FieldDecl *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
       return FD->getType();
+  } else if (const ObjCIvarRefExpr *IR = dyn_cast<ObjCIvarRefExpr>(E)) {
+    return IR->getDecl()->getType();
+  } else if (const ObjCPropertyRefExpr *PR = dyn_cast<ObjCPropertyRefExpr>(E)) {
+    if (PR->isExplicitProperty())
+      return PR->getExplicitProperty()->getType();
   }
-
+  
   // C++11 [expr.lambda.prim]p18:
   //   Every occurrence of decltype((x)) where x is a possibly
   //   parenthesized id-expression that names an entity of automatic

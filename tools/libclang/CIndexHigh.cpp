@@ -11,9 +11,8 @@
 #include "CXCursor.h"
 #include "CXSourceLocation.h"
 #include "CXTranslationUnit.h"
-
-#include "clang/Frontend/ASTUnit.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/Frontend/ASTUnit.h"
 
 using namespace clang;
 using namespace cxcursor;
@@ -267,7 +266,7 @@ static enum CXChildVisitResult findFileMacroRefVisit(CXCursor cursor,
   if (cursor.kind == CXCursor_MacroDefinition)
     Macro = getCursorMacroDefinition(cursor)->getName();
   else if (cursor.kind == CXCursor_MacroExpansion)
-    Macro = getCursorMacroExpansion(cursor)->getName();
+    Macro = getCursorMacroExpansion(cursor).getName();
   if (!Macro)
     return CXChildVisit_Continue;
 
@@ -318,7 +317,7 @@ static void findMacroRefsInFile(CXTranslationUnit TU, CXCursor Cursor,
   if (Cursor.kind == CXCursor_MacroDefinition)
     Macro = getCursorMacroDefinition(Cursor)->getName();
   else
-    Macro = getCursorMacroExpansion(Cursor)->getName();
+    Macro = getCursorMacroExpansion(Cursor).getName();
   if (!Macro)
     return;
 

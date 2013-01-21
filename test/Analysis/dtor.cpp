@@ -281,3 +281,50 @@ namespace MultipleInheritanceVirtualDtors {
     SubclassB b;
   }
 }
+
+namespace ExplicitDestructorCall {
+  class VirtualDtor {
+  public:
+    virtual ~VirtualDtor() {
+      clang_analyzer_checkInlined(true); // expected-warning{{TRUE}}
+    }
+  };
+  
+  class Subclass : public VirtualDtor {
+  public:
+    virtual ~Subclass() {
+      clang_analyzer_checkInlined(false); // no-warning
+    }
+  };
+  
+  void destroy(Subclass *obj) {
+    obj->VirtualDtor::~VirtualDtor();
+  }
+}
+
+
+namespace MultidimensionalArrays {
+  void testArrayInvalidation() {
+    int i = 42;
+    int j = 42;
+
+    {
+      IntWrapper arr[2][2];
+
+      // There should be no undefined value warnings here.
+      // Eventually these should be TRUE as well, but right now
+      // we can't handle array constructors.
+      clang_analyzer_eval(arr[0][0].x == 0); // expected-warning{{UNKNOWN}}
+      clang_analyzer_eval(arr[1][1].x == 0); // expected-warning{{UNKNOWN}}
+
+      arr[0][0].x = &i;
+      arr[1][1].x = &j;
+      clang_analyzer_eval(*arr[0][0].x == 42); // expected-warning{{TRUE}}
+      clang_analyzer_eval(*arr[1][1].x == 42); // expected-warning{{TRUE}}
+    }
+
+    // The destructors should have invalidated i and j.
+    clang_analyzer_eval(i == 42); // expected-warning{{UNKNOWN}}
+    clang_analyzer_eval(j == 42); // expected-warning{{UNKNOWN}}
+  }
+}

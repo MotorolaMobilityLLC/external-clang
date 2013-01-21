@@ -15,9 +15,9 @@
 #define LLVM_CLANG_AST_COMMENT_LEXER_H
 
 #include "clang/Basic/SourceManager.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -34,8 +34,8 @@ enum TokenKind {
   eof,
   newline,
   text,
-  unknown_command,
-  command,
+  unknown_command, // Command that does not have an ID.
+  command,         // Command with an ID.
   verbatim_block_begin,
   verbatim_block_line,
   verbatim_block_end,

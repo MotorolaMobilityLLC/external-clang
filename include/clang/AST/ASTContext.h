@@ -15,21 +15,21 @@
 #ifndef LLVM_CLANG_AST_ASTCONTEXT_H
 #define LLVM_CLANG_AST_ASTCONTEXT_H
 
+#include "clang/AST/CanonicalType.h"
+#include "clang/AST/CommentCommandTraits.h"
+#include "clang/AST/Decl.h"
+#include "clang/AST/LambdaMangleContext.h"
+#include "clang/AST/NestedNameSpecifier.h"
+#include "clang/AST/PrettyPrinter.h"
+#include "clang/AST/RawCommentList.h"
+#include "clang/AST/TemplateName.h"
+#include "clang/AST/Type.h"
 #include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/VersionTuple.h"
-#include "clang/AST/Decl.h"
-#include "clang/AST/LambdaMangleContext.h"
-#include "clang/AST/NestedNameSpecifier.h"
-#include "clang/AST/PrettyPrinter.h"
-#include "clang/AST/TemplateName.h"
-#include "clang/AST/Type.h"
-#include "clang/AST/CanonicalType.h"
-#include "clang/AST/RawCommentList.h"
-#include "clang/AST/CommentCommandTraits.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
@@ -233,6 +233,8 @@ class ASTContext : public RefCountedBase<ASTContext> {
   QualType ObjCConstantStringType;
   mutable RecordDecl *CFConstantStringTypeDecl;
   
+  mutable QualType ObjCSuperType;
+  
   QualType ObjCNSStringType;
 
   /// \brief The typedef declaration for the Objective-C "instancetype" type.
@@ -343,7 +345,10 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// \brief Mapping from each declaration context to its corresponding lambda 
   /// mangling context.
   llvm::DenseMap<const DeclContext *, LambdaMangleContext> LambdaMangleContexts;
-  
+
+  llvm::DenseMap<const DeclContext *, unsigned> UnnamedMangleContexts;
+  llvm::DenseMap<const TagDecl *, unsigned> UnnamedMangleNumbers;
+
   /// \brief Mapping that stores parameterIndex values for ParmVarDecls when
   /// that value exceeds the bitfield size of ParmVarDeclBits.ParameterIndex.
   typedef llvm::DenseMap<const VarDecl *, unsigned> ParameterIndexTable;
@@ -393,9 +398,11 @@ public:
   OwningPtr<ExternalASTSource> ExternalSource;
   ASTMutationListener *Listener;
 
-  clang::PrintingPolicy getPrintingPolicy() const { return PrintingPolicy; }
+  const clang::PrintingPolicy &getPrintingPolicy() const {
+    return PrintingPolicy;
+  }
 
-  void setPrintingPolicy(clang::PrintingPolicy Policy) {
+  void setPrintingPolicy(const clang::PrintingPolicy &Policy) {
     PrintingPolicy = Policy;
   }
   
@@ -514,6 +521,8 @@ public:
   }
 
   void addComment(const RawComment &RC) {
+    assert(LangOpts.RetainCommentsFromSystemHeaders ||
+           !SourceMgr.isInSystemHeader(RC.getSourceRange().getBegin()));
     Comments.addComment(RC, BumpAlloc);
   }
 
@@ -528,7 +537,14 @@ public:
 
   /// Return parsed documentation comment attached to a given declaration.
   /// Returns NULL if no comment is attached.
-  comments::FullComment *getCommentForDecl(const Decl *D) const;
+  ///
+  /// \param PP the Preprocessor used with this TU.  Could be NULL if
+  /// preprocessor is not available.
+  comments::FullComment *getCommentForDecl(const Decl *D,
+                                           const Preprocessor *PP) const;
+  
+  comments::FullComment *cloneFullComment(comments::FullComment *FC,
+                                         const Decl *D) const;
 
 private:
   mutable comments::CommandTraits CommentCommandTraits;
@@ -617,6 +633,17 @@ public:
   /// Overridden method.
   void addOverriddenMethod(const CXXMethodDecl *Method, 
                            const CXXMethodDecl *Overridden);
+
+  /// \brief Return C++ or ObjC overridden methods for the given \p Method.
+  ///
+  /// An ObjC method is considered to override any method in the class's
+  /// base classes, its protocols, or its categories' protocols, that has
+  /// the same selector and is of the same kind (class or instance).
+  /// A method in an implementation is not considered as overriding the same
+  /// method in the interface or its categories.
+  void getOverriddenMethods(
+                        const NamedDecl *Method,
+                        SmallVectorImpl<const NamedDecl *> &Overridden) const;
   
   /// \brief Notify the AST context that a new import declaration has been
   /// parsed or implicitly created within this translation unit.
@@ -691,6 +718,9 @@ public:
   CanQualType PseudoObjectTy, ARCUnbridgedCastTy;
   CanQualType ObjCBuiltinIdTy, ObjCBuiltinClassTy, ObjCBuiltinSelTy;
   CanQualType ObjCBuiltinBoolTy;
+  CanQualType OCLImage1dTy, OCLImage1dArrayTy, OCLImage1dBufferTy;
+  CanQualType OCLImage2dTy, OCLImage2dArrayTy;
+  CanQualType OCLImage3dTy;
 
   // Types for deductions in C++0x [stmt.ranged]'s desugaring. Built on demand.
   mutable QualType AutoDeductTy;     // Deduction against 'auto'.
@@ -835,12 +865,17 @@ public:
     return cudaConfigureCallDecl;
   }
 
-  /// Builds the struct used for __block variables.
-  QualType BuildByRefType(StringRef DeclName, QualType Ty) const;
-
   /// Returns true iff we need copy/dispose helpers for the given type.
-  bool BlockRequiresCopying(QualType Ty) const;
-
+  bool BlockRequiresCopying(QualType Ty, const VarDecl *D);
+  
+  
+  /// Returns true, if given type has a known lifetime. HasByrefExtendedLayout is set
+  /// to false in this case. If HasByrefExtendedLayout returns true, byref variable
+  /// has extended lifetime. 
+  bool getByrefLifetime(QualType Ty,
+                        Qualifiers::ObjCLifetime &Lifetime,
+                        bool &HasByrefExtendedLayout) const;
+  
   /// \brief Return the uniqued reference to the type for an lvalue reference
   /// to the specified type.
   QualType getLValueReferenceType(QualType T, bool SpelledAsLValue = true)
@@ -1076,9 +1111,17 @@ public:
   /// <stddef.h>. Pointer - pointer requires this (C99 6.5.6p9).
   QualType getPointerDiffType() const;
 
+  /// \brief Return the unique type for "pid_t" defined in
+  /// <sys/types.h>. We need this to compute the correct type for vfork().
+  QualType getProcessIDType() const;
+
   /// \brief Return the C structure type used to represent constant CFStrings.
   QualType getCFConstantStringType() const;
-
+  
+  /// \brief Returns the C struct type for objc_super
+  QualType getObjCSuperType() const;
+  void setObjCSuperType(QualType ST) { ObjCSuperType = ST; }
+  
   /// Get the structure type used to representation CFStrings, or NULL
   /// if it hasn't yet been built.
   QualType getRawCFConstantStringType() const {
@@ -1323,8 +1366,8 @@ public:
   /// for some targets.
   QualType getVaListTagType() const;
 
-  /// \brief Return a type with additional \c const, \c volatile, or \crestrict
-  /// qualifiers.
+  /// \brief Return a type with additional \c const, \c volatile, or
+  /// \c restrict qualifiers.
   QualType getCVRQualifiedType(QualType T, unsigned CVR) const {
     return getQualifiedType(T, Qualifiers::fromCVRMask(CVR));
   }
@@ -1754,8 +1797,8 @@ public:
   /// \brief Return a real floating point or a complex type (based on
   /// \p typeDomain/\p typeSize).
   ///
-  /// \arg typeDomain a real floating point or complex type.
-  /// \arg typeSize a real floating point or complex type.
+  /// \param typeDomain a real floating point or complex type.
+  /// \param typeSize a real floating point or complex type.
   QualType getFloatingTypeOfSizeWithinDomain(QualType typeSize,
                                              QualType typeDomain) const;
 
@@ -1967,6 +2010,9 @@ public:
   /// it is not used.
   bool DeclMustBeEmitted(const Decl *D);
 
+  void addUnnamedTag(const TagDecl *Tag);
+  int getUnnamedTagManglingNumber(const TagDecl *Tag) const;
+
   /// \brief Retrieve the lambda mangling number for a lambda expression.
   unsigned getLambdaManglingNumber(CXXMethodDecl *CallOperator);
   
@@ -2025,8 +2071,8 @@ public:
   static unsigned NumImplicitDestructorsDeclared;
   
 private:
-  ASTContext(const ASTContext&); // DO NOT IMPLEMENT
-  void operator=(const ASTContext&); // DO NOT IMPLEMENT
+  ASTContext(const ASTContext &) LLVM_DELETED_FUNCTION;
+  void operator=(const ASTContext &) LLVM_DELETED_FUNCTION;
 
 public:
   /// \brief Initialize built-in types.
@@ -2106,8 +2152,8 @@ static inline Selector GetUnarySelector(StringRef name, ASTContext& Ctx) {
 /// This placement form of operator new uses the ASTContext's allocator for
 /// obtaining memory.
 ///
-/// IMPORTANT: These are also declared in clang/AST/Attr.h! Any changes here
-/// need to also be made there.
+/// IMPORTANT: These are also declared in clang/AST/AttrIterator.h! Any changes
+/// here need to also be made there.
 ///
 /// We intentionally avoid using a nothrow specification here so that the calls
 /// to this operator will not perform a null check on the result -- the

@@ -116,7 +116,7 @@ def SizeofPointerChecker : Checker<"SizeofPtr">,
   HelpText<"Warn about unintended use of sizeof() on pointer expressions">,
   DescFile<"CheckSizeofPointer.cpp">;
 
-} // end "core.experimental"
+} // end "alpha.core"
 
 //===----------------------------------------------------------------------===//
 // Evaluate "builtin" functions.
@@ -172,7 +172,7 @@ def VirtualCallChecker : Checker<"VirtualCall">,
   HelpText<"Check virtual function calls during construction or destruction">, 
   DescFile<"VirtualCallChecker.cpp">;
 
-} // end: "cplusplus.experimental"
+} // end: "alpha.cplusplus"
 
 //===----------------------------------------------------------------------===//
 // Deadcode checkers.
@@ -195,7 +195,7 @@ def UnreachableCodeChecker : Checker<"UnreachableCode">,
   HelpText<"Check unreachable code">,
   DescFile<"UnreachableCodeChecker.cpp">;
 
-} // end "deadcode.experimental"
+} // end "alpha.deadcode"
 
 //===----------------------------------------------------------------------===//
 // Security checkers.
@@ -251,7 +251,7 @@ def MallocOverflowSecurityChecker : Checker<"MallocOverflow">,
   HelpText<"Check for overflows in the arguments to malloc()">,
   DescFile<"MallocOverflowSecurityChecker.cpp">;
 
-} // end "security.experimental"
+} // end "alpha.security"
 
 //===----------------------------------------------------------------------===//
 // Taint checkers.
@@ -263,7 +263,7 @@ def GenericTaintChecker : Checker<"TaintPropagation">,
   HelpText<"Generate taint information used by other checkers">,
   DescFile<"GenericTaintChecker.cpp">;
 
-} // end "experimental.security.taint"
+} // end "alpha.security.taint"
 
 //===----------------------------------------------------------------------===//
 // Unix API checkers.
@@ -303,7 +303,11 @@ def StreamChecker : Checker<"Stream">,
   HelpText<"Check stream handling functions">,
   DescFile<"StreamChecker.cpp">;
 
-} // end "unix.experimental"
+def SimpleStreamChecker : Checker<"SimpleStream">,
+  HelpText<"Check for misuses of stream APIs">,
+  DescFile<"SimpleStreamChecker.cpp">;
+
+} // end "alpha.unix"
 
 let ParentPackage = CString in {
 
@@ -342,17 +346,12 @@ def MacOSXAPIChecker : Checker<"API">,
   HelpText<"Check for proper uses of various Mac OS X APIs">,
   DescFile<"MacOSXAPIChecker.cpp">;
 
-def OSAtomicChecker : Checker<"AtomicCAS">,
-  InPackage<OSX>,
-  HelpText<"Evaluate calls to OSAtomic functions">,
-  DescFile<"OSAtomicChecker.cpp">;
-
 def MacOSKeychainAPIChecker : Checker<"SecKeychainAPI">,
   InPackage<OSX>,
   HelpText<"Check for proper uses of Secure Keychain APIs">,
   DescFile<"MacOSKeychainAPIChecker.cpp">;
 
-} // end "macosx"
+} // end "osx"
 
 let ParentPackage = Cocoa in {
 
@@ -413,7 +412,23 @@ def ObjCDeallocChecker : Checker<"Dealloc">,
   HelpText<"Warn about Objective-C classes that lack a correct implementation of -dealloc">,
   DescFile<"CheckObjCDealloc.cpp">;
 
-} // end "cocoa.alpha"
+def IvarInvalidationChecker : Checker<"InstanceVariableInvalidation">,
+  HelpText<"Check that the invalidatable instance variables are invalidated in the methods annotated with objc_instance_variable_invalidator">,
+  DescFile<"IvarInvalidationChecker.cpp">;
+
+def DirectIvarAssignment : Checker<"DirectIvarAssignment">,
+  HelpText<"Check for direct assignments to instance variables">,
+  DescFile<"DirectIvarAssignment.cpp">;
+
+def DirectIvarAssignmentForAnnotatedFunctions : Checker<"DirectIvarAssignmentForAnnotatedFunctions">,
+  HelpText<"Check for direct assignments to instance variables in the methods annotated with objc_no_direct_instance_variable_assignment">,
+  DescFile<"DirectIvarAssignment.cpp">;
+
+def ObjCSuperCallChecker : Checker<"MissingSuperCall">,
+  HelpText<"Warn about Objective-C methods that lack a necessary call to super">,
+  DescFile<"ObjCMissingSuperCallChecker.cpp">;
+
+} // end "alpha.osx.cocoa"
 
 let ParentPackage = CoreFoundation in {
 
@@ -422,7 +437,7 @@ def CFNumberCreateChecker : Checker<"CFNumber">,
   DescFile<"BasicObjCFoundationChecks.cpp">;
 
 def CFRetainReleaseChecker : Checker<"CFRetainRelease">,
-  HelpText<"Check for null arguments to CFRetain/CFRelease">,
+  HelpText<"Check for null arguments to CFRetain/CFRelease/CFMakeCollectable">,
   DescFile<"BasicObjCFoundationChecks.cpp">;
 
 def CFErrorChecker : Checker<"CFError">,
@@ -477,6 +492,10 @@ def CallGraphViewer : Checker<"ViewCallGraph">,
 
 def CallGraphDumper : Checker<"DumpCallGraph">,
   HelpText<"Display Call Graph">,
+  DescFile<"DebugCheckers.cpp">;
+
+def ConfigDumper : Checker<"ConfigDumper">,
+  HelpText<"Dump config table">,
   DescFile<"DebugCheckers.cpp">;
 
 def TraversalDumper : Checker<"DumpTraversal">,

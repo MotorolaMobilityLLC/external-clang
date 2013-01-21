@@ -13,40 +13,39 @@
 //===----------------------------------------------------------------------===//
 
 #include "CIndexer.h"
+#include "CIndexDiagnostic.h"
 #include "CXComment.h"
 #include "CXCursor.h"
-#include "CXTranslationUnit.h"
-#include "CXString.h"
-#include "CXType.h"
 #include "CXSourceLocation.h"
-#include "CIndexDiagnostic.h"
+#include "CXString.h"
+#include "CXTranslationUnit.h"
+#include "CXType.h"
 #include "CursorVisitor.h"
-
-#include "clang/Basic/Version.h"
-
+#include "SimpleFormatContext.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/Version.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
-#include "clang/Lex/Lexer.h"
 #include "clang/Lex/HeaderSearch.h"
+#include "clang/Lex/Lexer.h"
 #include "clang/Lex/PreprocessingRecord.h"
 #include "clang/Lex/Preprocessor.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
-#include "llvm/Support/SaveAndRestore.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/CrashRecoveryContext.h"
-#include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/Timer.h"
 #include "llvm/Support/Mutex.h"
+#include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/Threading.h"
-#include "llvm/Support/Compiler.h"
+#include "llvm/Support/Timer.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace clang::cxcursor;
@@ -63,6 +62,8 @@ CXTranslationUnit cxtu::MakeCXTranslationUnit(CIndexer *CIdx, ASTUnit *TU) {
   D->StringPool = createCXStringPool();
   D->Diagnostics = 0;
   D->OverridenCursorsPool = createOverridenCXCursorsPool();
+  D->FormatContext = 0;
+  D->FormatInMemoryUniqueId = 0;
   return D;
 }
 
@@ -517,6 +518,19 @@ bool CursorVisitor::VisitChildren(CXCursor Cursor) {
     if (const ObjCInterfaceType *InterT = A->getInterface()->getAs<ObjCInterfaceType>())
       return Visit(cxcursor::MakeCursorObjCClassRef(InterT->getInterface(),
                                                     A->getInterfaceLoc(), TU));
+  }
+
+  // If pointing inside a macro definition, check if the token is an identifier
+  // that was ever defined as a macro. In such a case, create a "pseudo" macro
+  // expansion cursor for that token.
+  SourceLocation BeginLoc = RegionOfInterest.getBegin();
+  if (Cursor.kind == CXCursor_MacroDefinition &&
+      BeginLoc == RegionOfInterest.getEnd()) {
+    SourceLocation Loc = AU->mapLocationToPreamble(BeginLoc);
+    MacroInfo *MI = getMacroInfo(cxcursor::getCursorMacroDefinition(Cursor),TU);
+    if (MacroDefinition *MacroDef =
+          checkForMacroInMacroDefinition(MI, Loc, TU))
+      return Visit(cxcursor::MakeMacroExpansionCursor(MacroDef, BeginLoc, TU));
   }
 
   // Nothing to visit at the moment.
@@ -1021,12 +1035,12 @@ bool CursorVisitor::VisitObjCPropertyDecl(ObjCPropertyDecl *PD) {
   // Visit synthesized methods since they will be skipped when visiting
   // the @interface.
   if (ObjCMethodDecl *MD = prevDecl->getGetterMethodDecl())
-    if (MD->isSynthesized() && MD->getLexicalDeclContext() == CDecl)
+    if (MD->isPropertyAccessor() && MD->getLexicalDeclContext() == CDecl)
       if (Visit(MakeCXCursor(MD, TU, RegionOfInterest)))
         return true;
 
   if (ObjCMethodDecl *MD = prevDecl->getSetterMethodDecl())
-    if (MD->isSynthesized() && MD->getLexicalDeclContext() == CDecl)
+    if (MD->isPropertyAccessor() && MD->getLexicalDeclContext() == CDecl)
       if (Visit(MakeCXCursor(MD, TU, RegionOfInterest)))
         return true;
 
@@ -1327,7 +1341,12 @@ bool CursorVisitor::VisitTemplateArgumentLoc(const TemplateArgumentLoc &TAL) {
     if (Expr *E = TAL.getSourceDeclExpression())
       return Visit(MakeCXCursor(E, StmtParent, TU, RegionOfInterest));
     return false;
-      
+
+  case TemplateArgument::NullPtr:
+    if (Expr *E = TAL.getSourceNullPtrExpression())
+      return Visit(MakeCXCursor(E, StmtParent, TU, RegionOfInterest));
+    return false;
+
   case TemplateArgument::Expression:
     if (Expr *E = TAL.getSourceExpression())
       return Visit(MakeCXCursor(E, StmtParent, TU, RegionOfInterest));
@@ -1364,6 +1383,12 @@ bool CursorVisitor::VisitBuiltinTypeLoc(BuiltinTypeLoc TL) {
   case BuiltinType::Void:
   case BuiltinType::NullPtr:
   case BuiltinType::Dependent:
+  case BuiltinType::OCLImage1d:
+  case BuiltinType::OCLImage1dArray:
+  case BuiltinType::OCLImage1dBuffer:
+  case BuiltinType::OCLImage2d:
+  case BuiltinType::OCLImage2dArray:
+  case BuiltinType::OCLImage3d:
 #define BUILTIN_TYPE(Id, SingletonId)
 #define SIGNED_TYPE(Id, SingletonId) case BuiltinType::Id:
 #define UNSIGNED_TYPE(Id, SingletonId) case BuiltinType::Id:
@@ -2481,7 +2506,6 @@ CXTranslationUnit clang_createTranslationUnit(CXIndex CIdx,
 
   CIndexer *CXXIdx = static_cast<CIndexer *>(CIdx);
   FileSystemOptions FileSystemOpts;
-  FileSystemOpts.WorkingDir = CXXIdx->getWorkingDirectory();
 
   IntrusiveRefCntPtr<DiagnosticsEngine> Diags;
   ASTUnit *TU = ASTUnit::LoadFromASTFile(ast_filename, Diags, FileSystemOpts,
@@ -2551,12 +2575,13 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   bool IncludeBriefCommentsInCodeCompletion
     = options & CXTranslationUnit_IncludeBriefCommentsInCodeCompletion;
   bool SkipFunctionBodies = options & CXTranslationUnit_SkipFunctionBodies;
+  bool ForSerialization = options & CXTranslationUnit_ForSerialization;
 
   // Configure the diagnostics.
-  DiagnosticOptions DiagOpts;
   IntrusiveRefCntPtr<DiagnosticsEngine>
-    Diags(CompilerInstance::createDiagnostics(DiagOpts, num_command_line_args, 
-                                                command_line_args));
+    Diags(CompilerInstance::createDiagnostics(new DiagnosticOptions,
+                                              num_command_line_args,
+                                              command_line_args));
 
   // Recover resources if we crash before exiting this function.
   llvm::CrashRecoveryContextCleanupRegistrar<DiagnosticsEngine,
@@ -2638,6 +2663,7 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
                                  /*AllowPCHWithCompilerErrors=*/true,
                                  SkipFunctionBodies,
                                  /*UserFilesAreVolatile=*/true,
+                                 ForSerialization,
                                  &ErrUnit));
 
   if (NumErrors != Diags->getClient()->getNumErrors()) {
@@ -2712,7 +2738,8 @@ static void clang_saveTranslationUnit_Impl(void *UserData) {
   if (CXXIdx->isOptEnabled(CXGlobalOpt_ThreadBackgroundPriorityForIndexing))
     setThreadBackgroundPriority();
 
-  STUI->result = static_cast<ASTUnit *>(STUI->TU->TUData)->Save(STUI->FileName);
+  bool hadError = static_cast<ASTUnit *>(STUI->TU->TUData)->Save(STUI->FileName);
+  STUI->result = hadError ? CXSaveError_Unknown : CXSaveError_None;
 }
 
 int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
@@ -2768,6 +2795,7 @@ void clang_disposeTranslationUnit(CXTranslationUnit CTUnit) {
     disposeCXStringPool(CTUnit->StringPool);
     delete static_cast<CXDiagnosticSetImpl *>(CTUnit->Diagnostics);
     disposeOverridenCXCursorsPool(CTUnit->OverridenCursorsPool);
+    delete static_cast<SimpleFormatContext*>(CTUnit->FormatContext);
     delete CTUnit;
   }
 }
@@ -3041,6 +3069,10 @@ static CXString getDeclSpelling(Decl *D) {
       if (ObjCPropertyDecl *Property = PropImpl->getPropertyDecl())
         return createCXString(Property->getIdentifier()->getName());
     
+    if (ImportDecl *ImportD = dyn_cast<ImportDecl>(D))
+      if (Module *Mod = ImportD->getImportedModule())
+        return createCXString(Mod->getFullModuleName());
+
     return createCXString("");
   }
   
@@ -3166,7 +3198,7 @@ CXString clang_getCursorSpelling(CXCursor C) {
   }
   
   if (C.kind == CXCursor_MacroExpansion)
-    return createCXString(getCursorMacroExpansion(C)->getName()
+    return createCXString(getCursorMacroExpansion(C).getName()
                                                            ->getNameStart());
 
   if (C.kind == CXCursor_MacroDefinition)
@@ -3240,6 +3272,18 @@ CXSourceRange clang_Cursor_getSpellingNameRange(CXCursor C,
     if (ObjCCategoryImplDecl *
           CID = dyn_cast_or_null<ObjCCategoryImplDecl>(getCursorDecl(C)))
       return cxloc::translateSourceRange(Ctx, CID->getCategoryNameLoc());
+  }
+
+  if (C.kind == CXCursor_ModuleImportDecl) {
+    if (pieceIndex > 0)
+      return clang_getNullRange();
+    if (ImportDecl *ImportD = dyn_cast_or_null<ImportDecl>(getCursorDecl(C))) {
+      ArrayRef<SourceLocation> Locs = ImportD->getIdentifierLocs();
+      if (!Locs.empty())
+        return cxloc::translateSourceRange(Ctx,
+                                         SourceRange(Locs.front(), Locs.back()));
+    }
+    return clang_getNullRange();
   }
 
   // FIXME: A CXCursor_InclusionDirective should give the location of the
@@ -3637,6 +3681,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return createCXString("ObjCDynamicDecl");
   case CXCursor_CXXAccessSpecifier:
     return createCXString("CXXAccessSpecifier");
+  case CXCursor_ModuleImportDecl:
+    return createCXString("ModuleImport");
   }
 
   llvm_unreachable("Unhandled CXCursorKind");
@@ -3816,6 +3862,18 @@ CXCursor clang_getNullCursor(void) {
 }
 
 unsigned clang_equalCursors(CXCursor X, CXCursor Y) {
+  // Clear out the "FirstInDeclGroup" part in a declaration cursor, since we
+  // can't set consistently. For example, when visiting a DeclStmt we will set
+  // it but we don't set it on the result of clang_getCursorDefinition for
+  // a reference of the same declaration.
+  // FIXME: Setting "FirstInDeclGroup" in CXCursors is a hack that only works
+  // when visiting a DeclStmt currently, the AST should be enhanced to be able
+  // to provide that kind of info.
+  if (clang_isDeclaration(X.kind))
+    X.data[1] = 0;
+  if (clang_isDeclaration(Y.kind))
+    Y.data[1] = 0;
+
   return X == Y;
 }
 
@@ -3833,7 +3891,8 @@ unsigned clang_isInvalid(enum CXCursorKind K) {
 }
 
 unsigned clang_isDeclaration(enum CXCursorKind K) {
-  return K >= CXCursor_FirstDecl && K <= CXCursor_LastDecl;
+  return (K >= CXCursor_FirstDecl && K <= CXCursor_LastDecl) ||
+         (K >= CXCursor_FirstExtraDecl && K <= CXCursor_LastExtraDecl);
 }
 
 unsigned clang_isReference(enum CXCursorKind K) {
@@ -3965,7 +4024,7 @@ CXSourceLocation clang_getCursorLocation(CXCursor C) {
 
   if (C.kind == CXCursor_MacroExpansion) {
     SourceLocation L
-      = cxcursor::getCursorMacroExpansion(C)->getSourceRange().getBegin();
+      = cxcursor::getCursorMacroExpansion(C).getSourceRange().getBegin();
     return cxloc::translateSourceLocation(getCursorContext(C), L);
   }
 
@@ -3980,7 +4039,7 @@ CXSourceLocation clang_getCursorLocation(CXCursor C) {
     return cxloc::translateSourceLocation(getCursorContext(C), L);
   }
 
-  if (C.kind < CXCursor_FirstDecl || C.kind > CXCursor_LastDecl)
+  if (!clang_isDeclaration(C.kind))
     return clang_getNullLocation();
 
   Decl *D = getCursorDecl(C);
@@ -4091,7 +4150,7 @@ static SourceRange getRawCursorExtent(CXCursor C) {
 
   if (C.kind == CXCursor_MacroExpansion) {
     ASTUnit *TU = getCursorASTUnit(C);
-    SourceRange Range = cxcursor::getCursorMacroExpansion(C)->getSourceRange();
+    SourceRange Range = cxcursor::getCursorMacroExpansion(C).getSourceRange();
     return TU->mapRangeFromPreamble(Range);
   }
 
@@ -4115,7 +4174,7 @@ static SourceRange getRawCursorExtent(CXCursor C) {
     return SourceRange(Start, End);
   }
 
-  if (C.kind >= CXCursor_FirstDecl && C.kind <= CXCursor_LastDecl) {
+  if (clang_isDeclaration(C.kind)) {
     Decl *D = cxcursor::getCursorDecl(C);
     if (!D)
       return SourceRange();
@@ -4138,7 +4197,7 @@ static SourceRange getRawCursorExtent(CXCursor C) {
 /// \brief Retrieves the "raw" cursor extent, which is then extended to include
 /// the decl-specifier-seq for declarations.
 static SourceRange getFullCursorExtent(CXCursor C, SourceManager &SrcMgr) {
-  if (C.kind >= CXCursor_FirstDecl && C.kind <= CXCursor_LastDecl) {
+  if (clang_isDeclaration(C.kind)) {
     Decl *D = cxcursor::getCursorDecl(C);
     if (!D)
       return SourceRange();
@@ -4231,7 +4290,7 @@ CXCursor clang_getCursorReferenced(CXCursor C) {
   }
   
   if (C.kind == CXCursor_MacroExpansion) {
-    if (MacroDefinition *Def = getCursorMacroExpansion(C)->getDefinition())
+    if (MacroDefinition *Def = getCursorMacroExpansion(C).getDefinition())
       return MakeMacroDefinitionCursor(Def, tu);
   }
 
@@ -4828,7 +4887,6 @@ void clang_disposeTokens(CXTranslationUnit TU,
 // Token annotation APIs.
 //===----------------------------------------------------------------------===//
 
-typedef llvm::DenseMap<unsigned, CXCursor> AnnotateTokensData;
 static enum CXChildVisitResult AnnotateTokensVisitor(CXCursor cursor,
                                                      CXCursor parent,
                                                      CXClientData client_data);
@@ -4837,7 +4895,6 @@ static bool AnnotateTokensPostChildrenVisitor(CXCursor cursor,
 
 namespace {
 class AnnotateTokensWorker {
-  AnnotateTokensData &Annotated;
   CXToken *Tokens;
   CXCursor *Cursors;
   unsigned NumTokens;
@@ -4872,10 +4929,9 @@ class AnnotateTokensWorker {
                                              SourceRange);
 
 public:
-  AnnotateTokensWorker(AnnotateTokensData &annotated,
-                       CXToken *tokens, CXCursor *cursors, unsigned numTokens,
+  AnnotateTokensWorker(CXToken *tokens, CXCursor *cursors, unsigned numTokens,
                        CXTranslationUnit tu, SourceRange RegionOfInterest)
-    : Annotated(annotated), Tokens(tokens), Cursors(cursors),
+    : Tokens(tokens), Cursors(cursors),
       NumTokens(numTokens), TokIdx(0), PreprocessingTokIdx(0),
       AnnotateVis(tu,
                   AnnotateTokensVisitor, this,
@@ -4908,27 +4964,13 @@ void AnnotateTokensWorker::AnnotateTokens() {
   // Walk the AST within the region of interest, annotating tokens
   // along the way.
   AnnotateVis.visitFileRegion();
+}
 
-  for (unsigned I = 0 ; I < TokIdx ; ++I) {
-    AnnotateTokensData::iterator Pos = Annotated.find(Tokens[I].int_data[1]);
-    if (Pos != Annotated.end() && 
-        (clang_isInvalid(Cursors[I].kind) ||
-         Pos->second.kind != CXCursor_PreprocessingDirective))
-      Cursors[I] = Pos->second;
-  }
-
-  // Finish up annotating any tokens left.
-  if (!MoreTokens())
+static inline void updateCursorAnnotation(CXCursor &Cursor,
+                                          const CXCursor &updateC) {
+  if (clang_isInvalid(updateC.kind) || clang_isPreprocessing(Cursor.kind))
     return;
-
-  const CXCursor &C = clang_getNullCursor();
-  for (unsigned I = TokIdx ; I < NumTokens ; ++I) {
-    if (I < PreprocessingTokIdx && clang_isPreprocessing(Cursors[I].kind))
-      continue;
-
-    AnnotateTokensData::iterator Pos = Annotated.find(Tokens[I].int_data[1]);
-    Cursors[I] = (Pos == Annotated.end()) ? C : Pos->second;
-  }
+  Cursor = updateC;
 }
 
 /// \brief It annotates and advances tokens with a cursor until the comparison
@@ -4947,7 +4989,7 @@ void AnnotateTokensWorker::annotateAndAdvanceTokens(CXCursor updateC,
 
     SourceLocation TokLoc = GetTokenLoc(I);
     if (LocationCompare(SrcMgr, TokLoc, range) == compResult) {
-      Cursors[I] = updateC;
+      updateCursorAnnotation(Cursors[I], updateC);
       AdvanceToken();
       continue;
     }
@@ -4992,7 +5034,6 @@ void AnnotateTokensWorker::annotateAndAdvanceFunctionMacroTokens(
 
 enum CXChildVisitResult
 AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {  
-  CXSourceLocation Loc = clang_getCursorLocation(cursor);
   SourceRange cursorRange = getRawCursorExtent(cursor);
   if (cursorRange.isInvalid())
     return CXChildVisit_Recurse;
@@ -5043,13 +5084,6 @@ AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {
   }
   
   if (clang_isPreprocessing(cursor.kind)) {    
-    // For macro expansions, just note where the beginning of the macro
-    // expansion occurs.
-    if (cursor.kind == CXCursor_MacroExpansion) {
-      Annotated[Loc.int_data] = cursor;
-      return CXChildVisit_Recurse;
-    }
-    
     // Items in the preprocessing record are kept separate from items in
     // declarations, so we keep a separate token index.
     unsigned SavedTokIdx = TokIdx;
@@ -5081,8 +5115,14 @@ AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {
       case RangeAfter:
         break;
       case RangeOverlap:
-        Cursors[I] = cursor;
+        // We may have already annotated macro names inside macro definitions.
+        if (Cursors[I].kind != CXCursor_MacroExpansion)
+          Cursors[I] = cursor;
         AdvanceToken();
+        // For macro expansions, just note where the beginning of the macro
+        // expansion occurs.
+        if (cursor.kind == CXCursor_MacroExpansion)
+          break;
         continue;
       }
       break;
@@ -5098,44 +5138,7 @@ AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {
   if (cursorRange.isInvalid())
     return CXChildVisit_Continue;
   
-  SourceLocation L = SourceLocation::getFromRawEncoding(Loc.int_data);
-
-  // Adjust the annotated range based specific declarations.
   const enum CXCursorKind cursorK = clang_getCursorKind(cursor);
-  if (cursorK >= CXCursor_FirstDecl && cursorK <= CXCursor_LastDecl) {
-    Decl *D = cxcursor::getCursorDecl(cursor);
-    
-    SourceLocation StartLoc;
-    if (const DeclaratorDecl *DD = dyn_cast_or_null<DeclaratorDecl>(D)) {
-      if (TypeSourceInfo *TI = DD->getTypeSourceInfo())
-        StartLoc = TI->getTypeLoc().getLocStart();
-    } else if (TypedefDecl *Typedef = dyn_cast_or_null<TypedefDecl>(D)) {
-      if (TypeSourceInfo *TI = Typedef->getTypeSourceInfo())
-        StartLoc = TI->getTypeLoc().getLocStart();
-    }
-
-    if (StartLoc.isValid() && L.isValid() &&
-        SrcMgr.isBeforeInTranslationUnit(StartLoc, L))
-      cursorRange.setBegin(StartLoc);
-  }
-  
-  // If the location of the cursor occurs within a macro instantiation, record
-  // the spelling location of the cursor in our annotation map.  We can then
-  // paper over the token labelings during a post-processing step to try and
-  // get cursor mappings for tokens that are the *arguments* of a macro
-  // instantiation.
-  if (L.isMacroID()) {
-    unsigned rawEncoding = SrcMgr.getSpellingLoc(L).getRawEncoding();
-    // Only invalidate the old annotation if it isn't part of a preprocessing
-    // directive.  Here we assume that the default construction of CXCursor
-    // results in CXCursor.kind being an initialized value (i.e., 0).  If
-    // this isn't the case, we can fix by doing lookup + insertion.
-    
-    CXCursor &oldC = Annotated[rawEncoding];
-    if (!clang_isPreprocessing(oldC.kind))
-      oldC = cursor;
-  }
-  
   const enum CXCursorKind K = clang_getCursorKind(parent);
   const CXCursor updateC =
     (clang_isInvalid(K) || K == CXCursor_TranslationUnit)
@@ -5155,7 +5158,7 @@ AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {
       if (E->getLocStart().isValid() && D->getLocation().isValid() &&
           E->getLocStart() == D->getLocation() &&
           E->getLocStart() == GetTokenLoc(I)) {
-        Cursors[I] = updateC;
+        updateCursorAnnotation(Cursors[I], updateC);
         AdvanceToken();
       }
     }
@@ -5236,7 +5239,7 @@ public:
     if (cursor.kind != CXCursor_MacroExpansion)
       return CXChildVisit_Continue;
 
-    SourceRange macroRange = getCursorMacroExpansion(cursor)->getSourceRange();
+    SourceRange macroRange = getCursorMacroExpansion(cursor).getSourceRange();
     if (macroRange.getBegin() == macroRange.getEnd())
       return CXChildVisit_Continue; // it's not a function macro.
 
@@ -5294,11 +5297,29 @@ namespace {
   };
 }
 
+/// \brief Used by \c annotatePreprocessorTokens.
+/// \returns true if lexing was finished, false otherwise.
+static bool lexNext(Lexer &Lex, Token &Tok,
+                   unsigned &NextIdx, unsigned NumTokens) {
+  if (NextIdx >= NumTokens)
+    return true;
+
+  ++NextIdx;
+  Lex.LexFromRawLexer(Tok);
+  if (Tok.is(tok::eof))
+    return true;
+
+  return false;
+}
+
 static void annotatePreprocessorTokens(CXTranslationUnit TU,
                                        SourceRange RegionOfInterest,
-                                       AnnotateTokensData &Annotated) {
+                                       CXCursor *Cursors,
+                                       CXToken *Tokens,
+                                       unsigned NumTokens) {
   ASTUnit *CXXUnit = static_cast<ASTUnit *>(TU->TUData);
 
+  Preprocessor &PP = CXXUnit->getPreprocessor();
   SourceManager &SourceMgr = CXXUnit->getSourceManager();
   std::pair<FileID, unsigned> BeginLocInfo
     = SourceMgr.getDecomposedLoc(RegionOfInterest.getBegin());
@@ -5320,44 +5341,77 @@ static void annotatePreprocessorTokens(CXTranslationUnit TU,
             Buffer.end());
   Lex.SetCommentRetentionState(true);
   
+  unsigned NextIdx = 0;
   // Lex tokens in raw mode until we hit the end of the range, to avoid
   // entering #includes or expanding macros.
   while (true) {
     Token Tok;
-    Lex.LexFromRawLexer(Tok);
+    if (lexNext(Lex, Tok, NextIdx, NumTokens))
+      break;
+    unsigned TokIdx = NextIdx-1;
+    assert(Tok.getLocation() ==
+             SourceLocation::getFromRawEncoding(Tokens[TokIdx].int_data[1]));
     
   reprocess:
     if (Tok.is(tok::hash) && Tok.isAtStartOfLine()) {
-      // We have found a preprocessing directive. Gobble it up so that we
-      // don't see it while preprocessing these tokens later, but keep track
-      // of all of the token locations inside this preprocessing directive so
-      // that we can annotate them appropriately.
+      // We have found a preprocessing directive. Annotate the tokens
+      // appropriately.
       //
       // FIXME: Some simple tests here could identify macro definitions and
       // #undefs, to provide specific cursor kinds for those.
-      SmallVector<SourceLocation, 32> Locations;
-      do {
-        Locations.push_back(Tok.getLocation());
-        Lex.LexFromRawLexer(Tok);
-      } while (!Tok.isAtStartOfLine() && !Tok.is(tok::eof));
-      
-      using namespace cxcursor;
-      CXCursor Cursor
-      = MakePreprocessingDirectiveCursor(SourceRange(Locations.front(),
-                                                     Locations.back()),
-                                         TU);
-      for (unsigned I = 0, N = Locations.size(); I != N; ++I) {
-        Annotated[Locations[I].getRawEncoding()] = Cursor;
+
+      SourceLocation BeginLoc = Tok.getLocation();
+      if (lexNext(Lex, Tok, NextIdx, NumTokens))
+        break;
+
+      MacroInfo *MI = 0;
+      if (Tok.is(tok::raw_identifier) &&
+          StringRef(Tok.getRawIdentifierData(), Tok.getLength()) == "define") {
+        if (lexNext(Lex, Tok, NextIdx, NumTokens))
+          break;
+
+        if (Tok.is(tok::raw_identifier)) {
+          StringRef Name(Tok.getRawIdentifierData(), Tok.getLength());
+          IdentifierInfo &II = PP.getIdentifierTable().get(Name);
+          SourceLocation MappedTokLoc =
+              CXXUnit->mapLocationToPreamble(Tok.getLocation());
+          MI = getMacroInfo(II, MappedTokLoc, TU);
+        }
       }
+
+      bool finished = false;
+      do {
+        if (lexNext(Lex, Tok, NextIdx, NumTokens)) {
+          finished = true;
+          break;
+        }
+        // If we are in a macro definition, check if the token was ever a
+        // macro name and annotate it if that's the case.
+        if (MI) {
+          SourceLocation SaveLoc = Tok.getLocation();
+          Tok.setLocation(CXXUnit->mapLocationToPreamble(SaveLoc));
+          MacroDefinition *MacroDef = checkForMacroInMacroDefinition(MI,Tok,TU);
+          Tok.setLocation(SaveLoc);
+          if (MacroDef)
+            Cursors[NextIdx-1] = MakeMacroExpansionCursor(MacroDef,
+                                                         Tok.getLocation(), TU);
+        }
+      } while (!Tok.isAtStartOfLine());
+
+      unsigned LastIdx = finished ? NextIdx-1 : NextIdx-2;
+      assert(TokIdx <= LastIdx);
+      SourceLocation EndLoc =
+          SourceLocation::getFromRawEncoding(Tokens[LastIdx].int_data[1]);
+      CXCursor Cursor =
+          MakePreprocessingDirectiveCursor(SourceRange(BeginLoc, EndLoc), TU);
+
+      for (; TokIdx <= LastIdx; ++TokIdx)
+        updateCursorAnnotation(Cursors[TokIdx], Cursor);
       
-      if (Tok.isAtStartOfLine())
-        goto reprocess;
-      
-      continue;
+      if (finished)
+        break;
+      goto reprocess;
     }
-    
-    if (Tok.is(tok::eof))
-      break;
   }
 }
 
@@ -5381,13 +5435,9 @@ static void clang_annotateTokensImpl(void *UserData) {
     cxloc::translateSourceLocation(clang_getTokenLocation(TU,
                                                          Tokens[NumTokens-1])));
 
-  // A mapping from the source locations found when re-lexing or traversing the
-  // region of interest to the corresponding cursors.
-  AnnotateTokensData Annotated;
-
   // Relex the tokens within the source range to look for preprocessing
   // directives.
-  annotatePreprocessorTokens(TU, RegionOfInterest, Annotated);
+  annotatePreprocessorTokens(TU, RegionOfInterest, Cursors, Tokens, NumTokens);
   
   if (CXXUnit->getPreprocessor().getPreprocessingRecord()) {
     // Search and mark tokens that are macro argument expansions.
@@ -5403,8 +5453,7 @@ static void clang_annotateTokensImpl(void *UserData) {
   
   // Annotate all of the source locations in the region of interest that map to
   // a specific cursor.
-  AnnotateTokensWorker W(Annotated, Tokens, Cursors, NumTokens,
-                         TU, RegionOfInterest);
+  AnnotateTokensWorker W(Tokens, Cursors, NumTokens, TU, RegionOfInterest);
   
   // FIXME: We use a ridiculous stack size here because the data-recursion
   // algorithm uses a large stack frame than the non-data recursive version,
@@ -5804,9 +5853,57 @@ CXComment clang_Cursor_getParsedComment(CXCursor C) {
 
   const Decl *D = getCursorDecl(C);
   const ASTContext &Context = getCursorContext(C);
-  const comments::FullComment *FC = Context.getCommentForDecl(D);
+  const comments::FullComment *FC = Context.getCommentForDecl(D, /*PP=*/ NULL);
 
   return cxcomment::createCXComment(FC, getCursorTU(C));
+}
+
+CXModule clang_Cursor_getModule(CXCursor C) {
+  if (C.kind == CXCursor_ModuleImportDecl) {
+    if (ImportDecl *ImportD = dyn_cast_or_null<ImportDecl>(getCursorDecl(C)))
+      return ImportD->getImportedModule();
+  }
+
+  return 0;
+}
+
+CXModule clang_Module_getParent(CXModule CXMod) {
+  if (!CXMod)
+    return 0;
+  Module *Mod = static_cast<Module*>(CXMod);
+  return Mod->Parent;
+}
+
+CXString clang_Module_getName(CXModule CXMod) {
+  if (!CXMod)
+    return createCXString("");
+  Module *Mod = static_cast<Module*>(CXMod);
+  return createCXString(Mod->Name);
+}
+
+CXString clang_Module_getFullName(CXModule CXMod) {
+  if (!CXMod)
+    return createCXString("");
+  Module *Mod = static_cast<Module*>(CXMod);
+  return createCXString(Mod->getFullModuleName());
+}
+
+unsigned clang_Module_getNumTopLevelHeaders(CXModule CXMod) {
+  if (!CXMod)
+    return 0;
+  Module *Mod = static_cast<Module*>(CXMod);
+  return Mod->TopHeaders.size();
+}
+
+CXFile clang_Module_getTopLevelHeader(CXModule CXMod, unsigned Index) {
+  if (!CXMod)
+    return 0;
+  Module *Mod = static_cast<Module*>(CXMod);
+
+  if (Index < Mod->TopHeaders.size())
+    return const_cast<FileEntry *>(Mod->TopHeaders[Index]);
+
+  return 0;
 }
 
 } // end: extern "C"
@@ -6062,6 +6159,9 @@ void SetSafetyThreadStackSize(unsigned Value) {
 }
 
 void clang::setThreadBackgroundPriority() {
+  if (getenv("LIBCLANG_BGPRIO_DISABLE"))
+    return;
+
   // FIXME: Move to llvm/Support and make it cross-platform.
 #ifdef __APPLE__
   setpriority(PRIO_DARWIN_THREAD, 0, PRIO_DARWIN_BG);
@@ -6087,6 +6187,99 @@ void cxindex::printDiagsToStderr(ASTUnit *Unit) {
   // but writing to the same device.
   fflush(stderr);
 #endif
+}
+
+MacroInfo *cxindex::getMacroInfo(const IdentifierInfo &II,
+                                 SourceLocation MacroDefLoc,
+                                 CXTranslationUnit TU){
+  if (MacroDefLoc.isInvalid() || !TU)
+    return 0;
+  if (!II.hadMacroDefinition())
+    return 0;
+
+  ASTUnit *Unit = static_cast<ASTUnit *>(TU->TUData);
+  Preprocessor &PP = Unit->getPreprocessor();
+  MacroInfo *MI = PP.getMacroInfoHistory(const_cast<IdentifierInfo*>(&II));
+  while (MI) {
+    if (MacroDefLoc == MI->getDefinitionLoc())
+      return MI;
+    MI = MI->getPreviousDefinition();
+  }
+
+  return 0;
+}
+
+MacroInfo *cxindex::getMacroInfo(MacroDefinition *MacroDef,
+                                 CXTranslationUnit TU) {
+  if (!MacroDef || !TU)
+    return 0;
+  const IdentifierInfo *II = MacroDef->getName();
+  if (!II)
+    return 0;
+
+  return getMacroInfo(*II, MacroDef->getLocation(), TU);
+}
+
+MacroDefinition *cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI,
+                                                         const Token &Tok,
+                                                         CXTranslationUnit TU) {
+  if (!MI || !TU)
+    return 0;
+  if (Tok.isNot(tok::raw_identifier))
+    return 0;
+
+  if (MI->getNumTokens() == 0)
+    return 0;
+  SourceRange DefRange(MI->getReplacementToken(0).getLocation(),
+                       MI->getDefinitionEndLoc());
+  ASTUnit *Unit = static_cast<ASTUnit *>(TU->TUData);
+
+  // Check that the token is inside the definition and not its argument list.
+  SourceManager &SM = Unit->getSourceManager();
+  if (SM.isBeforeInTranslationUnit(Tok.getLocation(), DefRange.getBegin()))
+    return 0;
+  if (SM.isBeforeInTranslationUnit(DefRange.getEnd(), Tok.getLocation()))
+    return 0;
+
+  Preprocessor &PP = Unit->getPreprocessor();
+  PreprocessingRecord *PPRec = PP.getPreprocessingRecord();
+  if (!PPRec)
+    return 0;
+
+  StringRef Name(Tok.getRawIdentifierData(), Tok.getLength());
+  IdentifierInfo &II = PP.getIdentifierTable().get(Name);
+  if (!II.hadMacroDefinition())
+    return 0;
+
+  // Check that the identifier is not one of the macro arguments.
+  if (std::find(MI->arg_begin(), MI->arg_end(), &II) != MI->arg_end())
+    return 0;
+
+  MacroInfo *InnerMI = PP.getMacroInfoHistory(&II);
+  if (!InnerMI)
+    return 0;
+
+  return PPRec->findMacroDefinition(InnerMI);
+}
+
+MacroDefinition *cxindex::checkForMacroInMacroDefinition(const MacroInfo *MI,
+                                                         SourceLocation Loc,
+                                                         CXTranslationUnit TU) {
+  if (Loc.isInvalid() || !MI || !TU)
+    return 0;
+
+  if (MI->getNumTokens() == 0)
+    return 0;
+  ASTUnit *Unit = static_cast<ASTUnit *>(TU->TUData);
+  Preprocessor &PP = Unit->getPreprocessor();
+  if (!PP.getPreprocessingRecord())
+    return 0;
+  Loc = Unit->getSourceManager().getSpellingLoc(Loc);
+  Token Tok;
+  if (PP.getRawToken(Loc, Tok))
+    return 0;
+
+  return checkForMacroInMacroDefinition(MI, Tok, TU);
 }
 
 extern "C" {

@@ -151,14 +151,8 @@ bool USRGenerator::EmitDeclName(const NamedDecl *D) {
   return startSize == endSize;
 }
 
-static bool InAnonymousNamespace(const Decl *D) {
-  if (const NamespaceDecl *ND = dyn_cast<NamespaceDecl>(D->getDeclContext()))
-    return ND->isAnonymousNamespace();
-  return false;
-}
-
 static inline bool ShouldGenerateLocation(const NamedDecl *D) {
-  return D->getLinkage() != ExternalLinkage && !InAnonymousNamespace(D);
+  return D->getLinkage() != ExternalLinkage;
 }
 
 void USRGenerator::VisitDeclContext(DeclContext *DC) {
@@ -593,6 +587,12 @@ void USRGenerator::VisitType(QualType T) {
 #define PLACEHOLDER_TYPE(Id, SingletonId) case BuiltinType::Id:
 #include "clang/AST/BuiltinTypes.def"
         case BuiltinType::Dependent:
+        case BuiltinType::OCLImage1d:
+        case BuiltinType::OCLImage1dArray:
+        case BuiltinType::OCLImage1dBuffer:
+        case BuiltinType::OCLImage2d:
+        case BuiltinType::OCLImage2dArray:
+        case BuiltinType::OCLImage3d:
           IgnoreResults = true;
           return;
         case BuiltinType::ObjCId:
@@ -728,10 +728,12 @@ void USRGenerator::VisitTemplateArgument(const TemplateArgument &Arg) {
     break;
 
   case TemplateArgument::Declaration:
-    if (Decl *D = Arg.getAsDecl())
-      Visit(D);
+    Visit(Arg.getAsDecl());
     break;
-      
+
+  case TemplateArgument::NullPtr:
+    break;
+
   case TemplateArgument::TemplateExpansion:
     Out << 'P'; // pack expansion of...
     // Fall through
@@ -803,36 +805,11 @@ bool cxcursor::getDeclCursorUSR(const Decl *D, SmallVectorImpl<char> &Buf) {
   if (!D || D->getLocStart().isInvalid())
     return true;
 
-  // Check if the cursor has 'NoLinkage'.
-  if (const NamedDecl *ND = dyn_cast<NamedDecl>(D))
-    switch (ND->getLinkage()) {
-      case ExternalLinkage:
-        // Generate USRs for all entities with external linkage.
-        break;
-      case NoLinkage:
-      case UniqueExternalLinkage:
-        // We allow enums, typedefs, and structs that have no linkage to
-        // have USRs that are anchored to the file they were defined in
-        // (e.g., the header).  This is a little gross, but in principal
-        // enums/anonymous structs/etc. defined in a common header file
-        // are referred to across multiple translation units.
-        if (isa<TagDecl>(ND) || isa<TypedefDecl>(ND) ||
-            isa<EnumConstantDecl>(ND) || isa<FieldDecl>(ND) ||
-            isa<VarDecl>(ND) || isa<NamespaceDecl>(ND))
-          break;
-        // Fall-through.
-      case InternalLinkage:
-        if (isa<FunctionDecl>(ND))
-          break;
-    }
+  USRGenerator UG(&D->getASTContext(), &Buf);
+  UG->Visit(const_cast<Decl*>(D));
 
-  {
-    USRGenerator UG(&D->getASTContext(), &Buf);
-    UG->Visit(const_cast<Decl*>(D));
-
-    if (UG->ignoreResults())
-      return true;
-  }
+  if (UG->ignoreResults())
+    return true;
 
   return false;
 }

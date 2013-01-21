@@ -1,12 +1,19 @@
 // RUN: %clang_cc1 -analyze -analyzer-checker=core,debug.DumpTraversal %s | FileCheck %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,debug.DumpTraversal -DUSE_EXPR %s | FileCheck %s
 
 int a();
 int b();
 int c();
 
+#ifdef USE_EXPR
+#define CHECK(x) ((x) & 1)
+#else
+#define CHECK(x) (x)
+#endif
+
 void testRemoveDeadBindings() {
   int i = a();
-  if (i)
+  if (CHECK(i))
     a();
   else
     b();
@@ -17,5 +24,5 @@ void testRemoveDeadBindings() {
   c();
 }
 
-// CHECK: --END PATH--
-// CHECK-NOT: --END PATH--
+// CHECK: --END FUNCTION--
+// CHECK-NOT: --END FUNCTION--

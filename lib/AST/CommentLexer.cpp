@@ -226,6 +226,11 @@ bool isWhitespace(const char *BufferPtr, const char *BufferEnd) {
   return skipWhitespace(BufferPtr, BufferEnd) == BufferEnd;
 }
 
+bool isCommandNameStartCharacter(char C) {
+  return (C >= 'a' && C <= 'z') ||
+         (C >= 'A' && C <= 'Z');
+}
+
 bool isCommandNameCharacter(char C) {
   return (C >= 'a' && C <= 'z') ||
          (C >= 'A' && C <= 'Z') ||
@@ -340,7 +345,7 @@ void Lexer::lexCommentText(Token &T) {
         }
 
         // Don't make zero-length commands.
-        if (!isCommandNameCharacter(*TokenPtr)) {
+        if (!isCommandNameStartCharacter(*TokenPtr)) {
           formTextToken(T, TokenPtr);
           return;
         }
@@ -410,15 +415,12 @@ void Lexer::lexCommentText(Token &T) {
         return;
 
       default: {
-        while (true) {
-          TokenPtr++;
-          if (TokenPtr == CommentEnd)
-            break;
-          const char C = *TokenPtr;
-          if(C == '\n' || C == '\r' ||
-             C == '\\' || C == '@' || C == '&' || C == '<')
-            break;
-        }
+        size_t End = StringRef(TokenPtr, CommentEnd - TokenPtr).
+                         find_first_of("\n\r\\@&<");
+        if (End != StringRef::npos)
+          TokenPtr += End;
+        else
+          TokenPtr = CommentEnd;
         formTextToken(T, TokenPtr);
         return;
       }

@@ -74,7 +74,11 @@ private:
   enum NodeTypeTag {
     NT_Decl,
     NT_Stmt,
-    NT_QualType
+    NT_NestedNameSpecifier,
+    NT_NestedNameSpecifierLoc,
+    NT_QualType,
+    NT_Type,
+    NT_TypeLoc
   } Tag;
 
   /// \brief Stores the data of the node.
@@ -83,8 +87,11 @@ private:
   /// guaranteed to be unique pointers pointing to dedicated storage in the
   /// AST. \c QualTypes on the other hand do not have storage or unique
   /// pointers and thus need to be stored by value.
-  llvm::AlignedCharArrayUnion<Decl*, Stmt*, QualType> Storage;
+  llvm::AlignedCharArrayUnion<Decl*, QualType, TypeLoc, NestedNameSpecifierLoc>
+    Storage;
 };
+
+// FIXME: Pull out abstraction for the following.
 template<typename T> struct DynTypedNode::BaseConverter<T,
     typename llvm::enable_if<llvm::is_base_of<Decl, T> >::type> {
   static const T *get(NodeTypeTag Tag, const char Storage[]) {
@@ -113,6 +120,47 @@ template<typename T> struct DynTypedNode::BaseConverter<T,
     return Result;
   }
 };
+template<typename T> struct DynTypedNode::BaseConverter<T,
+    typename llvm::enable_if<llvm::is_base_of<Type, T> >::type> {
+  static const T *get(NodeTypeTag Tag, const char Storage[]) {
+    if (Tag == NT_Type)
+      return dyn_cast<T>(*reinterpret_cast<Type*const*>(Storage));
+    return NULL;
+  }
+  static DynTypedNode create(const Type &Node) {
+    DynTypedNode Result;
+    Result.Tag = NT_Type;
+    new (Result.Storage.buffer) const Type*(&Node);
+    return Result;
+  }
+};
+template<> struct DynTypedNode::BaseConverter<NestedNameSpecifier, void> {
+  static const NestedNameSpecifier *get(NodeTypeTag Tag, const char Storage[]) {
+    if (Tag == NT_NestedNameSpecifier)
+      return *reinterpret_cast<NestedNameSpecifier*const*>(Storage);
+    return NULL;
+  }
+  static DynTypedNode create(const NestedNameSpecifier &Node) {
+    DynTypedNode Result;
+    Result.Tag = NT_NestedNameSpecifier;
+    new (Result.Storage.buffer) const NestedNameSpecifier*(&Node);
+    return Result;
+  }
+};
+template<> struct DynTypedNode::BaseConverter<NestedNameSpecifierLoc, void> {
+  static const NestedNameSpecifierLoc *get(NodeTypeTag Tag,
+                                           const char Storage[]) {
+    if (Tag == NT_NestedNameSpecifierLoc)
+      return reinterpret_cast<const NestedNameSpecifierLoc*>(Storage);
+    return NULL;
+  }
+  static DynTypedNode create(const NestedNameSpecifierLoc &Node) {
+    DynTypedNode Result;
+    Result.Tag = NT_NestedNameSpecifierLoc;
+    new (Result.Storage.buffer) NestedNameSpecifierLoc(Node);
+    return Result;
+  }
+};
 template<> struct DynTypedNode::BaseConverter<QualType, void> {
   static const QualType *get(NodeTypeTag Tag, const char Storage[]) {
     if (Tag == NT_QualType)
@@ -123,6 +171,19 @@ template<> struct DynTypedNode::BaseConverter<QualType, void> {
     DynTypedNode Result;
     Result.Tag = NT_QualType;
     new (Result.Storage.buffer) QualType(Node);
+    return Result;
+  }
+};
+template<> struct DynTypedNode::BaseConverter<TypeLoc, void> {
+  static const TypeLoc *get(NodeTypeTag Tag, const char Storage[]) {
+    if (Tag == NT_TypeLoc)
+      return reinterpret_cast<const TypeLoc*>(Storage);
+    return NULL;
+  }
+  static DynTypedNode create(const TypeLoc &Node) {
+    DynTypedNode Result;
+    Result.Tag = NT_TypeLoc;
+    new (Result.Storage.buffer) TypeLoc(Node);
     return Result;
   }
 };
@@ -146,4 +207,3 @@ inline const void *DynTypedNode::getMemoizationData() const {
 } // end namespace clang
 
 #endif // LLVM_CLANG_AST_MATCHERS_AST_TYPE_TRAITS_H
-

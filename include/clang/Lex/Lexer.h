@@ -14,11 +14,11 @@
 #ifndef LLVM_CLANG_LEXER_H
 #define LLVM_CLANG_LEXER_H
 
-#include "clang/Lex/PreprocessorLexer.h"
 #include "clang/Basic/LangOptions.h"
+#include "clang/Lex/PreprocessorLexer.h"
 #include "llvm/ADT/SmallVector.h"
-#include <string>
 #include <cassert>
+#include <string>
 
 namespace clang {
 class DiagnosticsEngine;
@@ -83,8 +83,8 @@ class Lexer : public PreprocessorLexer {
   // CurrentConflictMarkerState - The kind of conflict marker we are handling.
   ConflictMarkerKind CurrentConflictMarkerState;
 
-  Lexer(const Lexer&);          // DO NOT IMPLEMENT
-  void operator=(const Lexer&); // DO NOT IMPLEMENT
+  Lexer(const Lexer &) LLVM_DELETED_FUNCTION;
+  void operator=(const Lexer &) LLVM_DELETED_FUNCTION;
   friend class Preprocessor;
 
   void InitLexer(const char *BufStart, const char *BufPtr, const char *BufEnd);
@@ -128,9 +128,7 @@ public:
   SourceLocation getFileLoc() const { return FileLoc; }
 
   /// Lex - Return the next token in the file.  If this is the end of file, it
-  /// return the tok::eof token.  Return true if an error occurred and
-  /// compilation should terminate, false if normal.  This implicitly involves
-  /// the preprocessor.
+  /// return the tok::eof token.  This implicitly involves the preprocessor.
   void Lex(Token &Result) {
     // Start a new token.
     Result.startToken();
@@ -274,6 +272,12 @@ public:
   static unsigned MeasureTokenLength(SourceLocation Loc,
                                      const SourceManager &SM,
                                      const LangOptions &LangOpts);
+
+  /// \brief Relex the token at the specified location.
+  /// \returns true if there was a failure, false on success.
+  static bool getRawToken(SourceLocation Loc, Token &Result,
+                          const SourceManager &SM,
+                          const LangOptions &LangOpts);
 
   /// \brief Given a location any where in a source buffer, find the location
   /// that corresponds to the beginning of the token in which the original
@@ -564,9 +568,9 @@ private:
   bool LexEndOfFile          (Token &Result, const char *CurPtr);
 
   bool SkipWhitespace        (Token &Result, const char *CurPtr);
-  bool SkipBCPLComment       (Token &Result, const char *CurPtr);
+  bool SkipLineComment       (Token &Result, const char *CurPtr);
   bool SkipBlockComment      (Token &Result, const char *CurPtr);
-  bool SaveBCPLComment       (Token &Result, const char *CurPtr);
+  bool SaveLineComment       (Token &Result, const char *CurPtr);
   
   bool IsStartOfConflictMarker(const char *CurPtr);
   bool HandleEndOfConflictMarker(const char *CurPtr);

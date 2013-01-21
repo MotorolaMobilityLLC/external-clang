@@ -11,18 +11,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Parse/ParseDiagnostic.h" // FIXME: remove this back-dependency!
 #include "clang/Sema/DeclSpec.h"
-#include "clang/Sema/LocInfoType.h"
-#include "clang/Sema/ParsedTemplate.h"
-#include "clang/Sema/SemaDiagnostic.h"
-#include "clang/Sema/Sema.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/TypeLoc.h"
-#include "clang/Lex/Preprocessor.h"
 #include "clang/Basic/LangOptions.h"
+#include "clang/Lex/Preprocessor.h"
+#include "clang/Parse/ParseDiagnostic.h" // FIXME: remove this back-dependency!
+#include "clang/Sema/LocInfoType.h"
+#include "clang/Sema/ParsedTemplate.h"
+#include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cstring>
@@ -144,11 +144,13 @@ CXXScopeSpec::getWithLocInContext(ASTContext &Context) const {
 
 /// DeclaratorChunk::getFunction - Return a DeclaratorChunk for a function.
 /// "TheDeclarator" is the declarator that this will be added to.
-DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
+DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto,
                                              bool isAmbiguous,
-                                             SourceLocation EllipsisLoc,
+                                             SourceLocation LParenLoc,
                                              ParamInfo *ArgInfo,
                                              unsigned NumArgs,
+                                             SourceLocation EllipsisLoc,
+                                             SourceLocation RParenLoc,
                                              unsigned TypeQuals,
                                              bool RefQualifierIsLvalueRef,
                                              SourceLocation RefQualifierLoc,
@@ -173,9 +175,11 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
   I.EndLoc                      = LocalRangeEnd;
   I.Fun.AttrList                = 0;
   I.Fun.hasPrototype            = hasProto;
-  I.Fun.isVariadic              = isVariadic;
+  I.Fun.isVariadic              = EllipsisLoc.isValid();
   I.Fun.isAmbiguous             = isAmbiguous;
+  I.Fun.LParenLoc               = LParenLoc.getRawEncoding();
   I.Fun.EllipsisLoc             = EllipsisLoc.getRawEncoding();
+  I.Fun.RParenLoc               = RParenLoc.getRawEncoding();
   I.Fun.DeleteArgInfo           = false;
   I.Fun.TypeQuals               = TypeQuals;
   I.Fun.NumArgs                 = NumArgs;
@@ -276,6 +280,12 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_unspecified:
     case TST_void:
     case TST_wchar:
+    case TST_image1d_t:
+    case TST_image1d_array_t:
+    case TST_image1d_buffer_t:
+    case TST_image2d_t:
+    case TST_image2d_array_t:
+    case TST_image3d_t:
       return false;
 
     case TST_decltype:
@@ -410,6 +420,12 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T) {
   case DeclSpec::TST_underlyingType: return "__underlying_type";
   case DeclSpec::TST_unknown_anytype: return "__unknown_anytype";
   case DeclSpec::TST_atomic: return "_Atomic";
+  case DeclSpec::TST_image1d_t:   return "image1d_t";
+  case DeclSpec::TST_image1d_array_t: return "image1d_array_t";
+  case DeclSpec::TST_image1d_buffer_t: return "image1d_buffer_t";
+  case DeclSpec::TST_image2d_t:   return "image2d_t";
+  case DeclSpec::TST_image2d_array_t: return "image2d_array_t";
+  case DeclSpec::TST_image3d_t:   return "image3d_t";
   case DeclSpec::TST_error:       return "(error)";
   }
   llvm_unreachable("Unknown typespec!");
@@ -676,15 +692,13 @@ bool DeclSpec::SetTypeSpecError() {
 }
 
 bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
-                           unsigned &DiagID, const LangOptions &Lang,
-                           bool IsTypeSpec) {
-  // Duplicates are permitted in C99, and are permitted in C++11 unless the
-  // cv-qualifier appears as a type-specifier.  However, since this is likely 
-  // not what the user intended, we will always warn.  We do not need to set the
-  // qualifier's location since we already have it.
+                           unsigned &DiagID, const LangOptions &Lang) {
+  // Duplicates are permitted in C99, but are not permitted in C++. However,
+  // since this is likely not what the user intended, we will always warn.  We
+  // do not need to set the qualifier's location since we already have it.
   if (TypeQualifiers & T) {
     bool IsExtension = true;
-    if (Lang.C99 || (Lang.CPlusPlus0x && !IsTypeSpec))
+    if (Lang.C99)
       IsExtension = false;
     return BadSpecifier(T, T, PrevSpec, DiagID, IsExtension);
   }
@@ -699,24 +713,21 @@ bool DeclSpec::SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
   return false;
 }
 
-bool DeclSpec::SetFunctionSpecInline(SourceLocation Loc, const char *&PrevSpec,
-                                     unsigned &DiagID) {
+bool DeclSpec::setFunctionSpecInline(SourceLocation Loc) {
   // 'inline inline' is ok.
   FS_inline_specified = true;
   FS_inlineLoc = Loc;
   return false;
 }
 
-bool DeclSpec::SetFunctionSpecVirtual(SourceLocation Loc, const char *&PrevSpec,
-                                      unsigned &DiagID) {
+bool DeclSpec::setFunctionSpecVirtual(SourceLocation Loc) {
   // 'virtual virtual' is ok.
   FS_virtual_specified = true;
   FS_virtualLoc = Loc;
   return false;
 }
 
-bool DeclSpec::SetFunctionSpecExplicit(SourceLocation Loc, const char *&PrevSpec,
-                                       unsigned &DiagID) {
+bool DeclSpec::setFunctionSpecExplicit(SourceLocation Loc) {
   // 'explicit explicit' is ok.
   FS_explicit_specified = true;
   FS_explicitLoc = Loc;
@@ -917,9 +928,9 @@ void DeclSpec::Finish(DiagnosticsEngine &D, Preprocessor &PP) {
   }
   // Diagnose if we've recovered from an ill-formed 'auto' storage class
   // specifier in a pre-C++0x dialect of C++.
-  if (!PP.getLangOpts().CPlusPlus0x && TypeSpecType == TST_auto)
+  if (!PP.getLangOpts().CPlusPlus11 && TypeSpecType == TST_auto)
     Diag(D, TSTLoc, diag::ext_auto_type_specifier);
-  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().CPlusPlus0x &&
+  if (PP.getLangOpts().CPlusPlus && !PP.getLangOpts().CPlusPlus11 &&
       StorageClassSpec == SCS_auto)
     Diag(D, StorageClassSpecLoc, diag::warn_auto_storage_class)
       << FixItHint::CreateRemoval(StorageClassSpecLoc);

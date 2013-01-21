@@ -325,3 +325,45 @@ namespace VirtualWithSisterCasts {
     clang_analyzer_eval(g->x == 42); // expected-warning{{TRUE}}
   }
 }
+
+
+namespace QualifiedCalls {
+  void test(One *object) {
+    // This uses the One class from the top of the file.
+    clang_analyzer_eval(object->getNum() == 1); // expected-warning{{UNKNOWN}}
+    clang_analyzer_eval(object->One::getNum() == 1); // expected-warning{{TRUE}}
+    clang_analyzer_eval(object->A::getNum() == 0); // expected-warning{{TRUE}}
+
+    // getZero is non-virtual.
+    clang_analyzer_eval(object->getZero() == 0); // expected-warning{{TRUE}}
+    clang_analyzer_eval(object->One::getZero() == 0); // expected-warning{{TRUE}}
+    clang_analyzer_eval(object->A::getZero() == 0); // expected-warning{{TRUE}}
+}
+}
+
+
+namespace rdar12409977  {
+  struct Base {
+    int x;
+  };
+
+  struct Parent : public Base {
+    virtual Parent *vGetThis();
+    Parent *getThis() { return vGetThis(); }
+  };
+
+  struct Child : public Parent {
+    virtual Child *vGetThis() { return this; }
+  };
+
+  void test() {
+    Child obj;
+    obj.x = 42;
+
+    // Originally, calling a devirtualized method with a covariant return type
+    // caused a crash because the return value had the wrong type. When we then
+    // go to layer a CXXBaseObjectRegion on it, the base isn't a direct base of
+    // the object region and we get an assertion failure.
+    clang_analyzer_eval(obj.getThis()->x == 42); // expected-warning{{TRUE}}
+  }
+}

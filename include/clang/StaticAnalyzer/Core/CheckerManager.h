@@ -14,12 +14,12 @@
 #ifndef LLVM_CLANG_SA_CORE_CHECKERMANAGER_H
 #define LLVM_CLANG_SA_CORE_CHECKERMANAGER_H
 
+#include "clang/Analysis/ProgramPoint.h"
 #include "clang/Basic/LangOptions.h"
-#include "llvm/ADT/SmallVector.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/Store.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
-#include "clang/StaticAnalyzer/Core/PathSensitive/Store.h"
-#include "clang/Analysis/ProgramPoint.h"
+#include "llvm/ADT/SmallVector.h"
 #include <vector>
 
 namespace clang {
@@ -264,10 +264,11 @@ public:
   void runCheckersForEndAnalysis(ExplodedGraph &G, BugReporter &BR,
                                  ExprEngine &Eng);
 
-  /// \brief Run checkers for end of path.
-  void runCheckersForEndPath(NodeBuilderContext &BC,
-                             ExplodedNodeSet &Dst,
-                             ExprEngine &Eng);
+  /// \brief Run checkers on end of function.
+  void runCheckersForEndFunction(NodeBuilderContext &BC,
+                                 ExplodedNodeSet &Dst,
+                                 ExplodedNode *Pred,
+                                 ExprEngine &Eng);
 
   /// \brief Run checkers for branch condition.
   void runCheckersForBranchCondition(const Stmt *condition,
@@ -309,14 +310,31 @@ public:
   ///   by a call.
   ProgramStateRef
   runCheckersForRegionChanges(ProgramStateRef state,
-                            const StoreManager::InvalidatedSymbols *invalidated,
+                              const InvalidatedSymbols *invalidated,
                               ArrayRef<const MemRegion *> ExplicitRegions,
                               ArrayRef<const MemRegion *> Regions,
                               const CallEvent *Call);
 
+  /// \brief Run checkers when pointers escape.
+  ///
+  /// This notifies the checkers about pointer escape, which occurs whenever
+  /// the analyzer cannot track the symbol any more. For example, as a
+  /// result of assigning a pointer into a global or when it's passed to a 
+  /// function call the analyzer cannot model.
+  /// 
+  /// \param State The state at the point of escape.
+  /// \param Escaped The list of escaped symbols.
+  /// \param Call The corresponding CallEvent, if the symbols escape as 
+  ///        parameters to the given call.
+  /// \returns Checkers can modify the state by returning a new one.
+  ProgramStateRef 
+  runCheckersForPointerEscape(ProgramStateRef State,
+                              const InvalidatedSymbols &Escaped,
+                              const CallEvent *Call);
+
   /// \brief Run checkers for handling assumptions on symbolic values.
   ProgramStateRef runCheckersForEvalAssume(ProgramStateRef state,
-                                               SVal Cond, bool Assumption);
+                                           SVal Cond, bool Assumption);
 
   /// \brief Run checkers for evaluating a call.
   ///
@@ -381,7 +399,7 @@ public:
       CheckEndAnalysisFunc;
   
   typedef CheckerFn<void (CheckerContext &)>
-      CheckEndPathFunc;
+      CheckEndFunctionFunc;
   
   typedef CheckerFn<void (const Stmt *, CheckerContext &)>
       CheckBranchConditionFunc;
@@ -392,13 +410,18 @@ public:
   typedef CheckerFn<void (ProgramStateRef,SymbolReaper &)> CheckLiveSymbolsFunc;
   
   typedef CheckerFn<ProgramStateRef (ProgramStateRef,
-                                const StoreManager::InvalidatedSymbols *symbols,
+                                const InvalidatedSymbols *symbols,
                                 ArrayRef<const MemRegion *> ExplicitRegions,
                                 ArrayRef<const MemRegion *> Regions,
                                 const CallEvent *Call)>
       CheckRegionChangesFunc;
   
   typedef CheckerFn<bool (ProgramStateRef)> WantsRegionChangeUpdateFunc;
+
+  typedef CheckerFn<ProgramStateRef (ProgramStateRef,
+                                     const InvalidatedSymbols &Escaped,
+                                     const CallEvent *Call)>
+      CheckPointerEscapeFunc;
   
   typedef CheckerFn<ProgramStateRef (ProgramStateRef,
                                           const SVal &cond, bool assumption)>
@@ -406,11 +429,6 @@ public:
   
   typedef CheckerFn<bool (const CallExpr *, CheckerContext &)>
       EvalCallFunc;
-
-  typedef CheckerFn<bool (const CallExpr *, ExprEngine &Eng,
-                                            ExplodedNode *Pred,
-                                            ExplodedNodeSet &Dst)>
-      InlineCallFunc;
 
   typedef CheckerFn<void (const TranslationUnitDecl *,
                           AnalysisManager&, BugReporter &)>
@@ -434,7 +452,7 @@ public:
 
   void _registerForEndAnalysis(CheckEndAnalysisFunc checkfn);
 
-  void _registerForEndPath(CheckEndPathFunc checkfn);
+  void _registerForEndFunction(CheckEndFunctionFunc checkfn);
 
   void _registerForBranchCondition(CheckBranchConditionFunc checkfn);
 
@@ -445,11 +463,11 @@ public:
   void _registerForRegionChanges(CheckRegionChangesFunc checkfn,
                                  WantsRegionChangeUpdateFunc wantUpdateFn);
 
+  void _registerForPointerEscape(CheckPointerEscapeFunc checkfn);
+
   void _registerForEvalAssume(EvalAssumeFunc checkfn);
 
   void _registerForEvalCall(EvalCallFunc checkfn);
-
-  void _registerForInlineCall(InlineCallFunc checkfn);
 
   void _registerForEndOfTranslationUnit(CheckEndOfTranslationUnit checkfn);
 
@@ -558,7 +576,7 @@ private:
 
   std::vector<CheckEndAnalysisFunc> EndAnalysisCheckers;
 
-  std::vector<CheckEndPathFunc> EndPathCheckers;
+  std::vector<CheckEndFunctionFunc> EndFunctionCheckers;
 
   std::vector<CheckBranchConditionFunc> BranchConditionCheckers;
 
@@ -572,11 +590,11 @@ private:
   };
   std::vector<RegionChangesCheckerInfo> RegionChangesCheckers;
 
+  std::vector<CheckPointerEscapeFunc> PointerEscapeCheckers;
+
   std::vector<EvalAssumeFunc> EvalAssumeCheckers;
 
   std::vector<EvalCallFunc> EvalCallCheckers;
-
-  std::vector<InlineCallFunc> InlineCallCheckers;
 
   std::vector<CheckEndOfTranslationUnit> EndOfTranslationUnitCheckers;
 

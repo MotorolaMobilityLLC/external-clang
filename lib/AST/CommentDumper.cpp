@@ -18,13 +18,18 @@ class CommentDumper: public comments::ConstCommentVisitor<CommentDumper> {
   raw_ostream &OS;
   const CommandTraits *Traits;
   const SourceManager *SM;
+
+  /// The \c FullComment parent of the comment being dumped.
+  const FullComment *FC;
+
   unsigned IndentLevel;
 
 public:
   CommentDumper(raw_ostream &OS,
                 const CommandTraits *Traits,
-                const SourceManager *SM) :
-      OS(OS), Traits(Traits), SM(SM), IndentLevel(0)
+                const SourceManager *SM,
+                const FullComment *FC) :
+      OS(OS), Traits(Traits), SM(SM), FC(FC), IndentLevel(0)
   { }
 
   void dumpIndent() const {
@@ -182,8 +187,12 @@ void CommentDumper::visitParamCommandComment(const ParamCommandComment *C) {
   else
     OS << " implicitly";
 
-  if (C->hasParamName())
-    OS << " Param=\"" << C->getParamName() << "\"";
+  if (C->hasParamName()) {
+    if (C->isParamIndexValid())
+      OS << " Param=\"" << C->getParamName(FC) << "\"";
+    else
+      OS << " Param=\"" << C->getParamNameAsWritten() << "\"";
+  }
 
   if (C->isParamIndexValid())
     OS << " ParamIndex=" << C->getParamIndex();
@@ -193,7 +202,10 @@ void CommentDumper::visitTParamCommandComment(const TParamCommandComment *C) {
   dumpComment(C);
 
   if (C->hasParamName()) {
-    OS << " Param=\"" << C->getParamName() << "\"";
+    if (C->isPositionValid())
+      OS << " Param=\"" << C->getParamName(FC) << "\"";
+    else
+      OS << " Param=\"" << C->getParamNameAsWritten() << "\"";
   }
 
   if (C->isPositionValid()) {
@@ -234,7 +246,8 @@ void CommentDumper::visitFullComment(const FullComment *C) {
 
 void Comment::dump(llvm::raw_ostream &OS, const CommandTraits *Traits,
                    const SourceManager *SM) const {
-  CommentDumper D(llvm::errs(), Traits, SM);
+  const FullComment *FC = dyn_cast<FullComment>(this);
+  CommentDumper D(llvm::errs(), Traits, SM, FC);
   D.dumpSubtree(this);
   llvm::errs() << '\n';
 }

@@ -12,18 +12,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang-c/Index.h"
-#include "CXString.h"
 #include "CXComment.h"
 #include "CXCursor.h"
-
-#include "clang/AST/CommentVisitor.h"
+#include "CXString.h"
+#include "SimpleFormatContext.h"
 #include "clang/AST/CommentCommandTraits.h"
+#include "clang/AST/CommentVisitor.h"
 #include "clang/AST/Decl.h"
-
+#include "clang/AST/PrettyPrinter.h"
+#include "clang/Format/Format.h"
+#include "clang/Lex/Lexer.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-
 #include <climits>
 
 using namespace clang;
@@ -254,7 +256,7 @@ CXString clang_ParamCommandComment_getParamName(CXComment CXC) {
   if (!PCC || !PCC->hasParamName())
     return createCXString((const char *) 0);
 
-  return createCXString(PCC->getParamName(), /*DupString=*/ false);
+  return createCXString(PCC->getParamNameAsWritten(), /*DupString=*/ false);
 }
 
 unsigned clang_ParamCommandComment_isParamIndexValid(CXComment CXC) {
@@ -305,7 +307,7 @@ CXString clang_TParamCommandComment_getParamName(CXComment CXC) {
   if (!TPCC || !TPCC->hasParamName())
     return createCXString((const char *) 0);
 
-  return createCXString(TPCC->getParamName(), /*DupString=*/ false);
+  return createCXString(TPCC->getParamNameAsWritten(), /*DupString=*/ false);
 }
 
 unsigned clang_TParamCommandComment_isParamPositionValid(CXComment CXC) {
@@ -535,9 +537,10 @@ class CommentASTToHTMLConverter :
     public ConstCommentVisitor<CommentASTToHTMLConverter> {
 public:
   /// \param Str accumulator for HTML.
-  CommentASTToHTMLConverter(SmallVectorImpl<char> &Str,
+  CommentASTToHTMLConverter(const FullComment *FC,
+                            SmallVectorImpl<char> &Str,
                             const CommandTraits &Traits) :
-      Result(Str), Traits(Traits)
+      FC(FC), Result(Str), Traits(Traits)
   { }
 
   // Inline content.
@@ -566,6 +569,7 @@ public:
   void appendToResultWithHTMLEscaping(StringRef S);
 
 private:
+  const FullComment *FC;
   /// Output stream for HTML.
   llvm::raw_svector_ostream Result;
 
@@ -666,10 +670,11 @@ void CommentASTToHTMLConverter::visitParamCommandComment(
     Result << "<dt class=\"param-name-index-"
            << C->getParamIndex()
            << "\">";
-  } else
+    appendToResultWithHTMLEscaping(C->getParamName(FC));
+  } else {
     Result << "<dt class=\"param-name-index-invalid\">";
-
-  appendToResultWithHTMLEscaping(C->getParamName());
+    appendToResultWithHTMLEscaping(C->getParamNameAsWritten());
+  }
   Result << "</dt>";
 
   if (C->isParamIndexValid()) {
@@ -692,10 +697,12 @@ void CommentASTToHTMLConverter::visitTParamCommandComment(
              << "\">";
     else
       Result << "<dt class=\"tparam-name-index-other\">";
-  } else
+    appendToResultWithHTMLEscaping(C->getParamName(FC));
+  } else {
     Result << "<dt class=\"tparam-name-index-invalid\">";
-
-  appendToResultWithHTMLEscaping(C->getParamName());
+    appendToResultWithHTMLEscaping(C->getParamNameAsWritten());
+  }
+  
   Result << "</dt>";
 
   if (C->isPositionValid()) {
@@ -827,7 +834,7 @@ CXString clang_HTMLTagComment_getAsString(CXComment CXC) {
     return createCXString((const char *) 0);
 
   SmallString<128> HTML;
-  CommentASTToHTMLConverter Converter(HTML, getCommandTraits(CXC));
+  CommentASTToHTMLConverter Converter(0, HTML, getCommandTraits(CXC));
   Converter.visit(HTC);
   return createCXString(HTML.str(), /* DupString = */ true);
 }
@@ -838,7 +845,7 @@ CXString clang_FullComment_getAsHTML(CXComment CXC) {
     return createCXString((const char *) 0);
 
   SmallString<1024> HTML;
-  CommentASTToHTMLConverter Converter(HTML, getCommandTraits(CXC));
+  CommentASTToHTMLConverter Converter(FC, HTML, getCommandTraits(CXC));
   Converter.visit(FC);
   return createCXString(HTML.str(), /* DupString = */ true);
 }
@@ -850,10 +857,15 @@ class CommentASTToXMLConverter :
     public ConstCommentVisitor<CommentASTToXMLConverter> {
 public:
   /// \param Str accumulator for XML.
-  CommentASTToXMLConverter(SmallVectorImpl<char> &Str,
+  CommentASTToXMLConverter(const FullComment *FC,
+                           SmallVectorImpl<char> &Str,
                            const CommandTraits &Traits,
-                           const SourceManager &SM) :
-      Result(Str), Traits(Traits), SM(SM) { }
+                           const SourceManager &SM,
+                           SimpleFormatContext &SFC,
+                           unsigned FUID) :
+      FC(FC), Result(Str), Traits(Traits), SM(SM),
+      FormatRewriterContext(SFC),
+      FormatInMemoryUniqueId(FUID) { }
 
   // Inline content.
   void visitTextComment(const TextComment *C);
@@ -874,14 +886,64 @@ public:
 
   // Helpers.
   void appendToResultWithXMLEscaping(StringRef S);
+      
+  void formatTextOfDeclaration(const DeclInfo *DI,
+                               SmallString<128> &Declaration);
 
 private:
+  const FullComment *FC;
+
   /// Output stream for XML.
   llvm::raw_svector_ostream Result;
 
   const CommandTraits &Traits;
   const SourceManager &SM;
+  SimpleFormatContext &FormatRewriterContext;
+  unsigned FormatInMemoryUniqueId;
 };
+
+void getSourceTextOfDeclaration(const DeclInfo *ThisDecl,
+                                SmallVectorImpl<char> &Str) {
+  ASTContext &Context = ThisDecl->CurrentDecl->getASTContext();
+  const LangOptions &LangOpts = Context.getLangOpts();
+  llvm::raw_svector_ostream OS(Str);
+  PrintingPolicy PPolicy(LangOpts);
+  PPolicy.PolishForDeclaration = true;
+  PPolicy.TerseOutput = true;
+  ThisDecl->CurrentDecl->print(OS, PPolicy,
+                               /*Indentation*/0, /*PrintInstantiation*/false);
+}
+  
+void CommentASTToXMLConverter::formatTextOfDeclaration(
+                                              const DeclInfo *DI,
+                                              SmallString<128> &Declaration) {
+  // FIXME. formatting API expects null terminated input string.
+  // There might be more efficient way of doing this.
+  std::string StringDecl = Declaration.str();
+    
+  // Formatter specific code.
+  // Form a unique in memory buffer name.
+  llvm::SmallString<128> filename;
+  filename += "xmldecl";
+  filename += llvm::utostr(FormatInMemoryUniqueId);
+  filename += ".xd";
+  FileID ID = FormatRewriterContext.createInMemoryFile(filename, StringDecl);
+  SourceLocation Start =
+    FormatRewriterContext.Sources.getLocForStartOfFile(ID).getLocWithOffset(0);
+  unsigned Length = Declaration.size();
+    
+  std::vector<CharSourceRange>
+    Ranges(1, CharSourceRange::getCharRange(Start, Start.getLocWithOffset(Length)));
+  ASTContext &Context = DI->CurrentDecl->getASTContext();
+  const LangOptions &LangOpts = Context.getLangOpts();
+  Lexer Lex(ID, FormatRewriterContext.Sources.getBuffer(ID),
+            FormatRewriterContext.Sources, LangOpts);
+  tooling::Replacements Replace =
+    reformat(format::getLLVMStyle(), Lex, FormatRewriterContext.Sources, Ranges);
+  applyAllReplacements(Replace, FormatRewriterContext.Rewrite);
+  Declaration = FormatRewriterContext.getRewrittenText(ID);
+}
+
 } // end unnamed namespace
 
 void CommentASTToXMLConverter::visitTextComment(const TextComment *C) {
@@ -954,7 +1016,8 @@ void CommentASTToXMLConverter::visitBlockCommandComment(const BlockCommandCommen
 
 void CommentASTToXMLConverter::visitParamCommandComment(const ParamCommandComment *C) {
   Result << "<Parameter><Name>";
-  appendToResultWithXMLEscaping(C->getParamName());
+  appendToResultWithXMLEscaping(C->isParamIndexValid() ? C->getParamName(FC)
+                                                       : C->getParamNameAsWritten());
   Result << "</Name>";
 
   if (C->isParamIndexValid())
@@ -980,7 +1043,8 @@ void CommentASTToXMLConverter::visitParamCommandComment(const ParamCommandCommen
 void CommentASTToXMLConverter::visitTParamCommandComment(
                                   const TParamCommandComment *C) {
   Result << "<Parameter><Name>";
-  appendToResultWithXMLEscaping(C->getParamName());
+  appendToResultWithXMLEscaping(C->isPositionValid() ? C->getParamName(FC)
+                                : C->getParamNameAsWritten());
   Result << "</Name>";
 
   if (C->isPositionValid() && C->getDepth() == 1) {
@@ -1090,7 +1154,7 @@ void CommentASTToXMLConverter::visitFullComment(const FullComment *C) {
 
     {
       // Print line and column number.
-      SourceLocation Loc = DI->ThisDecl->getLocation();
+      SourceLocation Loc = DI->CurrentDecl->getLocation();
       std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(Loc);
       FileID FID = LocInfo.first;
       unsigned FileOffset = LocInfo.second;
@@ -1111,7 +1175,7 @@ void CommentASTToXMLConverter::visitFullComment(const FullComment *C) {
     Result << ">";
 
     bool FoundName = false;
-    if (const NamedDecl *ND = dyn_cast<NamedDecl>(DI->ThisDecl)) {
+    if (const NamedDecl *ND = dyn_cast<NamedDecl>(DI->CommentDecl)) {
       if (DeclarationName DeclName = ND->getDeclName()) {
         Result << "<Name>";
         std::string Name = DeclName.getAsString();
@@ -1126,7 +1190,7 @@ void CommentASTToXMLConverter::visitFullComment(const FullComment *C) {
     {
       // Print USR.
       SmallString<128> USR;
-      cxcursor::getDeclCursorUSR(DI->ThisDecl, USR);
+      cxcursor::getDeclCursorUSR(DI->CommentDecl, USR);
       if (!USR.empty()) {
         Result << "<USR>";
         appendToResultWithXMLEscaping(USR);
@@ -1137,6 +1201,17 @@ void CommentASTToXMLConverter::visitFullComment(const FullComment *C) {
     // No DeclInfo -- just emit some root tag and name tag.
     RootEndTag = "</Other>";
     Result << "<Other><Name>unknown</Name>";
+  }
+
+  {
+    // Pretty-print the declaration.
+    Result << "<Declaration>";
+    SmallString<128> Declaration;
+    getSourceTextOfDeclaration(DI, Declaration);
+    formatTextOfDeclaration(DI, Declaration);
+    appendToResultWithXMLEscaping(Declaration);
+    
+    Result << "</Declaration>";
   }
 
   bool FirstParagraphIsBrief = false;
@@ -1169,6 +1244,72 @@ void CommentASTToXMLConverter::visitFullComment(const FullComment *C) {
     Result << "<ResultDiscussion>";
     visit(Parts.Returns);
     Result << "</ResultDiscussion>";
+  }
+  
+  if (DI->CommentDecl->hasAttrs()) {
+    const AttrVec &Attrs = DI->CommentDecl->getAttrs();
+    for (unsigned i = 0, e = Attrs.size(); i != e; i++) {
+      const AvailabilityAttr *AA = dyn_cast<AvailabilityAttr>(Attrs[i]);
+      if (!AA) {
+        if (const DeprecatedAttr *DA = dyn_cast<DeprecatedAttr>(Attrs[i])) {
+          if (DA->getMessage().empty())
+            Result << "<Deprecated/>";
+          else {
+            Result << "<Deprecated>";
+            appendToResultWithXMLEscaping(DA->getMessage());
+            Result << "</Deprecated>";
+          }
+        }
+        else if (const UnavailableAttr *UA = dyn_cast<UnavailableAttr>(Attrs[i])) {
+          if (UA->getMessage().empty())
+            Result << "<Unavailable/>";
+          else {
+            Result << "<Unavailable>";
+            appendToResultWithXMLEscaping(UA->getMessage());
+            Result << "</Unavailable>";
+          }
+        }
+        continue;
+      }
+
+      // 'availability' attribute.
+      Result << "<Availability";
+      StringRef Distribution;
+      if (AA->getPlatform()) {
+        Distribution = AvailabilityAttr::getPrettyPlatformName(
+                                        AA->getPlatform()->getName());
+        if (Distribution.empty())
+          Distribution = AA->getPlatform()->getName();
+      }
+      Result << " distribution=\"" << Distribution << "\">";
+      VersionTuple IntroducedInVersion = AA->getIntroduced();
+      if (!IntroducedInVersion.empty()) {
+        Result << "<IntroducedInVersion>"
+               << IntroducedInVersion.getAsString()
+               << "</IntroducedInVersion>";
+      }
+      VersionTuple DeprecatedInVersion = AA->getDeprecated();
+      if (!DeprecatedInVersion.empty()) {
+        Result << "<DeprecatedInVersion>"
+               << DeprecatedInVersion.getAsString()
+               << "</DeprecatedInVersion>";
+      }
+      VersionTuple RemovedAfterVersion = AA->getObsoleted();
+      if (!RemovedAfterVersion.empty()) {
+        Result << "<RemovedAfterVersion>"
+               << RemovedAfterVersion.getAsString()
+               << "</RemovedAfterVersion>";
+      }
+      StringRef DeprecationSummary = AA->getMessage();
+      if (!DeprecationSummary.empty()) {
+        Result << "<DeprecationSummary>";
+        appendToResultWithXMLEscaping(DeprecationSummary);
+        Result << "</DeprecationSummary>";
+      }
+      if (AA->getUnavailable())
+        Result << "<Unavailable/>";
+      Result << "</Availability>";
+    }
   }
 
   {
@@ -1224,12 +1365,26 @@ CXString clang_FullComment_getAsXML(CXComment CXC) {
   const FullComment *FC = getASTNodeAs<FullComment>(CXC);
   if (!FC)
     return createCXString((const char *) 0);
-
+  ASTContext &Context = FC->getDeclInfo()->CurrentDecl->getASTContext();
   CXTranslationUnit TU = CXC.TranslationUnit;
   SourceManager &SM = static_cast<ASTUnit *>(TU->TUData)->getSourceManager();
+  
+  SimpleFormatContext *SFC =
+    static_cast<SimpleFormatContext*>(TU->FormatContext);
+  if (!SFC) {
+    SFC = new SimpleFormatContext(Context.getLangOpts());
+    TU->FormatContext = SFC;
+  } else if ((TU->FormatInMemoryUniqueId % 1000) == 0) {
+    // Delete after some number of iterators, so the buffers don't grow
+    // too large.
+    delete SFC;
+    SFC = new SimpleFormatContext(Context.getLangOpts());
+    TU->FormatContext = SFC;
+  }
 
   SmallString<1024> XML;
-  CommentASTToXMLConverter Converter(XML, getCommandTraits(CXC), SM);
+  CommentASTToXMLConverter Converter(FC, XML, getCommandTraits(CXC), SM,
+                                     *SFC, TU->FormatInMemoryUniqueId++);
   Converter.visit(FC);
   return createCXString(XML.str(), /* DupString = */ true);
 }

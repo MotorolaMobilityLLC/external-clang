@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/StaticAnalyzer/Core/PathSensitive/APSIntType.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SValBuilder.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/APSIntType.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState.h"
 
 using namespace clang;
@@ -81,7 +81,7 @@ SVal SimpleSValBuilder::evalCastFromNonLoc(NonLoc val, QualType castTy) {
   }
 
   if (const SymExpr *se = val.getAsSymbolicExpression()) {
-    QualType T = Context.getCanonicalType(se->getType(Context));
+    QualType T = Context.getCanonicalType(se->getType());
     // If types are the same or both are integers, ignore the cast.
     // FIXME: Remove this hack when we support symbolic truncation/extension.
     // HACK: If both castTy and T are integers, ignore the cast.  This is
@@ -100,6 +100,12 @@ SVal SimpleSValBuilder::evalCastFromNonLoc(NonLoc val, QualType castTy) {
   // If value is a non integer constant, produce unknown.
   if (!isa<nonloc::ConcreteInt>(val))
     return UnknownVal();
+
+  // Handle casts to a boolean type.
+  if (castTy->isBooleanType()) {
+    bool b = cast<nonloc::ConcreteInt>(val).getValue().getBoolValue();
+    return makeTruthVal(b, castTy);
+  }
 
   // Only handle casts from integers to integers - if val is an integer constant
   // being cast to a non integer type, produce unknown.
@@ -276,7 +282,7 @@ SVal SimpleSValBuilder::MakeSymIntVal(const SymExpr *LHS,
     // with the given constant.
     // FIXME: This is an approximation of Sema::UsualArithmeticConversions.
     ASTContext &Ctx = getContext();
-    QualType SymbolType = LHS->getType(Ctx);
+    QualType SymbolType = LHS->getType();
     uint64_t ValWidth = RHS.getBitWidth();
     uint64_t TypeWidth = Ctx.getTypeSize(SymbolType);
 
@@ -461,7 +467,7 @@ SVal SimpleSValBuilder::evalBinOpNN(ProgramStateRef state,
           case BO_NE:
             // Negate the comparison and make a value.
             opc = NegateComparison(opc);
-            assert(symIntExpr->getType(Context) == resultTy);
+            assert(symIntExpr->getType() == resultTy);
             return makeNonLoc(symIntExpr->getLHS(), opc,
                 symIntExpr->getRHS(), resultTy);
           }
@@ -735,7 +741,7 @@ SVal SimpleSValBuilder::evalBinOpLL(ProgramStateRef state,
         NonLoc *LeftIndex = dyn_cast<NonLoc>(&LeftIndexVal);
         if (!LeftIndex)
           return UnknownVal();
-        LeftIndexVal = evalCastFromNonLoc(*LeftIndex, resultTy);
+        LeftIndexVal = evalCastFromNonLoc(*LeftIndex, ArrayIndexTy);
         LeftIndex = dyn_cast<NonLoc>(&LeftIndexVal);
         if (!LeftIndex)
           return UnknownVal();
@@ -745,7 +751,7 @@ SVal SimpleSValBuilder::evalBinOpLL(ProgramStateRef state,
         NonLoc *RightIndex = dyn_cast<NonLoc>(&RightIndexVal);
         if (!RightIndex)
           return UnknownVal();
-        RightIndexVal = evalCastFromNonLoc(*RightIndex, resultTy);
+        RightIndexVal = evalCastFromNonLoc(*RightIndex, ArrayIndexTy);
         RightIndex = dyn_cast<NonLoc>(&RightIndexVal);
         if (!RightIndex)
           return UnknownVal();

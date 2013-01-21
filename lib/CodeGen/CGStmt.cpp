@@ -11,17 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "CodeGenFunction.h"
 #include "CGDebugInfo.h"
 #include "CodeGenModule.h"
-#include "CodeGenFunction.h"
 #include "TargetInfo.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/PrettyStackTrace.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/InlineAsm.h"
-#include "llvm/Intrinsics.h"
-#include "llvm/Target/TargetData.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/Intrinsics.h"
 using namespace clang;
 using namespace CodeGen;
 
@@ -235,6 +235,10 @@ void CodeGenFunction::SimplifyForwardingBlocks(llvm::BasicBlock *BB) {
 
   // Can only simplify direct branches.
   if (!BI || !BI->isUnconditional())
+    return;
+
+  // Can only simplify empty blocks.
+  if (BI != BB->begin())
     return;
 
   BB->replaceAllUsesWith(BI->getSuccessor(0));
@@ -743,6 +747,17 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
   // Emit the result value, even if unused, to evalute the side effects.
   const Expr *RV = S.getRetValue();
 
+  // Treat block literals in a return expression as if they appeared
+  // in their own scope.  This permits a small, easily-implemented
+  // exception to our over-conservative rules about not jumping to
+  // statements following block literals with non-trivial cleanups.
+  RunCleanupsScope cleanupScope(*this);
+  if (const ExprWithCleanups *cleanups =
+        dyn_cast_or_null<ExprWithCleanups>(RV)) {
+    enterFullExpression(cleanups);
+    RV = cleanups->getSubExpr();
+  }
+
   // FIXME: Clean this up by using an LValue for ReturnTemp,
   // EmitStoreThroughLValue, and EmitAnyExpr.
   if (S.getNRVOCandidate() && S.getNRVOCandidate()->isNRVOVariable() &&
@@ -779,6 +794,7 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
                                           AggValueSlot::IsNotAliased));
   }
 
+  cleanupScope.ForceCleanup();
   EmitBranchThroughCleanup(ReturnBlock);
 }
 
@@ -1264,6 +1280,10 @@ SimplifyConstraint(const char *Constraint, const TargetInfo &Target,
     case '=': // Will see this and the following in mult-alt constraints.
     case '+':
       break;
+    case '#': // Ignore the rest of the constraint alternative.
+      while (Constraint[1] && Constraint[1] != ',')
+	Constraint++;
+      break;
     case ',':
       Result += "|";
       break;
@@ -1333,7 +1353,7 @@ CodeGenFunction::EmitAsmInputLValue(const TargetInfo::ConstraintInfo &Info,
       Arg = EmitLoadOfLValue(InputValue).getScalarVal();
     } else {
       llvm::Type *Ty = ConvertType(InputType);
-      uint64_t Size = CGM.getTargetData().getTypeSizeInBits(Ty);
+      uint64_t Size = CGM.getDataLayout().getTypeSizeInBits(Ty);
       if (Size <= 64 && llvm::isPowerOf2_64(Size)) {
         Ty = llvm::IntegerType::get(getLLVMContext(), Size);
         Ty = llvm::PointerType::getUnqual(Ty);
@@ -1620,7 +1640,9 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
     llvm::InlineAsm::get(FTy, AsmString, Constraints, HasSideEffect,
                          /* IsAlignStack */ false, AsmDialect);
   llvm::CallInst *Result = Builder.CreateCall(IA, Args);
-  Result->addAttribute(~0, llvm::Attribute::NoUnwind);
+  Result->addAttribute(llvm::AttributeSet::FunctionIndex,
+                       llvm::Attribute::get(getLLVMContext(),
+                                             llvm::Attribute::NoUnwind));
 
   // Slap the source location of the inline asm into a !srcloc metadata on the
   // call.  FIXME: Handle metadata for MS-style inline asms.
@@ -1652,12 +1674,12 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
       if (TruncTy->isFloatingPointTy())
         Tmp = Builder.CreateFPTrunc(Tmp, TruncTy);
       else if (TruncTy->isPointerTy() && Tmp->getType()->isIntegerTy()) {
-        uint64_t ResSize = CGM.getTargetData().getTypeSizeInBits(TruncTy);
+        uint64_t ResSize = CGM.getDataLayout().getTypeSizeInBits(TruncTy);
         Tmp = Builder.CreateTrunc(Tmp,
                    llvm::IntegerType::get(getLLVMContext(), (unsigned)ResSize));
         Tmp = Builder.CreateIntToPtr(Tmp, TruncTy);
       } else if (Tmp->getType()->isPointerTy() && TruncTy->isIntegerTy()) {
-        uint64_t TmpSize =CGM.getTargetData().getTypeSizeInBits(Tmp->getType());
+        uint64_t TmpSize =CGM.getDataLayout().getTypeSizeInBits(Tmp->getType());
         Tmp = Builder.CreatePtrToInt(Tmp,
                    llvm::IntegerType::get(getLLVMContext(), (unsigned)TmpSize));
         Tmp = Builder.CreateTrunc(Tmp, TruncTy);

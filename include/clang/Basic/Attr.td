@@ -190,7 +190,7 @@ def Availability : InheritableAttr {
 [{static llvm::StringRef getPrettyPlatformName(llvm::StringRef Platform) {
     return llvm::StringSwitch<llvm::StringRef>(Platform)
              .Case("ios", "iOS")
-             .Case("macosx", "Mac OS X")
+             .Case("macosx", "OS X")
              .Default(llvm::StringRef());
 } }];
 }
@@ -232,11 +232,6 @@ def CFAuditedTransfer : InheritableAttr {
 def CFUnknownTransfer : InheritableAttr {
   let Spellings = [GNU<"cf_unknown_transfer">];
   let Subjects = [Function];
-}
-
-def CFReturnsAutoreleased : Attr {
-  let Spellings = [GNU<"cf_returns_autoreleased">];
-  let ASTNode = 0;
 }
 
 def CFReturnsRetained : InheritableAttr {
@@ -343,6 +338,11 @@ def FastCall : InheritableAttr {
 def Final : InheritableAttr {
   let Spellings = [];
   let SemaHandler = 0;
+}
+
+def MinSize : InheritableAttr {
+  let Spellings = [GNU<"minsize">];
+  let Subjects = [Function];
 }
 
 def Format : InheritableAttr {
@@ -565,6 +565,14 @@ def Packed : InheritableAttr {
   let Spellings = [GNU<"packed">];
 }
 
+def PnaclCall : InheritableAttr {
+  let Spellings = [GNU<"pnaclcall">];
+}
+
+def IntelOclBicc : InheritableAttr {
+  let Spellings = [GNU<"intel_ocl_bicc">];
+}
+
 def Pcs : InheritableAttr {
   let Spellings = [GNU<"pcs">];
   let Args = [EnumArgument<"PCS", "PCSType",
@@ -694,7 +702,7 @@ def VecReturn : InheritableAttr {
 }
 
 def WarnUnusedResult : InheritableAttr {
-  let Spellings = [GNU<"warn_unused_result">];
+  let Spellings = [GNU<"warn_unused_result">, CXX11<"clang","warn_unused_result">];
 }
 
 def Weak : InheritableAttr {

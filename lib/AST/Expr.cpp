@@ -11,22 +11,23 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/Expr.h"
-#include "clang/AST/ExprCXX.h"
 #include "clang/AST/APValue.h"
 #include "clang/AST/ASTContext.h"
-#include "clang/AST/DeclObjC.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
+#include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/EvaluatedExprVisitor.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtVisitor.h"
-#include "clang/Lex/LiteralSupport.h"
-#include "clang/Lex/Lexer.h"
-#include "clang/Sema/SemaDiagnostic.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
+#include "clang/Lex/Lexer.h"
+#include "clang/Lex/LiteralSupport.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -46,6 +47,75 @@ const CXXRecordDecl *Expr::getBestDynamicClassType() const {
   const RecordType *Ty = DerivedType->castAs<RecordType>();
   Decl *D = Ty->getDecl();
   return cast<CXXRecordDecl>(D);
+}
+
+const Expr *
+Expr::skipRValueSubobjectAdjustments(
+                     SmallVectorImpl<SubobjectAdjustment> &Adjustments) const  {
+  const Expr *E = this;
+  while (true) {
+    E = E->IgnoreParens();
+
+    if (const CastExpr *CE = dyn_cast<CastExpr>(E)) {
+      if ((CE->getCastKind() == CK_DerivedToBase ||
+           CE->getCastKind() == CK_UncheckedDerivedToBase) &&
+          E->getType()->isRecordType()) {
+        E = CE->getSubExpr();
+        CXXRecordDecl *Derived
+          = cast<CXXRecordDecl>(E->getType()->getAs<RecordType>()->getDecl());
+        Adjustments.push_back(SubobjectAdjustment(CE, Derived));
+        continue;
+      }
+
+      if (CE->getCastKind() == CK_NoOp) {
+        E = CE->getSubExpr();
+        continue;
+      }
+    } else if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
+      if (!ME->isArrow() && ME->getBase()->isRValue()) {
+        assert(ME->getBase()->getType()->isRecordType());
+        if (FieldDecl *Field = dyn_cast<FieldDecl>(ME->getMemberDecl())) {
+          E = ME->getBase();
+          Adjustments.push_back(SubobjectAdjustment(Field));
+          continue;
+        }
+      }
+    } else if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+      if (BO->isPtrMemOp()) {
+        assert(BO->getRHS()->isRValue());
+        E = BO->getLHS();
+        const MemberPointerType *MPT =
+          BO->getRHS()->getType()->getAs<MemberPointerType>();
+        Adjustments.push_back(SubobjectAdjustment(MPT, BO->getRHS()));
+      }
+    }
+
+    // Nothing changed.
+    break;
+  }
+  return E;
+}
+
+const Expr *
+Expr::findMaterializedTemporary(const MaterializeTemporaryExpr *&MTE) const {
+  const Expr *E = this;
+  // Look through single-element init lists that claim to be lvalues. They're
+  // just syntactic wrappers in this case.
+  if (const InitListExpr *ILE = dyn_cast<InitListExpr>(E)) {
+    if (ILE->getNumInits() == 1 && ILE->isGLValue())
+      E = ILE->getInit(0);
+  }
+
+  // Look through expressions for materialized temporaries (for now).
+  if (const MaterializeTemporaryExpr *M
+      = dyn_cast<MaterializeTemporaryExpr>(E)) {
+    MTE = M;
+    E = M->GetTemporaryExpr();
+  }
+
+  if (const CXXDefaultArgExpr *DAE = dyn_cast<CXXDefaultArgExpr>(E))
+    E = DAE->getExpr();
+  return E;
 }
 
 /// isKnownToHaveBooleanValue - Return true if this is an integer expression
@@ -208,7 +278,7 @@ static void computeDeclRefDependence(ASTContext &Ctx, NamedDecl *D, QualType T,
   //       -  an entity with reference type and is initialized with an
   //          expression that is value-dependent [C++11]
   if (VarDecl *Var = dyn_cast<VarDecl>(D)) {
-    if ((Ctx.getLangOpts().CPlusPlus0x ?
+    if ((Ctx.getLangOpts().CPlusPlus11 ?
            Var->getType()->isLiteralType() :
            Var->getType()->isIntegralOrEnumerationType()) &&
         (Var->getType().isConstQualified() ||
@@ -375,14 +445,6 @@ DeclRefExpr *DeclRefExpr::CreateEmpty(ASTContext &Context,
   return new (Mem) DeclRefExpr(EmptyShell());
 }
 
-SourceRange DeclRefExpr::getSourceRange() const {
-  SourceRange R = getNameInfo().getSourceRange();
-  if (hasQualifier())
-    R.setBegin(getQualifierLoc().getBeginLoc());
-  if (hasExplicitTemplateArgs())
-    R.setEnd(getRAngleLoc());
-  return R;
-}
 SourceLocation DeclRefExpr::getLocStart() const {
   if (hasQualifier())
     return getQualifierLoc().getBeginLoc();
@@ -440,7 +502,7 @@ std::string PredefinedExpr::ComputeName(IdentType IT, const Decl *CurrentDecl) {
     POut << ")";
 
     if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD)) {
-      const FunctionType *FT = cast<FunctionType>(MD->getType().getTypePtr());
+      const FunctionType *FT = MD->getType()->castAs<FunctionType>();
       if (FT->isConst())
         POut << " const";
       if (FT->isVolatile())
@@ -784,19 +846,19 @@ void StringLiteral::setString(ASTContext &C, StringRef Str,
   switch(CharByteWidth) {
     case 1: {
       char *AStrData = new (C) char[Length];
-      std::memcpy(AStrData,Str.data(),Str.size());
+      std::memcpy(AStrData,Str.data(),Length*sizeof(*AStrData));
       StrData.asChar = AStrData;
       break;
     }
     case 2: {
       uint16_t *AStrData = new (C) uint16_t[Length];
-      std::memcpy(AStrData,Str.data(),Str.size());
+      std::memcpy(AStrData,Str.data(),Length*sizeof(*AStrData));
       StrData.asUInt16 = AStrData;
       break;
     }
     case 4: {
       uint32_t *AStrData = new (C) uint32_t[Length];
-      std::memcpy(AStrData,Str.data(),Str.size());
+      std::memcpy(AStrData,Str.data(),Length*sizeof(*AStrData));
       StrData.asUInt32 = AStrData;
       break;
     }
@@ -869,7 +931,7 @@ getLocationOfByte(unsigned ByteNo, const SourceManager &SM,
 
 /// getOpcodeStr - Turn an Opcode enum value into the punctuation char it
 /// corresponds to, e.g. "sizeof" or "[pre]++".
-const char *UnaryOperator::getOpcodeStr(Opcode Op) {
+StringRef UnaryOperator::getOpcodeStr(Opcode Op) {
   switch (Op) {
   case UO_PostInc: return "++";
   case UO_PostDec: return "--";
@@ -1089,21 +1151,9 @@ QualType CallExpr::getCallReturnType() const {
   return FnType->getResultType();
 }
 
-SourceRange CallExpr::getSourceRange() const {
-  if (isa<CXXOperatorCallExpr>(this))
-    return cast<CXXOperatorCallExpr>(this)->getSourceRange();
-
-  SourceLocation begin = getCallee()->getLocStart();
-  if (begin.isInvalid() && getNumArgs() > 0)
-    begin = getArg(0)->getLocStart();
-  SourceLocation end = getRParenLoc();
-  if (end.isInvalid() && getNumArgs() > 0)
-    end = getArg(getNumArgs() - 1)->getLocEnd();
-  return SourceRange(begin, end);
-}
 SourceLocation CallExpr::getLocStart() const {
   if (isa<CXXOperatorCallExpr>(this))
-    return cast<CXXOperatorCallExpr>(this)->getSourceRange().getBegin();
+    return cast<CXXOperatorCallExpr>(this)->getLocStart();
 
   SourceLocation begin = getCallee()->getLocStart();
   if (begin.isInvalid() && getNumArgs() > 0)
@@ -1112,7 +1162,7 @@ SourceLocation CallExpr::getLocStart() const {
 }
 SourceLocation CallExpr::getLocEnd() const {
   if (isa<CXXOperatorCallExpr>(this))
-    return cast<CXXOperatorCallExpr>(this)->getSourceRange().getEnd();
+    return cast<CXXOperatorCallExpr>(this)->getLocEnd();
 
   SourceLocation end = getRParenLoc();
   if (end.isInvalid() && getNumArgs() > 0)
@@ -1240,9 +1290,6 @@ MemberExpr *MemberExpr::Create(ASTContext &C, Expr *base, bool isarrow,
   return E;
 }
 
-SourceRange MemberExpr::getSourceRange() const {
-  return SourceRange(getLocStart(), getLocEnd());
-}
 SourceLocation MemberExpr::getLocStart() const {
   if (isImplicitAccess()) {
     if (hasQualifier())
@@ -1258,9 +1305,12 @@ SourceLocation MemberExpr::getLocStart() const {
   return MemberLoc;
 }
 SourceLocation MemberExpr::getLocEnd() const {
+  SourceLocation EndLoc = getMemberNameInfo().getEndLoc();
   if (hasExplicitTemplateArgs())
-    return getRAngleLoc();
-  return getMemberNameInfo().getEndLoc();
+    EndLoc = getRAngleLoc();
+  else if (EndLoc.isInvalid())
+    EndLoc = getBase()->getLocEnd();
+  return EndLoc;
 }
 
 void CastExpr::CheckCastConsistency() const {
@@ -1570,7 +1620,7 @@ CStyleCastExpr *CStyleCastExpr::CreateEmpty(ASTContext &C, unsigned PathSize) {
 
 /// getOpcodeStr - Turn an Opcode enum value into the punctuation char it
 /// corresponds to, e.g. "<<=".
-const char *BinaryOperator::getOpcodeStr(Opcode Op) {
+StringRef BinaryOperator::getOpcodeStr(Opcode Op) {
   switch (Op) {
   case BO_PtrMemD:   return ".*";
   case BO_PtrMemI:   return "->*";
@@ -1676,7 +1726,7 @@ InitListExpr::InitListExpr(ASTContext &C, SourceLocation lbraceloc,
   : Expr(InitListExprClass, QualType(), VK_RValue, OK_Ordinary, false, false,
          false, false),
     InitExprs(C, initExprs.size()),
-    LBraceLoc(lbraceloc), RBraceLoc(rbraceloc), SyntacticForm(0)
+    LBraceLoc(lbraceloc), RBraceLoc(rbraceloc), AltForm(0, true)
 {
   sawArrayRangeDesignator(false);
   setInitializesStdInitializerList(false);
@@ -1735,10 +1785,10 @@ bool InitListExpr::isStringLiteralInit() const {
   return isa<StringLiteral>(Init) || isa<ObjCEncodeExpr>(Init);
 }
 
-SourceRange InitListExpr::getSourceRange() const {
-  if (SyntacticForm)
-    return SyntacticForm->getSourceRange();
-  SourceLocation Beg = LBraceLoc, End = RBraceLoc;
+SourceLocation InitListExpr::getLocStart() const {
+  if (InitListExpr *SyntacticForm = getSyntacticForm())
+    return SyntacticForm->getLocStart();
+  SourceLocation Beg = LBraceLoc;
   if (Beg.isInvalid()) {
     // Find the first non-null initializer.
     for (InitExprsTy::const_iterator I = InitExprs.begin(),
@@ -1750,18 +1800,25 @@ SourceRange InitListExpr::getSourceRange() const {
       }  
     }
   }
+  return Beg;
+}
+
+SourceLocation InitListExpr::getLocEnd() const {
+  if (InitListExpr *SyntacticForm = getSyntacticForm())
+    return SyntacticForm->getLocEnd();
+  SourceLocation End = RBraceLoc;
   if (End.isInvalid()) {
     // Find the first non-null initializer from the end.
     for (InitExprsTy::const_reverse_iterator I = InitExprs.rbegin(),
-                                             E = InitExprs.rend();
-      I != E; ++I) {
+         E = InitExprs.rend();
+         I != E; ++I) {
       if (Stmt *S = *I) {
-        End = S->getSourceRange().getEnd();
+        End = S->getLocEnd();
         break;
-      }  
+      }
     }
   }
-  return SourceRange(Beg, End);
+  return End;
 }
 
 /// getFunctionType - Return the underlying function type for this block.
@@ -1950,6 +2007,11 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
     return false;
   }
 
+  // If we don't know precisely what we're looking at, let's not warn.
+  case UnresolvedLookupExprClass:
+  case CXXUnresolvedConstructExprClass:
+    return false;
+
   case CXXTemporaryObjectExprClass:
   case CXXConstructExprClass:
     return false;
@@ -2019,6 +2081,7 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
     R1 = getSourceRange();
     return true;
   }
+  case CXXFunctionalCastExprClass:
   case CStyleCastExprClass: {
     // Ignore an explicit cast to void unless the operand is a non-trivial
     // volatile lvalue.
@@ -2036,6 +2099,10 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
       }
       return false;
     }
+
+    // Ignore casts within macro expansions.
+    if (getExprLoc().isMacroID())
+      return CE->getSubExpr()->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
 
     // If this is a cast to a constructor conversion, check the operand.
     // Otherwise, the result of the cast is unused.
@@ -2646,6 +2713,7 @@ bool Expr::HasSideEffects(const ASTContext &Ctx) const {
   case UnresolvedMemberExprClass:
   case PackExpansionExprClass:
   case SubstNonTypeTemplateParmPackExprClass:
+  case FunctionParmPackExprClass:
     llvm_unreachable("shouldn't see dependent / unresolved nodes here");
 
   case DeclRefExprClass:
@@ -2942,9 +3010,9 @@ Expr::isNullPointerConstant(ASTContext &Ctx,
       return Source->isNullPointerConstant(Ctx, NPC);
   }
 
-  // C++0x nullptr_t is always a null pointer constant.
+  // C++11 nullptr_t is always a null pointer constant.
   if (getType()->isNullPtrType())
-    return NPCK_CXX0X_nullptr;
+    return NPCK_CXX11_nullptr;
 
   if (const RecordType *UT = getType()->getAsUnionType())
     if (UT && UT->getDecl()->hasAttr<TransparentUnionAttr>())
@@ -2962,7 +3030,7 @@ Expr::isNullPointerConstant(ASTContext &Ctx,
   // test for the value 0. Don't use the C++11 constant expression semantics
   // for this, for now; once the dust settles on core issue 903, we might only
   // allow a literal 0 here in C++11 mode.
-  if (Ctx.getLangOpts().CPlusPlus0x) {
+  if (Ctx.getLangOpts().CPlusPlus11) {
     if (!isCXX98IntegralConstantExpr(Ctx))
       return NPCK_NotNull;
   } else {
@@ -2998,6 +3066,24 @@ const ObjCPropertyRefExpr *Expr::getObjCProperty() const {
   }
 
   return cast<ObjCPropertyRefExpr>(E);
+}
+
+bool Expr::isObjCSelfExpr() const {
+  const Expr *E = IgnoreParenImpCasts();
+
+  const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E);
+  if (!DRE)
+    return false;
+
+  const ImplicitParamDecl *Param = dyn_cast<ImplicitParamDecl>(DRE->getDecl());
+  if (!Param)
+    return false;
+
+  const ObjCMethodDecl *M = dyn_cast<ObjCMethodDecl>(Param->getDeclContext());
+  if (!M)
+    return false;
+
+  return M->getSelfDecl() == Param;
 }
 
 FieldDecl *Expr::getBitField() {
@@ -3344,32 +3430,28 @@ Selector ObjCMessageExpr::getSelector() const {
   return Selector(SelectorOrMethod); 
 }
 
-ObjCInterfaceDecl *ObjCMessageExpr::getReceiverInterface() const {
+QualType ObjCMessageExpr::getReceiverType() const {
   switch (getReceiverKind()) {
   case Instance:
-    if (const ObjCObjectPointerType *Ptr
-          = getInstanceReceiver()->getType()->getAs<ObjCObjectPointerType>())
-      return Ptr->getInterfaceDecl();
-    break;
-
+    return getInstanceReceiver()->getType();
   case Class:
-    if (const ObjCObjectType *Ty
-          = getClassReceiver()->getAs<ObjCObjectType>())
-      return Ty->getInterface();
-    break;
-
+    return getClassReceiver();
   case SuperInstance:
-    if (const ObjCObjectPointerType *Ptr
-          = getSuperType()->getAs<ObjCObjectPointerType>())
-      return Ptr->getInterfaceDecl();
-    break;
-
   case SuperClass:
-    if (const ObjCObjectType *Iface
-          = getSuperType()->getAs<ObjCObjectType>())
-      return Iface->getInterface();
-    break;
+    return getSuperType();
   }
+
+  llvm_unreachable("unexpected receiver kind");
+}
+
+ObjCInterfaceDecl *ObjCMessageExpr::getReceiverInterface() const {
+  QualType T = getReceiverType();
+
+  if (const ObjCObjectPointerType *Ptr = T->getAs<ObjCObjectPointerType>())
+    return Ptr->getInterfaceDecl();
+
+  if (const ObjCObjectType *Ty = T->getAs<ObjCObjectType>())
+    return Ty->getInterface();
 
   return 0;
 }
@@ -3586,11 +3668,11 @@ SourceRange DesignatedInitExpr::getDesignatorsSourceRange() const {
   DesignatedInitExpr *DIE = const_cast<DesignatedInitExpr*>(this);
   if (size() == 1)
     return DIE->getDesignator(0)->getSourceRange();
-  return SourceRange(DIE->getDesignator(0)->getStartLocation(),
-                     DIE->getDesignator(size()-1)->getEndLocation());
+  return SourceRange(DIE->getDesignator(0)->getLocStart(),
+                     DIE->getDesignator(size()-1)->getLocEnd());
 }
 
-SourceRange DesignatedInitExpr::getSourceRange() const {
+SourceLocation DesignatedInitExpr::getLocStart() const {
   SourceLocation StartLoc;
   Designator &First =
     *const_cast<DesignatedInitExpr*>(this)->designators_begin();
@@ -3602,7 +3684,11 @@ SourceRange DesignatedInitExpr::getSourceRange() const {
   } else
     StartLoc =
       SourceLocation::getFromRawEncoding(First.ArrayOrRange.LBracketLoc);
-  return SourceRange(StartLoc, getInit()->getSourceRange().getEnd());
+  return StartLoc;
+}
+
+SourceLocation DesignatedInitExpr::getLocEnd() const {
+  return getInit()->getLocEnd();
 }
 
 Expr *DesignatedInitExpr::getArrayIndex(const Designator& D) {
