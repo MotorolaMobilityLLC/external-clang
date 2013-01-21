@@ -17,8 +17,8 @@
 #define LLVM_CLANG_AST_COMMENT_COMMAND_TRAITS_H
 
 #include "clang/Basic/LLVM.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -65,6 +65,13 @@ struct CommandInfo {
   /// True if this command is introducing documentation for
   /// a template parameter (\\tparam or an alias).
   unsigned IsTParamCommand : 1;
+
+  /// True if this command is \\deprecated or an alias.
+  unsigned IsDeprecatedCommand : 1;
+
+  /// True if we don't want to warn about this command being passed an empty
+  /// paragraph.  Meaningful only for block commands.
+  unsigned IsEmptyParagraphAllowed : 1;
 
   /// \brief True if this command is a verbatim-like block command.
   ///

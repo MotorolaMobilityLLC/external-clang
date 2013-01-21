@@ -12,19 +12,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/DeclBase.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
-#include "clang/AST/DeclContextInternals.h"
 #include "clang/AST/DeclCXX.h"
+#include "clang/AST/DeclContextInternals.h"
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/DependentDiagnostic.h"
 #include "clang/AST/ExternalASTSource.h"
-#include "clang/AST/ASTContext.h"
-#include "clang/AST/Type.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
-#include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/Type.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/raw_ostream.h"
@@ -253,6 +254,19 @@ ASTMutationListener *Decl::getASTMutationListener() const {
   return getASTContext().getASTMutationListener();
 }
 
+unsigned Decl::getMaxAlignment() const {
+  if (!hasAttrs())
+    return 0;
+
+  unsigned Align = 0;
+  const AttrVec &V = getAttrs();
+  ASTContext &Ctx = getASTContext();
+  specific_attr_iterator<AlignedAttr> I(V.begin()), E(V.end());
+  for (; I != E; ++I)
+    Align = std::max(Align, I->getAlignment(Ctx));
+  return Align;
+}
+
 bool Decl::isUsed(bool CheckUsedAttr) const { 
   if (Used)
     return true;
@@ -260,13 +274,7 @@ bool Decl::isUsed(bool CheckUsedAttr) const {
   // Check for used attribute.
   if (CheckUsedAttr && hasAttr<UsedAttr>())
     return true;
-  
-  // Check redeclarations for used attribute.
-  for (redecl_iterator I = redecls_begin(), E = redecls_end(); I != E; ++I) {
-    if ((CheckUsedAttr && I->hasAttr<UsedAttr>()) || I->Used)
-      return true;
-  }
-  
+
   return false; 
 }
 
@@ -1198,7 +1206,7 @@ void DeclContext::localUncachedLookup(DeclarationName Name,
   // the results.
   if (!hasExternalVisibleStorage() && !hasExternalLexicalStorage() && Name) {
     lookup_result LookupResults = lookup(Name);
-    Results.insert(Results.end(), LookupResults.first, LookupResults.second);
+    Results.insert(Results.end(), LookupResults.begin(), LookupResults.end());
     return;
   }
 
@@ -1208,8 +1216,8 @@ void DeclContext::localUncachedLookup(DeclarationName Name,
       StoredDeclsMap::iterator Pos = Map->find(Name);
       if (Pos != Map->end()) {
         Results.insert(Results.end(),
-                       Pos->second.getLookupResult().first,
-                       Pos->second.getLookupResult().second);
+                       Pos->second.getLookupResult().begin(),
+                       Pos->second.getLookupResult().end());
         return;
       }
     }
@@ -1361,8 +1369,8 @@ DeclContext::getUsingDirectives() const {
   // FIXME: Use something more efficient than normal lookup for using
   // directives. In C++, using directives are looked up more than anything else.
   lookup_const_result Result = lookup(UsingDirectiveDecl::getName());
-  return udir_iterator_range(reinterpret_cast<udir_iterator>(Result.first),
-                             reinterpret_cast<udir_iterator>(Result.second));
+  return udir_iterator_range(reinterpret_cast<udir_iterator>(Result.begin()),
+                             reinterpret_cast<udir_iterator>(Result.end()));
 }
 
 //===----------------------------------------------------------------------===//

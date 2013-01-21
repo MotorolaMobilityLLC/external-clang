@@ -1,11 +1,11 @@
-// RUN: %clang_cc1 -triple i386-apple-darwin9 -fsyntax-only -fblocks -verify %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -fsyntax-only -fblocks -verify %s
+// RUN: %clang_cc1 -triple i386-apple-darwin9 -fsyntax-only -fblocks -Wformat-non-iso -verify %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -fsyntax-only -fblocks -Wformat-non-iso -verify %s
 
-// RUN: %clang_cc1 -triple i386-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks %s 2>&1 | FileCheck %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks %s 2>&1 | FileCheck %s
+// RUN: %clang_cc1 -triple i386-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks -Wformat-non-iso %s 2>&1 | FileCheck %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks -Wformat-non-iso %s 2>&1 | FileCheck %s
 
-// RUN: %clang_cc1 -triple i386-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks %s 2>&1 | FileCheck -check-prefix=CHECK-32 %s
-// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks %s 2>&1 | FileCheck -check-prefix=CHECK-64 %s
+// RUN: %clang_cc1 -triple i386-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks -Wformat-non-iso %s 2>&1 | FileCheck -check-prefix=CHECK-32 %s
+// RUN: %clang_cc1 -triple x86_64-apple-darwin9 -fdiagnostics-parseable-fixits -fblocks -Wformat-non-iso %s 2>&1 | FileCheck -check-prefix=CHECK-64 %s
 
 int printf(const char * restrict, ...);
 
@@ -65,7 +65,7 @@ void testParens(Foo *obj, struct Bar *record) {
   NSInteger arr[4] = {0};
   NSInteger i = 0;
 
-  // These cases match the cases in CheckPrintfHandler::checkFormatExpr.
+  // These cases match the relevant cases in CheckPrintfHandler::checkFormatExpr.
   printf("%s", arr[0]);  // expected-warning{{values of type 'NSInteger' should not be used as format arguments; add an explicit cast to 'long' instead}}
   printf("%s", getNSInteger());  // expected-warning{{values of type 'NSInteger' should not be used as format arguments; add an explicit cast to 'long' instead}}
   printf("%s", i);  // expected-warning{{values of type 'NSInteger' should not be used as format arguments; add an explicit cast to 'long' instead}}
@@ -178,4 +178,21 @@ void testCasts() {
 
   // CHECK: fix-it:"{{.*}}":{168:11-168:13}:"%u"
   // CHECK: fix-it:"{{.*}}":{168:16-168:24}:"(unsigned int)"
+}
+
+void testCapitals() {
+  printf("%D", 1); // expected-warning{{conversion specifier is not supported by ISO C}} expected-note {{did you mean to use 'd'?}}
+  printf("%U", 1); // expected-warning{{conversion specifier is not supported by ISO C}} expected-note {{did you mean to use 'u'?}}
+  printf("%O", 1); // expected-warning{{conversion specifier is not supported by ISO C}} expected-note {{did you mean to use 'o'?}}
+  
+  // CHECK: fix-it:"{{.*}}":{184:12-184:13}:"d"
+  // CHECK: fix-it:"{{.*}}":{185:12-185:13}:"u"
+  // CHECK: fix-it:"{{.*}}":{186:12-186:13}:"o"
+
+  
+  printf("%lD", 1); // expected-warning{{conversion specifier is not supported by ISO C}} expected-note {{did you mean to use 'd'?}} expected-warning{{format specifies type 'long' but the argument has type 'int'}}
+
+  // FIXME: offering two somewhat-conflicting fixits is less than ideal.
+  // CHECK: fix-it:"{{.*}}":{193:13-193:14}:"d"
+  // CHECK: fix-it:"{{.*}}":{193:11-193:14}:"%D"
 }

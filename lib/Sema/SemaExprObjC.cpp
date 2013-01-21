@@ -12,20 +12,20 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Sema/SemaInternal.h"
-#include "clang/Sema/Lookup.h"
-#include "clang/Sema/Scope.h"
-#include "clang/Sema/ScopeInfo.h"
-#include "clang/Sema/Initialization.h"
-#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
-#include "clang/Edit/Rewriters.h"
-#include "clang/Edit/Commit.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/AST/TypeLoc.h"
-#include "llvm/ADT/SmallString.h"
+#include "clang/Analysis/DomainSpecific/CocoaConventions.h"
+#include "clang/Edit/Commit.h"
+#include "clang/Edit/Rewriters.h"
 #include "clang/Lex/Preprocessor.h"
+#include "clang/Sema/Initialization.h"
+#include "clang/Sema/Lookup.h"
+#include "clang/Sema/Scope.h"
+#include "clang/Sema/ScopeInfo.h"
+#include "llvm/ADT/SmallString.h"
 
 using namespace clang;
 using namespace sema;
@@ -229,7 +229,7 @@ static ObjCMethodDecl *getNSNumberFactoryMethod(Sema &S, SourceLocation Loc,
                                     S.NSNumberPointer, ResultTInfo,
                                     S.NSNumberDecl,
                                     /*isInstance=*/false, /*isVariadic=*/false,
-                                    /*isSynthesized=*/false,
+                                    /*isPropertyAccessor=*/false,
                                     /*isImplicitlyDeclared=*/true,
                                     /*isDefined=*/false,
                                     ObjCMethodDecl::Required,
@@ -477,7 +477,7 @@ ExprResult Sema::BuildObjCBoxedExpr(SourceRange SR, Expr *ValueExpr) {
                                    stringWithUTF8String, NSStringPointer,
                                    ResultTInfo, NSStringDecl,
                                    /*isInstance=*/false, /*isVariadic=*/false,
-                                   /*isSynthesized=*/false,
+                                   /*isPropertyAccessor=*/false,
                                    /*isImplicitlyDeclared=*/true,
                                    /*isDefined=*/false,
                                    ObjCMethodDecl::Required,
@@ -646,7 +646,7 @@ ExprResult Sema::BuildObjCArrayLiteral(SourceRange SR, MultiExprArg Elements) {
                            ResultTInfo,
                            Context.getTranslationUnitDecl(),
                            false /*Instance*/, false/*isVariadic*/,
-                           /*isSynthesized=*/false,
+                           /*isPropertyAccessor=*/false,
                            /*isImplicitlyDeclared=*/true, /*isDefined=*/false,
                            ObjCMethodDecl::Required,
                            false);
@@ -764,7 +764,7 @@ ExprResult Sema::BuildObjCDictionaryLiteral(SourceRange SR,
                            0 /*TypeSourceInfo */,
                            Context.getTranslationUnitDecl(),
                            false /*Instance*/, false/*isVariadic*/,
-                           /*isSynthesized=*/false,
+                           /*isPropertyAccessor=*/false,
                            /*isImplicitlyDeclared=*/true, /*isDefined=*/false,
                            ObjCMethodDecl::Required,
                            false);
@@ -1196,6 +1196,19 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
         !param->hasAttr<CFConsumedAttr>())
       argExpr = stripARCUnbridgedCast(argExpr);
 
+    // If the parameter is __unknown_anytype, infer its type
+    // from the argument.
+    if (param->getType() == Context.UnknownAnyTy) {
+      QualType paramType = checkUnknownAnyArg(argExpr);
+      if (paramType.isNull()) {
+        IsError = true;
+        continue;
+      }
+
+      // Update the parameter type in-place.
+      param->setType(paramType);
+    }
+
     if (RequireCompleteType(argExpr->getSourceRange().getBegin(),
                             param->getType(),
                             diag::err_call_incomplete_argument, argExpr))
@@ -1305,8 +1318,8 @@ static void DiagnoseARCUseOfWeakReceiver(Sema &S, Expr *Receiver) {
   Expr *RExpr = Receiver->IgnoreParenImpCasts();
   SourceLocation Loc = RExpr->getLocStart();
   QualType T = RExpr->getType();
-  ObjCPropertyDecl *PDecl = 0;
-  ObjCMethodDecl *GDecl = 0;
+  const ObjCPropertyDecl *PDecl = 0;
+  const ObjCMethodDecl *GDecl = 0;
   if (PseudoObjectExpr *POE = dyn_cast<PseudoObjectExpr>(RExpr)) {
     RExpr = POE->getSyntacticForm();
     if (ObjCPropertyRefExpr *PRE = dyn_cast<ObjCPropertyRefExpr>(RExpr)) {
@@ -1328,34 +1341,29 @@ static void DiagnoseARCUseOfWeakReceiver(Sema &S, Expr *Receiver) {
     // See if receiver is a method which envokes a synthesized getter
     // backing a 'weak' property.
     ObjCMethodDecl *Method = ME->getMethodDecl();
-    if (Method && Method->isSynthesized()) {
-      Selector Sel = Method->getSelector();
-      if (Sel.getNumArgs() == 0) {
-        const DeclContext *Container = Method->getDeclContext();
-        PDecl = 
-          S.LookupPropertyDecl(cast<ObjCContainerDecl>(Container),
-                               Sel.getIdentifierInfoForSlot(0));
-      }
+    if (Method && Method->getSelector().getNumArgs() == 0) {
+      PDecl = Method->findPropertyDecl();
       if (PDecl)
         T = PDecl->getType();
     }
   }
   
-  if (T.getObjCLifetime() == Qualifiers::OCL_Weak) {
-    S.Diag(Loc, diag::warn_receiver_is_weak) 
-      << ((!PDecl && !GDecl) ? 0 : (PDecl ? 1 : 2));
-    if (PDecl)
-      S.Diag(PDecl->getLocation(), diag::note_property_declare);
-    else if (GDecl)
-      S.Diag(GDecl->getLocation(), diag::note_method_declared_at) << GDecl;
-    return;
+  if (T.getObjCLifetime() != Qualifiers::OCL_Weak) {
+    if (!PDecl)
+      return;
+    if (!(PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_weak))
+      return;
   }
-  
-  if (PDecl && 
-      (PDecl->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_weak)) {
-    S.Diag(Loc, diag::warn_receiver_is_weak) << 1;
+
+  S.Diag(Loc, diag::warn_receiver_is_weak)
+    << ((!PDecl && !GDecl) ? 0 : (PDecl ? 1 : 2));
+
+  if (PDecl)
     S.Diag(PDecl->getLocation(), diag::note_property_declare);
-  }
+  else if (GDecl)
+    S.Diag(GDecl->getLocation(), diag::note_method_declared_at) << GDecl;
+
+  S.Diag(Loc, diag::note_arc_assign_to_strong);
 }
 
 /// HandleExprPropertyRefExpr - Handle foo.bar where foo is a pointer to an
@@ -1777,20 +1785,10 @@ ExprResult Sema::ActOnSuperMessage(Scope *S,
 
   // We are in a method whose class has a superclass, so 'super'
   // is acting as a keyword.
-  if (Method->isInstanceMethod()) {
-    if (Sel.getMethodFamily() == OMF_dealloc)
-      getCurFunction()->ObjCShouldCallSuperDealloc = false;
-    else if (const ObjCMethodDecl *IMD =
-               Class->lookupMethod(Method->getSelector(), 
-                                   Method->isInstanceMethod()))
-          // Must check for name of message since the method could
-          // be another method with objc_requires_super attribute set.
-          if (IMD->hasAttr<ObjCRequiresSuperAttr>() && 
-              Sel == IMD->getSelector())
-            getCurFunction()->ObjCShouldCallSuperDealloc = false;
-    if (Sel.getMethodFamily() == OMF_finalize)
-      getCurFunction()->ObjCShouldCallSuperFinalize = false;
+  if (Method->getSelector() == Sel)
+    getCurFunction()->ObjCShouldCallSuper = false;
 
+  if (Method->isInstanceMethod()) {
     // Since we are in an instance method, this is an instance
     // message to the superclass instance.
     QualType SuperTy = Context.getObjCInterfaceType(Super);
@@ -2238,7 +2236,8 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
 
           if (!Method && getLangOpts().ObjCAutoRefCount) {
             Diag(Loc, diag::err_arc_may_not_respond)
-              << OCIType->getPointeeType() << Sel;
+              << OCIType->getPointeeType() << Sel 
+              << SourceRange(SelectorLocs.front(), SelectorLocs.back());
             return ExprError();
           }
 
@@ -2439,6 +2438,24 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
     // In ARC, check for message sends which are likely to introduce
     // retain cycles.
     checkRetainCycles(Result);
+
+    if (!isImplicit && Method) {
+      if (const ObjCPropertyDecl *Prop = Method->findPropertyDecl()) {
+        bool IsWeak =
+          Prop->getPropertyAttributes() & ObjCPropertyDecl::OBJC_PR_weak;
+        if (!IsWeak && Sel.isUnarySelector())
+          IsWeak = ReturnType.getObjCLifetime() & Qualifiers::OCL_Weak;
+
+        if (IsWeak) {
+          DiagnosticsEngine::Level Level =
+            Diags.getDiagnosticLevel(diag::warn_arc_repeated_use_of_weak,
+                                     LBracLoc);
+          if (Level != DiagnosticsEngine::Ignored)
+            getCurFunction()->recordUseOfWeak(Result, Prop);
+
+        }
+      }
+    }
   }
       
   return MaybeBindToTemporary(Result);

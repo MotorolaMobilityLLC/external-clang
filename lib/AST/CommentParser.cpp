@@ -8,9 +8,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/CommentParser.h"
-#include "clang/AST/CommentSema.h"
-#include "clang/AST/CommentDiagnostic.h"
 #include "clang/AST/CommentCommandTraits.h"
+#include "clang/AST/CommentDiagnostic.h"
+#include "clang/AST/CommentSema.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -175,8 +175,7 @@ public:
     memcpy(TextPtr, WordText.c_str(), Length + 1);
     StringRef Text = StringRef(TextPtr, Length);
 
-    formTokenWithChars(Tok, Loc, WordBegin,
-                       Pos.BufferPtr - WordBegin, Text);
+    formTokenWithChars(Tok, Loc, WordBegin, Length, Text);
     return true;
   }
 
@@ -318,7 +317,7 @@ BlockCommandComment *Parser::parseBlockCommand() {
     PC = S.actOnParamCommandStart(Tok.getLocation(),
                                   Tok.getEndLocation(),
                                   Tok.getCommandID());
-  } if (Info->IsTParamCommand) {
+  } else if (Info->IsTParamCommand) {
     IsTParam = true;
     TPC = S.actOnTParamCommandStart(Tok.getLocation(),
                                     Tok.getEndLocation(),
@@ -553,6 +552,21 @@ BlockContentComment *Parser::parseParagraphOrBlockCommand() {
         if (Content.size() == 0)
           return parseBlockCommand();
         break; // Block command ahead, finish this parapgaph.
+      }
+      if (Info->IsVerbatimBlockEndCommand) {
+        Diag(Tok.getLocation(),
+             diag::warn_verbatim_block_end_without_start)
+          << Info->Name
+          << SourceRange(Tok.getLocation(), Tok.getEndLocation());
+        consumeToken();
+        continue;
+      }
+      if (Info->IsUnknownCommand) {
+        Content.push_back(S.actOnUnknownCommand(Tok.getLocation(),
+                                                Tok.getEndLocation(),
+                                                Info->getID()));
+        consumeToken();
+        continue;
       }
       assert(Info->IsInlineCommand);
       Content.push_back(parseInlineCommand());

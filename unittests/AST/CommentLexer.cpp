@@ -7,15 +7,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Basic/SourceManager.h"
-#include "clang/Basic/FileManager.h"
-#include "clang/Basic/Diagnostic.h"
 #include "clang/AST/CommentLexer.h"
 #include "clang/AST/CommentCommandTraits.h"
+#include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticOptions.h"
+#include "clang/Basic/FileManager.h"
+#include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/STLExtras.h"
-#include <vector>
-
 #include "gtest/gtest.h"
+#include <vector>
 
 using namespace llvm;
 using namespace clang;
@@ -29,7 +29,7 @@ protected:
   CommentLexerTest()
     : FileMgr(FileMgrOpts),
       DiagID(new DiagnosticIDs()),
-      Diags(DiagID, new IgnoringDiagConsumer()),
+      Diags(DiagID, new DiagnosticOptions, new IgnoringDiagConsumer()),
       SourceMgr(Diags, FileMgr),
       Traits(Allocator) {
   }
@@ -322,7 +322,35 @@ TEST_F(CommentLexerTest, DoxygenCommand4) {
   }
 }
 
+// A command marker followed by a non-letter that is not a part of an escape
+// sequence.
 TEST_F(CommentLexerTest, DoxygenCommand5) {
+  const char *Source = "/// \\^ \\0";
+  std::vector<Token> Toks;
+
+  lexString(Source, Toks);
+
+  ASSERT_EQ(6U, Toks.size());
+
+  ASSERT_EQ(tok::text,       Toks[0].getKind());
+  ASSERT_EQ(StringRef(" "),  Toks[0].getText());
+
+  ASSERT_EQ(tok::text,       Toks[1].getKind());
+  ASSERT_EQ(StringRef("\\"), Toks[1].getText());
+
+  ASSERT_EQ(tok::text,       Toks[2].getKind());
+  ASSERT_EQ(StringRef("^ "), Toks[2].getText());
+
+  ASSERT_EQ(tok::text,       Toks[3].getKind());
+  ASSERT_EQ(StringRef("\\"), Toks[3].getText());
+
+  ASSERT_EQ(tok::text,       Toks[4].getKind());
+  ASSERT_EQ(StringRef("0"),  Toks[4].getText());
+
+  ASSERT_EQ(tok::newline,    Toks[5].getKind());
+}
+
+TEST_F(CommentLexerTest, DoxygenCommand6) {
   const char *Source = "/// \\brief Aaa.";
   std::vector<Token> Toks;
 
@@ -342,7 +370,7 @@ TEST_F(CommentLexerTest, DoxygenCommand5) {
   ASSERT_EQ(tok::newline,       Toks[3].getKind());
 }
 
-TEST_F(CommentLexerTest, DoxygenCommand6) {
+TEST_F(CommentLexerTest, DoxygenCommand7) {
   const char *Source = "/// \\em\\em \\em\t\\em\n";
   std::vector<Token> Toks;
 
@@ -374,7 +402,7 @@ TEST_F(CommentLexerTest, DoxygenCommand6) {
   ASSERT_EQ(tok::newline,    Toks[7].getKind());
 }
 
-TEST_F(CommentLexerTest, DoxygenCommand7) {
+TEST_F(CommentLexerTest, DoxygenCommand8) {
   const char *Source = "/// \\aaa\\bbb \\ccc\t\\ddd\n";
   std::vector<Token> Toks;
 
@@ -406,7 +434,7 @@ TEST_F(CommentLexerTest, DoxygenCommand7) {
   ASSERT_EQ(tok::newline,     Toks[7].getKind());
 }
 
-TEST_F(CommentLexerTest, DoxygenCommand8) {
+TEST_F(CommentLexerTest, DoxygenCommand9) {
   const char *Source = "// \\c\n";
   std::vector<Token> Toks;
 

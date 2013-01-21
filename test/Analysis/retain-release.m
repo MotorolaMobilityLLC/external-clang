@@ -1,4 +1,4 @@
-// RUN: rm -f $t.objc.plist $t.objcpp.plist
+// RUN: rm -f %t.objc.plist %t.objcpp.plist
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease,osx.cocoa.RetainCount -analyzer-store=region -fblocks -verify -Wno-objc-root-class %s -analyzer-output=plist -o %t.objc.plist
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -analyze -analyzer-checker=core,osx.coreFoundation.CFRetainRelease,osx.cocoa.ClassRelease,osx.cocoa.RetainCount -analyzer-store=region -fblocks -verify -x objective-c++ -std=gnu++98 -Wno-objc-root-class %s -analyzer-output=plist -o %t.objcpp.plist
 // FIXLATER: cat %t.objc.plist ; FileCheck --input-file=%t.objc.plist %s
@@ -24,6 +24,9 @@
 #endif
 #if __has_feature(attribute_cf_consumed)
 #define CF_CONSUMED __attribute__((cf_consumed))
+#endif
+#if __has_attribute(ns_returns_autoreleased)
+#define NS_RETURNS_AUTORELEASED __attribute__((ns_returns_autoreleased))
 #endif
 
 //===----------------------------------------------------------------------===//
@@ -62,6 +65,7 @@ typedef const struct __CFAllocator * CFAllocatorRef;
 extern const CFAllocatorRef kCFAllocatorDefault;
 extern CFTypeRef CFRetain(CFTypeRef cf);
 extern void CFRelease(CFTypeRef cf);
+extern CFTypeRef CFMakeCollectable(CFTypeRef cf);
 typedef struct {
 }
 CFArrayCallBacks;
@@ -473,8 +477,8 @@ void f13_autorelease() {
 void f13_autorelease_b() {
   CFMutableArrayRef A = CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks);
   [(id) A autorelease];
-  [(id) A autorelease]; // expected-warning{{Object sent -autorelease too many times}}
-}
+  [(id) A autorelease];
+} // expected-warning{{Object sent -autorelease too many times}}
 
 CFMutableArrayRef f13_autorelease_c() {
   CFMutableArrayRef A = CFArrayCreateMutable(0, 10, &kCFTypeArrayCallBacks);
@@ -508,30 +512,38 @@ void f15() {
   CFRelease(*B);  // no-warning
 }
 
-// Test when we pass NULL to CFRetain/CFRelease.
+// Test when we pass NULL to CFRetain/CFRelease/CFMakeCollectable.
 void f16(int x, CFTypeRef p) {
   if (p)
     return;
 
-  if (x) {
+  if (x > 0) {
     CFRelease(p); // expected-warning{{Null pointer argument in call to CFRelease}}
   }
-  else {
+  else if (x < 0) {
     CFRetain(p); // expected-warning{{Null pointer argument in call to CFRetain}}
+  }
+  else {
+    CFMakeCollectable(p); // expected-warning{{Null pointer argument in call to CFMakeCollectable}}
   }
 }
 
 // Test that an object is non-null after being CFRetained/CFReleased.
 void f17(int x, CFTypeRef p) {
-  if (x) {
+  if (x > 0) {
     CFRelease(p);
     if (!p)
       CFRelease(0); // no-warning
   }
-  else {
+  else if (x < 0) {
     CFRetain(p);
     if (!p)
       CFRetain(0); // no-warning
+  }
+  else {
+    CFMakeCollectable(p);
+    if (!p)
+      CFMakeCollectable(0); // no-warning
   }
 }
 
@@ -1291,6 +1303,7 @@ typedef NSString* MyStringTy;
 - (NSString*) returnsAnOwnedCFString  CF_RETURNS_RETAINED; // no-warning
 - (MyStringTy) returnsAnOwnedTypedString NS_RETURNS_RETAINED; // no-warning
 - (NSString*) newString NS_RETURNS_NOT_RETAINED; // no-warning
+- (NSString*) newString_auto NS_RETURNS_AUTORELEASED; // no-warning
 - (NSString*) newStringNoAttr;
 - (int) returnsAnOwnedInt NS_RETURNS_RETAINED; // expected-warning{{'ns_returns_retained' attribute only applies to methods that return an Objective-C object}}
 - (id) pseudoInit NS_CONSUMES_SELF NS_RETURNS_RETAINED;
@@ -1311,6 +1324,8 @@ void test_attr_1b(TestOwnershipAttr *X) {
 void test_attr1c(TestOwnershipAttr *X) {
   NSString *str = [X newString]; // no-warning
   NSString *str2 = [X newStringNoAttr]; // expected-warning{{leak}}
+  NSString *str3 = [X newString_auto]; // no-warning
+  NSString *str4 = [[X newString_auto] retain]; // expected-warning {{leak}}
 }
 
 void testattr2_a() {

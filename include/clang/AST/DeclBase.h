@@ -14,38 +14,39 @@
 #ifndef LLVM_CLANG_AST_DECLBASE_H
 #define LLVM_CLANG_AST_DECLBASE_H
 
-#include "clang/AST/Attr.h"
+#include "clang/AST/AttrIterator.h"
 #include "clang/AST/DeclarationName.h"
-#include "clang/AST/Type.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/PrettyStackTrace.h"
 
 namespace clang {
-class DeclContext;
-class TranslationUnitDecl;
-class NamespaceDecl;
-class UsingDirectiveDecl;
-class NamedDecl;
-class FunctionDecl;
-class CXXRecordDecl;
-class EnumDecl;
-class ObjCMethodDecl;
-class ObjCContainerDecl;
-class ObjCInterfaceDecl;
-class ObjCCategoryDecl;
-class ObjCProtocolDecl;
-class ObjCImplementationDecl;
-class ObjCCategoryImplDecl;
-class ObjCImplDecl;
-class LinkageSpecDecl;
-class BlockDecl;
-class DeclarationName;
-class CompoundStmt;
-class StoredDeclsMap;
-class DependentDiagnostic;
 class ASTMutationListener;
+class BlockDecl;
+class CXXRecordDecl;
+class CompoundStmt;
+class DeclContext;
+class DeclarationName;
+class DependentDiagnostic;
+class EnumDecl;
+class FunctionDecl;
+class LinkageSpecDecl;
+class NamedDecl;
+class NamespaceDecl;
+class ObjCCategoryDecl;
+class ObjCCategoryImplDecl;
+class ObjCContainerDecl;
+class ObjCImplDecl;
+class ObjCImplementationDecl;
+class ObjCInterfaceDecl;
+class ObjCMethodDecl;
+class ObjCProtocolDecl;
+struct PrintingPolicy;
+class Stmt;
+class StoredDeclsMap;
+class TranslationUnitDecl;
+class UsingDirectiveDecl;
 }
 
 namespace llvm {
@@ -240,7 +241,7 @@ private:
   SourceLocation Loc;
 
   /// DeclKind - This indicates which class this is.
-  unsigned DeclKind : 8;
+  unsigned DeclKind : 6;
 
   /// InvalidDecl - This indicates a semantic error occurred.
   unsigned InvalidDecl :  1;
@@ -282,15 +283,16 @@ protected:
   /// IdentifierNamespace - This specifies what IDNS_* namespace this lives in.
   unsigned IdentifierNamespace : 12;
 
-  /// \brief Whether the \c CachedLinkage field is active.
+  /// These fields are only valid for NamedDecls subclasses.
   ///
-  /// This field is only valid for NamedDecls subclasses.
-  mutable unsigned HasCachedLinkage : 1;
-
-  /// \brief If \c HasCachedLinkage, the linkage of this declaration.
-  ///
-  /// This field is only valid for NamedDecls subclasses.
+  /// \brief Nonzero if the cache (i.e. the bitfields here starting
+  /// with 'Cache') is valid.  If so, then this is a
+  /// LangOptions::VisibilityMode+1.
+  mutable unsigned CacheValidAndVisibility : 2;
+  /// \brief the linkage of this declaration.
   mutable unsigned CachedLinkage : 2;
+  /// \brief true if the visibility is explicit.
+  mutable unsigned CachedVisibilityExplicit : 1;
 
   friend class ASTDeclWriter;
   friend class ASTDeclReader;
@@ -307,7 +309,7 @@ protected:
       HasAttrs(false), Implicit(false), Used(false), Referenced(false),
       Access(AS_none), FromASTFile(0), Hidden(0),
       IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
-      HasCachedLinkage(0)
+      CacheValidAndVisibility(0)
   {
     if (StatisticsEnabled) add(DK);
   }
@@ -317,7 +319,7 @@ protected:
       HasAttrs(false), Implicit(false), Used(false), Referenced(false),
       Access(AS_none), FromASTFile(0), Hidden(0),
       IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
-      HasCachedLinkage(0)
+      CacheValidAndVisibility(0)
   {
     if (StatisticsEnabled) add(DK);
   }
@@ -430,16 +432,10 @@ public:
   void dropAttr() {
     if (!HasAttrs) return;
 
-    AttrVec &Attrs = getAttrs();
-    for (unsigned i = 0, e = Attrs.size(); i != e; /* in loop */) {
-      if (isa<T>(Attrs[i])) {
-        Attrs.erase(Attrs.begin() + i);
-        --e;
-      }
-      else
-        ++i;
-    }
-    if (Attrs.empty())
+    AttrVec &Vec = getAttrs();
+    Vec.erase(std::remove_if(Vec.begin(), Vec.end(), isa<T, Attr*>), Vec.end());
+
+    if (Vec.empty())
       HasAttrs = false;
   }
 
@@ -461,9 +457,7 @@ public:
 
   /// getMaxAlignment - return the maximum alignment specified by attributes
   /// on this decl, 0 if there are none.
-  unsigned getMaxAlignment() const {
-    return hasAttrs() ? getMaxAttrAlignment(getAttrs(), getASTContext()) : 0;
-  }
+  unsigned getMaxAlignment() const;
 
   /// setInvalidDecl - Indicates the Decl had a semantic error. This
   /// allows for graceful error recovery.
@@ -844,8 +838,6 @@ public:
     IdentifierNamespace |= IDNS_NonMemberOperator;
   }
 
-  // Implement isa/cast/dyncast/etc.
-  static bool classof(const Decl *) { return true; }
   static bool classofKind(Kind K) { return true; }
   static DeclContext *castToDeclContext(const Decl *);
   static Decl *castFromDeclContext(const DeclContext *);
@@ -899,29 +891,9 @@ public:
   virtual void print(raw_ostream &OS) const;
 };
 
-class DeclContextLookupResult
-  : public std::pair<NamedDecl**,NamedDecl**> {
-public:
-  DeclContextLookupResult(NamedDecl **I, NamedDecl **E)
-    : std::pair<NamedDecl**,NamedDecl**>(I, E) {}
-  DeclContextLookupResult()
-    : std::pair<NamedDecl**,NamedDecl**>() {}
+typedef llvm::MutableArrayRef<NamedDecl*> DeclContextLookupResult;
 
-  using std::pair<NamedDecl**,NamedDecl**>::operator=;
-};
-
-class DeclContextLookupConstResult
-  : public std::pair<NamedDecl*const*, NamedDecl*const*> {
-public:
-  DeclContextLookupConstResult(std::pair<NamedDecl**,NamedDecl**> R)
-    : std::pair<NamedDecl*const*, NamedDecl*const*>(R) {}
-  DeclContextLookupConstResult(NamedDecl * const *I, NamedDecl * const *E)
-    : std::pair<NamedDecl*const*, NamedDecl*const*>(I, E) {}
-  DeclContextLookupConstResult()
-    : std::pair<NamedDecl*const*, NamedDecl*const*>() {}
-
-  using std::pair<NamedDecl*const*,NamedDecl*const*>::operator=;
-};
+typedef llvm::ArrayRef<NamedDecl*> DeclContextLookupConstResult;
 
 /// DeclContext - This is used only as base class of specific decl types that
 /// can act as declaration contexts. These decls are (only the top classes
@@ -1523,10 +1495,6 @@ public:
 
   static bool classof(const Decl *D);
   static bool classof(const DeclContext *D) { return true; }
-#define DECL(NAME, BASE)
-#define DECL_CONTEXT(NAME) \
-  static bool classof(const NAME##Decl *D) { return true; }
-#include "clang/AST/DeclNodes.inc"
 
   LLVM_ATTRIBUTE_USED void dumpDeclContext() const;
 

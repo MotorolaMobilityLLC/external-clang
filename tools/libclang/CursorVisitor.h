@@ -1,4 +1,4 @@
-//===- CursorVisitor.h - CursorVisitor interface --------------------------===//
+//===- CursorVisitor.h - CursorVisitor interface ----------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,10 +10,9 @@
 #ifndef LLVM_CLANG_LIBCLANG_CURSORVISITOR_H
 #define LLVM_CLANG_LIBCLANG_CURSORVISITOR_H
 
-#include "Index_Internal.h"
 #include "CXCursor.h"
 #include "CXTranslationUnit.h"
-
+#include "Index_Internal.h"
 #include "clang/AST/DeclVisitor.h"
 #include "clang/AST/TypeLocVisitor.h"
 
@@ -46,7 +45,6 @@ protected:
 public:
   Kind getKind() const { return K; }
   const CXCursor &getParent() const { return parent; }
-  static bool classof(VisitorJob *VJ) { return true; }
 };
   
 typedef SmallVector<VisitorJob, 10> VisitorWorkList;

@@ -135,12 +135,12 @@ class InitializeUsingSelfTest {
   TwoInOne D;
   int E;
   InitializeUsingSelfTest(int F)
-      : A(A),  // expected-warning {{field is uninitialized when used here}}
-        B((((B)))),  // expected-warning {{field is uninitialized when used here}}
-        C(A && InitializeUsingSelfTest::C),  // expected-warning {{field is uninitialized when used here}}
-        D(D,  // expected-warning {{field is uninitialized when used here}}
-          D), // expected-warning {{field is uninitialized when used here}}
-        E(IntParam(E)) {} // expected-warning {{field is uninitialized when used here}}
+      : A(A),  // expected-warning {{field 'A' is uninitialized when used here}}
+        B((((B)))),  // expected-warning {{field 'B' is uninitialized when used here}}
+        C(A && InitializeUsingSelfTest::C),  // expected-warning {{field 'C' is uninitialized when used here}}
+        D(D,  // expected-warning {{field 'D' is uninitialized when used here}}
+          D), // expected-warning {{field 'D' is uninitialized when used here}}
+        E(IntParam(E)) {} // expected-warning {{field 'E' is uninitialized when used here}}
 };
 
 int IntWrapper(int &i) { return 0; };
@@ -160,8 +160,8 @@ class CopyConstructorTest {
   bool A, B, C;
   CopyConstructorTest(const CopyConstructorTest& rhs)
       : A(rhs.A),
-        B(B),  // expected-warning {{field is uninitialized when used here}}
-        C(rhs.C || C) { }  // expected-warning {{field is uninitialized when used here}}
+        B(B),  // expected-warning {{field 'B' is uninitialized when used here}}
+        C(rhs.C || C) { }  // expected-warning {{field 'C' is uninitialized when used here}}
 };
 
 // Make sure we aren't marking default constructors when we shouldn't be.
@@ -282,4 +282,10 @@ namespace PR12049 {
 
       int member; // expected-error {{expected ')'}}
   };
+}
+
+namespace PR14073 {
+  struct S1 { union { int n; }; S1() : n(n) {} };  // expected-warning {{field 'n' is uninitialized when used here}}
+  struct S2 { union { union { int n; }; char c; }; S2() : n(n) {} };  // expected-warning {{field 'n' is uninitialized when used here}}
+  struct S3 { struct { int n; }; S3() : n(n) {} };  // expected-warning {{field 'n' is uninitialized when used here}}
 }

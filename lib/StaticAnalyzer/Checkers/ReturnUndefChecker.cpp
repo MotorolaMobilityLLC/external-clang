@@ -14,10 +14,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
-#include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 
 using namespace clang;
 using namespace ento;
@@ -41,6 +42,19 @@ void ReturnUndefChecker::checkPreStmt(const ReturnStmt *RS,
   if (!C.getState()->getSVal(RetE, C.getLocationContext()).isUndef())
     return;
   
+  // "return;" is modeled to evaluate to an UndefinedValue. Allow UndefinedValue
+  // to be returned in functions returning void to support the following pattern:
+  // void foo() {
+  //  return;
+  // }
+  // void test() {
+  //   return foo();
+  // }
+  const StackFrameContext *SFC = C.getStackFrame();
+  QualType RT = CallEvent::getDeclaredResultType(SFC->getDecl());
+  if (!RT.isNull() && RT->isSpecificBuiltinType(BuiltinType::Void))
+    return;
+
   ExplodedNode *N = C.generateSink();
 
   if (!N)
@@ -56,7 +70,7 @@ void ReturnUndefChecker::checkPreStmt(const ReturnStmt *RS,
   report->addRange(RetE->getSourceRange());
   bugreporter::trackNullOrUndefValue(N, RetE, *report);
 
-  C.EmitReport(report);
+  C.emitReport(report);
 }
 
 void ento::registerReturnUndefChecker(CheckerManager &mgr) {

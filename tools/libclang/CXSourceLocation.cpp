@@ -12,12 +12,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Frontend/ASTUnit.h"
-
 #include "CIndexer.h"
-#include "CXString.h"
-#include "CXSourceLocation.h"
-#include "CXTranslationUnit.h"
 #include "CXLoadedDiagnostic.h"
+#include "CXSourceLocation.h"
+#include "CXString.h"
+#include "CXTranslationUnit.h"
 
 using namespace clang;
 using namespace clang::cxstring;
@@ -295,16 +294,8 @@ void clang_getSpellingLocation(CXSourceLocation location,
   
   const SourceManager &SM =
   *static_cast<const SourceManager*>(location.ptr_data[0]);
-  SourceLocation SpellLoc = Loc;
-  if (SpellLoc.isMacroID()) {
-    SourceLocation SimpleSpellingLoc = SM.getImmediateSpellingLoc(SpellLoc);
-    if (SimpleSpellingLoc.isFileID() &&
-        SM.getFileEntryForID(SM.getDecomposedLoc(SimpleSpellingLoc).first))
-      SpellLoc = SimpleSpellingLoc;
-    else
-      SpellLoc = SM.getExpansionLoc(SpellLoc);
-  }
-  
+  // FIXME: This should call SourceManager::getSpellingLoc().
+  SourceLocation SpellLoc = SM.getFileLoc(Loc);
   std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(SpellLoc);
   FileID FID = LocInfo.first;
   unsigned FileOffset = LocInfo.second;
@@ -322,5 +313,41 @@ void clang_getSpellingLocation(CXSourceLocation location,
     *offset = FileOffset;
 }
 
-} // end extern "C"
+void clang_getFileLocation(CXSourceLocation location,
+                           CXFile *file,
+                           unsigned *line,
+                           unsigned *column,
+                           unsigned *offset) {
 
+  if (!isASTUnitSourceLocation(location)) {
+    CXLoadedDiagnostic::decodeLocation(location, file, line,
+                                           column, offset);
+    return;
+  }
+
+  SourceLocation Loc = SourceLocation::getFromRawEncoding(location.int_data);
+
+  if (!location.ptr_data[0] || Loc.isInvalid())
+    return createNullLocation(file, line, column, offset);
+
+  const SourceManager &SM =
+  *static_cast<const SourceManager*>(location.ptr_data[0]);
+  SourceLocation FileLoc = SM.getFileLoc(Loc);
+  std::pair<FileID, unsigned> LocInfo = SM.getDecomposedLoc(FileLoc);
+  FileID FID = LocInfo.first;
+  unsigned FileOffset = LocInfo.second;
+
+  if (FID.isInvalid())
+    return createNullLocation(file, line, column, offset);
+
+  if (file)
+    *file = (void *)SM.getFileEntryForID(FID);
+  if (line)
+    *line = SM.getLineNumber(FID, FileOffset);
+  if (column)
+    *column = SM.getColumnNumber(FID, FileOffset);
+  if (offset)
+    *offset = FileOffset;
+}
+
+} // end extern "C"

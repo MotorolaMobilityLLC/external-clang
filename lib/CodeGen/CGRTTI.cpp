@@ -13,10 +13,10 @@
 
 #include "CodeGenModule.h"
 #include "CGCXXABI.h"
+#include "CGObjCRuntime.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/Type.h"
 #include "clang/Frontend/CodeGenOptions.h"
-#include "CGObjCRuntime.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -191,6 +191,12 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
     case BuiltinType::Char32:
     case BuiltinType::Int128:
     case BuiltinType::UInt128:
+    case BuiltinType::OCLImage1d:
+    case BuiltinType::OCLImage1dArray:
+    case BuiltinType::OCLImage1dBuffer:
+    case BuiltinType::OCLImage2d:
+    case BuiltinType::OCLImage2dArray:
+    case BuiltinType::OCLImage3d:
       return true;
       
     case BuiltinType::Dependent:
@@ -977,7 +983,7 @@ llvm::Constant *CodeGenModule::GetAddrOfRTTIDescriptor(QualType Ty,
   // Return a bogus pointer if RTTI is disabled, unless it's for EH.
   // FIXME: should we even be calling this method if RTTI is disabled
   // and it's not for EH?
-  if (!ForEH && !getContext().getLangOpts().RTTI)
+  if (!ForEH && !getLangOpts().RTTI)
     return llvm::Constant::getNullValue(Int8PtrTy);
   
   if (ForEH && Ty->isObjCObjectPointerType() &&

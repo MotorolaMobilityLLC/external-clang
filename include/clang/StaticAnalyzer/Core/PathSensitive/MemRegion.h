@@ -22,8 +22,8 @@
 #include "clang/AST/ExprObjC.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SVals.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "llvm/ADT/FoldingSet.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <string>
 
 namespace llvm {
@@ -140,6 +140,9 @@ public:
 
   const MemRegion *getBaseRegion() const;
 
+  /// Check if the region is a subregion of the given region.
+  virtual bool isSubRegionOf(const MemRegion *R) const;
+
   const MemRegion *StripCasts(bool StripBaseCasts = true) const;
 
   bool hasGlobalsOrParametersStorage() const;
@@ -171,8 +174,6 @@ public:
   template<typename RegionTy> const RegionTy* getAs() const;
 
   virtual bool isBoundable() const { return false; }
-
-  static bool classof(const MemRegion*) { return true; }
 };
 
 /// MemSpaceRegion - A memory region that represents a "memory space";
@@ -416,7 +417,7 @@ public:
 
   MemRegionManager* getMemRegionManager() const;
 
-  bool isSubRegionOf(const MemRegion* R) const;
+  virtual bool isSubRegionOf(const MemRegion* R) const;
 
   static bool classof(const MemRegion* R) {
     return R->getKind() > END_MEMSPACES;
@@ -530,16 +531,28 @@ public:
 
 /// FunctionTextRegion - A region that represents code texts of function.
 class FunctionTextRegion : public CodeTextRegion {
-  const FunctionDecl *FD;
+  const NamedDecl *FD;
 public:
-  FunctionTextRegion(const FunctionDecl *fd, const MemRegion* sreg)
-    : CodeTextRegion(sreg, FunctionTextRegionKind), FD(fd) {}
-  
-  QualType getLocationType() const {
-    return getContext().getPointerType(FD->getType());
+  FunctionTextRegion(const NamedDecl *fd, const MemRegion* sreg)
+    : CodeTextRegion(sreg, FunctionTextRegionKind), FD(fd) {
+    assert(isa<ObjCMethodDecl>(fd) || isa<FunctionDecl>(fd));
   }
   
-  const FunctionDecl *getDecl() const {
+  QualType getLocationType() const {
+    const ASTContext &Ctx = getContext();
+    if (const FunctionDecl *D = dyn_cast<FunctionDecl>(FD)) {
+      return Ctx.getPointerType(D->getType());
+    }
+
+    assert(isa<ObjCMethodDecl>(FD));
+    assert(false && "Getting the type of ObjCMethod is not supported yet");
+
+    // TODO: We might want to return a different type here (ex: id (*ty)(...))
+    //       depending on how it is used.
+    return QualType();
+  }
+
+  const NamedDecl *getDecl() const {
     return FD;
   }
     
@@ -547,7 +560,7 @@ public:
   
   void Profile(llvm::FoldingSetNodeID& ID) const;
   
-  static void ProfileRegion(llvm::FoldingSetNodeID& ID, const FunctionDecl *FD,
+  static void ProfileRegion(llvm::FoldingSetNodeID& ID, const NamedDecl *FD,
                             const MemRegion*);
   
   static bool classof(const MemRegion* R) {
@@ -629,22 +642,14 @@ public:
     explicit referenced_vars_iterator(const MemRegion * const *r,
                                       const MemRegion * const *originalR)
       : R(r), OriginalR(originalR) {}
-    
-    operator const MemRegion * const *() const {
-      return R;
-    }
-  
-    const MemRegion *getCapturedRegion() const {
-      return *R;
-    }
-    const MemRegion *getOriginalRegion() const {
-      return *OriginalR;
-    }
 
-    const VarRegion* operator*() const {
+    const VarRegion *getCapturedRegion() const {
       return cast<VarRegion>(*R);
     }
-    
+    const VarRegion *getOriginalRegion() const {
+      return cast<VarRegion>(*OriginalR);
+    }
+
     bool operator==(const referenced_vars_iterator &I) const {
       return I.R == R;
     }
@@ -673,6 +678,8 @@ public:
   }
 private:
   void LazyInitializeReferencedVars();
+  std::pair<const VarRegion *, const VarRegion *>
+  getCaptureRegions(const VarDecl *VD);
 };
 
 /// SymbolicRegion - A special, "non-concrete" region. Unlike other region
@@ -1214,7 +1221,7 @@ public:
     return getCXXBaseObjectRegion(baseReg->getDecl(), superRegion);
   }
 
-  const FunctionTextRegion *getFunctionTextRegion(const FunctionDecl *FD);
+  const FunctionTextRegion *getFunctionTextRegion(const NamedDecl *FD);
   const BlockTextRegion *getBlockTextRegion(const BlockDecl *BD,
                                             CanQualType locTy,
                                             AnalysisDeclContext *AC);

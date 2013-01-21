@@ -542,12 +542,6 @@ namespace {
   };
 }
 
-static bool hasTrivialCopyOrMoveConstructor(const CXXRecordDecl *Record,
-                                            bool Moving) {
-  return Moving ? Record->hasTrivialMoveConstructor() :
-                  Record->hasTrivialCopyConstructor();
-}
-
 static void EmitMemberInitializer(CodeGenFunction &CGF,
                                   const CXXRecordDecl *ClassDecl,
                                   CXXCtorInitializer *MemberInit,
@@ -588,12 +582,11 @@ static void EmitMemberInitializer(CodeGenFunction &CGF,
   if (Array && Constructor->isImplicitlyDefined() &&
       Constructor->isCopyOrMoveConstructor()) {
     QualType BaseElementTy = CGF.getContext().getBaseElementType(Array);
-    const CXXRecordDecl *Record = BaseElementTy->getAsCXXRecordDecl();
+    CXXConstructExpr *CE = dyn_cast<CXXConstructExpr>(MemberInit->getInit());
     if (BaseElementTy.isPODType(CGF.getContext()) ||
-        (Record && hasTrivialCopyOrMoveConstructor(Record,
-                       Constructor->isMoveConstructor()))) {
-      // Find the source pointer. We knows it's the last argument because
-      // we know we're in a copy constructor.
+        (CE && CE->getConstructor()->isTrivial())) {
+      // Find the source pointer. We know it's the last argument because
+      // we know we're in an implicit copy constructor.
       unsigned SrcArgIndex = Args.size() - 1;
       llvm::Value *SrcPtr
         = CGF.Builder.CreateLoad(CGF.GetAddrOfLocalVar(Args[SrcArgIndex]));
@@ -952,7 +945,7 @@ void CodeGenFunction::EmitDestructorBody(FunctionArgList &Args) {
     }
     // -fapple-kext must inline any call to this dtor into
     // the caller's body.
-    if (getContext().getLangOpts().AppleKext)
+    if (getLangOpts().AppleKext)
       CurFn->addFnAttr(llvm::Attribute::AlwaysInline);
     break;
   }
@@ -1096,8 +1089,6 @@ void CodeGenFunction::EnterDtorCleanups(const CXXDestructorDecl *DD,
 /// constructor for each of several members of an array.
 ///
 /// \param ctor the constructor to call for each element
-/// \param argBegin,argEnd the arguments to evaluate and pass to the
-///   constructor
 /// \param arrayType the type of the array to initialize
 /// \param arrayBegin an arrayType*
 /// \param zeroInitialize true if each element should be
@@ -1123,8 +1114,6 @@ CodeGenFunction::EmitCXXAggrConstructorCall(const CXXConstructorDecl *ctor,
 /// \param ctor the constructor to call for each element
 /// \param numElements the number of elements in the array;
 ///   may be zero
-/// \param argBegin,argEnd the arguments to evaluate and pass to the
-///   constructor
 /// \param arrayBegin a T*, where T is the type constructed by ctor
 /// \param zeroInitialize true if each element should be
 ///   zero-initialized before it is constructed
@@ -1238,7 +1227,7 @@ CodeGenFunction::EmitCXXConstructorCall(const CXXConstructorDecl *D,
 
   CGDebugInfo *DI = getDebugInfo();
   if (DI &&
-      CGM.getCodeGenOpts().DebugInfo == CodeGenOptions::LimitedDebugInfo) {
+      CGM.getCodeGenOpts().getDebugInfo() == CodeGenOptions::LimitedDebugInfo) {
     // If debug info for this class has not been emitted then this is the
     // right time to do so.
     const CXXRecordDecl *Parent = D->getParent();
@@ -1268,7 +1257,9 @@ CodeGenFunction::EmitCXXConstructorCall(const CXXConstructorDecl *D,
   llvm::Value *VTT = GetVTTParameter(*this, GlobalDecl(D, Type), ForVirtualBase);
   llvm::Value *Callee = CGM.GetAddrOfCXXConstructor(D, Type);
 
-  EmitCXXMemberCall(D, Callee, ReturnValueSlot(), This, VTT, ArgBeg, ArgEnd);
+  // FIXME: Provide a source location here.
+  EmitCXXMemberCall(D, SourceLocation(), Callee, ReturnValueSlot(), This,
+                    VTT, ArgBeg, ArgEnd);
 }
 
 void
@@ -1413,14 +1404,16 @@ void CodeGenFunction::EmitCXXDestructorCall(const CXXDestructorDecl *DD,
   llvm::Value *VTT = GetVTTParameter(*this, GlobalDecl(DD, Type), 
                                      ForVirtualBase);
   llvm::Value *Callee = 0;
-  if (getContext().getLangOpts().AppleKext)
+  if (getLangOpts().AppleKext)
     Callee = BuildAppleKextVirtualDestructorCall(DD, Type, 
                                                  DD->getParent());
     
   if (!Callee)
     Callee = CGM.GetAddrOfCXXDestructor(DD, Type);
   
-  EmitCXXMemberCall(DD, Callee, ReturnValueSlot(), This, VTT, 0, 0);
+  // FIXME: Provide a source location here.
+  EmitCXXMemberCall(DD, SourceLocation(), Callee, ReturnValueSlot(), This,
+                    VTT, 0, 0);
 }
 
 namespace {
@@ -1760,7 +1753,7 @@ void CodeGenFunction::EmitForwardingCallToLambda(const CXXRecordDecl *lambda,
   DeclarationName operatorName
     = getContext().DeclarationNames.getCXXOperatorName(OO_Call);
   CXXMethodDecl *callOperator =
-    cast<CXXMethodDecl>(*lambda->lookup(operatorName).first);
+    cast<CXXMethodDecl>(lambda->lookup(operatorName).front());
 
   // Get the address of the call operator.
   const CGFunctionInfo &calleeFnInfo =
@@ -1790,6 +1783,8 @@ void CodeGenFunction::EmitForwardingCallToLambda(const CXXRecordDecl *lambda,
   // If necessary, copy the returned value into the slot.
   if (!resultType->isVoidType() && returnSlot.isNull())
     EmitReturnOfRValue(RV, resultType);
+  else
+    EmitBranchThroughCleanup(ReturnBlock);
 }
 
 void CodeGenFunction::EmitLambdaBlockInvokeBody() {

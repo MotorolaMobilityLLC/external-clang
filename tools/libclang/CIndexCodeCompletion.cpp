@@ -13,16 +13,15 @@
 //===----------------------------------------------------------------------===//
 
 #include "CIndexer.h"
-#include "CXTranslationUnit.h"
-#include "CXString.h"
+#include "CIndexDiagnostic.h"
 #include "CXCursor.h"
 #include "CXString.h"
-#include "CIndexDiagnostic.h"
-#include "clang/AST/Type.h"
+#include "CXTranslationUnit.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
-#include "clang/Basic/SourceManager.h"
+#include "clang/AST/Type.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -32,11 +31,11 @@
 #include "llvm/Support/Atomic.h"
 #include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/Program.h"
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 
 
 #ifdef UDP_CODE_COMPLETION_LOGGER
@@ -223,8 +222,6 @@ clang_getCompletionParent(CXCompletionString completion_string,
   if (!CCStr)
     return createCXString((const char *)0);
   
-  if (kind)
-    *kind = CCStr->getParentContextKind();
   return createCXString(CCStr->getParentContextName(), /*DupString=*/false);
 }
 
@@ -238,7 +235,8 @@ clang_getCompletionBriefComment(CXCompletionString completion_string) {
   return createCXString(CCStr->getBriefComment(), /*DupString=*/false);
 }
 
-  
+namespace {
+
 /// \brief The CXCodeCompleteResults structure we allocate internally;
 /// the client only sees the initial CXCodeCompleteResults structure.
 struct AllocatedCXCodeCompleteResults : public CXCodeCompleteResults {
@@ -248,6 +246,8 @@ struct AllocatedCXCodeCompleteResults : public CXCodeCompleteResults {
   /// \brief Diagnostics produced while performing code completion.
   SmallVector<StoredDiagnostic, 8> Diagnostics;
 
+  IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts;
+  
   /// \brief Diag object
   IntrusiveRefCntPtr<DiagnosticsEngine> Diag;
   
@@ -298,6 +298,8 @@ struct AllocatedCXCodeCompleteResults : public CXCodeCompleteResults {
   std::string Selector;
 };
 
+} // end anonymous namespace
+
 /// \brief Tracks the number of code-completion result objects that are 
 /// currently active.
 ///
@@ -307,8 +309,10 @@ static llvm::sys::cas_flag CodeCompletionResultObjects;
 AllocatedCXCodeCompleteResults::AllocatedCXCodeCompleteResults(
                                       const FileSystemOptions& FileSystemOpts)
   : CXCodeCompleteResults(),
+    DiagOpts(new DiagnosticOptions),
     Diag(new DiagnosticsEngine(
-                   IntrusiveRefCntPtr<DiagnosticIDs>(new DiagnosticIDs))),
+                   IntrusiveRefCntPtr<DiagnosticIDs>(new DiagnosticIDs),
+                   &*DiagOpts)),
     FileSystemOpts(FileSystemOpts),
     FileMgr(new FileManager(FileSystemOpts)),
     SourceMgr(new SourceManager(*Diag, *FileMgr)),
@@ -820,6 +824,12 @@ CXCodeCompleteResults *clang_codeCompleteAt(CXTranslationUnit TU,
   CodeCompleteAtInfo CCAI = { TU, complete_filename, complete_line,
                               complete_column, unsaved_files, num_unsaved_files,
                               options, 0 };
+
+  if (getenv("LIBCLANG_NOTHREADS")) {
+    clang_codeCompleteAt_Impl(&CCAI);
+    return CCAI.result;
+  }
+
   llvm::CrashRecoveryContext CRC;
 
   if (!RunSafely(CRC, clang_codeCompleteAt_Impl, &CCAI)) {

@@ -13,9 +13,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Rewrite/Frontend/Rewriters.h"
-#include "clang/Lex/Preprocessor.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/PreprocessorOutputOptions.h"
+#include "clang/Lex/Preprocessor.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
@@ -57,10 +57,11 @@ private:
                                   const Token &IncludeTok,
                                   StringRef FileName,
                                   bool IsAngled,
+                                  CharSourceRange FilenameRange,
                                   const FileEntry *File,
-                                  SourceLocation EndLoc,
                                   StringRef SearchPath,
-                                  StringRef RelativePath);
+                                  StringRef RelativePath,
+                                  const Module *Imported);
   void WriteLineInfo(const char *Filename, int Line,
                      SrcMgr::CharacteristicKind FileType,
                      StringRef EOL, StringRef Extra = StringRef());
@@ -152,10 +153,11 @@ void InclusionRewriter::InclusionDirective(SourceLocation HashLoc,
                                            const Token &/*IncludeTok*/,
                                            StringRef /*FileName*/,
                                            bool /*IsAngled*/,
+                                           CharSourceRange /*FilenameRange*/,
                                            const FileEntry * /*File*/,
-                                           SourceLocation /*EndLoc*/,
                                            StringRef /*SearchPath*/,
-                                           StringRef /*RelativePath*/) {
+                                           StringRef /*RelativePath*/,
+                                           const Module * /*Imported*/) {
   assert(LastInsertedFileChange == FileChanges.end() && "Another inclusion "
     "directive was found before the previous one was processed");
   std::pair<FileChangeMap::iterator, bool> p = FileChanges.insert(

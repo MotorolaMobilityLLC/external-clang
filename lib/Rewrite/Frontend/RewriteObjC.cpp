@@ -12,20 +12,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Rewrite/Frontend/ASTConsumers.h"
-#include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/AST/AST.h"
 #include "clang/AST/ASTConsumer.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/ParentMap.h"
-#include "clang/Basic/SourceManager.h"
-#include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/IdentifierTable.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Rewrite/Core/Rewriter.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/OwningPtr.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/OwningPtr.h"
-#include "llvm/ADT/DenseSet.h"
 
 using namespace clang;
 using llvm::utostr;
@@ -2264,11 +2265,10 @@ void RewriteObjC::SynthSelGetUidFunctionDecl() {
   QualType getFuncType =
     getSimpleFunctionType(Context->getObjCSelType(), &ArgTys[0], ArgTys.size());
   SelGetUidFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                           SourceLocation(),
-                                           SourceLocation(),
-                                           SelGetUidIdent, getFuncType, 0,
-                                           SC_Extern,
-                                           SC_None, false);
+                                               SourceLocation(),
+                                               SourceLocation(),
+                                               SelGetUidIdent, getFuncType, 0,
+                                               SC_Extern, SC_None);
 }
 
 void RewriteObjC::RewriteFunctionDecl(FunctionDecl *FD) {
@@ -2361,11 +2361,10 @@ void RewriteObjC::SynthSuperContructorFunctionDecl() {
   QualType msgSendType = getSimpleFunctionType(Context->getObjCIdType(),
                                                &ArgTys[0], ArgTys.size());
   SuperContructorFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                         SourceLocation(),
-                                         SourceLocation(),
-                                         msgSendIdent, msgSendType, 0,
-                                         SC_Extern,
-                                         SC_None, false);
+                                                     SourceLocation(),
+                                                     SourceLocation(),
+                                                     msgSendIdent, msgSendType,
+                                                     0, SC_Extern, SC_None);
 }
 
 // SynthMsgSendFunctionDecl - id objc_msgSend(id self, SEL op, ...);
@@ -2382,11 +2381,10 @@ void RewriteObjC::SynthMsgSendFunctionDecl() {
                                                &ArgTys[0], ArgTys.size(),
                                                true /*isVariadic*/);
   MsgSendFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                         SourceLocation(),
-                                         SourceLocation(),
-                                         msgSendIdent, msgSendType, 0,
-                                         SC_Extern,
-                                         SC_None, false);
+                                             SourceLocation(),
+                                             SourceLocation(),
+                                             msgSendIdent, msgSendType, 0,
+                                             SC_Extern, SC_None);
 }
 
 // SynthMsgSendSuperFunctionDecl - id objc_msgSendSuper(struct objc_super *, SEL op, ...);
@@ -2406,11 +2404,10 @@ void RewriteObjC::SynthMsgSendSuperFunctionDecl() {
                                                &ArgTys[0], ArgTys.size(),
                                                true /*isVariadic*/);
   MsgSendSuperFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                              SourceLocation(),
-                                              SourceLocation(),
-                                              msgSendIdent, msgSendType, 0,
-                                              SC_Extern,
-                                              SC_None, false);
+                                                  SourceLocation(),
+                                                  SourceLocation(),
+                                                  msgSendIdent, msgSendType, 0,
+                                                  SC_Extern, SC_None);
 }
 
 // SynthMsgSendStretFunctionDecl - id objc_msgSend_stret(id self, SEL op, ...);
@@ -2427,11 +2424,10 @@ void RewriteObjC::SynthMsgSendStretFunctionDecl() {
                                                &ArgTys[0], ArgTys.size(),
                                                true /*isVariadic*/);
   MsgSendStretFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                         SourceLocation(),
-                                         SourceLocation(),
-                                         msgSendIdent, msgSendType, 0,
-                                         SC_Extern,
-                                         SC_None, false);
+                                                  SourceLocation(),
+                                                  SourceLocation(),
+                                                  msgSendIdent, msgSendType, 0,
+                                                  SC_Extern, SC_None);
 }
 
 // SynthMsgSendSuperStretFunctionDecl -
@@ -2455,9 +2451,9 @@ void RewriteObjC::SynthMsgSendSuperStretFunctionDecl() {
   MsgSendSuperStretFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
                                                        SourceLocation(),
                                                        SourceLocation(),
-                                              msgSendIdent, msgSendType, 0,
-                                              SC_Extern,
-                                              SC_None, false);
+                                                       msgSendIdent,
+                                                       msgSendType, 0,
+                                                       SC_Extern, SC_None);
 }
 
 // SynthMsgSendFpretFunctionDecl - double objc_msgSend_fpret(id self, SEL op, ...);
@@ -2474,11 +2470,10 @@ void RewriteObjC::SynthMsgSendFpretFunctionDecl() {
                                                &ArgTys[0], ArgTys.size(),
                                                true /*isVariadic*/);
   MsgSendFpretFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                              SourceLocation(),
-                                              SourceLocation(),
-                                              msgSendIdent, msgSendType, 0,
-                                              SC_Extern,
-                                              SC_None, false);
+                                                  SourceLocation(),
+                                                  SourceLocation(),
+                                                  msgSendIdent, msgSendType, 0,
+                                                  SC_Extern, SC_None);
 }
 
 // SynthGetClassFunctionDecl - id objc_getClass(const char *name);
@@ -2489,11 +2484,10 @@ void RewriteObjC::SynthGetClassFunctionDecl() {
   QualType getClassType = getSimpleFunctionType(Context->getObjCIdType(),
                                                 &ArgTys[0], ArgTys.size());
   GetClassFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                          SourceLocation(),
-                                          SourceLocation(),
-                                          getClassIdent, getClassType, 0,
-                                          SC_Extern,
-                                          SC_None, false);
+                                              SourceLocation(),
+                                              SourceLocation(),
+                                              getClassIdent, getClassType, 0,
+                                              SC_Extern, SC_None);
 }
 
 // SynthGetSuperClassFunctionDecl - Class class_getSuperclass(Class cls);
@@ -2509,9 +2503,7 @@ void RewriteObjC::SynthGetSuperClassFunctionDecl() {
                                                    SourceLocation(),
                                                    getSuperClassIdent,
                                                    getClassType, 0,
-                                                   SC_Extern,
-                                                   SC_None,
-                                                   false);
+                                                   SC_Extern, SC_None);
 }
 
 // SynthGetMetaClassFunctionDecl - id objc_getMetaClass(const char *name);
@@ -2522,11 +2514,10 @@ void RewriteObjC::SynthGetMetaClassFunctionDecl() {
   QualType getClassType = getSimpleFunctionType(Context->getObjCIdType(),
                                                 &ArgTys[0], ArgTys.size());
   GetMetaClassFunctionDecl = FunctionDecl::Create(*Context, TUDecl,
-                                              SourceLocation(),
-                                              SourceLocation(),
-                                              getClassIdent, getClassType, 0,
-                                              SC_Extern,
-                                              SC_None, false);
+                                                  SourceLocation(),
+                                                  SourceLocation(),
+                                                  getClassIdent, getClassType,
+                                                  0, SC_Extern, SC_None);
 }
 
 Stmt *RewriteObjC::RewriteObjCStringLiteral(ObjCStringLiteral *Exp) {
@@ -3078,7 +3069,8 @@ Stmt *RewriteObjC::SynthMessageExpr(ObjCMessageExpr *Exp,
                                                    SourceLocation());
     BinaryOperator *lessThanExpr = 
       new (Context) BinaryOperator(sizeofExpr, limit, BO_LE, Context->IntTy,
-                                   VK_RValue, OK_Ordinary, SourceLocation());
+                                   VK_RValue, OK_Ordinary, SourceLocation(),
+                                   false);
     // (sizeof(returnType) <= 8 ? objc_msgSend(...) : objc_msgSend_stret(...))
     ConditionalOperator *CondExpr =
       new (Context) ConditionalOperator(lessThanExpr,
@@ -4308,7 +4300,7 @@ void RewriteObjC::RewriteByRefVar(VarDecl *ND) {
   // Add void *__Block_byref_id_object_copy; 
   // void *__Block_byref_id_object_dispose; if needed.
   QualType Ty = ND->getType();
-  bool HasCopyAndDispose = Context->BlockRequiresCopying(Ty);
+  bool HasCopyAndDispose = Context->BlockRequiresCopying(Ty, ND);
   if (HasCopyAndDispose) {
     ByrefType += " void (*__Block_byref_id_object_copy)(void*, void*);\n";
     ByrefType += " void (*__Block_byref_id_object_dispose)(void*);\n";

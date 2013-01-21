@@ -15,10 +15,10 @@
 #define LLVM_CLANG_AST_DECLCONTEXTINTERNALS_H
 
 #include "clang/AST/Decl.h"
-#include "clang/AST/DeclarationName.h"
 #include "clang/AST/DeclCXX.h"
-#include "llvm/ADT/PointerUnion.h"
+#include "clang/AST/DeclarationName.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/SmallVector.h"
 #include <algorithm>
 
@@ -117,7 +117,7 @@ public:
     DeclsTy &Vector = *getAsVector();
 
     // Otherwise, we have a range result.
-    return DeclContext::lookup_result(&Vector[0], &Vector[0]+Vector.size());
+    return DeclContext::lookup_result(Vector.begin(), Vector.end());
   }
 
   /// HandleRedeclaration - If this is a redeclaration of an existing decl,

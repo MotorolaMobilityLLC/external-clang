@@ -8,11 +8,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/CommentSema.h"
-#include "clang/AST/CommentDiagnostic.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/CommentCommandTraits.h"
+#include "clang/AST/CommentDiagnostic.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Lex/Preprocessor.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 
 namespace clang {
@@ -23,9 +26,10 @@ namespace {
 } // unnamed namespace
 
 Sema::Sema(llvm::BumpPtrAllocator &Allocator, const SourceManager &SourceMgr,
-           DiagnosticsEngine &Diags, CommandTraits &Traits) :
+           DiagnosticsEngine &Diags, CommandTraits &Traits,
+           const Preprocessor *PP) :
     Allocator(Allocator), SourceMgr(SourceMgr), Diags(Diags), Traits(Traits),
-    ThisDeclInfo(NULL), BriefCommand(NULL), ReturnsCommand(NULL) {
+    PP(PP), ThisDeclInfo(NULL), BriefCommand(NULL), ReturnsCommand(NULL) {
 }
 
 void Sema::setDecl(const Decl *D) {
@@ -33,7 +37,7 @@ void Sema::setDecl(const Decl *D) {
     return;
 
   ThisDeclInfo = new (Allocator) DeclInfo;
-  ThisDeclInfo->ThisDecl = D;
+  ThisDeclInfo->CommentDecl = D;
   ThisDeclInfo->IsFilled = false;
 }
 
@@ -59,6 +63,7 @@ void Sema::actOnBlockCommandFinish(BlockCommandComment *Command,
   checkBlockCommandEmptyParagraph(Command);
   checkBlockCommandDuplicate(Command);
   checkReturnsCommand(Command);
+  checkDeprecatedCommand(Command);
 }
 
 ParamCommandComment *Sema::actOnParamCommandStart(SourceLocation LocBegin,
@@ -272,9 +277,15 @@ InlineCommandComment *Sema::actOnInlineCommand(SourceLocation CommandLocBegin,
 
 InlineContentComment *Sema::actOnUnknownCommand(SourceLocation LocBegin,
                                                 SourceLocation LocEnd,
-                                                StringRef Name) {
+                                                StringRef CommandName) {
+  unsigned CommandID = Traits.registerUnknownCommand(CommandName)->getID();
+  return actOnUnknownCommand(LocBegin, LocEnd, CommandID);
+}
+
+InlineContentComment *Sema::actOnUnknownCommand(SourceLocation LocBegin,
+                                                SourceLocation LocEnd,
+                                                unsigned CommandID) {
   ArrayRef<InlineCommandComment::Argument> Args;
-  unsigned CommandID = Traits.registerUnknownCommand(Name)->getID();
   return new (Allocator) InlineCommandComment(
                                   LocBegin, LocEnd, CommandID,
                                   InlineCommandComment::RenderNormal,
@@ -409,6 +420,9 @@ FullComment *Sema::actOnFullComment(
 }
 
 void Sema::checkBlockCommandEmptyParagraph(BlockCommandComment *Command) {
+  if (Traits.getCommandInfo(Command->getCommandID())->IsEmptyParagraphAllowed)
+    return;
+
   ParagraphComment *Paragraph = Command->getParagraph();
   if (Paragraph->isWhitespace()) {
     SourceLocation DiagLoc;
@@ -428,7 +442,7 @@ void Sema::checkReturnsCommand(const BlockCommandComment *Command) {
   if (isFunctionDecl()) {
     if (ThisDeclInfo->ResultType->isVoidType()) {
       unsigned DiagKind;
-      switch (ThisDeclInfo->ThisDecl->getKind()) {
+      switch (ThisDeclInfo->CommentDecl->getKind()) {
       default:
         if (ThisDeclInfo->IsObjCMethod)
           DiagKind = 3;
@@ -491,6 +505,54 @@ void Sema::checkBlockCommandDuplicate(const BlockCommandComment *Command) {
         << CommandName;
 }
 
+void Sema::checkDeprecatedCommand(const BlockCommandComment *Command) {
+  if (!Traits.getCommandInfo(Command->getCommandID())->IsDeprecatedCommand)
+    return;
+
+  const Decl *D = ThisDeclInfo->CommentDecl;
+  if (!D)
+    return;
+
+  if (D->hasAttr<DeprecatedAttr>() ||
+      D->hasAttr<AvailabilityAttr>() ||
+      D->hasAttr<UnavailableAttr>())
+    return;
+
+  Diag(Command->getLocation(),
+       diag::warn_doc_deprecated_not_sync)
+    << Command->getSourceRange();
+
+  // Try to emit a fixit with a deprecation attribute.
+  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+    // Don't emit a Fix-It for non-member function definitions.  GCC does not
+    // accept attributes on them.
+    const DeclContext *Ctx = FD->getDeclContext();
+    if ((!Ctx || !Ctx->isRecord()) &&
+        FD->doesThisDeclarationHaveABody())
+      return;
+
+    StringRef AttributeSpelling = "__attribute__((deprecated))";
+    if (PP) {
+      TokenValue Tokens[] = {
+        tok::kw___attribute, tok::l_paren, tok::l_paren,
+        PP->getIdentifierInfo("deprecated"),
+        tok::r_paren, tok::r_paren
+      };
+      StringRef MacroName = PP->getLastMacroWithSpelling(FD->getLocation(),
+                                                         Tokens);
+      if (!MacroName.empty())
+        AttributeSpelling = MacroName;
+    }
+
+    SmallString<64> TextToInsert(" ");
+    TextToInsert += AttributeSpelling;
+    Diag(FD->getLocEnd(),
+         diag::note_add_deprecation_attr)
+      << FixItHint::CreateInsertion(FD->getLocEnd().getLocWithOffset(1),
+                                    TextToInsert);
+  }
+}
+
 void Sema::resolveParamCommandIndexes(const FullComment *FC) {
   if (!isFunctionDecl()) {
     // We already warned that \\param commands are not attached to a function
@@ -513,7 +575,7 @@ void Sema::resolveParamCommandIndexes(const FullComment *FC) {
     ParamCommandComment *PCC = dyn_cast<ParamCommandComment>(*I);
     if (!PCC || !PCC->hasParamName())
       continue;
-    StringRef ParamName = PCC->getParamName();
+    StringRef ParamName = PCC->getParamNameAsWritten();
 
     // Check that referenced parameter name is in the function decl.
     const unsigned ResolvedParamIndex = resolveParmVarReference(ParamName,
@@ -548,7 +610,7 @@ void Sema::resolveParamCommandIndexes(const FullComment *FC) {
     const ParamCommandComment *PCC = UnresolvedParamCommands[i];
 
     SourceRange ArgRange = PCC->getParamNameRange();
-    StringRef ParamName = PCC->getParamName();
+    StringRef ParamName = PCC->getParamNameAsWritten();
     Diag(ArgRange.getBegin(), diag::warn_doc_param_not_found)
       << ParamName << ArgRange;
 

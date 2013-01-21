@@ -15,39 +15,83 @@
 #define LLVM_CLANG_AST_EXPR_H
 
 #include "clang/AST/APValue.h"
+#include "clang/AST/ASTVector.h"
 #include "clang/AST/Decl.h"
-#include "clang/AST/Stmt.h"
-#include "clang/AST/Type.h"
 #include "clang/AST/DeclAccessPair.h"
 #include "clang/AST/OperationKinds.h"
-#include "clang/AST/ASTVector.h"
+#include "clang/AST/Stmt.h"
 #include "clang/AST/TemplateBase.h"
-#include "clang/Basic/TargetInfo.h"
+#include "clang/AST/Type.h"
 #include "clang/Basic/TypeTraits.h"
-#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Compiler.h"
 #include <cctype>
 
 namespace clang {
-  class ASTContext;
   class APValue;
-  class Decl;
-  class IdentifierInfo;
-  class ParmVarDecl;
-  class NamedDecl;
-  class ValueDecl;
+  class ASTContext;
   class BlockDecl;
   class CXXBaseSpecifier;
-  class CXXOperatorCallExpr;
   class CXXMemberCallExpr;
+  class CXXOperatorCallExpr;
+  class CastExpr;
+  class Decl;
+  class IdentifierInfo;
+  class MaterializeTemporaryExpr;
+  class NamedDecl;
   class ObjCPropertyRefExpr;
   class OpaqueValueExpr;
+  class ParmVarDecl;
+  class TargetInfo;
+  class ValueDecl;
 
 /// \brief A simple array of base specifiers.
 typedef SmallVector<CXXBaseSpecifier*, 4> CXXCastPath;
+
+/// \brief An adjustment to be made to the temporary created when emitting a
+/// reference binding, which accesses a particular subobject of that temporary.
+struct SubobjectAdjustment {
+  enum {
+    DerivedToBaseAdjustment,
+    FieldAdjustment,
+    MemberPointerAdjustment
+  } Kind;
+
+   union {
+    struct {
+      const CastExpr *BasePath;
+      const CXXRecordDecl *DerivedClass;
+    } DerivedToBase;
+
+    FieldDecl *Field;
+
+    struct {
+      const MemberPointerType *MPT;
+      Expr *RHS;
+    } Ptr;
+  };
+
+  SubobjectAdjustment(const CastExpr *BasePath,
+                      const CXXRecordDecl *DerivedClass)
+    : Kind(DerivedToBaseAdjustment) {
+    DerivedToBase.BasePath = BasePath;
+    DerivedToBase.DerivedClass = DerivedClass;
+  }
+
+  SubobjectAdjustment(FieldDecl *Field)
+    : Kind(FieldAdjustment) {
+    this->Field = Field;
+  }
+
+  SubobjectAdjustment(const MemberPointerType *MPT, Expr *RHS)
+    : Kind(MemberPointerAdjustment) {
+    this->Ptr.MPT = MPT;
+    this->Ptr.RHS = RHS;
+  }
+};
 
 /// Expr - This represents one expression.  Note that Expr's are subclasses of
 /// Stmt.  This allows an expression to be transparently used any place a Stmt
@@ -152,7 +196,7 @@ public:
   }
 
   /// \brief Whether this expression contains an unexpanded parameter
-  /// pack (for C++0x variadic templates).
+  /// pack (for C++11 variadic templates).
   ///
   /// Given the following function template:
   ///
@@ -194,7 +238,7 @@ public:
   /// result of an r-value expression is a value detached from any
   /// specific storage.
   ///
-  /// C++0x divides the concept of "r-value" into pure r-values
+  /// C++11 divides the concept of "r-value" into pure r-values
   /// ("pr-values") and so-called expiring values ("x-values"), which
   /// identify specific objects that can be safely cannibalized for
   /// their resources.  This is an unfortunate abuse of terminology on
@@ -250,7 +294,7 @@ public:
   isModifiableLvalueResult isModifiableLvalue(ASTContext &Ctx,
                                               SourceLocation *Loc = 0) const;
 
-  /// \brief The return type of classify(). Represents the C++0x expression
+  /// \brief The return type of classify(). Represents the C++11 expression
   ///        taxonomy.
   class Classification {
   public:
@@ -313,10 +357,10 @@ public:
     }
 
   };
-  /// \brief Classify - Classify this expression according to the C++0x
+  /// \brief Classify - Classify this expression according to the C++11
   ///        expression taxonomy.
   ///
-  /// C++0x defines ([basic.lval]) a new taxonomy of expressions to replace the
+  /// C++11 defines ([basic.lval]) a new taxonomy of expressions to replace the
   /// old lvalue vs rvalue. This function determines the type of expression this
   /// is. There are three expression types:
   /// - lvalues are classical lvalues as in C++03.
@@ -330,7 +374,7 @@ public:
   }
 
   /// \brief ClassifyModifiable - Classify this expression according to the
-  ///        C++0x expression taxonomy, and see if it is valid on the left side
+  ///        C++11 expression taxonomy, and see if it is valid on the left side
   ///        of an assignment.
   ///
   /// This function extends classify in that it also tests whether the
@@ -391,6 +435,9 @@ public:
   /// \brief If this expression is an l-value for an Objective C
   /// property, find the underlying property reference expression.
   const ObjCPropertyRefExpr *getObjCProperty() const;
+
+  /// \brief Check if this expression is the ObjC 'self' implicit parameter.
+  bool isObjCSelfExpr() const;
 
   /// \brief Returns whether this expression refers to a vector element.
   bool refersToVectorElement() const;
@@ -551,8 +598,8 @@ public:
     /// \brief Expression is a Null pointer constant built from a literal zero.
     NPCK_ZeroLiteral,
 
-    /// \brief Expression is a C++0X nullptr.
-    NPCK_CXX0X_nullptr,
+    /// \brief Expression is a C++11 nullptr.
+    NPCK_CXX11_nullptr,
 
     /// \brief Expression is a GNU-style __null constant.
     NPCK_GNUNull
@@ -692,11 +739,22 @@ public:
   /// behavior if the object isn't dynamically of the derived type.
   const CXXRecordDecl *getBestDynamicClassType() const;
 
+  /// Walk outwards from an expression we want to bind a reference to and
+  /// find the expression whose lifetime needs to be extended. Record
+  /// the adjustments needed along the path.
+  const Expr *
+  skipRValueSubobjectAdjustments(
+                       SmallVectorImpl<SubobjectAdjustment> &Adjustments) const;
+
+  /// Skip irrelevant expressions to find what should be materialize for
+  /// binding with a reference.
+  const Expr *
+  findMaterializedTemporary(const MaterializeTemporaryExpr *&MTE) const;
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() >= firstExprConstant &&
            T->getStmtClass() <= lastExprConstant;
   }
-  static bool classof(const Expr *) { return true; }
 };
 
 
@@ -738,9 +796,11 @@ public:
   /// \brief Retrieve the location of this expression.
   SourceLocation getLocation() const { return Loc; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    if (SourceExpr) return SourceExpr->getSourceRange();
-    return Loc;
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return SourceExpr ? SourceExpr->getLocStart() : Loc;
+  }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return SourceExpr ? SourceExpr->getLocEnd() : Loc;
   }
   SourceLocation getExprLoc() const LLVM_READONLY {
     if (SourceExpr) return SourceExpr->getExprLoc();
@@ -762,7 +822,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == OpaqueValueExprClass;
   }
-  static bool classof(const OpaqueValueExpr *) { return true; }
 };
 
 /// \brief A reference to a declared variable, function, enum, etc.
@@ -897,7 +956,6 @@ public:
 
   SourceLocation getLocation() const { return Loc; }
   void setLocation(SourceLocation L) { Loc = L; }
-  SourceRange getSourceRange() const LLVM_READONLY;
   SourceLocation getLocStart() const LLVM_READONLY;
   SourceLocation getLocEnd() const LLVM_READONLY;
 
@@ -1059,7 +1117,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == DeclRefExprClass;
   }
-  static bool classof(const DeclRefExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -1104,12 +1161,12 @@ public:
 
   static std::string ComputeName(IdentType IT, const Decl *CurrentDecl);
 
-  SourceRange getSourceRange() const LLVM_READONLY { return SourceRange(Loc); }
+  SourceLocation getLocStart() const LLVM_READONLY { return Loc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Loc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == PredefinedExprClass;
   }
-  static bool classof(const PredefinedExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -1132,8 +1189,8 @@ class APNumericStorage {
 
   bool hasAllocation() const { return llvm::APInt::getNumWords(BitWidth) > 1; }
 
-  APNumericStorage(const APNumericStorage&); // do not implement
-  APNumericStorage& operator=(const APNumericStorage&); // do not implement
+  APNumericStorage(const APNumericStorage &) LLVM_DELETED_FUNCTION;
+  void operator=(const APNumericStorage &) LLVM_DELETED_FUNCTION;
 
 protected:
   APNumericStorage() : VAL(0), BitWidth(0) { }
@@ -1186,7 +1243,8 @@ public:
   /// \brief Returns a new empty integer literal.
   static IntegerLiteral *Create(ASTContext &C, EmptyShell Empty);
 
-  SourceRange getSourceRange() const LLVM_READONLY { return SourceRange(Loc); }
+  SourceLocation getLocStart() const LLVM_READONLY { return Loc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Loc; }
 
   /// \brief Retrieve the location of the literal.
   SourceLocation getLocation() const { return Loc; }
@@ -1196,7 +1254,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == IntegerLiteralClass;
   }
-  static bool classof(const IntegerLiteral *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -1232,7 +1289,8 @@ public:
     return static_cast<CharacterKind>(CharacterLiteralBits.Kind);
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY { return SourceRange(Loc); }
+  SourceLocation getLocStart() const LLVM_READONLY { return Loc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Loc; }
 
   unsigned getValue() const { return Value; }
 
@@ -1243,7 +1301,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == CharacterLiteralClass;
   }
-  static bool classof(const CharacterLiteral *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -1281,12 +1338,12 @@ public:
   SourceLocation getLocation() const { return Loc; }
   void setLocation(SourceLocation L) { Loc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY { return SourceRange(Loc); }
+  SourceLocation getLocStart() const LLVM_READONLY { return Loc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Loc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == FloatingLiteralClass;
   }
-  static bool classof(const FloatingLiteral *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -1313,11 +1370,12 @@ public:
   Expr *getSubExpr() { return cast<Expr>(Val); }
   void setSubExpr(Expr *E) { Val = E; }
 
-  SourceRange getSourceRange() const LLVM_READONLY { return Val->getSourceRange(); }
+  SourceLocation getLocStart() const LLVM_READONLY { return Val->getLocStart(); }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Val->getLocEnd(); }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ImaginaryLiteralClass;
   }
-  static bool classof(const ImaginaryLiteral *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Val, &Val+1); }
@@ -1473,13 +1531,14 @@ public:
   tokloc_iterator tokloc_begin() const { return TokLocs; }
   tokloc_iterator tokloc_end() const { return TokLocs+NumConcatenated; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(TokLocs[0], TokLocs[NumConcatenated-1]);
+  SourceLocation getLocStart() const LLVM_READONLY { return TokLocs[0]; }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return TokLocs[NumConcatenated - 1];
   }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == StringLiteralClass;
   }
-  static bool classof(const StringLiteral *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -1507,7 +1566,8 @@ public:
   Expr *getSubExpr() { return cast<Expr>(Val); }
   void setSubExpr(Expr *E) { Val = E; }
 
-  SourceRange getSourceRange() const LLVM_READONLY { return SourceRange(L, R); }
+  SourceLocation getLocStart() const LLVM_READONLY { return L; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return R; }
 
   /// \brief Get the location of the left parentheses '('.
   SourceLocation getLParen() const { return L; }
@@ -1520,7 +1580,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ParenExprClass;
   }
-  static bool classof(const ParenExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Val, &Val+1); }
@@ -1610,7 +1669,7 @@ public:
 
   /// getOpcodeStr - Turn an Opcode enum value into the punctuation char it
   /// corresponds to, e.g. "sizeof" or "[pre]++"
-  static const char *getOpcodeStr(Opcode Op);
+  static StringRef getOpcodeStr(Opcode Op);
 
   /// \brief Retrieve the unary opcode that corresponds to the given
   /// overloaded operator.
@@ -1620,18 +1679,17 @@ public:
   /// the given unary opcode.
   static OverloadedOperatorKind getOverloadedOperator(Opcode Opc);
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    if (isPostfix())
-      return SourceRange(Val->getLocStart(), Loc);
-    else
-      return SourceRange(Loc, Val->getLocEnd());
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return isPostfix() ? Val->getLocStart() : Loc;
+  }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return isPostfix() ? Loc : Val->getLocEnd();
   }
   SourceLocation getExprLoc() const LLVM_READONLY { return Loc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == UnaryOperatorClass;
   }
-  static bool classof(const UnaryOperator *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Val, &Val+1); }
@@ -1743,6 +1801,8 @@ public:
     /// contains the location of the period (if there is one) and the
     /// identifier.
     SourceRange getSourceRange() const LLVM_READONLY { return Range; }
+    SourceLocation getLocStart() const LLVM_READONLY { return Range.getBegin(); }
+    SourceLocation getLocEnd() const LLVM_READONLY { return Range.getEnd(); }
   };
 
 private:
@@ -1822,15 +1882,12 @@ public:
     return NumExprs;
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(OperatorLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return OperatorLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == OffsetOfExprClass;
   }
-
-  static bool classof(const OffsetOfExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -1928,14 +1985,12 @@ public:
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(OpLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return OpLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == UnaryExprOrTypeTraitExprClass;
   }
-  static bool classof(const UnaryExprOrTypeTraitExpr *) { return true; }
 
   // Iterators
   child_range children();
@@ -2003,19 +2058,21 @@ public:
     return cast<Expr>(getRHS()->getType()->isIntegerType() ? getRHS():getLHS());
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getLHS()->getLocStart(), RBracketLoc);
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return getLHS()->getLocStart();
   }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RBracketLoc; }
 
   SourceLocation getRBracketLoc() const { return RBracketLoc; }
   void setRBracketLoc(SourceLocation L) { RBracketLoc = L; }
 
-  SourceLocation getExprLoc() const LLVM_READONLY { return getBase()->getExprLoc(); }
+  SourceLocation getExprLoc() const LLVM_READONLY {
+    return getBase()->getExprLoc();
+  }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ArraySubscriptExprClass;
   }
-  static bool classof(const ArraySubscriptExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -2143,7 +2200,6 @@ public:
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY;
   SourceLocation getLocStart() const LLVM_READONLY;
   SourceLocation getLocEnd() const LLVM_READONLY;
 
@@ -2151,7 +2207,6 @@ public:
     return T->getStmtClass() >= firstCallExprConstant &&
            T->getStmtClass() <= lastCallExprConstant;
   }
-  static bool classof(const CallExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -2412,7 +2467,6 @@ public:
   SourceLocation getMemberLoc() const { return MemberLoc; }
   void setMemberLoc(SourceLocation L) { MemberLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY;
   SourceLocation getLocStart() const LLVM_READONLY;
   SourceLocation getLocEnd() const LLVM_READONLY;
 
@@ -2438,7 +2492,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == MemberExprClass;
   }
-  static bool classof(const MemberExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Base, &Base+1); }
@@ -2492,19 +2545,24 @@ public:
     TInfoAndScope.setPointer(tinfo);
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
+  SourceLocation getLocStart() const LLVM_READONLY {
     // FIXME: Init should never be null.
     if (!Init)
-      return SourceRange();
+      return SourceLocation();
     if (LParenLoc.isInvalid())
-      return Init->getSourceRange();
-    return SourceRange(LParenLoc, Init->getLocEnd());
+      return Init->getLocStart();
+    return LParenLoc;
+  }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    // FIXME: Init should never be null.
+    if (!Init)
+      return SourceLocation();
+    return Init->getLocEnd();
   }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == CompoundLiteralExprClass;
   }
-  static bool classof(const CompoundLiteralExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Init, &Init+1); }
@@ -2595,7 +2653,6 @@ public:
     return T->getStmtClass() >= firstCastExprConstant &&
            T->getStmtClass() <= lastCastExprConstant;
   }
-  static bool classof(const CastExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Op, &Op+1); }
@@ -2646,9 +2703,6 @@ public:
 
   static ImplicitCastExpr *CreateEmpty(ASTContext &Context, unsigned PathSize);
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return getSubExpr()->getSourceRange();
-  }
   SourceLocation getLocStart() const LLVM_READONLY {
     return getSubExpr()->getLocStart();
   }
@@ -2659,7 +2713,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ImplicitCastExprClass;
   }
-  static bool classof(const ImplicitCastExpr *) { return true; }
 };
 
 inline Expr *Expr::IgnoreImpCasts() {
@@ -2714,7 +2767,6 @@ public:
      return T->getStmtClass() >= firstExplicitCastExprConstant &&
             T->getStmtClass() <= lastExplicitCastExprConstant;
   }
-  static bool classof(const ExplicitCastExpr *) { return true; }
 };
 
 /// CStyleCastExpr - An explicit cast in C (C99 6.5.4) or a C-style
@@ -2749,13 +2801,14 @@ public:
   SourceLocation getRParenLoc() const { return RPLoc; }
   void setRParenLoc(SourceLocation L) { RPLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(LPLoc, getSubExpr()->getSourceRange().getEnd());
+  SourceLocation getLocStart() const LLVM_READONLY { return LPLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return getSubExpr()->getLocEnd();
   }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == CStyleCastExprClass;
   }
-  static bool classof(const CStyleCastExpr *) { return true; }
 };
 
 /// \brief A builtin binary operation expression such as "x + y" or "x <= y".
@@ -2782,6 +2835,12 @@ public:
 
 private:
   unsigned Opc : 6;
+
+  // Records the FP_CONTRACT pragma status at the point that this binary
+  // operator was parsed. This bit is only meaningful for operations on
+  // floating point types. For all other types it should default to
+  // false.
+  unsigned FPContractable : 1;
   SourceLocation OpLoc;
 
   enum { LHS, RHS, END_EXPR };
@@ -2790,7 +2849,7 @@ public:
 
   BinaryOperator(Expr *lhs, Expr *rhs, Opcode opc, QualType ResTy,
                  ExprValueKind VK, ExprObjectKind OK,
-                 SourceLocation opLoc)
+                 SourceLocation opLoc, bool fpContractable)
     : Expr(BinaryOperatorClass, ResTy, VK, OK,
            lhs->isTypeDependent() || rhs->isTypeDependent(),
            lhs->isValueDependent() || rhs->isValueDependent(),
@@ -2798,7 +2857,7 @@ public:
             rhs->isInstantiationDependent()),
            (lhs->containsUnexpandedParameterPack() ||
             rhs->containsUnexpandedParameterPack())),
-      Opc(opc), OpLoc(opLoc) {
+      Opc(opc), FPContractable(fpContractable), OpLoc(opLoc) {
     SubExprs[LHS] = lhs;
     SubExprs[RHS] = rhs;
     assert(!isCompoundAssignmentOp() &&
@@ -2821,15 +2880,18 @@ public:
   Expr *getRHS() const { return cast<Expr>(SubExprs[RHS]); }
   void setRHS(Expr *E) { SubExprs[RHS] = E; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getLHS()->getLocStart(), getRHS()->getLocEnd());
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return getLHS()->getLocStart();
+  }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return getRHS()->getLocEnd();
   }
 
   /// getOpcodeStr - Turn an Opcode enum value into the punctuation char it
   /// corresponds to, e.g. "<<=".
-  static const char *getOpcodeStr(Opcode Op);
+  static StringRef getOpcodeStr(Opcode Op);
 
-  const char *getOpcodeStr() const { return getOpcodeStr(getOpcode()); }
+  StringRef getOpcodeStr() const { return getOpcodeStr(getOpcode()); }
 
   /// \brief Retrieve the binary opcode that corresponds to the given
   /// overloaded operator.
@@ -2892,17 +2954,24 @@ public:
     return S->getStmtClass() >= firstBinaryOperatorConstant &&
            S->getStmtClass() <= lastBinaryOperatorConstant;
   }
-  static bool classof(const BinaryOperator *) { return true; }
 
   // Iterators
   child_range children() {
     return child_range(&SubExprs[0], &SubExprs[0]+END_EXPR);
   }
 
+  // Set the FP contractability status of this operator. Only meaningful for
+  // operations on floating point types.
+  void setFPContractable(bool FPC) { FPContractable = FPC; }
+
+  // Get the FP contractability status of this operator. Only meaningful for
+  // operations on floating point types.
+  bool isFPContractable() const { return FPContractable; }
+
 protected:
   BinaryOperator(Expr *lhs, Expr *rhs, Opcode opc, QualType ResTy,
                  ExprValueKind VK, ExprObjectKind OK,
-                 SourceLocation opLoc, bool dead)
+                 SourceLocation opLoc, bool fpContractable, bool dead2)
     : Expr(CompoundAssignOperatorClass, ResTy, VK, OK,
            lhs->isTypeDependent() || rhs->isTypeDependent(),
            lhs->isValueDependent() || rhs->isValueDependent(),
@@ -2910,7 +2979,7 @@ protected:
             rhs->isInstantiationDependent()),
            (lhs->containsUnexpandedParameterPack() ||
             rhs->containsUnexpandedParameterPack())),
-      Opc(opc), OpLoc(opLoc) {
+      Opc(opc), FPContractable(fpContractable), OpLoc(opLoc) {
     SubExprs[LHS] = lhs;
     SubExprs[RHS] = rhs;
   }
@@ -2932,8 +3001,9 @@ public:
   CompoundAssignOperator(Expr *lhs, Expr *rhs, Opcode opc, QualType ResType,
                          ExprValueKind VK, ExprObjectKind OK,
                          QualType CompLHSType, QualType CompResultType,
-                         SourceLocation OpLoc)
-    : BinaryOperator(lhs, rhs, opc, ResType, VK, OK, OpLoc, true),
+                         SourceLocation OpLoc, bool fpContractable)
+    : BinaryOperator(lhs, rhs, opc, ResType, VK, OK, OpLoc, fpContractable,
+                     true),
       ComputationLHSType(CompLHSType),
       ComputationResultType(CompResultType) {
     assert(isCompoundAssignmentOp() &&
@@ -2953,7 +3023,6 @@ public:
   QualType getComputationResultType() const { return ComputationResultType; }
   void setComputationResultType(QualType T) { ComputationResultType = T; }
 
-  static bool classof(const CompoundAssignOperator *) { return true; }
   static bool classof(const Stmt *S) {
     return S->getStmtClass() == CompoundAssignOperatorClass;
   }
@@ -2999,7 +3068,6 @@ public:
     return T->getStmtClass() == ConditionalOperatorClass ||
            T->getStmtClass() == BinaryConditionalOperatorClass;
   }
-  static bool classof(const AbstractConditionalOperator *) { return true; }
 };
 
 /// ConditionalOperator - The ?: ternary operator.  The GNU "missing
@@ -3052,13 +3120,16 @@ public:
   Expr *getLHS() const { return cast<Expr>(SubExprs[LHS]); }
   Expr *getRHS() const { return cast<Expr>(SubExprs[RHS]); }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getCond()->getLocStart(), getRHS()->getLocEnd());
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return getCond()->getLocStart();
   }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return getRHS()->getLocEnd();
+  }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ConditionalOperatorClass;
   }
-  static bool classof(const ConditionalOperator *) { return true; }
 
   // Iterators
   child_range children() {
@@ -3134,13 +3205,16 @@ public:
     return cast<Expr>(SubExprs[RHS]);
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getCommon()->getLocStart(), getFalseExpr()->getLocEnd());
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return getCommon()->getLocStart();
   }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return getFalseExpr()->getLocEnd();
+  }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == BinaryConditionalOperatorClass;
   }
-  static bool classof(const BinaryConditionalOperator *) { return true; }
 
   // Iterators
   child_range children() {
@@ -3186,9 +3260,8 @@ public:
   SourceLocation getLabelLoc() const { return LabelLoc; }
   void setLabelLoc(SourceLocation L) { LabelLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(AmpAmpLoc, LabelLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return AmpAmpLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return LabelLoc; }
 
   LabelDecl *getLabel() const { return Label; }
   void setLabel(LabelDecl *L) { Label = L; }
@@ -3196,7 +3269,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == AddrLabelExprClass;
   }
-  static bool classof(const AddrLabelExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -3228,9 +3300,8 @@ public:
   const CompoundStmt *getSubStmt() const { return cast<CompoundStmt>(SubStmt); }
   void setSubStmt(CompoundStmt *S) { SubStmt = S; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(LParenLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return LParenLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
 
   SourceLocation getLParenLoc() const { return LParenLoc; }
   void setLParenLoc(SourceLocation L) { LParenLoc = L; }
@@ -3240,7 +3311,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == StmtExprClass;
   }
-  static bool classof(const StmtExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&SubStmt, &SubStmt+1); }
@@ -3277,13 +3347,12 @@ public:
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(BuiltinLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return BuiltinLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ShuffleVectorExprClass;
   }
-  static bool classof(const ShuffleVectorExpr *) { return true; }
 
   /// getNumSubExprs - Return the size of the SubExprs array.  This includes the
   /// constant expression, the actual arguments passed in, and the function
@@ -3372,13 +3441,12 @@ public:
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(BuiltinLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return BuiltinLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ChooseExprClass;
   }
-  static bool classof(const ChooseExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -3409,13 +3477,12 @@ public:
   SourceLocation getTokenLocation() const { return TokenLoc; }
   void setTokenLocation(SourceLocation L) { TokenLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(TokenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return TokenLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return TokenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == GNUNullExprClass;
   }
-  static bool classof(const GNUNullExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -3455,13 +3522,12 @@ public:
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(BuiltinLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return BuiltinLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == VAArgExprClass;
   }
-  static bool classof(const VAArgExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Val, &Val+1); }
@@ -3498,21 +3564,32 @@ public:
 /// initializer lists may still have fewer initializers than there are
 /// elements to initialize within the object.
 ///
+/// After semantic analysis has completed, given an initializer list,
+/// method isSemanticForm() returns true if and only if this is the
+/// semantic form of the initializer list (note: the same AST node
+/// may at the same time be the syntactic form).
 /// Given the semantic form of the initializer list, one can retrieve
-/// the original syntactic form of that initializer list (if it
-/// exists) using getSyntacticForm(). Since many initializer lists
-/// have the same syntactic and semantic forms, getSyntacticForm() may
-/// return NULL, indicating that the current initializer list also
-/// serves as its syntactic form.
+/// the syntactic form of that initializer list (when different)
+/// using method getSyntacticForm(); the method returns null if applied
+/// to a initializer list which is already in syntactic form.
+/// Similarly, given the syntactic form (i.e., an initializer list such
+/// that isSemanticForm() returns false), one can retrieve the semantic
+/// form using method getSemanticForm().
+/// Since many initializer lists have the same syntactic and semantic forms,
+/// getSyntacticForm() may return NULL, indicating that the current
+/// semantic initializer list also serves as its syntactic form.
 class InitListExpr : public Expr {
   // FIXME: Eliminate this vector in favor of ASTContext allocation
   typedef ASTVector<Stmt *> InitExprsTy;
   InitExprsTy InitExprs;
   SourceLocation LBraceLoc, RBraceLoc;
 
-  /// Contains the initializer list that describes the syntactic form
-  /// written in the source code.
-  InitListExpr *SyntacticForm;
+  /// The alternative form of the initializer list (if it exists).
+  /// The int part of the pair stores whether this initalizer list is
+  /// in semantic form. If not null, the pointer points to:
+  ///   - the syntactic form, if this is in semantic form;
+  ///   - the semantic form, if this is in syntactic form.
+  llvm::PointerIntPair<InitListExpr *, 1, bool> AltForm;
 
   /// \brief Either:
   ///  If this initializer list initializes an array with more elements than
@@ -3528,8 +3605,8 @@ public:
                ArrayRef<Expr*> initExprs, SourceLocation rbraceloc);
 
   /// \brief Build an empty initializer list.
-  explicit InitListExpr(ASTContext &C, EmptyShell Empty)
-    : Expr(InitListExprClass, Empty), InitExprs(C) { }
+  explicit InitListExpr(EmptyShell Empty)
+    : Expr(InitListExprClass, Empty) { }
 
   unsigned getNumInits() const { return InitExprs.size(); }
 
@@ -3617,12 +3694,20 @@ public:
   SourceLocation getRBraceLoc() const { return RBraceLoc; }
   void setRBraceLoc(SourceLocation Loc) { RBraceLoc = Loc; }
 
-  /// @brief Retrieve the initializer list that describes the
-  /// syntactic form of the initializer.
-  ///
-  ///
-  InitListExpr *getSyntacticForm() const { return SyntacticForm; }
-  void setSyntacticForm(InitListExpr *Init) { SyntacticForm = Init; }
+  bool isSemanticForm() const { return AltForm.getInt(); }
+  InitListExpr *getSemanticForm() const {
+    return isSemanticForm() ? 0 : AltForm.getPointer();
+  }
+  InitListExpr *getSyntacticForm() const {
+    return isSemanticForm() ? AltForm.getPointer() : 0;
+  }
+
+  void setSyntacticForm(InitListExpr *Init) {
+    AltForm.setPointer(Init);
+    AltForm.setInt(true);
+    Init->AltForm.setPointer(this);
+    Init->AltForm.setInt(false);
+  }
 
   bool hadArrayRangeDesignator() const {
     return InitListExprBits.HadArrayRangeDesignator != 0;
@@ -3638,12 +3723,12 @@ public:
     InitListExprBits.InitializesStdInitializerList = ISIL;
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY;
+  SourceLocation getLocStart() const LLVM_READONLY;
+  SourceLocation getLocEnd() const LLVM_READONLY;
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == InitListExprClass;
   }
-  static bool classof(const InitListExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -3864,17 +3949,17 @@ public:
       return ArrayOrRange.Index;
     }
 
-    SourceLocation getStartLocation() const {
+    SourceLocation getLocStart() const LLVM_READONLY {
       if (Kind == FieldDesignator)
         return getDotLoc().isInvalid()? getFieldLoc() : getDotLoc();
       else
         return getLBracketLoc();
     }
-    SourceLocation getEndLocation() const {
+    SourceLocation getLocEnd() const LLVM_READONLY {
       return Kind == FieldDesignator ? getFieldLoc() : getRBracketLoc();
     }
     SourceRange getSourceRange() const LLVM_READONLY {
-      return SourceRange(getStartLocation(), getEndLocation());
+      return SourceRange(getLocStart(), getLocEnd());
     }
   };
 
@@ -3975,12 +4060,12 @@ public:
 
   SourceRange getDesignatorsSourceRange() const;
 
-  SourceRange getSourceRange() const LLVM_READONLY;
+  SourceLocation getLocStart() const LLVM_READONLY;
+  SourceLocation getLocEnd() const LLVM_READONLY;
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == DesignatedInitExprClass;
   }
-  static bool classof(const DesignatedInitExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -4010,11 +4095,9 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ImplicitValueInitExprClass;
   }
-  static bool classof(const ImplicitValueInitExpr *) { return true; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange();
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return SourceLocation(); }
+  SourceLocation getLocEnd() const LLVM_READONLY { return SourceLocation(); }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -4050,13 +4133,12 @@ public:
   SourceLocation getLParenLoc() const { return LParenLoc; }
   SourceLocation getRParenLoc() const { return RParenLoc; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(LParenLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return LParenLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ParenListExprClass;
   }
-  static bool classof(const ParenListExpr *) { return true; }
 
   // Iterators
   child_range children() {
@@ -4165,13 +4247,12 @@ public:
   const Expr *getResultExpr() const { return getAssocExpr(getResultIndex()); }
   Expr *getResultExpr() { return getAssocExpr(getResultIndex()); }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(GenericLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return GenericLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == GenericSelectionExprClass;
   }
-  static bool classof(const GenericSelectionExpr *) { return true; }
 
   child_range children() {
     return child_range(SubExprs, SubExprs+END_EXPR+NumAssocs);
@@ -4231,9 +4312,10 @@ public:
   /// aggregate Constant of ConstantInt(s).
   void getEncodedElementAccess(SmallVectorImpl<unsigned> &Elts) const;
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getBase()->getLocStart(), AccessorLoc);
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return getBase()->getLocStart();
   }
+  SourceLocation getLocEnd() const LLVM_READONLY { return AccessorLoc; }
 
   /// isArrow - Return true if the base expression is a pointer to vector,
   /// return false if the base expression is a vector.
@@ -4242,7 +4324,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ExtVectorElementExprClass;
   }
-  static bool classof(const ExtVectorElementExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&Base, &Base+1); }
@@ -4274,9 +4355,8 @@ public:
   const Stmt *getBody() const;
   Stmt *getBody();
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getCaretLocation(), getBody()->getLocEnd());
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return getCaretLocation(); }
+  SourceLocation getLocEnd() const LLVM_READONLY { return getBody()->getLocEnd(); }
 
   /// getFunctionType - Return the underlying function type for this block.
   const FunctionProtoType *getFunctionType() const;
@@ -4284,7 +4364,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == BlockExprClass;
   }
-  static bool classof(const BlockExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(); }
@@ -4324,14 +4403,12 @@ public:
   /// getRParenLoc - Return the location of final right parenthesis.
   SourceLocation getRParenLoc() const { return RParenLoc; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(BuiltinLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return BuiltinLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == AsTypeExprClass;
   }
-  static bool classof(const AsTypeExpr *) { return true; }
 
   // Iterators
   child_range children() { return child_range(&SrcExpr, &SrcExpr+1); }
@@ -4456,8 +4533,12 @@ public:
   SourceLocation getExprLoc() const LLVM_READONLY {
     return getSyntacticForm()->getExprLoc();
   }
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return getSyntacticForm()->getSourceRange();
+
+  SourceLocation getLocStart() const LLVM_READONLY {
+    return getSyntacticForm()->getLocStart();
+  }
+  SourceLocation getLocEnd() const LLVM_READONLY {
+    return getSyntacticForm()->getLocEnd();
   }
 
   child_range children() {
@@ -4468,7 +4549,6 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == PseudoObjectExprClass;
   }
-  static bool classof(const PseudoObjectExpr *) { return true; }
 };
 
 /// AtomicExpr - Variadic atomic builtins: __atomic_exchange, __atomic_fetch_*,
@@ -4552,13 +4632,12 @@ public:
   SourceLocation getBuiltinLoc() const { return BuiltinLoc; }
   SourceLocation getRParenLoc() const { return RParenLoc; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(BuiltinLoc, RParenLoc);
-  }
+  SourceLocation getLocStart() const LLVM_READONLY { return BuiltinLoc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return RParenLoc; }
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == AtomicExprClass;
   }
-  static bool classof(const AtomicExpr *) { return true; }
 
   // Iterators
   child_range children() {

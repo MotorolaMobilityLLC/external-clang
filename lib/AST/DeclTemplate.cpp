@@ -11,13 +11,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
-#include "clang/AST/ASTContext.h"
 #include "clang/AST/TypeLoc.h"
-#include "clang/AST/ASTMutationListener.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "llvm/ADT/STLExtras.h"
 #include <memory>
@@ -764,13 +764,27 @@ ClassTemplateSpecializationDecl::getSpecializedTemplate() const {
 SourceRange
 ClassTemplateSpecializationDecl::getSourceRange() const {
   if (ExplicitInfo) {
-    SourceLocation Begin = getExternLoc();
-    if (Begin.isInvalid())
-      Begin = getTemplateKeywordLoc();
-    SourceLocation End = getRBraceLoc();
-    if (End.isInvalid())
-      End = getTypeAsWritten()->getTypeLoc().getEndLoc();
-    return SourceRange(Begin, End);
+    SourceLocation Begin = getTemplateKeywordLoc();
+    if (Begin.isValid()) {
+      // Here we have an explicit (partial) specialization or instantiation.
+      assert(getSpecializationKind() == TSK_ExplicitSpecialization ||
+             getSpecializationKind() == TSK_ExplicitInstantiationDeclaration ||
+             getSpecializationKind() == TSK_ExplicitInstantiationDefinition);
+      if (getExternLoc().isValid())
+        Begin = getExternLoc();
+      SourceLocation End = getRBraceLoc();
+      if (End.isInvalid())
+        End = getTypeAsWritten()->getTypeLoc().getEndLoc();
+      return SourceRange(Begin, End);
+    }
+    // An implicit instantiation of a class template partial specialization
+    // uses ExplicitInfo to record the TypeAsWritten, but the source
+    // locations should be retrieved from the instantiation pattern.
+    typedef ClassTemplatePartialSpecializationDecl CTPSDecl;
+    CTPSDecl *ctpsd = const_cast<CTPSDecl*>(cast<CTPSDecl>(this));
+    CTPSDecl *inst_from = ctpsd->getInstantiatedFromMember();
+    assert(inst_from != 0);
+    return inst_from->getSourceRange();
   }
   else {
     // No explicit info available.

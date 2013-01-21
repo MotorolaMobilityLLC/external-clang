@@ -12,30 +12,31 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Analysis/AnalysisContext.h"
+#include "BodyFarm.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ParentMap.h"
 #include "clang/AST/StmtVisitor.h"
+#include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
 #include "clang/Analysis/Analyses/LiveVariables.h"
 #include "clang/Analysis/Analyses/PseudoConstantAnalysis.h"
-#include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
-#include "clang/Analysis/AnalysisContext.h"
 #include "clang/Analysis/CFG.h"
 #include "clang/Analysis/CFGStmtMap.h"
 #include "clang/Analysis/Support/BumpVector.h"
-#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/SaveAndRestore.h"
 
 using namespace clang;
 
 typedef llvm::DenseMap<const void *, ManagedAnalysis *> ManagedAnalysisMap;
 
 AnalysisDeclContext::AnalysisDeclContext(AnalysisDeclContextManager *Mgr,
-                                 const Decl *d,
-                                 const CFG::BuildOptions &buildOptions)
+                                         const Decl *d,
+                                         const CFG::BuildOptions &buildOptions)
   : Manager(Mgr),
     D(d),
     cfgBuildOptions(buildOptions),
@@ -49,7 +50,7 @@ AnalysisDeclContext::AnalysisDeclContext(AnalysisDeclContextManager *Mgr,
 }
 
 AnalysisDeclContext::AnalysisDeclContext(AnalysisDeclContextManager *Mgr,
-                                 const Decl *d)
+                                         const Decl *d)
 : Manager(Mgr),
   D(d),
   forcedBlkExprs(0),
@@ -64,7 +65,10 @@ AnalysisDeclContext::AnalysisDeclContext(AnalysisDeclContextManager *Mgr,
 AnalysisDeclContextManager::AnalysisDeclContextManager(bool useUnoptimizedCFG,
                                                        bool addImplicitDtors,
                                                        bool addInitializers,
-                                                       bool addTemporaryDtors) {
+                                                       bool addTemporaryDtors,
+                                                       bool synthesizeBodies)
+  : SynthesizeBodies(synthesizeBodies)
+{
   cfgBuildOptions.PruneTriviallyFalseEdges = !useUnoptimizedCFG;
   cfgBuildOptions.AddImplicitDtors = addImplicitDtors;
   cfgBuildOptions.AddInitializers = addInitializers;
@@ -77,9 +81,18 @@ void AnalysisDeclContextManager::clear() {
   Contexts.clear();
 }
 
+static BodyFarm &getBodyFarm(ASTContext &C) {
+  static BodyFarm *BF = new BodyFarm(C);
+  return *BF;
+}
+
 Stmt *AnalysisDeclContext::getBody() const {
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
-    return FD->getBody();
+  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+    Stmt *Body = FD->getBody();
+    if (!Body && Manager && Manager->synthesizeBodies())
+      return getBodyFarm(getASTContext()).getBody(FD);
+    return Body;
+  }
   else if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D))
     return MD->getBody();
   else if (const BlockDecl *BD = dyn_cast<BlockDecl>(D))
@@ -203,6 +216,13 @@ PseudoConstantAnalysis *AnalysisDeclContext::getPseudoConstantAnalysis() {
 }
 
 AnalysisDeclContext *AnalysisDeclContextManager::getContext(const Decl *D) {
+  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+    // Calling 'hasBody' replaces 'FD' in place with the FunctionDecl
+    // that has the body.
+    FD->hasBody(FD);
+    D = FD;
+  }
+
   AnalysisDeclContext *&AC = Contexts[D];
   if (!AC)
     AC = new AnalysisDeclContext(this, D, cfgBuildOptions);
@@ -334,6 +354,10 @@ const StackFrameContext *LocationContext::getCurrentStackFrame() const {
   return NULL;
 }
 
+bool LocationContext::inTopFrame() const {
+  return getCurrentStackFrame()->inTopFrame();
+}
+
 bool LocationContext::isParentOf(const LocationContext *LC) const {
   do {
     const LocationContext *Parent = LC->getParent();
@@ -378,9 +402,6 @@ public:
       if (!VD->hasLocalStorage()) {
         if (Visited.insert(VD))
           BEVals.push_back(VD, BC);
-      } else if (DR->refersToEnclosingLocal()) {
-        if (Visited.insert(VD) && IsTrackedDecl(VD))
-          BEVals.push_back(VD, BC);
       }
     }
   }
@@ -415,7 +436,13 @@ static DeclVec* LazyInitializeReferencedDecls(const BlockDecl *BD,
   DeclVec *BV = (DeclVec*) A.Allocate<DeclVec>();
   new (BV) DeclVec(BC, 10);
 
-  // Find the referenced variables.
+  // Go through the capture list.
+  for (BlockDecl::capture_const_iterator CI = BD->capture_begin(),
+       CE = BD->capture_end(); CI != CE; ++CI) {
+    BV->push_back(CI->getVariable(), BC);
+  }
+
+  // Find the referenced global/static variables.
   FindBlockDeclRefExprsVals F(*BV, BC);
   F.Visit(BD->getBody());
 

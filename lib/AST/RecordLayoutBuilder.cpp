@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/RecordLayout.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/CXXInheritance.h"
@@ -14,13 +15,12 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/Expr.h"
-#include "clang/AST/RecordLayout.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/SemaDiagnostic.h"
-#include "llvm/Support/Format.h"
 #include "llvm/ADT/SmallSet.h"
-#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Support/Format.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace clang;
 
@@ -789,8 +789,8 @@ protected:
   void setDataSize(CharUnits NewSize) { DataSize = Context.toBits(NewSize); }
   void setDataSize(uint64_t NewSize) { DataSize = NewSize; }
 
-  RecordLayoutBuilder(const RecordLayoutBuilder&);   // DO NOT IMPLEMENT
-  void operator=(const RecordLayoutBuilder&); // DO NOT IMPLEMENT
+  RecordLayoutBuilder(const RecordLayoutBuilder &) LLVM_DELETED_FUNCTION;
+  void operator=(const RecordLayoutBuilder &) LLVM_DELETED_FUNCTION;
 public:
   static const CXXMethodDecl *ComputeKeyFunction(const CXXRecordDecl *RD);
 };
@@ -1557,6 +1557,13 @@ CharUnits RecordLayoutBuilder::LayoutBase(const BaseSubobjectInfo *Base) {
     bool Allowed = EmptySubobjects->CanPlaceBaseAtOffset(Base, Offset);
     (void)Allowed;
     assert(Allowed && "Base subobject externally placed at overlapping offset");
+
+    if (InferAlignment && Offset < getDataSize().RoundUpToAlignment(BaseAlign)){
+      // The externally-supplied base offset is before the base offset we
+      // computed. Assume that the structure is packed.
+      Alignment = CharUnits::One();
+      InferAlignment = false;
+    }
   }
   
   if (!Base->Class->isEmpty()) {
@@ -1574,12 +1581,12 @@ CharUnits RecordLayoutBuilder::LayoutBase(const BaseSubobjectInfo *Base) {
 }
 
 void RecordLayoutBuilder::InitializeLayout(const Decl *D) {
-  if (const RecordDecl *RD = dyn_cast<RecordDecl>(D))
+  if (const RecordDecl *RD = dyn_cast<RecordDecl>(D)) {
     IsUnion = RD->isUnion();
+    IsMsStruct = RD->isMsStruct(Context);
+  }
 
-  Packed = D->hasAttr<PackedAttr>();
-  
-  IsMsStruct = D->hasAttr<MsStructAttr>();
+  Packed = D->hasAttr<PackedAttr>();  
 
   // Honor the default struct packing maximum alignment flag.
   if (unsigned DefaultMaxFieldAlignment = Context.getLangOpts().PackStruct) {
@@ -1616,7 +1623,6 @@ void RecordLayoutBuilder::InitializeLayout(const Decl *D) {
       if (ExternalLayout) {
         if (ExternalAlign > 0) {
           Alignment = Context.toCharUnitsFromBits(ExternalAlign);
-          UnpackedAlignment = Alignment;
         } else {
           // The external source didn't have alignment information; infer it.
           InferAlignment = true;
@@ -2085,7 +2091,7 @@ void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {
       ZeroLengthBitfield = 0;
     }
 
-    if (Context.getLangOpts().MSBitfields || IsMsStruct) {
+    if (IsMsStruct) {
       // If MS bitfield layout is required, figure out what type is being
       // laid out and align the field to the width of that type.
       
@@ -2166,11 +2172,6 @@ void RecordLayoutBuilder::LayoutField(const FieldDecl *D) {
 }
 
 void RecordLayoutBuilder::FinishLayout(const NamedDecl *D) {
-  if (ExternalLayout) {
-    setSize(ExternalSize);
-    return;
-  }
-  
   // In C++, records cannot be of size 0.
   if (Context.getLangOpts().CPlusPlus && getSizeInBits() == 0) {
     if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D)) {
@@ -2184,20 +2185,37 @@ void RecordLayoutBuilder::FinishLayout(const NamedDecl *D) {
       setSize(CharUnits::One());
   }
 
+  // Finally, round the size of the record up to the alignment of the
+  // record itself.
+  uint64_t UnpaddedSize = getSizeInBits() - UnfilledBitsInLastByte;
+  uint64_t UnpackedSizeInBits =
+  llvm::RoundUpToAlignment(getSizeInBits(),
+                           Context.toBits(UnpackedAlignment));
+  CharUnits UnpackedSize = Context.toCharUnitsFromBits(UnpackedSizeInBits);
+  uint64_t RoundedSize
+    = llvm::RoundUpToAlignment(getSizeInBits(), Context.toBits(Alignment));
+
+  if (ExternalLayout) {
+    // If we're inferring alignment, and the external size is smaller than
+    // our size after we've rounded up to alignment, conservatively set the
+    // alignment to 1.
+    if (InferAlignment && ExternalSize < RoundedSize) {
+      Alignment = CharUnits::One();
+      InferAlignment = false;
+    }
+    setSize(ExternalSize);
+    return;
+  }
+
+
   // MSVC doesn't round up to the alignment of the record with virtual bases.
   if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(D)) {
     if (isMicrosoftCXXABI() && RD->getNumVBases())
       return;
   }
 
-  // Finally, round the size of the record up to the alignment of the
-  // record itself.
-  uint64_t UnpaddedSize = getSizeInBits() - UnfilledBitsInLastByte;
-  uint64_t UnpackedSizeInBits = 
-    llvm::RoundUpToAlignment(getSizeInBits(), 
-                             Context.toBits(UnpackedAlignment));
-  CharUnits UnpackedSize = Context.toCharUnitsFromBits(UnpackedSizeInBits);
-  setSize(llvm::RoundUpToAlignment(getSizeInBits(), Context.toBits(Alignment)));
+  // Set the size to the final size.
+  setSize(RoundedSize);
 
   unsigned CharBitNum = Context.getTargetInfo().getCharWidth();
   if (const RecordDecl *RD = dyn_cast<RecordDecl>(D)) {
@@ -2255,7 +2273,7 @@ RecordLayoutBuilder::updateExternalFieldOffset(const FieldDecl *Field,
   if (InferAlignment && ExternalFieldOffset < ComputedOffset) {
     // The externally-supplied field offset is before the field offset we
     // computed. Assume that the structure is packed.
-    Alignment = CharUnits::fromQuantity(1);
+    Alignment = CharUnits::One();
     InferAlignment = false;
   }
   
@@ -2559,6 +2577,11 @@ static void PrintOffset(raw_ostream &OS,
   OS.indent(IndentLevel * 2);
 }
 
+static void PrintIndentNoOffset(raw_ostream &OS, unsigned IndentLevel) {
+  OS << "     | ";
+  OS.indent(IndentLevel * 2);
+}
+
 static void DumpCXXRecordLayout(raw_ostream &OS,
                                 const CXXRecordDecl *RD, const ASTContext &C,
                                 CharUnits Offset,
@@ -2662,11 +2685,14 @@ static void DumpCXXRecordLayout(raw_ostream &OS,
                         /*IncludeVirtualBases=*/false);
   }
 
-  OS << "  sizeof=" << Layout.getSize().getQuantity();
+  PrintIndentNoOffset(OS, IndentLevel - 1);
+  OS << "[sizeof=" << Layout.getSize().getQuantity();
   OS << ", dsize=" << Layout.getDataSize().getQuantity();
   OS << ", align=" << Layout.getAlignment().getQuantity() << '\n';
-  OS << "  nvsize=" << Layout.getNonVirtualSize().getQuantity();
-  OS << ", nvalign=" << Layout.getNonVirtualAlign().getQuantity() << '\n';
+
+  PrintIndentNoOffset(OS, IndentLevel - 1);
+  OS << " nvsize=" << Layout.getNonVirtualSize().getQuantity();
+  OS << ", nvalign=" << Layout.getNonVirtualAlign().getQuantity() << "]\n";
   OS << '\n';
 }
 

@@ -23,6 +23,34 @@
 #include "clang-c/Platform.h"
 #include "clang-c/CXString.h"
 
+/**
+ * \brief The version constants for the libclang API.
+ * CINDEX_VERSION_MINOR should increase when there are API additions.
+ * CINDEX_VERSION_MAJOR is intended for "major" source/ABI breaking changes.
+ *
+ * The policy about the libclang API was always to keep it source and ABI
+ * compatible, thus CINDEX_VERSION_MAJOR is expected to remain stable.
+ */
+#define CINDEX_VERSION_MAJOR 0
+#define CINDEX_VERSION_MINOR 10
+
+#define CINDEX_VERSION_ENCODE(major, minor) ( \
+      ((major) * 10000)                       \
+    + ((minor) *     1))
+
+#define CINDEX_VERSION CINDEX_VERSION_ENCODE( \
+    CINDEX_VERSION_MAJOR,                     \
+    CINDEX_VERSION_MINOR )
+
+#define CINDEX_VERSION_STRINGIZE_(major, minor)   \
+    #major"."#minor
+#define CINDEX_VERSION_STRINGIZE(major, minor)    \
+    CINDEX_VERSION_STRINGIZE_(major, minor)
+
+#define CINDEX_VERSION_STRING CINDEX_VERSION_STRINGIZE( \
+    CINDEX_VERSION_MAJOR,                               \
+    CINDEX_VERSION_MINOR)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -383,7 +411,7 @@ CINDEX_LINKAGE unsigned clang_equalRanges(CXSourceRange range1,
                                           CXSourceRange range2);
 
 /**
- * \brief Returns non-zero if \arg range is null.
+ * \brief Returns non-zero if \p range is null.
  */
 CINDEX_LINKAGE int clang_Range_isNull(CXSourceRange range);
 
@@ -501,6 +529,35 @@ CINDEX_LINKAGE void clang_getSpellingLocation(CXSourceLocation location,
                                               unsigned *line,
                                               unsigned *column,
                                               unsigned *offset);
+
+/**
+ * \brief Retrieve the file, line, column, and offset represented by
+ * the given source location.
+ *
+ * If the location refers into a macro expansion, return where the macro was
+ * expanded or where the macro argument was written, if the location points at
+ * a macro argument.
+ *
+ * \param location the location within a source file that will be decomposed
+ * into its parts.
+ *
+ * \param file [out] if non-NULL, will be set to the file to which the given
+ * source location points.
+ *
+ * \param line [out] if non-NULL, will be set to the line to which the given
+ * source location points.
+ *
+ * \param column [out] if non-NULL, will be set to the column to which the given
+ * source location points.
+ *
+ * \param offset [out] if non-NULL, will be set to the offset into the
+ * buffer to which the given source location points.
+ */
+CINDEX_LINKAGE void clang_getFileLocation(CXSourceLocation location,
+                                          CXFile *file,
+                                          unsigned *line,
+                                          unsigned *column,
+                                          unsigned *offset);
 
 /**
  * \brief Retrieve a source location representing the first character within a
@@ -1035,13 +1092,15 @@ enum CXTranslationUnit_Flags {
    * code-completion operations.
    */
   CXTranslationUnit_CacheCompletionResults = 0x08,
+
   /**
-   * \brief DEPRECATED: Enable precompiled preambles in C++.
+   * \brief Used to indicate that the translation unit will be serialized with
+   * \c clang_saveTranslationUnit.
    *
-   * Note: this is a *temporary* option that is available only while
-   * we are testing C++ precompiled preamble support. It is deprecated.
+   * This option is typically used when parsing a header with the intent of
+   * producing a precompiled header.
    */
-  CXTranslationUnit_CXXPrecompiledPreamble = 0x10,
+  CXTranslationUnit_ForSerialization = 0x10,
 
   /**
    * \brief DEPRECATED: Enabled chained precompiled preambles in C++.
@@ -1907,6 +1966,7 @@ enum CXCursorKind {
   /** \brief A GCC inline assembly statement extension.
    */
   CXCursor_GCCAsmStmt                    = 215,
+  CXCursor_AsmStmt                       = CXCursor_GCCAsmStmt,
 
   /** \brief Objective-C's overall \@try-\@catch-\@finally statement.
    */
@@ -2009,7 +2069,15 @@ enum CXCursorKind {
   CXCursor_MacroInstantiation            = CXCursor_MacroExpansion,
   CXCursor_InclusionDirective            = 503,
   CXCursor_FirstPreprocessing            = CXCursor_PreprocessingDirective,
-  CXCursor_LastPreprocessing             = CXCursor_InclusionDirective
+  CXCursor_LastPreprocessing             = CXCursor_InclusionDirective,
+
+  /* Extra Declarations */
+  /**
+   * \brief A module import declaration.
+   */
+  CXCursor_ModuleImportDecl              = 600,
+  CXCursor_FirstExtraDecl                = CXCursor_ModuleImportDecl,
+  CXCursor_LastExtraDecl                 = CXCursor_ModuleImportDecl
 };
 
 /**
@@ -2069,9 +2137,9 @@ CINDEX_LINKAGE CXCursor clang_getTranslationUnitCursor(CXTranslationUnit);
 CINDEX_LINKAGE unsigned clang_equalCursors(CXCursor, CXCursor);
 
 /**
- * \brief Returns non-zero if \arg cursor is null.
+ * \brief Returns non-zero if \p cursor is null.
  */
-CINDEX_LINKAGE int clang_Cursor_isNull(CXCursor);
+CINDEX_LINKAGE int clang_Cursor_isNull(CXCursor cursor);
 
 /**
  * \brief Compute a hash value for the given cursor.
@@ -2586,6 +2654,8 @@ enum CXCallingConv {
   CXCallingConv_X86Pascal = 5,
   CXCallingConv_AAPCS = 6,
   CXCallingConv_AAPCS_VFP = 7,
+  CXCallingConv_PnaclCall = 8,
+  CXCallingConv_IntelOclBicc = 9,
 
   CXCallingConv_Invalid = 100,
   CXCallingConv_Unexposed = 200
@@ -2641,6 +2711,13 @@ CINDEX_LINKAGE long long clang_getEnumConstantDeclValue(CXCursor C);
  * must be verified before calling this function.
  */
 CINDEX_LINKAGE unsigned long long clang_getEnumConstantDeclUnsignedValue(CXCursor C);
+
+/**
+ * \brief Retrieve the bit width of a bit field declaration as an integer.
+ *
+ * If a cursor that is not a bit field declaration is passed in, -1 is returned.
+ */
+CINDEX_LINKAGE int clang_getFieldDeclBitWidth(CXCursor C);
 
 /**
  * \brief Retrieve the number of non-variadic arguments associated with a given
@@ -3165,6 +3242,12 @@ CINDEX_LINKAGE int clang_Cursor_getObjCSelectorIndex(CXCursor);
 CINDEX_LINKAGE int clang_Cursor_isDynamicCall(CXCursor C);
 
 /**
+ * \brief Given a cursor pointing to an ObjC message, returns the CXType of the
+ * receiver.
+ */
+CINDEX_LINKAGE CXType clang_Cursor_getReceiverType(CXCursor C);
+
+/**
  * \brief Given a cursor that represents a declaration, return the associated
  * comment's source range.  The range may include multiple consecutive comments
  * with whitespace in between.
@@ -3190,6 +3273,65 @@ CINDEX_LINKAGE CXString clang_Cursor_getBriefCommentText(CXCursor C);
  * \c CXComment_FullComment AST node.
  */
 CINDEX_LINKAGE CXComment clang_Cursor_getParsedComment(CXCursor C);
+
+/**
+ * @}
+ */
+
+/**
+ * \defgroup CINDEX_MODULE Module introspection
+ *
+ * The functions in this group provide access to information about modules.
+ *
+ * @{
+ */
+
+typedef void *CXModule;
+
+/**
+ * \brief Given a CXCursor_ModuleImportDecl cursor, return the associated module.
+ */
+CINDEX_LINKAGE CXModule clang_Cursor_getModule(CXCursor C);
+
+/**
+ * \param Module a module object.
+ *
+ * \returns the parent of a sub-module or NULL if the given module is top-level,
+ * e.g. for 'std.vector' it will return the 'std' module.
+ */
+CINDEX_LINKAGE CXModule clang_Module_getParent(CXModule Module);
+
+/**
+ * \param Module a module object.
+ *
+ * \returns the name of the module, e.g. for the 'std.vector' sub-module it
+ * will return "vector".
+ */
+CINDEX_LINKAGE CXString clang_Module_getName(CXModule Module);
+
+/**
+ * \param Module a module object.
+ *
+ * \returns the full name of the module, e.g. "std.vector".
+ */
+CINDEX_LINKAGE CXString clang_Module_getFullName(CXModule Module);
+
+/**
+ * \param Module a module object.
+ *
+ * \returns the number of top level headers associated with this module.
+ */
+CINDEX_LINKAGE unsigned clang_Module_getNumTopLevelHeaders(CXModule Module);
+
+/**
+ * \param Module a module object.
+ *
+ * \param Index top level header index (zero-based).
+ *
+ * \returns the specified top level header associated with the module.
+ */
+CINDEX_LINKAGE
+CXFile clang_Module_getTopLevelHeader(CXModule Module, unsigned Index);
 
 /**
  * @}
@@ -4321,8 +4463,7 @@ clang_getCompletionAnnotation(CXCompletionString completion_string,
  * \param completion_string The code completion string whose parent is
  * being queried.
  *
- * \param kind If non-NULL, will be set to the kind of the parent context,
- * or CXCursor_NotImplemented if there is no context.
+ * \param kind DEPRECATED: always set to CXCursor_NotImplemented if non-NULL.
  *
  * \returns The name of the completion parent, e.g., "NSObject" if
  * the completion string represents a method in the NSObject class.
@@ -4915,22 +5056,35 @@ typedef struct {
   CXFile file;
   int isImport;
   int isAngled;
+  /**
+   * \brief Non-zero if the directive was automatically turned into a module
+   * import.
+   */
+  int isModuleImport;
 } CXIdxIncludedFileInfo;
 
 /**
  * \brief Data for IndexerCallbacks#importedASTFile.
  */
 typedef struct {
+  /**
+   * \brief Top level AST file containing the imported PCH, module or submodule.
+   */
   CXFile file;
   /**
-   * \brief Location where the file is imported. It is useful mostly for
-   * modules.
+   * \brief The imported module or NULL if the AST file is a PCH.
+   */
+  CXModule module;
+  /**
+   * \brief Location where the file is imported. Applicable only for modules.
    */
   CXIdxLoc loc;
   /**
-   * \brief Non-zero if the AST file is a module otherwise it's a PCH.
+   * \brief Non-zero if an inclusion directive was automatically turned into
+   * a module import. Applicable only for modules.
    */
-  int isModule;
+  int isImplicit;
+
 } CXIdxImportedASTFileInfo;
 
 typedef enum {
@@ -5027,6 +5181,10 @@ typedef struct {
   CXIdxLoc classLoc;
 } CXIdxIBOutletCollectionAttrInfo;
 
+typedef enum {
+  CXIdxDeclFlag_Skipped = 0x1
+} CXIdxDeclInfoFlags;
+
 typedef struct {
   const CXIdxEntityInfo *entityInfo;
   CXCursor cursor;
@@ -5048,6 +5206,9 @@ typedef struct {
   int isImplicit;
   const CXIdxAttrInfo *const *attributes;
   unsigned numAttributes;
+
+  unsigned flags;
+
 } CXIdxDeclInfo;
 
 typedef enum {
@@ -5182,8 +5343,8 @@ typedef struct {
    * 
    * AST files will not get indexed (there will not be callbacks to index all
    * the entities in an AST file). The recommended action is that, if the AST
-   * file is not already indexed, to block further indexing and initiate a new
-   * indexing job specific to the AST file.
+   * file is not already indexed, to initiate a new indexing job specific to
+   * the AST file.
    */
   CXIdxClientASTFile (*importedASTFile)(CXClientData client_data,
                                         const CXIdxImportedASTFileInfo *);
@@ -5255,16 +5416,14 @@ CINDEX_LINKAGE void
 clang_index_setClientEntity(const CXIdxEntityInfo *, CXIdxClientEntity);
 
 /**
- * \brief An indexing action, to be applied to one or multiple translation units
- * but not on concurrent threads. If there are threads doing indexing
- * concurrently, they should use different CXIndexAction objects.
+ * \brief An indexing action/session, to be applied to one or multiple
+ * translation units.
  */
 typedef void *CXIndexAction;
 
 /**
- * \brief An indexing action, to be applied to one or multiple translation units
- * but not on concurrent threads. If there are threads doing indexing
- * concurrently, they should use different CXIndexAction objects.
+ * \brief An indexing action/session, to be applied to one or multiple
+ * translation units.
  *
  * \param CIdx The index object with which the index action will be associated.
  */
@@ -5306,7 +5465,15 @@ typedef enum {
   /**
    * \brief Suppress all compiler warnings when parsing for indexing.
    */
-  CXIndexOpt_SuppressWarnings = 0x8
+  CXIndexOpt_SuppressWarnings = 0x8,
+
+  /**
+   * \brief Skip a function/method body that was already parsed during an
+   * indexing session assosiated with a \c CXIndexAction object.
+   * Bodies in system headers are always skipped.
+   */
+  CXIndexOpt_SkipParsedBodiesInSession = 0x10
+
 } CXIndexOptFlags;
 
 /**

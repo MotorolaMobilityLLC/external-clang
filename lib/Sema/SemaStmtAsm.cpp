@@ -12,30 +12,25 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Sema/SemaInternal.h"
-#include "clang/Sema/Scope.h"
-#include "clang/Sema/ScopeInfo.h"
+#include "clang/AST/RecordLayout.h"
+#include "clang/AST/TypeLoc.h"
+#include "clang/Basic/TargetInfo.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Initialization.h"
 #include "clang/Sema/Lookup.h"
-#include "clang/AST/TypeLoc.h"
-#include "clang/Lex/Preprocessor.h"
-#include "clang/Basic/TargetInfo.h"
+#include "clang/Sema/Scope.h"
+#include "clang/Sema/ScopeInfo.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCExpr.h"
-#include "llvm/MC/MCInst.h"
-#include "llvm/MC/MCInstPrinter.h"
-#include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
+#include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetAsmParser.h"
-#include "llvm/MC/MCParser/MCAsmLexer.h"
-#include "llvm/MC/MCParser/MCAsmParser.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
@@ -184,6 +179,17 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
 
     Exprs[i] = Result.take();
     InputConstraintInfos.push_back(Info);
+
+    const Type *Ty = Exprs[i]->getType().getTypePtr();
+    if (Ty->isDependentType() || Ty->isIncompleteType())
+      continue;
+
+    unsigned Size = Context.getTypeSize(Ty);
+    if (!Context.getTargetInfo().validateInputSize(Literal->getString(),
+                                                   Size))
+      return StmtError(Diag(InputExpr->getLocStart(),
+                            diag::err_asm_invalid_input_size)
+                       << Info.getConstraintStr());
   }
 
   // Check that the clobbers are valid.
@@ -212,6 +218,54 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
     Diag(getLocationOfStringLiteralByte(AsmString, DiagOffs), DiagID)
            << AsmString->getSourceRange();
     return StmtError();
+  }
+
+  // Validate constraints and modifiers.
+  for (unsigned i = 0, e = Pieces.size(); i != e; ++i) {
+    GCCAsmStmt::AsmStringPiece &Piece = Pieces[i];
+    if (!Piece.isOperand()) continue;
+
+    // Look for the correct constraint index.
+    unsigned Idx = 0;
+    unsigned ConstraintIdx = 0;
+    for (unsigned i = 0, e = NS->getNumOutputs(); i != e; ++i, ++ConstraintIdx) {
+      TargetInfo::ConstraintInfo &Info = OutputConstraintInfos[i];
+      if (Idx == Piece.getOperandNo())
+        break;
+      ++Idx;
+
+      if (Info.isReadWrite()) {
+        if (Idx == Piece.getOperandNo())
+          break;
+        ++Idx;
+      }
+    }
+
+    for (unsigned i = 0, e = NS->getNumInputs(); i != e; ++i, ++ConstraintIdx) {
+      TargetInfo::ConstraintInfo &Info = InputConstraintInfos[i];
+      if (Idx == Piece.getOperandNo())
+        break;
+      ++Idx;
+
+      if (Info.isReadWrite()) {
+        if (Idx == Piece.getOperandNo())
+          break;
+        ++Idx;
+      }
+    }
+
+    // Now that we have the right indexes go ahead and check.
+    StringLiteral *Literal = Constraints[ConstraintIdx];
+    const Type *Ty = Exprs[ConstraintIdx]->getType().getTypePtr();
+    if (Ty->isDependentType() || Ty->isIncompleteType())
+      continue;
+
+    unsigned Size = Context.getTypeSize(Ty);
+    if (!Context.getTargetInfo()
+          .validateConstraintModifier(Literal->getString(), Piece.getModifier(),
+                                      Size))
+      Diag(Exprs[ConstraintIdx]->getLocStart(),
+           diag::warn_asm_mismatched_size_modifier);
   }
 
   // Validate tied input operands for type mismatches.
@@ -319,30 +373,6 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
   return Owned(NS);
 }
 
-// isMSAsmKeyword - Return true if this is an MS-style inline asm keyword. These
-// require special handling.
-static bool isMSAsmKeyword(StringRef Name) {
-  bool Ret = llvm::StringSwitch<bool>(Name)
-    .Cases("EVEN", "ALIGN", true) // Alignment directives.
-    .Cases("LENGTH", "SIZE", "TYPE", true) // Type and variable sizes.
-    .Case("_emit", true) // _emit Pseudoinstruction.
-    .Default(false);
-  return Ret;
-}
-
-// getIdentifierInfo - Given a Name and a range of tokens, find the associated
-// IdentifierInfo*.
-static IdentifierInfo *getIdentifierInfo(StringRef Name,
-                                         ArrayRef<Token> AsmToks,
-                                         unsigned Begin, unsigned End) {
-  for (unsigned i = Begin; i <= End; ++i) {
-    IdentifierInfo *II = AsmToks[i].getIdentifierInfo();
-    if (II && II->getName() == Name)
-      return II;
-  }
-  return 0;
-}
-
 // getSpelling - Get the spelling of the AsmTok token.
 static StringRef getSpelling(Sema &SemaRef, Token AsmTok) {
   StringRef Asm;
@@ -354,150 +384,199 @@ static StringRef getSpelling(Sema &SemaRef, Token AsmTok) {
   return Asm;
 }
 
-// Determine if we should bail on this MSAsm instruction.
-static bool bailOnMSAsm(std::vector<StringRef> Piece) {
-  for (unsigned i = 0, e = Piece.size(); i != e; ++i)
-    if (isMSAsmKeyword(Piece[i]))
-      return true;
-  return false;
-}
-
-// Determine if we should bail on this MSAsm block.
-static bool bailOnMSAsm(std::vector<std::vector<StringRef> > Pieces) {
-  for (unsigned i = 0, e = Pieces.size(); i != e; ++i)
-    if (bailOnMSAsm(Pieces[i]))
-      return true;
-  return false;
-}
-
-// Determine if this is a simple MSAsm instruction.
-static bool isSimpleMSAsm(std::vector<StringRef> &Pieces,
-                          const TargetInfo &TI) {
-  if (isMSAsmKeyword(Pieces[0]))
-      return false;
-
-  for (unsigned i = 1, e = Pieces.size(); i != e; ++i)
-    if (!TI.isValidGCCRegisterName(Pieces[i]))
-      return false;
-  return true;
-}
-
-// Determine if this is a simple MSAsm block.
-static bool isSimpleMSAsm(std::vector<std::vector<StringRef> > Pieces,
-                          const TargetInfo &TI) {
-  for (unsigned i = 0, e = Pieces.size(); i != e; ++i)
-    if (!isSimpleMSAsm(Pieces[i], TI))
-      return false;
-  return true;
-}
-
-// Break the AsmSting into pieces (i.e., mnemonic and operands).
-static void buildMSAsmPieces(StringRef Asm, std::vector<StringRef> &Pieces) {
-  std::pair<StringRef,StringRef> Split = Asm.split(' ');
-
-  // Mnemonic
-  Pieces.push_back(Split.first);
-  Asm = Split.second;
-
-  // Operands
-  while (!Asm.empty()) {
-    Split = Asm.split(", ");
-    Pieces.push_back(Split.first);
-    Asm = Split.second;
-  }
-}
-
-static void buildMSAsmPieces(std::vector<std::string> &AsmStrings,
-                             std::vector<std::vector<StringRef> > &Pieces) {
-  for (unsigned i = 0, e = AsmStrings.size(); i != e; ++i)
-    buildMSAsmPieces(AsmStrings[i], Pieces[i]);
-}
-
-// Build the unmodified AsmString used by the IR.  Also build the individual
-// asm instruction(s) and place them in the AsmStrings vector; these are fed
-// to the AsmParser.
-static std::string buildMSAsmString(Sema &SemaRef, ArrayRef<Token> AsmToks,
-                                    std::vector<std::string> &AsmStrings,
-                     std::vector<std::pair<unsigned,unsigned> > &AsmTokRanges) {
+// Build the inline assembly string.  Returns true on error.
+static bool buildMSAsmString(Sema &SemaRef,
+                             SourceLocation AsmLoc,
+                             ArrayRef<Token> AsmToks,
+                             llvm::SmallVectorImpl<unsigned> &TokOffsets,
+                             std::string &AsmString) {
   assert (!AsmToks.empty() && "Didn't expect an empty AsmToks!");
 
-  SmallString<512> Res;
   SmallString<512> Asm;
-  unsigned startTok = 0;
   for (unsigned i = 0, e = AsmToks.size(); i < e; ++i) {
-    bool isNewAsm = i == 0 || AsmToks[i].isAtStartOfLine() ||
-      AsmToks[i].is(tok::kw_asm);
-
+    bool isNewAsm = ((i == 0) ||
+                     AsmToks[i].isAtStartOfLine() ||
+                     AsmToks[i].is(tok::kw_asm));
     if (isNewAsm) {
-      if (i) {
-        AsmStrings.push_back(Asm.str());
-        AsmTokRanges.push_back(std::make_pair(startTok, i-1));
-        startTok = i;
-        Res += Asm;
-        Asm.clear();
-        Res += '\n';
-      }
+      if (i != 0)
+        Asm += "\n\t";
+
       if (AsmToks[i].is(tok::kw_asm)) {
         i++; // Skip __asm
-        assert (i != e && "Expected another token");
+        if (i == e) {
+          SemaRef.Diag(AsmLoc, diag::err_asm_empty);
+          return true;
+        }
+
       }
     }
 
     if (i && AsmToks[i].hasLeadingSpace() && !isNewAsm)
       Asm += ' ';
 
-    Asm += getSpelling(SemaRef, AsmToks[i]);
+    StringRef Spelling = getSpelling(SemaRef, AsmToks[i]);
+    Asm += Spelling;
+    TokOffsets.push_back(Asm.size());
   }
-  AsmStrings.push_back(Asm.str());
-  AsmTokRanges.push_back(std::make_pair(startTok, AsmToks.size()-1));
-  Res += Asm;
-  return Res.str();
+  AsmString = Asm.str();
+  return false;
 }
 
-#define DEF_SIMPLE_MSASM(STR)                                                \
-  MSAsmStmt *NS =                                                            \
-    new (Context) MSAsmStmt(Context, AsmLoc, LBraceLoc, /*IsSimple*/ true,   \
-                            /*IsVolatile*/ true, AsmToks, Inputs, Outputs,   \
-                            InputExprs, OutputExprs, STR, Constraints,       \
-                            Clobbers, EndLoc);
+namespace {
 
-StmtResult Sema::ActOnMSAsmStmt(SourceLocation AsmLoc,
-                                SourceLocation LBraceLoc,
-                                ArrayRef<Token> AsmToks,
-                                SourceLocation EndLoc) {
-  SmallVector<StringRef, 4> Constraints;
-  std::vector<std::string> InputConstraints;
-  std::vector<std::string> OutputConstraints;
-  SmallVector<StringRef, 4> Clobbers;
-  std::set<std::string> ClobberRegs;
-  SmallVector<IdentifierInfo*, 4> Inputs;
-  SmallVector<IdentifierInfo*, 4> Outputs;
-  SmallVector<Expr*, 4> InputExprs;
-  SmallVector<Expr*, 4> OutputExprs;
-  SmallVector<std::string, 4> InputExprNames;
-  SmallVector<std::string, 4> OutputExprNames;
+class MCAsmParserSemaCallbackImpl : public llvm::MCAsmParserSemaCallback {
+  Sema &SemaRef;
+  SourceLocation AsmLoc;
+  ArrayRef<Token> AsmToks;
+  ArrayRef<unsigned> TokOffsets;
+
+public:
+  MCAsmParserSemaCallbackImpl(Sema &Ref, SourceLocation Loc,
+                              ArrayRef<Token> Toks,
+                              ArrayRef<unsigned> Offsets)
+    : SemaRef(Ref), AsmLoc(Loc), AsmToks(Toks), TokOffsets(Offsets) { }
+  ~MCAsmParserSemaCallbackImpl() {}
+
+  void *LookupInlineAsmIdentifier(StringRef Name, void *SrcLoc, unsigned &Size){
+    SourceLocation Loc = SourceLocation::getFromPtrEncoding(SrcLoc);
+    NamedDecl *OpDecl = SemaRef.LookupInlineAsmIdentifier(Name, Loc, Size);
+    return static_cast<void *>(OpDecl);
+  }
+
+  bool LookupInlineAsmField(StringRef Base, StringRef Member,
+                            unsigned &Offset) {
+    return SemaRef.LookupInlineAsmField(Base, Member, Offset, AsmLoc);
+  }
+
+  static void MSAsmDiagHandlerCallback(const llvm::SMDiagnostic &D,
+                                       void *Context) {
+    ((MCAsmParserSemaCallbackImpl*)Context)->MSAsmDiagHandler(D);
+  }
+  void MSAsmDiagHandler(const llvm::SMDiagnostic &D) {
+    // Compute an offset into the inline asm buffer.
+    // FIXME: This isn't right if .macro is involved (but hopefully, no
+    // real-world code does that).
+    const llvm::SourceMgr &LSM = *D.getSourceMgr();
+    const llvm::MemoryBuffer *LBuf =
+    LSM.getMemoryBuffer(LSM.FindBufferContainingLoc(D.getLoc()));
+    unsigned Offset = D.getLoc().getPointer()  - LBuf->getBufferStart();
+
+    // Figure out which token that offset points into.
+    const unsigned *OffsetPtr =
+        std::lower_bound(TokOffsets.begin(), TokOffsets.end(), Offset);
+    unsigned TokIndex = OffsetPtr - TokOffsets.begin();
+
+    // If we come up with an answer which seems sane, use it; otherwise,
+    // just point at the __asm keyword.
+    // FIXME: Assert the answer is sane once we handle .macro correctly.
+    SourceLocation Loc = AsmLoc;
+    if (TokIndex < AsmToks.size()) {
+      const Token *Tok = &AsmToks[TokIndex];
+      Loc = Tok->getLocation();
+      Loc = Loc.getLocWithOffset(Offset - (*OffsetPtr - Tok->getLength()));
+    }
+    SemaRef.Diag(Loc, diag::err_inline_ms_asm_parsing) << D.getMessage();
+  }
+};
+
+}
+
+NamedDecl *Sema::LookupInlineAsmIdentifier(StringRef Name, SourceLocation Loc,
+                                           unsigned &Size) {
+  Size = 0;
+  LookupResult Result(*this, &Context.Idents.get(Name), Loc,
+                      Sema::LookupOrdinaryName);
+
+  if (!LookupName(Result, getCurScope())) {
+    // If we don't find anything, return null; the AsmParser will assume
+    // it is a label of some sort.
+    return 0;
+  }
+
+  if (!Result.isSingleResult()) {
+    // FIXME: Diagnose result.
+    return 0;
+  }
+
+  NamedDecl *ND = Result.getFoundDecl();
+  if (isa<VarDecl>(ND) || isa<FunctionDecl>(ND)) {
+    if (VarDecl *Var = dyn_cast<VarDecl>(ND))
+      Size = Context.getTypeInfo(Var->getType()).first;
+
+    return ND;
+  }
+
+  // FIXME: Handle other kinds of results? (FieldDecl, etc.)
+  // FIXME: Diagnose if we find something we can't handle, like a typedef.
+  return 0;
+}
+
+bool Sema::LookupInlineAsmField(StringRef Base, StringRef Member,
+                                unsigned &Offset, SourceLocation AsmLoc) {
+  Offset = 0;
+  LookupResult BaseResult(*this, &Context.Idents.get(Base), SourceLocation(),
+                          LookupOrdinaryName);
+
+  if (!LookupName(BaseResult, getCurScope()))
+    return true;
+
+  if (!BaseResult.isSingleResult())
+    return true;
+
+  NamedDecl *FoundDecl = BaseResult.getFoundDecl();
+  const RecordType *RT = 0;
+  if (VarDecl *VD = dyn_cast<VarDecl>(FoundDecl)) {
+    RT = VD->getType()->getAs<RecordType>();
+  } else if (TypedefDecl *TD = dyn_cast<TypedefDecl>(FoundDecl)) {
+    RT = TD->getUnderlyingType()->getAs<RecordType>();
+  }
+  if (!RT)
+    return true;
+
+  if (RequireCompleteType(AsmLoc, QualType(RT, 0), 0))
+    return true;
+
+  LookupResult FieldResult(*this, &Context.Idents.get(Member), SourceLocation(),
+                           LookupMemberName);
+
+  if (!LookupQualifiedName(FieldResult, RT->getDecl()))
+    return true;
+
+  // FIXME: Handle IndirectFieldDecl?
+  FieldDecl *FD = dyn_cast<FieldDecl>(FieldResult.getFoundDecl());
+  if (!FD)
+    return true;
+
+  const ASTRecordLayout &RL = Context.getASTRecordLayout(RT->getDecl());
+  unsigned i = FD->getFieldIndex();
+  CharUnits Result = Context.toCharUnitsFromBits(RL.getFieldOffset(i));
+  Offset = (unsigned)Result.getQuantity();
+
+  return false;
+}
+
+StmtResult Sema::ActOnMSAsmStmt(SourceLocation AsmLoc, SourceLocation LBraceLoc,
+                                ArrayRef<Token> AsmToks,SourceLocation EndLoc) {
+  SmallVector<IdentifierInfo*, 4> Names;
+  SmallVector<StringRef, 4> ConstraintRefs;
+  SmallVector<Expr*, 4> Exprs;
+  SmallVector<StringRef, 4> ClobberRefs;
 
   // Empty asm statements don't need to instantiate the AsmParser, etc.
-  StringRef EmptyAsmStr;
-  if (AsmToks.empty()) { DEF_SIMPLE_MSASM(EmptyAsmStr); return Owned(NS); }
+  if (AsmToks.empty()) {
+    StringRef EmptyAsmStr;
+    MSAsmStmt *NS =
+      new (Context) MSAsmStmt(Context, AsmLoc, LBraceLoc, /*IsSimple*/ true,
+                              /*IsVolatile*/ true, AsmToks, /*NumOutputs*/ 0,
+                              /*NumInputs*/ 0, Names, ConstraintRefs, Exprs,
+                              EmptyAsmStr, ClobberRefs, EndLoc);
+    return Owned(NS);
+  }
 
-  std::vector<std::string> AsmStrings;
-  std::vector<std::pair<unsigned,unsigned> > AsmTokRanges;
-  std::string AsmString = buildMSAsmString(*this, AsmToks, AsmStrings,
-                                           AsmTokRanges);
-
-  std::vector<std::vector<StringRef> > Pieces(AsmStrings.size());
-  buildMSAsmPieces(AsmStrings, Pieces);
-
-  bool IsSimple = isSimpleMSAsm(Pieces, Context.getTargetInfo());
-
-  // AsmParser doesn't fully support these asm statements.
-  if (bailOnMSAsm(Pieces)) { DEF_SIMPLE_MSASM(EmptyAsmStr); return Owned(NS); }
-
-  // Initialize targets and assembly printers/parsers.
-  llvm::InitializeAllTargetInfos();
-  llvm::InitializeAllTargetMCs();
-  llvm::InitializeAllAsmParsers();
+  std::string AsmString;
+  llvm::SmallVector<unsigned, 8> TokOffsets;
+  if (buildMSAsmString(*this, AsmLoc, AsmToks, TokOffsets, AsmString))
+    return StmtError();
 
   // Get the target specific parser.
   std::string Error;
@@ -510,176 +589,84 @@ StmtResult Sema::ActOnMSAsmStmt(SourceLocation AsmLoc,
   OwningPtr<llvm::MCSubtargetInfo>
     STI(TheTarget->createMCSubtargetInfo(TT, "", ""));
 
-  for (unsigned StrIdx = 0, e = AsmStrings.size(); StrIdx != e; ++StrIdx) {
-    llvm::SourceMgr SrcMgr;
-    llvm::MCContext Ctx(*MAI, *MRI, MOFI.get(), &SrcMgr);
-    llvm::MemoryBuffer *Buffer =
-      llvm::MemoryBuffer::getMemBuffer(AsmStrings[StrIdx], "<inline asm>");
+  llvm::SourceMgr SrcMgr;
+  llvm::MCContext Ctx(*MAI, *MRI, MOFI.get(), &SrcMgr);
+  llvm::MemoryBuffer *Buffer =
+    llvm::MemoryBuffer::getMemBuffer(AsmString, "<inline asm>");
 
-    // Tell SrcMgr about this buffer, which is what the parser will pick up.
-    SrcMgr.AddNewSourceBuffer(Buffer, llvm::SMLoc());
+  // Tell SrcMgr about this buffer, which is what the parser will pick up.
+  SrcMgr.AddNewSourceBuffer(Buffer, llvm::SMLoc());
 
-    OwningPtr<llvm::MCStreamer> Str(createNullStreamer(Ctx));
-    OwningPtr<llvm::MCAsmParser>
-      Parser(createMCAsmParser(SrcMgr, Ctx, *Str.get(), *MAI));
-    OwningPtr<llvm::MCTargetAsmParser>
-      TargetParser(TheTarget->createMCAsmParser(*STI, *Parser));
-    // Change to the Intel dialect.
-    Parser->setAssemblerDialect(1);
-    Parser->setTargetParser(*TargetParser.get());
+  OwningPtr<llvm::MCStreamer> Str(createNullStreamer(Ctx));
+  OwningPtr<llvm::MCAsmParser>
+    Parser(createMCAsmParser(SrcMgr, Ctx, *Str.get(), *MAI));
+  OwningPtr<llvm::MCTargetAsmParser>
+    TargetParser(TheTarget->createMCAsmParser(*STI, *Parser));
 
-    // Prime the lexer.
-    Parser->Lex();
+  // Get the instruction descriptor.
+  const llvm::MCInstrInfo *MII = TheTarget->createMCInstrInfo(); 
+  llvm::MCInstPrinter *IP =
+    TheTarget->createMCInstPrinter(1, *MAI, *MII, *MRI, *STI);
 
-    // Parse the opcode.
-    StringRef IDVal;
-    Parser->ParseIdentifier(IDVal);
+  // Change to the Intel dialect.
+  Parser->setAssemblerDialect(1);
+  Parser->setTargetParser(*TargetParser.get());
+  Parser->setParsingInlineAsm(true);
+  TargetParser->setParsingInlineAsm(true);
 
-    // Canonicalize the opcode to lower case.
-    SmallString<128> OpcodeStr;
-    for (unsigned i = 0, e = IDVal.size(); i != e; ++i)
-      OpcodeStr.push_back(tolower(IDVal[i]));
+  MCAsmParserSemaCallbackImpl MCAPSI(*this, AsmLoc, AsmToks, TokOffsets);
+  TargetParser->setSemaCallback(&MCAPSI);
+  SrcMgr.setDiagHandler(MCAsmParserSemaCallbackImpl::MSAsmDiagHandlerCallback,
+                        &MCAPSI);
 
-    // Parse the operands.
-    llvm::SMLoc IDLoc;
-    SmallVector<llvm::MCParsedAsmOperand*, 8> Operands;
-    bool HadError = TargetParser->ParseInstruction(OpcodeStr.str(), IDLoc,
-                                                   Operands);
-    // If we had an error parsing the operands, fail gracefully.
-    if (HadError) { DEF_SIMPLE_MSASM(EmptyAsmStr); return Owned(NS); }
+  unsigned NumOutputs;
+  unsigned NumInputs;
+  std::string AsmStringIR;
+  SmallVector<std::pair<void *, bool>, 4> OpDecls;
+  SmallVector<std::string, 4> Constraints;
+  SmallVector<std::string, 4> Clobbers;
+  if (Parser->ParseMSInlineAsm(AsmLoc.getPtrEncoding(), AsmStringIR,
+                               NumOutputs, NumInputs, OpDecls, Constraints,
+                               Clobbers, MII, IP, MCAPSI))
+    return StmtError();
 
-    // Match the MCInstr.
-    unsigned Kind;
-    unsigned ErrorInfo;
-    SmallVector<llvm::MCInst, 2> Instrs;
-    HadError = TargetParser->MatchInstruction(IDLoc, Kind, Operands, Instrs,
-                                              ErrorInfo,
-                                              /*matchingInlineAsm*/ true);
-    // If we had an error parsing the operands, fail gracefully.
-    if (HadError) { DEF_SIMPLE_MSASM(EmptyAsmStr); return Owned(NS); }
+  // Build the vector of clobber StringRefs.
+  unsigned NumClobbers = Clobbers.size();
+  ClobberRefs.resize(NumClobbers);
+  for (unsigned i = 0; i != NumClobbers; ++i)
+    ClobberRefs[i] = StringRef(Clobbers[i]);
 
-    // Get the instruction descriptor.
-    llvm::MCInst Inst = Instrs[0];
-    const llvm::MCInstrInfo *MII = TheTarget->createMCInstrInfo();
-    const llvm::MCInstrDesc &Desc = MII->get(Inst.getOpcode());
-    llvm::MCInstPrinter *IP =
-      TheTarget->createMCInstPrinter(1, *MAI, *MII, *MRI, *STI);
+  // Recast the void pointers and build the vector of constraint StringRefs.
+  unsigned NumExprs = NumOutputs + NumInputs;
+  Names.resize(NumExprs);
+  ConstraintRefs.resize(NumExprs);
+  Exprs.resize(NumExprs);
+  for (unsigned i = 0, e = NumExprs; i != e; ++i) {
+    NamedDecl *OpDecl = static_cast<NamedDecl *>(OpDecls[i].first);
+    if (!OpDecl)
+      return StmtError();
 
-    // Build the list of clobbers, outputs and inputs.
-    unsigned NumDefs = Desc.getNumDefs();
-    for (unsigned i = 1, e = Operands.size(); i != e; ++i) {
-      unsigned NumMCOperands;
-      unsigned MCIdx = TargetParser->getMCInstOperandNum(Kind, Inst, Operands,
-                                                         i, NumMCOperands);
-      assert (NumMCOperands && "Expected at least 1 MCOperand!");
-      // If we have a one-to-many mapping, then search for the MCExpr.
-      if (NumMCOperands > 1) {
-        bool foundExpr = false;
-        for (unsigned j = MCIdx, e = MCIdx + NumMCOperands; j != e; ++j) {
-          if (Inst.getOperand(j).isExpr()) {
-            foundExpr = true;
-            MCIdx = j;
-            break;
-          }
-        }
-        assert (foundExpr && "Expected for find an expression!");
-      }
+    DeclarationNameInfo NameInfo(OpDecl->getDeclName(), AsmLoc);
+    ExprResult OpExpr = BuildDeclarationNameExpr(CXXScopeSpec(), NameInfo,
+                                                 OpDecl);
+    if (OpExpr.isInvalid())
+      return StmtError();
 
-      const llvm::MCOperand &Op = Inst.getOperand(MCIdx);
+    // Need offset of variable.
+    if (OpDecls[i].second)
+      OpExpr = BuildUnaryOp(getCurScope(), AsmLoc, clang::UO_AddrOf,
+                            OpExpr.take());
 
-      // Immediate.
-      if (Op.isImm() || Op.isFPImm())
-        continue;
-
-      bool isDef = NumDefs && (MCIdx < NumDefs);
-
-      // Register/Clobber.
-      if (Op.isReg() && isDef) {
-        std::string Reg;
-        llvm::raw_string_ostream OS(Reg);
-        IP->printRegName(OS, Op.getReg());
-
-        StringRef Clobber(OS.str());
-        if (!Context.getTargetInfo().isValidClobber(Clobber))
-          return StmtError(Diag(AsmLoc, diag::err_asm_unknown_register_name) <<
-                           Clobber);
-        ClobberRegs.insert(Reg);
-        continue;
-      }
-      // Expr/Input or Output.
-      if (Op.isExpr()) {
-        const llvm::MCExpr *Expr = Op.getExpr();
-        const llvm::MCSymbolRefExpr *SymRef;
-        if ((SymRef = dyn_cast<llvm::MCSymbolRefExpr>(Expr))) {
-          StringRef Name = SymRef->getSymbol().getName();
-          IdentifierInfo *II = getIdentifierInfo(Name, AsmToks,
-                                                 AsmTokRanges[StrIdx].first,
-                                                 AsmTokRanges[StrIdx].second);
-          if (II) {
-            CXXScopeSpec SS;
-            UnqualifiedId Id;
-            SourceLocation Loc;
-            Id.setIdentifier(II, AsmLoc);
-            ExprResult Result = ActOnIdExpression(getCurScope(), SS, Loc, Id,
-                                                  false, false);
-            if (!Result.isInvalid()) {
-              bool isMemDef = (i == 1) && Desc.mayStore();
-              if (isDef || isMemDef) {
-                Outputs.push_back(II);
-                OutputExprs.push_back(Result.take());
-                OutputExprNames.push_back(Name.str());
-                OutputConstraints.push_back("=r");
-              } else {
-                Inputs.push_back(II);
-                InputExprs.push_back(Result.take());
-                InputExprNames.push_back(Name.str());
-                InputConstraints.push_back("r");
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  for (std::set<std::string>::iterator I = ClobberRegs.begin(),
-         E = ClobberRegs.end(); I != E; ++I)
-    Clobbers.push_back(*I);
-
-  // Merge the output and input constraints.  Output constraints are expected
-  // first.
-  for (std::vector<std::string>::iterator I = OutputConstraints.begin(),
-         E = OutputConstraints.end(); I != E; ++I)
-    Constraints.push_back(*I);
-
-  for (std::vector<std::string>::iterator I = InputConstraints.begin(),
-         E = InputConstraints.end(); I != E; ++I)
-    Constraints.push_back(*I);
-
-  // Enumerate the AsmString expressions.
-  // FIXME: This isn't going to work if:
-  //  1. The symbol name and an opcode/reg share the same, or are a substring of
-  //     the, name.
-  //  2. The symbol name appears more then once in the asm string.
-  unsigned OpNum = 0;
-  for (unsigned i = 0, e = OutputExprNames.size(); i != e; ++i, ++OpNum) {
-    size_t found = AsmString.find(OutputExprNames[i]);
-    SmallString<32> Res;
-    llvm::raw_svector_ostream OS(Res);
-    OS << '$' << OpNum;
-    AsmString.replace(found, OutputExprNames[i].size(), OS.str());
-  }
-  for (unsigned i = 0, e = InputExprNames.size(); i != e; ++i, ++OpNum) {
-    size_t found = AsmString.find(InputExprNames[i]);
-    SmallString<32> Res;
-    llvm::raw_svector_ostream OS(Res);
-    OS << '$' << OpNum;
-    AsmString.replace(found, InputExprNames[i].size(), OS.str());
+    Names[i] = OpDecl->getIdentifier();
+    ConstraintRefs[i] = StringRef(Constraints[i]);
+    Exprs[i] = OpExpr.take();
   }
 
+  bool IsSimple = NumExprs > 0;
   MSAsmStmt *NS =
     new (Context) MSAsmStmt(Context, AsmLoc, LBraceLoc, IsSimple,
-                            /*IsVolatile*/ true, AsmToks, Inputs, Outputs,
-                            InputExprs, OutputExprs, AsmString, Constraints,
-                            Clobbers, EndLoc);
+                            /*IsVolatile*/ true, AsmToks, NumOutputs, NumInputs,
+                            Names, ConstraintRefs, Exprs, AsmStringIR,
+                            ClobberRefs, EndLoc);
   return Owned(NS);
 }

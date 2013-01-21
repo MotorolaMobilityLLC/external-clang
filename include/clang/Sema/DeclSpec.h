@@ -23,14 +23,14 @@
 #ifndef LLVM_CLANG_SEMA_DECLSPEC_H
 #define LLVM_CLANG_SEMA_DECLSPEC_H
 
-#include "clang/Sema/AttributeList.h"
-#include "clang/Sema/Ownership.h"
 #include "clang/AST/NestedNameSpecifier.h"
-#include "clang/Lex/Token.h"
 #include "clang/Basic/ExceptionSpecificationType.h"
 #include "clang/Basic/Lambda.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/Specifiers.h"
+#include "clang/Lex/Token.h"
+#include "clang/Sema/AttributeList.h"
+#include "clang/Sema/Ownership.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -276,6 +276,12 @@ public:
   static const TST TST_auto = clang::TST_auto;
   static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
   static const TST TST_atomic = clang::TST_atomic;
+  static const TST TST_image1d_t = clang::TST_image1d_t;
+  static const TST TST_image1d_array_t = clang::TST_image1d_array_t;
+  static const TST TST_image1d_buffer_t = clang::TST_image1d_buffer_t;
+  static const TST TST_image2d_t = clang::TST_image2d_t;
+  static const TST TST_image2d_array_t = clang::TST_image2d_array_t;
+  static const TST TST_image3d_t = clang::TST_image3d_t;
   static const TST TST_error = clang::TST_error;
 
   // type-qualifiers
@@ -306,7 +312,7 @@ private:
   /*TSW*/unsigned TypeSpecWidth : 2;
   /*TSC*/unsigned TypeSpecComplex : 2;
   /*TSS*/unsigned TypeSpecSign : 2;
-  /*TST*/unsigned TypeSpecType : 5;
+  /*TST*/unsigned TypeSpecType : 6;
   unsigned TypeAltiVecVector : 1;
   unsigned TypeAltiVecPixel : 1;
   unsigned TypeAltiVecBool : 1;
@@ -377,15 +383,15 @@ private:
   static bool isExprRep(TST T) {
     return (T == TST_typeofExpr || T == TST_decltype);
   }
+
+  DeclSpec(const DeclSpec &) LLVM_DELETED_FUNCTION;
+  void operator=(const DeclSpec &) LLVM_DELETED_FUNCTION;
+public:
   static bool isDeclRep(TST T) {
     return (T == TST_enum || T == TST_struct ||
             T == TST_interface || T == TST_union ||
             T == TST_class);
   }
-
-  DeclSpec(const DeclSpec&);       // DO NOT IMPLEMENT
-  void operator=(const DeclSpec&); // DO NOT IMPLEMENT
-public:
 
   DeclSpec(AttributeFactory &attrFactory)
     : StorageClassSpec(SCS_unspecified),
@@ -600,15 +606,11 @@ public:
   }
 
   bool SetTypeQual(TQ T, SourceLocation Loc, const char *&PrevSpec,
-                   unsigned &DiagID, const LangOptions &Lang,
-                   bool IsTypeSpec);
+                   unsigned &DiagID, const LangOptions &Lang);
 
-  bool SetFunctionSpecInline(SourceLocation Loc, const char *&PrevSpec,
-                             unsigned &DiagID);
-  bool SetFunctionSpecVirtual(SourceLocation Loc, const char *&PrevSpec,
-                              unsigned &DiagID);
-  bool SetFunctionSpecExplicit(SourceLocation Loc, const char *&PrevSpec,
-                               unsigned &DiagID);
+  bool setFunctionSpecInline(SourceLocation Loc);
+  bool setFunctionSpecVirtual(SourceLocation Loc);
+  bool setFunctionSpecExplicit(SourceLocation Loc);
 
   bool SetFriendSpec(SourceLocation Loc, const char *&PrevSpec,
                      unsigned &DiagID);
@@ -783,8 +785,9 @@ private:
 /// \brief Represents a C++ unqualified-id that has been parsed. 
 class UnqualifiedId {
 private:
-  const UnqualifiedId &operator=(const UnqualifiedId &); // DO NOT IMPLEMENT
-  
+  UnqualifiedId(const UnqualifiedId &Other) LLVM_DELETED_FUNCTION;
+  const UnqualifiedId &operator=(const UnqualifiedId &) LLVM_DELETED_FUNCTION;
+
 public:
   /// \brief Describes the kind of unqualified-id parsed.
   enum IdKind {
@@ -858,17 +861,6 @@ public:
   SourceLocation EndLocation;
   
   UnqualifiedId() : Kind(IK_Identifier), Identifier(0) { }
-
-  /// \brief Do not use this copy constructor. It is temporary, and only
-  /// exists because we are holding FieldDeclarators in a SmallVector when we
-  /// don't actually need them.
-  ///
-  /// FIXME: Kill this copy constructor.
-  UnqualifiedId(const UnqualifiedId &Other) 
-    : Kind(IK_Identifier), Identifier(Other.Identifier), 
-      StartLocation(Other.StartLocation), EndLocation(Other.EndLocation) {
-    assert(Other.Kind == IK_Identifier && "Cannot copy non-identifiers");
-  }
 
   /// \brief Clear out this unqualified-id, setting it to default (invalid) 
   /// state.
@@ -1112,7 +1104,7 @@ struct DeclaratorChunk {
     /// \brief Whether the ref-qualifier (if any) is an lvalue reference.
     /// Otherwise, it's an rvalue reference.
     unsigned RefQualifierIsLValueRef : 1;
-    
+
     /// The type qualifiers: const/volatile/restrict.
     /// The qualifier bitmask values are the same as in QualType.
     unsigned TypeQuals : 3;
@@ -1127,8 +1119,14 @@ struct DeclaratorChunk {
     /// specified.
     unsigned HasTrailingReturnType : 1;
 
+    /// The location of the left parenthesis in the source.
+    unsigned LParenLoc;
+
     /// When isVariadic is true, the location of the ellipsis in the source.
     unsigned EllipsisLoc;
+
+    /// The location of the right parenthesis in the source.
+    unsigned RParenLoc;
 
     /// NumArgs - This is the number of formal arguments provided for the
     /// declarator.
@@ -1204,10 +1202,19 @@ struct DeclaratorChunk {
     bool isKNRPrototype() const {
       return !hasPrototype && NumArgs != 0;
     }
-    
+
+    SourceLocation getLParenLoc() const {
+      return SourceLocation::getFromRawEncoding(LParenLoc);
+    }
+
     SourceLocation getEllipsisLoc() const {
       return SourceLocation::getFromRawEncoding(EllipsisLoc);
     }
+
+    SourceLocation getRParenLoc() const {
+      return SourceLocation::getFromRawEncoding(RParenLoc);
+    }
+
     SourceLocation getExceptionSpecLoc() const {
       return SourceLocation::getFromRawEncoding(ExceptionSpecLoc);
     }
@@ -1360,11 +1367,13 @@ struct DeclaratorChunk {
 
   /// DeclaratorChunk::getFunction - Return a DeclaratorChunk for a function.
   /// "TheDeclarator" is the declarator that this will be added to.
-  static DeclaratorChunk getFunction(bool hasProto, bool isVariadic,
+  static DeclaratorChunk getFunction(bool hasProto,
                                      bool isAmbiguous,
-                                     SourceLocation EllipsisLoc,
+                                     SourceLocation LParenLoc,
                                      ParamInfo *ArgInfo, unsigned NumArgs,
-                                     unsigned TypeQuals, 
+                                     SourceLocation EllipsisLoc,
+                                     SourceLocation RParenLoc,
+                                     unsigned TypeQuals,
                                      bool RefQualifierIsLvalueRef,
                                      SourceLocation RefQualifierLoc,
                                      SourceLocation ConstQualifierLoc,
@@ -1889,6 +1898,17 @@ public:
       if (getTypeObject(i).getAttrs())
         return true;
     return false;
+  }
+
+  /// \brief Return a source range list of C++11 attributes associated
+  /// with the declarator.
+  void getCXX11AttributeRanges(SmallVector<SourceRange, 4> &Ranges) {
+    AttributeList *AttrList = Attrs.getList();
+    while (AttrList) {
+      if (AttrList->isCXX11Attribute())
+        Ranges.push_back(AttrList->getRange());
+      AttrList = AttrList->getNext();
+    }
   }
 
   void setAsmLabel(Expr *E) { AsmLabel = E; }
