@@ -7,4 +7,5 @@ $(TARGET_OUT_HEADERS)/clang/arm_neon.h: $(CLANG_ROOT_PATH)/include/clang/Basic/a
     | $(CLANG_TBLGEN)
 	$(call transform-host-clang-td-to-out,arm-neon)
 
-$(CLANG): $(TARGET_OUT_HEADERS)/clang/arm_neon.h
+# Make sure when clang is used, arm_neon.h does exist.
+$(CLANG): | $(TARGET_OUT_HEADERS)/clang/arm_neon.h
