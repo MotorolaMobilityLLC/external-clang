@@ -28,5 +28,6 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   ))
 
 include $(LOCAL_PATH)/clang.mk
+include $(LOCAL_PATH)/host_shared_clang.mk
 
 include $(subdirs)
