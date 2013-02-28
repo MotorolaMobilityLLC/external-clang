@@ -21,7 +21,11 @@ LOCAL_WHOLE_STATIC_LIBRARIES := \
 
 LOCAL_SHARED_LIBRARIES := libLLVM
 
-LOCAL_LDLIBS := -ldl -lpthread
+ifeq ($(HOST_OS),windows)
+  LOCAL_LDLIBS := -limagehlp -lpsapi
+else
+  LOCAL_LDLIBS := -ldl -lpthread
+endif
 
 include $(CLANG_HOST_BUILD_MK)
 include $(BUILD_HOST_SHARED_LIBRARY)
