@@ -1,3 +1,6 @@
+# Don't build the library in unbundled branches.
+ifeq (,$(TARGET_BUILD_APPS))
+
 LOCAL_PATH:= $(call my-dir)
 
 LOCAL_IS_HOST_MODULE := true
@@ -29,3 +32,5 @@ endif
 
 include $(CLANG_HOST_BUILD_MK)
 include $(BUILD_HOST_SHARED_LIBRARY)
+
+endif # don't build in unbundled branches
