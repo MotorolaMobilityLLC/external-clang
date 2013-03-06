@@ -10,7 +10,7 @@
 /// \file
 /// \brief Defines the SourceManager interface.
 ///
-/// There are three different types of locations in a file: a spelling
+/// There are three different types of locations in a %file: a spelling
 /// location, an expansion location, and a presumed location.
 ///
 /// Given an example of:
@@ -79,7 +79,7 @@ namespace SrcMgr {
   };
 
   /// \brief One instance of this struct is kept for every file loaded or used.
-  ////
+  ///
   /// This object owns the MemoryBuffer object.
   class ContentCache {
     enum CCFlags {
@@ -271,7 +271,7 @@ namespace SrcMgr {
       return SourceLocation::getFromRawEncoding(IncludeLoc);
     }
     const ContentCache* getContentCache() const {
-      return reinterpret_cast<const ContentCache*>(Data & ~7UL);
+      return reinterpret_cast<const ContentCache*>(Data & ~uintptr_t(7));
     }
 
     /// \brief Return whether this is a system header or not.
@@ -327,6 +327,11 @@ namespace SrcMgr {
       // Note that this needs to return false for default constructed objects.
       return getExpansionLocStart().isValid() &&
         SourceLocation::getFromRawEncoding(ExpansionLocEnd).isInvalid();
+    }
+
+    bool isMacroBodyExpansion() const {
+      return getExpansionLocStart().isValid() &&
+        SourceLocation::getFromRawEncoding(ExpansionLocEnd).isValid();
     }
 
     bool isFunctionMacroExpansion() const {
@@ -517,7 +522,7 @@ public:
 /// \brief The stack used when building modules on demand, which is used
 /// to provide a link between the source managers of the different compiler
 /// instances.
-typedef llvm::ArrayRef<std::pair<std::string, FullSourceLoc> > ModuleBuildStack;
+typedef ArrayRef<std::pair<std::string, FullSourceLoc> > ModuleBuildStack;
 
 /// \brief This class handles loading and caching of source files into memory.
 ///
@@ -583,13 +588,13 @@ class SourceManager : public RefCountedBase<SourceManager> {
   ///
   /// Positive FileIDs are indexes into this table. Entry 0 indicates an invalid
   /// expansion.
-  std::vector<SrcMgr::SLocEntry> LocalSLocEntryTable;
+  SmallVector<SrcMgr::SLocEntry, 0> LocalSLocEntryTable;
 
   /// \brief The table of SLocEntries that are loaded from other modules.
   ///
   /// Negative FileIDs are indexes into this table. To get from ID to an index,
   /// use (-ID - 2).
-  mutable std::vector<SrcMgr::SLocEntry> LoadedSLocEntryTable;
+  mutable SmallVector<SrcMgr::SLocEntry, 0> LoadedSLocEntryTable;
 
   /// \brief The starting offset of the next local SLocEntry.
   ///
@@ -1126,6 +1131,13 @@ public:
   /// expanded.
   bool isMacroArgExpansion(SourceLocation Loc) const;
 
+  /// \brief Tests whether the given source location represents the expansion of
+  /// a macro body.
+  ///
+  /// This is equivalent to testing whether the location is part of a macro
+  /// expansion but not the expansion of an argument to a function-like macro.
+  bool isMacroBodyExpansion(SourceLocation Loc) const;
+
   /// \brief Returns true if \p Loc is inside the [\p Start, +\p Length)
   /// chunk of the source location address space.
   ///
@@ -1607,5 +1619,6 @@ public:
 };
 
 }  // end namespace clang
+
 
 #endif

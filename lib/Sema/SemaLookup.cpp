@@ -371,6 +371,12 @@ void LookupResult::resolveKind() {
     NamedDecl *D = Decls[I]->getUnderlyingDecl();
     D = cast<NamedDecl>(D->getCanonicalDecl());
 
+    // Ignore an invalid declaration unless it's the only one left.
+    if (D->isInvalidDecl() && I < N-1) {
+      Decls[I] = Decls[--N];
+      continue;
+    }
+
     // Redeclarations of types via typedef can occur both within a scope
     // and, through using declarations and directives, across scopes. There is
     // no ambiguity if they all refer to the same type, so unique based on the
@@ -2536,7 +2542,7 @@ Sema::LookupLiteralOperator(Scope *S, LookupResult &R,
       if (FD->getNumParams() == 1 &&
           FD->getParamDecl(0)->getType()->getAs<PointerType>())
         IsRaw = true;
-      else {
+      else if (FD->getNumParams() == ArgTys.size()) {
         IsExactMatch = true;
         for (unsigned ArgIdx = 0; ArgIdx != ArgTys.size(); ++ArgIdx) {
           QualType ParamTy = FD->getParamDecl(ArgIdx)->getType();
@@ -2913,10 +2919,12 @@ static void LookupVisibleDecls(DeclContext *Ctx, LookupResult &Result,
   // Traverse the contexts of Objective-C classes.
   if (ObjCInterfaceDecl *IFace = dyn_cast<ObjCInterfaceDecl>(Ctx)) {
     // Traverse categories.
-    for (ObjCCategoryDecl *Category = IFace->getCategoryList();
-         Category; Category = Category->getNextClassCategory()) {
+    for (ObjCInterfaceDecl::visible_categories_iterator
+           Cat = IFace->visible_categories_begin(),
+           CatEnd = IFace->visible_categories_end();
+         Cat != CatEnd; ++Cat) {
       ShadowContextRAII Shadow(Visited);
-      LookupVisibleDecls(Category, Result, QualifiedNameLookup, false,
+      LookupVisibleDecls(*Cat, Result, QualifiedNameLookup, false,
                          Consumer, Visited);
     }
 
@@ -3130,7 +3138,7 @@ LabelDecl *Sema::LookupOrCreateLabel(IdentifierInfo *II, SourceLocation Loc,
 
 namespace {
 
-typedef llvm::SmallVector<TypoCorrection, 1> TypoResultList;
+typedef SmallVector<TypoCorrection, 1> TypoResultList;
 typedef llvm::StringMap<TypoResultList, llvm::BumpPtrAllocator> TypoResultsMap;
 typedef std::map<unsigned, TypoResultsMap> TypoEditDistanceMap;
 
@@ -3855,7 +3863,7 @@ TypoCorrection Sema::CorrectTypo(const DeclarationNameInfo &TypoName,
         KnownNamespaces[ExternalKnownNamespaces[I]] = true;
     }
     
-    for (llvm::DenseMap<NamespaceDecl*, bool>::iterator 
+    for (llvm::MapVector<NamespaceDecl*, bool>::iterator 
            KNI = KnownNamespaces.begin(),
            KNIEnd = KnownNamespaces.end();
          KNI != KNIEnd; ++KNI)
@@ -3864,7 +3872,7 @@ TypoCorrection Sema::CorrectTypo(const DeclarationNameInfo &TypoName,
 
   // Weed out any names that could not be found by name lookup or, if a
   // CorrectionCandidateCallback object was provided, failed validation.
-  llvm::SmallVector<TypoCorrection, 16> QualifiedResults;
+  SmallVector<TypoCorrection, 16> QualifiedResults;
   LookupResult TmpRes(*this, TypoName, LookupKind);
   TmpRes.suppressDiagnostics();
   while (!Consumer.empty()) {
@@ -3966,9 +3974,9 @@ TypoCorrection Sema::CorrectTypo(const DeclarationNameInfo &TypoName,
     // Only perform the qualified lookups for C++
     if (SearchNamespaces) {
       TmpRes.suppressDiagnostics();
-      for (llvm::SmallVector<TypoCorrection,
-                             16>::iterator QRI = QualifiedResults.begin(),
-                                        QRIEnd = QualifiedResults.end();
+      for (SmallVector<TypoCorrection,
+                       16>::iterator QRI = QualifiedResults.begin(),
+                                  QRIEnd = QualifiedResults.end();
            QRI != QRIEnd; ++QRI) {
         for (NamespaceSpecifierSet::iterator NI = Namespaces.begin(),
                                           NIEnd = Namespaces.end();

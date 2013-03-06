@@ -902,14 +902,13 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 /// including the next assigned index (if none of them match). Returns an
 /// empty option if the context is not a record, i.e.. if the anonymous
 /// struct/union is at namespace or block scope.
-static llvm::Optional<unsigned>
-findAnonymousStructOrUnionIndex(RecordDecl *Anon) {
+static Optional<unsigned> findAnonymousStructOrUnionIndex(RecordDecl *Anon) {
   ASTContext &Context = Anon->getASTContext();
   QualType AnonTy = Context.getRecordType(Anon);
 
   RecordDecl *Owner = dyn_cast<RecordDecl>(Anon->getDeclContext());
   if (!Owner)
-    return llvm::Optional<unsigned>();
+    return None;
 
   unsigned Index = 0;
   for (DeclContext::decl_iterator D = Owner->noload_decls_begin(),
@@ -944,10 +943,8 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   if (D1->isAnonymousStructOrUnion() && D2->isAnonymousStructOrUnion()) {
     // If both anonymous structs/unions are in a record context, make sure
     // they occur in the same location in the context records.
-    if (llvm::Optional<unsigned> Index1
-          = findAnonymousStructOrUnionIndex(D1)) {
-      if (llvm::Optional<unsigned> Index2
-            = findAnonymousStructOrUnionIndex(D2)) {
+    if (Optional<unsigned> Index1 = findAnonymousStructOrUnionIndex(D1)) {
+      if (Optional<unsigned> Index2 = findAnonymousStructOrUnionIndex(D2)) {
         if (*Index1 != *Index2)
           return false;
       }
@@ -1835,7 +1832,7 @@ void ASTNodeImporter::ImportDefinitionIfNeeded(Decl *FromD, Decl *ToD) {
   
   if (RecordDecl *FromRecord = dyn_cast<RecordDecl>(FromD)) {
     if (RecordDecl *ToRecord = cast_or_null<RecordDecl>(ToD)) {
-      if (FromRecord->getDefinition() && !ToRecord->getDefinition()) {
+      if (FromRecord->getDefinition() && FromRecord->isCompleteDefinition() && !ToRecord->getDefinition()) {
         ImportDefinition(FromRecord, ToRecord);
       }
     }
@@ -2213,7 +2210,7 @@ Decl *ASTNodeImporter::VisitNamespaceDecl(NamespaceDecl *D) {
       MergeWithNamespace = cast<NamespaceDecl>(DC)->getAnonymousNamespace();
   } else {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(Name, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(Decl::IDNS_Namespace))
@@ -2276,7 +2273,7 @@ Decl *ASTNodeImporter::VisitTypedefNameDecl(TypedefNameDecl *D, bool IsAlias) {
   if (!DC->isFunctionOrMethod()) {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
     unsigned IDNS = Decl::IDNS_Ordinary;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(Name, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(IDNS))
@@ -2356,7 +2353,7 @@ Decl *ASTNodeImporter::VisitEnumDecl(EnumDecl *D) {
   // We may already have an enum of the same name; try to find and match it.
   if (!DC->isFunctionOrMethod() && SearchName) {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(SearchName, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(IDNS))
@@ -2442,7 +2439,7 @@ Decl *ASTNodeImporter::VisitRecordDecl(RecordDecl *D) {
   RecordDecl *AdoptDecl = 0;
   if (!DC->isFunctionOrMethod()) {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(SearchName, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(IDNS))
@@ -2459,10 +2456,10 @@ Decl *ASTNodeImporter::VisitRecordDecl(RecordDecl *D) {
             FoundRecord->isAnonymousStructOrUnion()) {
           // If both anonymous structs/unions are in a record context, make sure
           // they occur in the same location in the context records.
-          if (llvm::Optional<unsigned> Index1
+          if (Optional<unsigned> Index1
               = findAnonymousStructOrUnionIndex(D)) {
-            if (llvm::Optional<unsigned> Index2
-                = findAnonymousStructOrUnionIndex(FoundRecord)) {
+            if (Optional<unsigned> Index2 =
+                    findAnonymousStructOrUnionIndex(FoundRecord)) {
               if (*Index1 != *Index2)
                 continue;
             }
@@ -2549,7 +2546,7 @@ Decl *ASTNodeImporter::VisitEnumConstantDecl(EnumConstantDecl *D) {
   if (!LexicalDC->isFunctionOrMethod()) {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
     unsigned IDNS = Decl::IDNS_Ordinary;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(Name, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(IDNS))
@@ -2601,7 +2598,7 @@ Decl *ASTNodeImporter::VisitFunctionDecl(FunctionDecl *D) {
   if (!LexicalDC->isFunctionOrMethod()) {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
     unsigned IDNS = Decl::IDNS_Ordinary;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(Name, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(IDNS))
@@ -2811,7 +2808,7 @@ Decl *ASTNodeImporter::VisitFieldDecl(FieldDecl *D) {
     return 0;
   
   // Determine whether we've already imported this field. 
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (FieldDecl *FoundField = dyn_cast<FieldDecl>(FoundDecls[I])) {
@@ -2867,7 +2864,7 @@ Decl *ASTNodeImporter::VisitIndirectFieldDecl(IndirectFieldDecl *D) {
     return 0;
 
   // Determine whether we've already imported this field. 
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (IndirectFieldDecl *FoundField 
@@ -2932,7 +2929,7 @@ Decl *ASTNodeImporter::VisitObjCIvarDecl(ObjCIvarDecl *D) {
     return 0;
   
   // Determine whether we've already imported this ivar 
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (ObjCIvarDecl *FoundIvar = dyn_cast<ObjCIvarDecl>(FoundDecls[I])) {
@@ -2987,7 +2984,7 @@ Decl *ASTNodeImporter::VisitVarDecl(VarDecl *D) {
     VarDecl *MergeWithVar = 0;
     SmallVector<NamedDecl *, 4> ConflictingDecls;
     unsigned IDNS = Decl::IDNS_Ordinary;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(Name, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(IDNS))
@@ -3163,7 +3160,7 @@ Decl *ASTNodeImporter::VisitObjCMethodDecl(ObjCMethodDecl *D) {
   if (ImportDeclParts(D, DC, LexicalDC, Name, Loc))
     return 0;
   
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (ObjCMethodDecl *FoundMethod = dyn_cast<ObjCMethodDecl>(FoundDecls[I])) {
@@ -3410,7 +3407,7 @@ Decl *ASTNodeImporter::VisitObjCProtocolDecl(ObjCProtocolDecl *D) {
     return 0;
 
   ObjCProtocolDecl *MergeWithProtocol = 0;
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (!FoundDecls[I]->isInIdentifierNamespace(Decl::IDNS_ObjCProtocol))
@@ -3514,10 +3511,13 @@ bool ASTNodeImporter::ImportDefinition(ObjCInterfaceDecl *From,
   
   // Import categories. When the categories themselves are imported, they'll
   // hook themselves into this interface.
-  for (ObjCCategoryDecl *FromCat = From->getCategoryList(); FromCat;
-       FromCat = FromCat->getNextClassCategory())
-    Importer.Import(FromCat);
-
+  for (ObjCInterfaceDecl::known_categories_iterator
+         Cat = From->known_categories_begin(),
+         CatEnd = From->known_categories_end();
+       Cat != CatEnd; ++Cat) {
+    Importer.Import(*Cat);
+  }
+  
   // If we have an @implementation, import it as well.
   if (From->getImplementation()) {
     ObjCImplementationDecl *Impl = cast_or_null<ObjCImplementationDecl>(
@@ -3557,7 +3557,7 @@ Decl *ASTNodeImporter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *D) {
 
   // Look for an existing interface with the same name.
   ObjCInterfaceDecl *MergeWithIface = 0;
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (!FoundDecls[I]->isInIdentifierNamespace(Decl::IDNS_Ordinary))
@@ -3709,7 +3709,7 @@ Decl *ASTNodeImporter::VisitObjCPropertyDecl(ObjCPropertyDecl *D) {
     return 0;
 
   // Check whether we have already imported this property.
-  llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+  SmallVector<NamedDecl *, 2> FoundDecls;
   DC->localUncachedLookup(Name, FoundDecls);
   for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
     if (ObjCPropertyDecl *FoundProp
@@ -3942,7 +3942,7 @@ Decl *ASTNodeImporter::VisitClassTemplateDecl(ClassTemplateDecl *D) {
   // We may already have a template of the same name; try to find and match it.
   if (!DC->isFunctionOrMethod()) {
     SmallVector<NamedDecl *, 4> ConflictingDecls;
-    llvm::SmallVector<NamedDecl *, 2> FoundDecls;
+    SmallVector<NamedDecl *, 2> FoundDecls;
     DC->localUncachedLookup(Name, FoundDecls);
     for (unsigned I = 0, N = FoundDecls.size(); I != N; ++I) {
       if (!FoundDecls[I]->isInIdentifierNamespace(Decl::IDNS_Ordinary))

@@ -232,8 +232,12 @@ CreateGlobalInitOrDestructFunction(CodeGenModule &CGM,
   if (!CGM.getLangOpts().Exceptions)
     Fn->setDoesNotThrow();
 
-  if (CGM.getLangOpts().SanitizeAddress)
-    Fn->addFnAttr(llvm::Attribute::AddressSafety);
+  if (CGM.getSanOpts().Address)
+    Fn->addFnAttr(llvm::Attribute::SanitizeAddress);
+  if (CGM.getSanOpts().Thread)
+    Fn->addFnAttr(llvm::Attribute::SanitizeThread);
+  if (CGM.getSanOpts().Memory)
+    Fn->addFnAttr(llvm::Attribute::SanitizeMemory);
 
   return Fn;
 }

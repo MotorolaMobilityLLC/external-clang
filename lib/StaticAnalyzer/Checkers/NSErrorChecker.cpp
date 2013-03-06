@@ -186,7 +186,7 @@ static void setFlag(ProgramStateRef state, SVal val, CheckerContext &C) {
 static QualType parameterTypeFromSVal(SVal val, CheckerContext &C) {
   const StackFrameContext *
     SFC = C.getLocationContext()->getCurrentStackFrame();
-  if (const loc::MemRegionVal* X = dyn_cast<loc::MemRegionVal>(&val)) {
+  if (Optional<loc::MemRegionVal> X = val.getAs<loc::MemRegionVal>()) {
     const MemRegion* R = X->getRegion();
     if (const VarRegion *VR = R->getAs<VarRegion>())
       if (const StackArgumentsSpaceRegion *
@@ -203,7 +203,7 @@ void NSOrCFErrorDerefChecker::checkLocation(SVal loc, bool isLoad,
                                             CheckerContext &C) const {
   if (!isLoad)
     return;
-  if (loc.isUndef() || !isa<Loc>(loc))
+  if (loc.isUndef() || !loc.getAs<Loc>())
     return;
 
   ASTContext &Ctx = C.getASTContext();
@@ -225,12 +225,12 @@ void NSOrCFErrorDerefChecker::checkLocation(SVal loc, bool isLoad,
     CFErrorII = &Ctx.Idents.get("CFErrorRef");
 
   if (ShouldCheckNSError && IsNSError(parmT, NSErrorII)) {
-    setFlag<NSErrorOut>(state, state->getSVal(cast<Loc>(loc)), C);
+    setFlag<NSErrorOut>(state, state->getSVal(loc.castAs<Loc>()), C);
     return;
   }
 
   if (ShouldCheckCFError && IsCFError(parmT, CFErrorII)) {
-    setFlag<CFErrorOut>(state, state->getSVal(cast<Loc>(loc)), C);
+    setFlag<CFErrorOut>(state, state->getSVal(loc.castAs<Loc>()), C);
     return;
   }
 }
@@ -252,7 +252,7 @@ void NSOrCFErrorDerefChecker::checkEvent(ImplicitNullDerefEvent event) const {
     return;
 
   // Storing to possible null NSError/CFErrorRef out parameter.
-  llvm::SmallString<128> Buf;
+  SmallString<128> Buf;
   llvm::raw_svector_ostream os(Buf);
 
   os << "Potential null dereference.  According to coding standards ";

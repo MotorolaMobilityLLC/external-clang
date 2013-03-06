@@ -83,6 +83,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::StaticAssert: // static_assert(X, ""); [C++0x]
   case Decl::Label:        // __label__ x;
   case Decl::Import:
+  case Decl::Empty:
     // None of these decls require codegen support.
     return;
 
@@ -386,7 +387,9 @@ namespace {
       }
 
       CGF.EmitCXXDestructorCall(Dtor, Dtor_Complete,
-                                /*ForVirtualBase=*/false, Loc);
+                                /*ForVirtualBase=*/false,
+                                /*Delegating=*/false,
+                                Loc);
 
       if (NRVO) CGF.EmitBlock(SkipDtorBB);
     }
@@ -1240,7 +1243,18 @@ CodeGenFunction::getDestroyer(QualType::DestructionKind kind) {
   llvm_unreachable("Unknown DestructionKind");
 }
 
-/// pushDestroy - Push the standard destructor for the given type.
+/// pushEHDestroy - Push the standard destructor for the given type as
+/// an EH-only cleanup.
+void CodeGenFunction::pushEHDestroy(QualType::DestructionKind dtorKind,
+                                  llvm::Value *addr, QualType type) {
+  assert(dtorKind && "cannot push destructor for trivial type");
+  assert(needsEHCleanup(dtorKind));
+
+  pushDestroy(EHCleanup, addr, type, getDestroyer(dtorKind), true);
+}
+
+/// pushDestroy - Push the standard destructor for the given type as
+/// at least a normal cleanup.
 void CodeGenFunction::pushDestroy(QualType::DestructionKind dtorKind,
                                   llvm::Value *addr, QualType type) {
   assert(dtorKind && "cannot push destructor for trivial type");
@@ -1513,13 +1527,14 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
     // Otherwise, create a temporary to hold the value.
     llvm::AllocaInst *Alloc = CreateTempAlloca(ConvertTypeForMem(Ty),
                                                D.getName() + ".addr");
-    Alloc->setAlignment(getContext().getDeclAlign(&D).getQuantity());
+    CharUnits Align = getContext().getDeclAlign(&D);
+    Alloc->setAlignment(Align.getQuantity());
     DeclPtr = Alloc;
 
     bool doStore = true;
 
     Qualifiers qs = Ty.getQualifiers();
-
+    LValue lv = MakeAddrLValue(DeclPtr, Ty, Align);
     if (Qualifiers::ObjCLifetime lt = qs.getObjCLifetime()) {
       // We honor __attribute__((ns_consumed)) for types with lifetime.
       // For __strong, it's handled by just skipping the initial retain;
@@ -1540,11 +1555,22 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
       }
 
       if (lt == Qualifiers::OCL_Strong) {
-        if (!isConsumed)
+        if (!isConsumed) {
+          if (CGM.getCodeGenOpts().OptimizationLevel == 0) {
+            // use objc_storeStrong(&dest, value) for retaining the
+            // object. But first, store a null into 'dest' because
+            // objc_storeStrong attempts to release its old value.
+            llvm::Value * Null = CGM.EmitNullConstant(D.getType());
+            EmitStoreOfScalar(Null, lv, /* isInitialization */ true);
+            EmitARCStoreStrongCall(lv.getAddress(), Arg, true);
+            doStore = false;
+          }
+          else
           // Don't use objc_retainBlock for block pointers, because we
           // don't want to Block_copy something just because we got it
           // as a parameter.
-          Arg = EmitARCRetainNonBlock(Arg);
+            Arg = EmitARCRetainNonBlock(Arg);
+        }
       } else {
         // Push the cleanup for a consumed parameter.
         if (isConsumed)
@@ -1561,11 +1587,8 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, llvm::Value *Arg,
     }
 
     // Store the initial value into the alloca.
-    if (doStore) {
-      LValue lv = MakeAddrLValue(DeclPtr, Ty,
-                                 getContext().getDeclAlign(&D));
+    if (doStore)
       EmitStoreOfScalar(Arg, lv, /* isInitialization */ true);
-    }
   }
 
   llvm::Value *&DMEntry = LocalDeclMap[&D];

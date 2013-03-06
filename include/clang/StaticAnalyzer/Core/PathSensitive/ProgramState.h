@@ -222,8 +222,8 @@ public:
   /// \param E the expression that caused the invalidation.
   /// \param BlockCount The number of times the current basic block has been
   //         visited.
-  /// \param CausedByPointerEscape the flag is set to true when
-  ///        the invalidation is due to escape of a symbol (representing a
+  /// \param CausesPointerEscape the flag is set to true when
+  ///        the invalidation entails escape of a symbol (representing a
   ///        pointer). For example, due to it being passed as an argument in a
   ///        call.
   /// \param IS the set of invalidated symbols.
@@ -232,7 +232,7 @@ public:
   ProgramStateRef invalidateRegions(ArrayRef<const MemRegion *> Regions,
                                     const Expr *E, unsigned BlockCount,
                                     const LocationContext *LCtx,
-                                    bool CausedByPointerEscape,
+                                    bool CausesPointerEscape,
                                     InvalidatedSymbols *IS = 0,
                                     const CallEvent *Call = 0) const;
 
@@ -620,22 +620,24 @@ inline ProgramStateRef ProgramState::assume(DefinedOrUnknownSVal Cond,
                                       bool Assumption) const {
   if (Cond.isUnknown())
     return this;
-  
-  return getStateManager().ConstraintMgr->assume(this, cast<DefinedSVal>(Cond),
-                                                 Assumption);
+
+  return getStateManager().ConstraintMgr
+      ->assume(this, Cond.castAs<DefinedSVal>(), Assumption);
 }
   
 inline std::pair<ProgramStateRef , ProgramStateRef >
 ProgramState::assume(DefinedOrUnknownSVal Cond) const {
   if (Cond.isUnknown())
     return std::make_pair(this, this);
-  
-  return getStateManager().ConstraintMgr->assumeDual(this,
-                                                     cast<DefinedSVal>(Cond));
+
+  return getStateManager().ConstraintMgr
+      ->assumeDual(this, Cond.castAs<DefinedSVal>());
 }
 
 inline ProgramStateRef ProgramState::bindLoc(SVal LV, SVal V) const {
-  return !isa<Loc>(LV) ? this : bindLoc(cast<Loc>(LV), V);
+  if (Optional<Loc> L = LV.getAs<Loc>())
+    return bindLoc(*L, V);
+  return this;
 }
 
 inline Loc ProgramState::getLValue(const VarDecl *VD,
@@ -669,7 +671,7 @@ inline SVal ProgramState::getLValue(const IndirectFieldDecl *D,
 }
 
 inline SVal ProgramState::getLValue(QualType ElementType, SVal Idx, SVal Base) const{
-  if (NonLoc *N = dyn_cast<NonLoc>(&Idx))
+  if (Optional<NonLoc> N = Idx.getAs<NonLoc>())
     return getStateManager().StoreMgr->getLValueElement(ElementType, *N, Base);
   return UnknownVal();
 }

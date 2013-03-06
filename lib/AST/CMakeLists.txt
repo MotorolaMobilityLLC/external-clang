@@ -12,7 +12,6 @@ add_clang_library(clangAST
   Comment.cpp
   CommentBriefParser.cpp
   CommentCommandTraits.cpp
-  CommentDumper.cpp
   CommentLexer.cpp
   CommentParser.cpp
   CommentSema.cpp
@@ -66,9 +65,11 @@ add_dependencies(clangAST
   ClangAttrImpl
   ClangAttrDump
   ClangCommentCommandInfo
+  ClangCommentCommandList
   ClangCommentNodes
   ClangCommentHTMLTags
   ClangCommentHTMLTagsProperties
+  ClangCommentHTMLNamedCharacterReferences
   ClangDeclNodes
   ClangDiagnosticAST
   ClangDiagnosticComment
