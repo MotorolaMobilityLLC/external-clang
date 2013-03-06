@@ -10,6 +10,7 @@ TBLGEN_TABLES := \
   Attrs.inc \
   AttrParsedAttrList.inc \
   CC1Options.inc \
+  CommentCommandList.inc \
   CommentNodes.inc \
   DiagnosticASTKinds.inc \
   DiagnosticCommonKinds.inc \

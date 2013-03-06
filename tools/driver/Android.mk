@@ -75,6 +75,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMMC \
   libLLVMMCParser \
   libLLVMScalarOpts \
+  libLLVMTransformObjCARC \
   libLLVMTransformUtils \
   libLLVMVectorize \
   libLLVMAnalysis \

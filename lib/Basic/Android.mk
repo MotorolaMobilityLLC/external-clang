@@ -22,8 +22,7 @@ TBLGEN_TABLES := \
 
 clang_basic_SRC_FILES := \
   Builtins.cpp \
-  ConvertUTF.c \
-  ConvertUTFWrapper.cpp \
+  CharInfo.cpp \
   Diagnostic.cpp \
   DiagnosticIDs.cpp \
   FileManager.cpp \

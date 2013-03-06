@@ -3,6 +3,7 @@ LOCAL_PATH:= $(call my-dir)
 clang_codegen_TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
+  CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
