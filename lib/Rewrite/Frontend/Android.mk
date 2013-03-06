@@ -13,6 +13,7 @@ TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
   AttrParsedAttrList.inc \
+  CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \

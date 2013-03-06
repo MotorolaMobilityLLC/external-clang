@@ -10,7 +10,9 @@ TBLGEN_TABLES :=    \
 	Attrs.inc	\
 	AttrParsedAttrKinds.inc    \
 	AttrParsedAttrList.inc    \
+	AttrSpellingListIndex.inc \
 	AttrTemplateInstantiate.inc	\
+	CommentCommandList.inc \
 	CommentNodes.inc \
 	DeclNodes.inc	\
 	DiagnosticASTKinds.inc	\

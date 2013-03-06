@@ -11,6 +11,8 @@ TBLGEN_TABLES :=    \
 	AttrList.inc	\
 	Attrs.inc	\
 	CommentCommandInfo.inc \
+	CommentCommandList.inc \
+	CommentHTMLNamedCharacterReferences.inc \
 	CommentHTMLTags.inc \
 	CommentHTMLTagsProperties.inc \
 	CommentNodes.inc \
@@ -32,7 +34,6 @@ clang_ast_SRC_FILES :=	\
 	Comment.cpp \
 	CommentBriefParser.cpp \
 	CommentCommandTraits.cpp \
-	CommentDumper.cpp \
 	CommentLexer.cpp \
 	CommentParser.cpp \
 	CommentSema.cpp \

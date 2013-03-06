@@ -37,6 +37,13 @@ $(intermediates)/include/clang/Lex/AttrSpellings.inc: $(CLANG_ROOT_PATH)/include
 	$(call transform-host-clang-td-to-out,clang-attr-spelling-list)
 endif
 
+ifneq ($(findstring AttrSpellingListIndex.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Sema/AttrSpellingListIndex.inc
+$(intermediates)/include/clang/Sema/AttrSpellingListIndex.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/Sema/AttrSpellingListIndex.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td | $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-attr-spelling-index)
+endif
+
 ifneq ($(findstring AttrPCHRead.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Serialization/AttrPCHRead.inc
 $(intermediates)/include/clang/Serialization/AttrPCHRead.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
@@ -103,6 +110,24 @@ $(intermediates)/include/clang/AST/CommentCommandInfo.inc: \
   $(CLANG_ROOT_PATH)/include/clang/AST/CommentCommands.td \
   | $(CLANG_TBLGEN)
 	$(call transform-host-clang-td-to-out,clang-comment-command-info)
+endif
+
+ifneq ($(findstring CommentCommandList.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/CommentCommandList.inc
+$(intermediates)/include/clang/AST/CommentCommandList.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/AST/CommentCommandList.inc: \
+  $(CLANG_ROOT_PATH)/include/clang/AST/CommentCommands.td \
+  | $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-comment-command-list)
+endif
+
+ifneq ($(findstring CommentHTMLNamedCharacterReferences.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/CommentHTMLNamedCharacterReferences.inc
+$(intermediates)/include/clang/AST/CommentHTMLNamedCharacterReferences.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/AST/CommentHTMLNamedCharacterReferences.inc: \
+  $(CLANG_ROOT_PATH)/include/clang/AST/CommentHTMLNamedCharacterReferences.td \
+  | $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-comment-html-named-character-references)
 endif
 
 ifneq ($(findstring CommentHTMLTagsProperties.inc,$(TBLGEN_TABLES)),)

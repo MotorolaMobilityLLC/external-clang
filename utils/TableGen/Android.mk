@@ -4,6 +4,7 @@ clang_tablegen_SRC_FILES := \
   ClangASTNodesEmitter.cpp \
   ClangAttrEmitter.cpp \
   ClangCommentCommandInfoEmitter.cpp \
+  ClangCommentHTMLNamedCharacterReferenceEmitter.cpp \
   ClangCommentHTMLTagsEmitter.cpp \
   ClangDiagnosticsEmitter.cpp \
   ClangSACheckersEmitter.cpp \

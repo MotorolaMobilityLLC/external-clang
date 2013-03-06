@@ -15,6 +15,7 @@ TBLGEN_TABLES := \
   AttrPCHRead.inc \
   AttrPCHWrite.inc \
   Attrs.inc \
+  CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
@@ -24,7 +25,6 @@ TBLGEN_TABLES := \
   StmtNodes.inc
 
 clang_serialization_SRC_FILES :=\
-  GeneratePCH.cpp \
   ASTCommon.cpp \
   ASTReader.cpp \
   ASTReaderDecl.cpp \
@@ -32,6 +32,8 @@ clang_serialization_SRC_FILES :=\
   ASTWriter.cpp \
   ASTWriterDecl.cpp \
   ASTWriterStmt.cpp \
+  GeneratePCH.cpp \
+  GlobalModuleIndex.cpp \
   Module.cpp \
   ModuleManager.cpp
 

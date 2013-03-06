@@ -6,6 +6,7 @@ clang_static_analyzer_checkers_TBLGEN_TABLES := \
   AttrParsedAttrList.inc \
   Attrs.inc \
   Checkers.inc \
+  CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
