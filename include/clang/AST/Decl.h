@@ -109,6 +109,7 @@ class NamedDecl : public Decl {
 
 private:
   NamedDecl *getUnderlyingDeclImpl();
+  void verifyLinkage() const;
 
 protected:
   NamedDecl(Kind DK, DeclContext *DC, SourceLocation L, DeclarationName N)
@@ -150,32 +151,29 @@ public:
   /// \brief Set the name of this declaration.
   void setDeclName(DeclarationName N) { Name = N; }
 
-  /// getQualifiedNameAsString - Returns human-readable qualified name for
+  /// printQualifiedName - Returns human-readable qualified name for
   /// declaration, like A::B::i, for i being member of namespace A::B.
   /// If declaration is not member of context which can be named (record,
-  /// namespace), it will return same result as getNameAsString().
+  /// namespace), it will return same result as printName().
   /// Creating this name is expensive, so it should be called only when
   /// performance doesn't matter.
+  void printQualifiedName(raw_ostream &OS) const;
+  void printQualifiedName(raw_ostream &OS, const PrintingPolicy &Policy) const;
+
+  // FIXME: Remove string versions.
   std::string getQualifiedNameAsString() const;
   std::string getQualifiedNameAsString(const PrintingPolicy &Policy) const;
 
   /// getNameForDiagnostic - Appends a human-readable name for this
-  /// declaration into the given string.
+  /// declaration into the given stream.
   ///
   /// This is the method invoked by Sema when displaying a NamedDecl
   /// in a diagnostic.  It does not necessarily produce the same
-  /// result as getNameAsString(); for example, class template
+  /// result as printName(); for example, class template
   /// specializations are printed with their template arguments.
-  ///
-  /// TODO: use an API that doesn't require so many temporary strings
-  virtual void getNameForDiagnostic(std::string &S,
+  virtual void getNameForDiagnostic(raw_ostream &OS,
                                     const PrintingPolicy &Policy,
-                                    bool Qualified) const {
-    if (Qualified)
-      S += getQualifiedNameAsString(Policy);
-    else
-      S += getNameAsString();
-  }
+                                    bool Qualified) const;
 
   /// declarationReplaces - Determine whether this declaration, if
   /// known to be well-formed within its context, will replace the
@@ -228,12 +226,6 @@ public:
              "Enum truncated!");
     }
 
-    bool operator==(const LinkageInfo &Other) {
-      return linkage_ == Other.linkage_ &&
-	visibility_ == Other.visibility_ &&
-	explicit_ == Other.explicit_;
-    }
-
     static LinkageInfo external() {
       return LinkageInfo();
     }
@@ -252,63 +244,45 @@ public:
     bool visibilityExplicit() const { return explicit_; }
 
     void setLinkage(Linkage L) { linkage_ = L; }
+
     void mergeLinkage(Linkage L) {
       setLinkage(minLinkage(linkage(), L));
     }
-    void mergeLinkage(LinkageInfo Other) {
-      mergeLinkage(Other.linkage());
+    void mergeLinkage(LinkageInfo other) {
+      mergeLinkage(other.linkage());
     }
 
-    // Merge the visibility V giving preference to explicit ones.
-    // This is used, for example, when merging the visibility of a class
-    // down to one of its members. If the member has no explicit visibility,
-    // the class visibility wins.
-    void mergeVisibility(Visibility V, bool E = false) {
-      // Never increase the visibility
-      if (visibility() < V)
+    /// Merge in the visibility 'newVis'.
+    void mergeVisibility(Visibility newVis, bool newExplicit) {
+      Visibility oldVis = visibility();
+
+      // Never increase visibility.
+      if (oldVis < newVis)
         return;
 
-      // If we have an explicit visibility, keep it
-      if (visibilityExplicit())
+      // If the new visibility is the same as the old and the new
+      // visibility isn't explicit, we have nothing to add.
+      if (oldVis == newVis && !newExplicit)
         return;
 
-      setVisibility(V, E);
+      // Otherwise, we're either decreasing visibility or making our
+      // existing visibility explicit.
+      setVisibility(newVis, newExplicit);
     }
-    // Merge the visibility V, keeping the most restrictive one.
-    // This is used for cases like merging the visibility of a template
-    // argument to an instantiation. If we already have a hidden class,
-    // no argument should give it default visibility.
-    void mergeVisibilityWithMin(Visibility V, bool E = false) {
-      // Never increase the visibility
-      if (visibility() < V)
-        return;
-
-      // FIXME: this
-      // If this visibility is explicit, keep it.
-      if (visibilityExplicit() && !E)
-        return;
-
-      // should be replaced with this
-      // Don't lose the explicit bit for nothing
-      //      if (visibility() == V && visibilityExplicit())
-      //        return;
-
-      setVisibility(V, E);
-    }
-    void mergeVisibility(LinkageInfo Other) {
-      mergeVisibility(Other.visibility(), Other.visibilityExplicit());
-    }
-    void mergeVisibilityWithMin(LinkageInfo Other) {
-      mergeVisibilityWithMin(Other.visibility(), Other.visibilityExplicit());
+    void mergeVisibility(LinkageInfo other) {
+      mergeVisibility(other.visibility(), other.visibilityExplicit());
     }
 
-    void merge(LinkageInfo Other) {
-      mergeLinkage(Other);
-      mergeVisibility(Other);
+    /// Merge both linkage and visibility.
+    void merge(LinkageInfo other) {
+      mergeLinkage(other);
+      mergeVisibility(other);
     }
-    void mergeWithMin(LinkageInfo Other) {
-      mergeLinkage(Other);
-      mergeVisibilityWithMin(Other);
+
+    /// Merge linkage and conditionally merge visibility.
+    void mergeMaybeWithVisibility(LinkageInfo other, bool withVis) {
+      mergeLinkage(other);
+      if (withVis) mergeVisibility(other);
     }
   };
 
@@ -323,13 +297,20 @@ public:
   /// \brief Determines the linkage and visibility of this entity.
   LinkageInfo getLinkageAndVisibility() const;
 
+  /// Kinds of explicit visibility.
+  enum ExplicitVisibilityKind {
+    VisibilityForType,
+    VisibilityForValue
+  };
+
   /// \brief If visibility was explicitly specified for this
   /// declaration, return that visibility.
-  llvm::Optional<Visibility> getExplicitVisibility() const;
+  Optional<Visibility>
+  getExplicitVisibility(ExplicitVisibilityKind kind) const;
 
   /// \brief Clear the linkage cache in response to a change
   /// to the declaration.
-  void ClearLVCache();
+  void ClearLinkageCache();
 
   /// \brief Looks through UsingDecls and ObjCCompatibleAliasDecls for
   /// the underlying named decl.
@@ -899,15 +880,14 @@ public:
   ///  as static variables declared within a function.
   bool hasGlobalStorage() const { return !hasLocalStorage(); }
 
+  /// Compute the language linkage.
+  LanguageLinkage getLanguageLinkage() const;
+
   /// \brief Determines whether this variable is a variable with
   /// external, C linkage.
-  bool isExternC() const;
-
-  /// Checks if this variable has C language linkage. Note that this is not the
-  /// same as isExternC since decls with non external linkage can have C
-  /// language linkage. They can also have C language linkage when they are not
-  /// declared in an extern C context, but a previous decl is.
-  bool hasCLanguageLinkage() const;
+  bool isExternC() const {
+    return getLanguageLinkage() == CLanguageLinkage;
+  }
 
   /// isLocalVarDecl - Returns true for local variable declarations
   /// other than parameters.  Note that this includes static variables
@@ -1098,8 +1078,7 @@ public:
   /// not a constant expression. Returns a pointer to the value if evaluation
   /// succeeded, 0 otherwise.
   APValue *evaluateValue() const;
-  APValue *evaluateValue(
-    llvm::SmallVectorImpl<PartialDiagnosticAt> &Notes) const;
+  APValue *evaluateValue(SmallVectorImpl<PartialDiagnosticAt> &Notes) const;
 
   /// \brief Return the already-evaluated value of this variable's
   /// initializer, or NULL if the value is not yet known. Returns pointer
@@ -1462,7 +1441,7 @@ private:
   /// DeclsInPrototypeScope - Array of pointers to NamedDecls for
   /// decls defined in the function prototype that are not parameters. E.g.
   /// 'enum Y' in 'void f(enum Y {AA} x) {}'.
-  llvm::ArrayRef<NamedDecl*> DeclsInPrototypeScope;
+  ArrayRef<NamedDecl *> DeclsInPrototypeScope;
 
   LazyDeclStmtPtr Body;
 
@@ -1553,7 +1532,7 @@ private:
   void setInstantiationOfMemberFunction(ASTContext &C, FunctionDecl *FD,
                                         TemplateSpecializationKind TSK);
 
-  void setParams(ASTContext &C, llvm::ArrayRef<ParmVarDecl *> NewParamInfo);
+  void setParams(ASTContext &C, ArrayRef<ParmVarDecl *> NewParamInfo);
 
 protected:
   FunctionDecl(Kind DK, DeclContext *DC, SourceLocation StartLoc,
@@ -1624,7 +1603,7 @@ public:
     return DeclarationNameInfo(getDeclName(), getLocation(), DNLoc);
   }
 
-  virtual void getNameForDiagnostic(std::string &S,
+  virtual void getNameForDiagnostic(raw_ostream &OS,
                                     const PrintingPolicy &Policy,
                                     bool Qualified) const;
 
@@ -1792,18 +1771,21 @@ public:
   /// This function must be an allocation or deallocation function.
   bool isReservedGlobalPlacementOperator() const;
 
+  /// Compute the language linkage.
+  LanguageLinkage getLanguageLinkage() const;
+
   /// \brief Determines whether this function is a function with
   /// external, C linkage.
-  bool isExternC() const;
-
-  /// Checks if this function has C language linkage. Note that this is not the
-  /// same as isExternC since decls with non external linkage can have C
-  /// language linkage. They can also have C language linkage when they are not
-  /// declared in an extern C context, but a previous decl is.
-  bool hasCLanguageLinkage() const;
+  bool isExternC() const {
+    return getLanguageLinkage() == CLanguageLinkage;
+  }
 
   /// \brief Determines whether this is a global function.
   bool isGlobal() const;
+
+  /// \brief Determines whether this function is known to be 'noreturn', through
+  /// an attribute on its declaration or its type.
+  bool isNoReturn() const;
 
   /// \brief True if the function was a definition but its body was skipped.
   bool hasSkippedBody() const { return HasSkippedBody; }
@@ -1840,14 +1822,14 @@ public:
     assert(i < getNumParams() && "Illegal param #");
     return ParamInfo[i];
   }
-  void setParams(llvm::ArrayRef<ParmVarDecl *> NewParamInfo) {
+  void setParams(ArrayRef<ParmVarDecl *> NewParamInfo) {
     setParams(getASTContext(), NewParamInfo);
   }
 
-  const llvm::ArrayRef<NamedDecl*> &getDeclsInPrototypeScope() const {
+  const ArrayRef<NamedDecl *> &getDeclsInPrototypeScope() const {
     return DeclsInPrototypeScope;
   }
-  void setDeclsInPrototypeScope(llvm::ArrayRef<NamedDecl *> NewDecls);
+  void setDeclsInPrototypeScope(ArrayRef<NamedDecl *> NewDecls);
 
   /// getMinRequiredArguments - Returns the minimum number of arguments
   /// needed to call this function. This may be fewer than the number of
@@ -1889,7 +1871,7 @@ public:
   /// \brief Determine whether this function should be inlined, because it is
   /// either marked "inline" or "constexpr" or is a member function of a class
   /// that was defined in the class body.
-  bool isInlined() const;
+  bool isInlined() const { return IsInline; }
 
   bool isInlineDefinitionExternallyVisible() const;
 
@@ -1934,7 +1916,9 @@ public:
   /// \brief If this function is an instantiation of a member function of a
   /// class template specialization, retrieves the member specialization
   /// information.
-  MemberSpecializationInfo *getMemberSpecializationInfo() const;
+  MemberSpecializationInfo *getMemberSpecializationInfo() const {
+    return TemplateOrSpecialization.dyn_cast<MemberSpecializationInfo*>();
+  }
 
   /// \brief Specify that this record is an instantiation of the
   /// member function FD.
@@ -2498,6 +2482,12 @@ protected:
   /// possible in C++11 or Microsoft extensions mode.
   bool IsFixed : 1;
 
+  /// \brief Indicates whether it is possible for declarations of this kind
+  /// to have an out-of-date definition.
+  ///
+  /// This option is only enabled when modules are enabled.
+  bool MayHaveOutOfDateDef : 1;
+
 private:
   SourceLocation RBraceLoc;
 
@@ -2932,6 +2922,10 @@ class RecordDecl : public TagDecl {
   /// HasObjectMember - This is true if this struct has at least one member
   /// containing an Objective-C object pointer type.
   bool HasObjectMember : 1;
+  
+  /// HasVolatileMember - This is true if struct has at least one member of
+  /// 'volatile' type.
+  bool HasVolatileMember : 1;
 
   /// \brief Whether the field declarations of this record have been loaded
   /// from external storage. To avoid unnecessary deserialization of
@@ -2988,6 +2982,9 @@ public:
   bool hasObjectMember() const { return HasObjectMember; }
   void setHasObjectMember (bool val) { HasObjectMember = val; }
 
+  bool hasVolatileMember() const { return HasVolatileMember; }
+  void setHasVolatileMember (bool val) { HasVolatileMember = val; }
+  
   /// \brief Determines whether this declaration represents the
   /// injected class name.
   ///
@@ -3187,7 +3184,7 @@ public:
     assert(i < getNumParams() && "Illegal param #");
     return ParamInfo[i];
   }
-  void setParams(llvm::ArrayRef<ParmVarDecl *> NewParamInfo);
+  void setParams(ArrayRef<ParmVarDecl *> NewParamInfo);
 
   /// hasCaptures - True if this block (or its nested blocks) captures
   /// anything of local storage from its enclosing scopes.
@@ -3297,7 +3294,21 @@ public:
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == Import; }
 };
-  
+
+/// \brief Represents an empty-declaration.
+class EmptyDecl : public Decl {
+  virtual void anchor();
+  EmptyDecl(DeclContext *DC, SourceLocation L)
+    : Decl(Empty, DC, L) { }
+
+public:
+  static EmptyDecl *Create(ASTContext &C, DeclContext *DC,
+                           SourceLocation L);
+  static EmptyDecl *CreateDeserialized(ASTContext &C, unsigned ID);
+
+  static bool classof(const Decl *D) { return classofKind(D->getKind()); }
+  static bool classofKind(Kind K) { return K == Empty; }
+};
 
 /// Insertion operator for diagnostics.  This allows sending NamedDecl's
 /// into a diagnostic with <<.
@@ -3328,7 +3339,7 @@ void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
     First = PrevDecl->getFirstDeclaration();
     assert(First->RedeclLink.NextIsLatest() && "Expected first");
     decl_type *MostRecent = First->RedeclLink.getNext();
-    RedeclLink = PreviousDeclLink(llvm::cast<decl_type>(MostRecent));
+    RedeclLink = PreviousDeclLink(cast<decl_type>(MostRecent));
   } else {
     // Make this first.
     First = static_cast<decl_type*>(this);
@@ -3337,7 +3348,7 @@ void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
   // First one will point to this one as latest.
   First->RedeclLink = LatestDeclLink(static_cast<decl_type*>(this));
   if (NamedDecl *ND = dyn_cast<NamedDecl>(static_cast<decl_type*>(this)))
-    ND->ClearLVCache();
+    ND->ClearLinkageCache();
 }
 
 // Inline function definitions.

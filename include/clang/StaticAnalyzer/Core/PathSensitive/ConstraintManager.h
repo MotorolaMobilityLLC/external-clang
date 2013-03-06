@@ -28,7 +28,7 @@ namespace ento {
 class SubEngine;
 
 class ConditionTruthVal {
-  llvm::Optional<bool> Val;
+  Optional<bool> Val;
 public:
   /// Construct a ConditionTruthVal indicating the constraint is constrained
   /// to either true or false, depending on the boolean value provided.
@@ -122,7 +122,7 @@ public:
   /// Convenience method to query the state to see if a symbol is null or
   /// not null, or if neither assumption can be made.
   ConditionTruthVal isNull(ProgramStateRef State, SymbolRef Sym) {
-    llvm::SaveAndRestore<bool> DisableNotify(NotifyAssumeClients, false);
+    SaveAndRestore<bool> DisableNotify(NotifyAssumeClients, false);
 
     return checkNull(State, Sym);
   }

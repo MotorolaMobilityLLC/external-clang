@@ -99,7 +99,7 @@ class FindLastStoreBRVisitor
 {
   const MemRegion *R;
   SVal V;
-  bool satisfied;
+  bool Satisfied;
 
 public:
   /// \brief Convenience method to create a visitor given only the MemRegion.
@@ -112,13 +112,10 @@ public:
   /// the BugReport.
   static void registerStatementVarDecls(BugReport &BR, const Stmt *S);
 
-  FindLastStoreBRVisitor(SVal v, const MemRegion *r)
-  : R(r), V(v), satisfied(false) {
-    assert (!V.isUnknown() && "Cannot track unknown value.");
-
-    // TODO: Does it make sense to allow undef values here?
-    // (If not, also see UndefCapturedBlockVarChecker)?
-  }
+  FindLastStoreBRVisitor(KnownSVal V, const MemRegion *R)
+  : R(R),
+    V(V),
+    Satisfied(false) {}
 
   void Profile(llvm::FoldingSetNodeID &ID) const;
 
@@ -223,11 +220,38 @@ public:
                                               const ExplodedNode *N);
 
   bool patternMatch(const Expr *Ex,
-                    llvm::raw_ostream &Out,
+                    raw_ostream &Out,
                     BugReporterContext &BRC,
                     BugReport &R,
                     const ExplodedNode *N,
-                    llvm::Optional<bool> &prunable);
+                    Optional<bool> &prunable);
+};
+
+/// \brief Suppress reports that might lead to known false positives.
+///
+/// Currently this suppresses reports based on locations of bugs.
+class LikelyFalsePositiveSuppressionBRVisitor
+  : public BugReporterVisitorImpl<LikelyFalsePositiveSuppressionBRVisitor> {
+public:
+  static void *getTag() {
+    static int Tag = 0;
+    return static_cast<void *>(&Tag);
+  }
+
+  void Profile(llvm::FoldingSetNodeID &ID) const {
+    ID.AddPointer(getTag());
+  }
+
+  virtual PathDiagnosticPiece *VisitNode(const ExplodedNode *N,
+                                         const ExplodedNode *Prev,
+                                         BugReporterContext &BRC,
+                                         BugReport &BR) {
+    return 0;
+  }
+
+  virtual PathDiagnosticPiece *getEndPath(BugReporterContext &BRC,
+                                          const ExplodedNode *N,
+                                          BugReport &BR);
 };
 
 /// \brief When a region containing undefined value or '0' value is passed 
@@ -275,7 +299,7 @@ namespace bugreporter {
 bool trackNullOrUndefValue(const ExplodedNode *N, const Stmt *S, BugReport &R,
                            bool IsArg = false);
 
-const Stmt *GetDerefExpr(const ExplodedNode *N);
+const Expr *getDerefExpr(const Stmt *S);
 const Stmt *GetDenomExpr(const ExplodedNode *N);
 const Stmt *GetRetValExpr(const ExplodedNode *N);
 bool isDeclRefExprToReference(const Expr *E);

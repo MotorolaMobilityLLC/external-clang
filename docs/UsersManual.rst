@@ -334,13 +334,12 @@ output format of the diagnostics that it generates.
 
 .. _opt_fdiagnostics-print-source-range-info:
 
-**-f[no-]diagnostics-print-source-range-info**
+**-fdiagnostics-print-source-range-info**
    Print machine parsable information about source ranges.
-   This option, which defaults to off, controls whether or not Clang
-   prints information about source ranges in a machine parsable format
-   after the file/line/column number information. The information is a
-   simple sequence of brace enclosed ranges, where each range lists the
-   start and end line/column locations. For example, in this output:
+   This option makes Clang print information about source ranges in a machine
+   parsable format after the file/line/column number information. The
+   information is a simple sequence of brace enclosed ranges, where each range
+   lists the start and end line/column locations. For example, in this output:
 
    ::
 
@@ -821,12 +820,7 @@ example, :option:`-isysroot /Developer/SDKs/MacOSX10.4u.sdk` will look for
 Relocatable precompiled headers are intended to be used in a limited
 number of cases where the compilation environment is tightly controlled
 and the precompiled header cannot be generated after headers have been
-installed. Relocatable precompiled headers also have some performance
-impact, because the difference in location between the header locations
-at PCH build time vs. at the time of PCH use requires one of the PCH
-optimizations, ``stat()`` caching, to be disabled. However, this change
-is only likely to affect PCH files that reference a large number of
-headers.
+installed.
 
 Controlling Code Generation
 ---------------------------
@@ -867,6 +861,14 @@ are listed below.
       runtime cost and no impact on address space layout or ABI. This
       includes all of the checks listed below other than
       ``unsigned-integer-overflow``.
+
+      ``-fsanitize=undefined-trap``: This includes all sanitizers
+      included by ``-fsanitize=undefined``, except those that require
+      runtime support.  This group of sanitizers are generally used
+      in conjunction with the ``-fsanitize-undefined-trap-on-error``
+      flag, which causes traps to be emitted, rather than calls to
+      runtime libraries. This includes all of the checks listed below
+      other than ``unsigned-integer-overflow`` and ``vptr``.
 
    The following more fine-grained checks are also available:
 
@@ -1175,6 +1177,11 @@ features <http://clang.llvm.org/cxx_status.html>`_ are also implemented.
 
 Controlling implementation limits
 ---------------------------------
+
+.. option:: -fbracket-depth=N
+
+  Sets the limit for nested parentheses, brackets, and braces to N.  The
+  default is 256.
 
 .. option:: -fconstexpr-depth=N
 

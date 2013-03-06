@@ -318,10 +318,7 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
 
   // Add Ubsan runtime library, if required.
   if (Sanitize.needsUbsanRt()) {
-    if (Args.hasArg(options::OPT_dynamiclib) ||
-        Args.hasArg(options::OPT_bundle)) {
-      // Assume the binary will provide the Ubsan runtime.
-    } else if (isTargetIPhoneOS()) {
+    if (isTargetIPhoneOS()) {
       getDriver().Diag(diag::err_drv_clang_unsupported_per_platform)
         << "-fsanitize=undefined";
     } else {
@@ -342,12 +339,10 @@ void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
       getDriver().Diag(diag::err_drv_clang_unsupported_per_platform)
         << "-fsanitize=address";
     } else {
-      AddLinkRuntimeLib(Args, CmdArgs, "libclang_rt.asan_osx.a", true);
+      AddLinkRuntimeLib(Args, CmdArgs, "libclang_rt.asan_osx_dynamic.dylib", true);
 
-      // The ASAN runtime library requires C++ and CoreFoundation.
+      // The ASAN runtime library requires C++.
       AddCXXStdlibLibArgs(Args, CmdArgs);
-      CmdArgs.push_back("-framework");
-      CmdArgs.push_back("CoreFoundation");
     }
   }
 
@@ -404,9 +399,10 @@ void Darwin::AddDeploymentTarget(DerivedArgList &Args) const {
       getDriver().Diag(clang::diag::warn_missing_sysroot) << A->getValue();
   } else {
     if (char *env = ::getenv("SDKROOT")) {
-      // We only use this value as the default if it is an absolute path and
-      // exists.
-      if (llvm::sys::path::is_absolute(env) && llvm::sys::fs::exists(env)) {
+      // We only use this value as the default if it is an absolute path,
+      // exists, and it is not the root path.
+      if (llvm::sys::path::is_absolute(env) && llvm::sys::fs::exists(env) &&
+          StringRef(env) != "/") {
         Args.append(Args.MakeSeparateArg(
                       0, Opts.getOption(options::OPT_isysroot), env));
       }
@@ -952,7 +948,7 @@ Generic_GCC::GCCVersion Linux::GCCVersion::Parse(StringRef VersionText) {
   // And retains any patch number it finds.
   StringRef PatchText = GoodVersion.PatchSuffix = Second.second.str();
   if (!PatchText.empty()) {
-    if (unsigned EndNumber = PatchText.find_first_not_of("0123456789")) {
+    if (size_t EndNumber = PatchText.find_first_not_of("0123456789")) {
       // Try to parse the number and any suffix.
       if (PatchText.slice(0, EndNumber).getAsInteger(10, GoodVersion.Patch) ||
           GoodVersion.Patch < 0)
@@ -1085,6 +1081,12 @@ Generic_GCC::GCCInstallationDetector::GCCInstallationDetector(
   // Declare a bunch of static data sets that we'll select between below. These
   // are specifically designed to always refer to string literals to avoid any
   // lifetime or initialization issues.
+  static const char *const AArch64LibDirs[] = { "/lib" };
+  static const char *const AArch64Triples[] = {
+    "aarch64-none-linux-gnu",
+    "aarch64-linux-gnu"
+  };
+
   static const char *const ARMLibDirs[] = { "/lib" };
   static const char *const ARMTriples[] = {
     "arm-linux-gnueabi",
@@ -1150,6 +1152,16 @@ Generic_GCC::GCCInstallationDetector::GCCInstallationDetector(
   };
 
   switch (TargetTriple.getArch()) {
+  case llvm::Triple::aarch64:
+    LibDirs.append(AArch64LibDirs, AArch64LibDirs
+                   + llvm::array_lengthof(AArch64LibDirs));
+    TripleAliases.append(
+      AArch64Triples, AArch64Triples + llvm::array_lengthof(AArch64Triples));
+    MultiarchLibDirs.append(
+      AArch64LibDirs, AArch64LibDirs + llvm::array_lengthof(AArch64LibDirs));
+    MultiarchTripleAliases.append(
+      AArch64Triples, AArch64Triples + llvm::array_lengthof(AArch64Triples));
+    break;
   case llvm::Triple::arm:
   case llvm::Triple::thumb:
     LibDirs.append(ARMLibDirs, ARMLibDirs + llvm::array_lengthof(ARMLibDirs));
@@ -1646,7 +1658,7 @@ StringRef Hexagon_TC::GetTargetCPU(const ArgList &Args)
   // Select the default CPU (v4) if none was given or detection failed.
   Arg *A = GetLastHexagonArchArg (Args);
   if (A) {
-    llvm::StringRef WhichHexagon = A->getValue();
+    StringRef WhichHexagon = A->getValue();
     if (WhichHexagon.startswith("hexagon"))
       return WhichHexagon.substr(sizeof("hexagon") - 1);
     if (WhichHexagon != "")
@@ -2145,11 +2157,11 @@ static LinuxDistro DetectLinuxDistro(llvm::Triple::ArchType Arch) {
              Data.find("release 6") != StringRef::npos)
       return RHEL6;
     else if ((Data.startswith("Red Hat Enterprise Linux") ||
-	      Data.startswith("CentOS")) &&
+              Data.startswith("CentOS")) &&
              Data.find("release 5") != StringRef::npos)
       return RHEL5;
     else if ((Data.startswith("Red Hat Enterprise Linux") ||
-	      Data.startswith("CentOS")) &&
+              Data.startswith("CentOS")) &&
              Data.find("release 4") != StringRef::npos)
       return RHEL4;
     return UnknownDistro;
@@ -2222,6 +2234,9 @@ static std::string getMultiarchTriple(const llvm::Triple TargetTriple,
     if (llvm::sys::fs::exists(SysRoot + "/lib/x86_64-linux-gnu"))
       return "x86_64-linux-gnu";
     return TargetTriple.str();
+  case llvm::Triple::aarch64:
+    if (llvm::sys::fs::exists(SysRoot + "/lib/aarch64-linux-gnu"))
+      return "aarch64-linux-gnu";
   case llvm::Triple::mips:
     if (llvm::sys::fs::exists(SysRoot + "/lib/mips-linux-gnu"))
       return "mips-linux-gnu";
@@ -2448,6 +2463,7 @@ void Linux::addClangTargetOptions(const ArgList &DriverArgs,
   const Generic_GCC::GCCVersion &V = GCCInstallation.getVersion();
   bool UseInitArrayDefault
     = V >= Generic_GCC::GCCVersion::Parse("4.7.0") ||
+      getTriple().getArch() == llvm::Triple::aarch64 ||
       getTriple().getEnvironment() == llvm::Triple::Android;
   if (DriverArgs.hasFlag(options::OPT_fuse_init_array,
                          options::OPT_fno_use_init_array,
@@ -2510,6 +2526,9 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
     "/usr/include/i686-linux-gnu",
     "/usr/include/i486-linux-gnu"
   };
+  const StringRef AArch64MultiarchIncludeDirs[] = {
+    "/usr/include/aarch64-linux-gnu"
+  };
   const StringRef ARMMultiarchIncludeDirs[] = {
     "/usr/include/arm-linux-gnueabi"
   };
@@ -2533,6 +2552,8 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
     MultiarchIncludeDirs = X86_64MultiarchIncludeDirs;
   } else if (getTriple().getArch() == llvm::Triple::x86) {
     MultiarchIncludeDirs = X86MultiarchIncludeDirs;
+  } else if (getTriple().getArch() == llvm::Triple::aarch64) {
+    MultiarchIncludeDirs = AArch64MultiarchIncludeDirs;
   } else if (getTriple().getArch() == llvm::Triple::arm) {
     if (getTriple().getEnvironment() == llvm::Triple::GNUEABIHF)
       MultiarchIncludeDirs = ARMHFMultiarchIncludeDirs;

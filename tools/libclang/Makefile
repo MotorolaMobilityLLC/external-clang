@@ -16,7 +16,7 @@ LINK_LIBS_IN_SHARED = 1
 SHARED_LIBRARY = 1
 
 include $(CLANG_LEVEL)/../../Makefile.config
-LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser support mc
+LINK_COMPONENTS := $(TARGETS_TO_BUILD) asmparser bitreader support mc
 USEDLIBS = clangFrontend.a clangDriver.a \
 	   clangTooling.a \
 	   clangSerialization.a \
@@ -57,7 +57,7 @@ ifeq ($(HOST_OS),Darwin)
     endif
 
     # If we're doing an Apple-style build, add the LTO object path.
-    ifeq ($(RC_BUILDIT),YES)
+    ifeq ($(RC_XBS),YES)
        TempFile        := $(shell mkdir -p ${OBJROOT}/dSYMs ; mktemp ${OBJROOT}/dSYMs/clang-lto.XXXXXX)
        LLVMLibsOptions += -Wl,-object_path_lto -Wl,$(TempFile)
     endif

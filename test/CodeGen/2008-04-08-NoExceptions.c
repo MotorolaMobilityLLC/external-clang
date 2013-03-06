@@ -2,9 +2,11 @@
 
 void f(void);
 void g(void) {
-  // CHECK: define void @g() nounwind
+  // CHECK: define void @g() #0
   // CHECK-NOT: call void @f() nounwind
   f();
 }
 
-// CHECK-NOT: declare void @f() nounwind
+// CHECK-NOT: declare void @f() #0
+
+// CHECK: attributes #0 = { nounwind{{.*}} }

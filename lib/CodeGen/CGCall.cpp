@@ -26,6 +26,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InlineAsm.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Support/CallSite.h"
 #include "llvm/Transforms/Utils/Local.h"
 using namespace clang;
@@ -968,7 +969,8 @@ llvm::Type *CodeGenTypes::GetFunctionTypeForVTable(GlobalDecl GD) {
 void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
                                            const Decl *TargetDecl,
                                            AttributeListType &PAL,
-                                           unsigned &CallingConv) {
+                                           unsigned &CallingConv,
+                                           bool AttrOnCallSite) {
   llvm::AttrBuilder FuncAttrs;
   llvm::AttrBuilder RetAttrs;
 
@@ -983,17 +985,16 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
       FuncAttrs.addAttribute(llvm::Attribute::ReturnsTwice);
     if (TargetDecl->hasAttr<NoThrowAttr>())
       FuncAttrs.addAttribute(llvm::Attribute::NoUnwind);
-    else if (const FunctionDecl *Fn = dyn_cast<FunctionDecl>(TargetDecl)) {
-      const FunctionProtoType *FPT = Fn->getType()->getAs<FunctionProtoType>();
-      if (FPT && FPT->isNothrow(getContext()))
-        FuncAttrs.addAttribute(llvm::Attribute::NoUnwind);
-    }
-
     if (TargetDecl->hasAttr<NoReturnAttr>())
       FuncAttrs.addAttribute(llvm::Attribute::NoReturn);
 
-    if (TargetDecl->hasAttr<ReturnsTwiceAttr>())
-      FuncAttrs.addAttribute(llvm::Attribute::ReturnsTwice);
+    if (const FunctionDecl *Fn = dyn_cast<FunctionDecl>(TargetDecl)) {
+      const FunctionProtoType *FPT = Fn->getType()->getAs<FunctionProtoType>();
+      if (FPT && FPT->isNothrow(getContext()))
+        FuncAttrs.addAttribute(llvm::Attribute::NoUnwind);
+      if (Fn->isNoReturn())
+        FuncAttrs.addAttribute(llvm::Attribute::NoReturn);
+    }
 
     // 'const' and 'pure' attribute functions are also nounwind.
     if (TargetDecl->hasAttr<ConstAttr>()) {
@@ -1016,6 +1017,25 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
   if (CodeGenOpts.NoImplicitFloat)
     FuncAttrs.addAttribute(llvm::Attribute::NoImplicitFloat);
 
+  if (AttrOnCallSite) {
+    // Attributes that should go on the call site only.
+    if (!CodeGenOpts.SimplifyLibCalls)
+      FuncAttrs.addAttribute(llvm::Attribute::NoBuiltin);
+  } else {
+    // Attributes that should go on the function, but not the call site.
+    if (!TargetOpts.CPU.empty())
+      FuncAttrs.addAttribute("target-cpu", TargetOpts.CPU);
+
+    if (TargetOpts.Features.size()) {
+      llvm::SubtargetFeatures Features;
+      for (std::vector<std::string>::const_iterator
+             it = TargetOpts.Features.begin(),
+             ie = TargetOpts.Features.end(); it != ie; ++it)
+        Features.AddFeature(*it);
+      FuncAttrs.addAttribute("target-features", Features.getString());
+    }
+  }
+
   QualType RetTy = FI.getReturnType();
   unsigned Index = 1;
   const ABIArgInfo &RetAI = FI.getReturnInfo();
@@ -1036,9 +1056,7 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
     if (RetAI.getInReg())
       SRETAttrs.addAttribute(llvm::Attribute::InReg);
     PAL.push_back(llvm::
-                  AttributeWithIndex::get(Index,
-                                         llvm::Attribute::get(getLLVMContext(),
-                                                               SRETAttrs)));
+                  AttributeSet::get(getLLVMContext(), Index, SRETAttrs));
 
     ++Index;
     // sret disables readnone and readonly
@@ -1053,9 +1071,9 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
 
   if (RetAttrs.hasAttributes())
     PAL.push_back(llvm::
-                  AttributeWithIndex::get(llvm::AttributeSet::ReturnIndex,
-                                         llvm::Attribute::get(getLLVMContext(),
-                                                               RetAttrs)));
+                  AttributeSet::get(getLLVMContext(),
+                                    llvm::AttributeSet::ReturnIndex,
+                                    RetAttrs));
 
   for (CGFunctionInfo::const_arg_iterator it = FI.arg_begin(),
          ie = FI.arg_end(); it != ie; ++it) {
@@ -1064,13 +1082,9 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
     llvm::AttrBuilder Attrs;
 
     if (AI.getPaddingType()) {
-      if (AI.getPaddingInReg()) {
-        llvm::AttrBuilder PadAttrs;
-        PadAttrs.addAttribute(llvm::Attribute::InReg);
-
-        llvm::Attribute A =llvm::Attribute::get(getLLVMContext(), PadAttrs);
-        PAL.push_back(llvm::AttributeWithIndex::get(Index, A));
-      }
+      if (AI.getPaddingInReg())
+        PAL.push_back(llvm::AttributeSet::get(getLLVMContext(), Index,
+                                              llvm::Attribute::InReg));
       // Increment Index if there is padding.
       ++Index;
     }
@@ -1096,9 +1110,8 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
         unsigned Extra = STy->getNumElements()-1;  // 1 will be added below.
         if (Attrs.hasAttributes())
           for (unsigned I = 0; I < Extra; ++I)
-            PAL.push_back(llvm::AttributeWithIndex::get(Index + I,
-                                         llvm::Attribute::get(getLLVMContext(),
-                                                               Attrs)));
+            PAL.push_back(llvm::AttributeSet::get(getLLVMContext(), Index + I,
+                                                  Attrs));
         Index += Extra;
       }
       break;
@@ -1133,16 +1146,14 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
     }
 
     if (Attrs.hasAttributes())
-      PAL.push_back(llvm::AttributeWithIndex::get(Index,
-                                         llvm::Attribute::get(getLLVMContext(),
-                                                               Attrs)));
+      PAL.push_back(llvm::AttributeSet::get(getLLVMContext(), Index, Attrs));
     ++Index;
   }
   if (FuncAttrs.hasAttributes())
     PAL.push_back(llvm::
-                  AttributeWithIndex::get(llvm::AttributeSet::FunctionIndex,
-                                         llvm::Attribute::get(getLLVMContext(),
-                                                               FuncAttrs)));
+                  AttributeSet::get(getLLVMContext(),
+                                    llvm::AttributeSet::FunctionIndex,
+                                    FuncAttrs));
 }
 
 /// An argument came in as a promoted argument; demote it back to its
@@ -1190,8 +1201,9 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
   // Name the struct return argument.
   if (CGM.ReturnTypeUsesSRet(FI)) {
     AI->setName("agg.result");
-    AI->addAttr(llvm::Attribute::get(getLLVMContext(),
-                                      llvm::Attribute::NoAlias));
+    AI->addAttr(llvm::AttributeSet::get(getLLVMContext(),
+                                        AI->getArgNo() + 1,
+                                        llvm::Attribute::NoAlias));
     ++AI;
   }
 
@@ -1262,8 +1274,9 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
         llvm::Value *V = AI;
 
         if (Arg->getType().isRestrictQualified())
-          AI->addAttr(llvm::Attribute::get(getLLVMContext(),
-                                            llvm::Attribute::NoAlias));
+          AI->addAttr(llvm::AttributeSet::get(getLLVMContext(),
+                                              AI->getArgNo() + 1,
+                                              llvm::Attribute::NoAlias));
 
         // Ensure the argument is the correct type.
         if (V->getType() != ArgI.getCoerceToType())
@@ -2233,9 +2246,10 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
   unsigned CallingConv;
   CodeGen::AttributeListType AttributeList;
-  CGM.ConstructAttributeList(CallInfo, TargetDecl, AttributeList, CallingConv);
+  CGM.ConstructAttributeList(CallInfo, TargetDecl, AttributeList,
+                             CallingConv, true);
   llvm::AttributeSet Attrs = llvm::AttributeSet::get(getLLVMContext(),
-                                                   AttributeList);
+                                                     AttributeList);
 
   llvm::BasicBlock *InvokeDest = 0;
   if (!Attrs.hasAttribute(llvm::AttributeSet::FunctionIndex,

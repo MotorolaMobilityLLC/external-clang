@@ -1518,6 +1518,8 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
   case OCLImage2d:        return "image2d_t";
   case OCLImage2dArray:   return "image2d_array_t";
   case OCLImage3d:        return "image3d_t";
+  case OCLSampler:        return "sampler_t";
+  case OCLEvent:          return "event_t";
   }
   
   llvm_unreachable("Invalid builtin type.");
@@ -2190,7 +2192,7 @@ std::pair<Linkage,Visibility> Type::getLinkageAndVisibility() const {
   return std::make_pair(TypeBits.getLinkage(), TypeBits.getVisibility());
 }
 
-void Type::ClearLVCache() {
+void Type::ClearLinkageCache() {
   TypeBits.CacheValidAndVisibility = 0;
   if (QualType(this, 0) != CanonicalType)
     CanonicalType->TypeBits.CacheValidAndVisibility = 0;
