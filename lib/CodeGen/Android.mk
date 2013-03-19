@@ -13,6 +13,7 @@ clang_codegen_TBLGEN_TABLES := \
 
 clang_codegen_SRC_FILES := \
   BackendUtil.cpp \
+  CGAtomic.cpp \
   CGBlocks.cpp \
   CGBuiltin.cpp \
   CGCUDANV.cpp \
