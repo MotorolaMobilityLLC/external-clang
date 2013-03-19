@@ -2769,6 +2769,45 @@ static void handleWorkGroupSize(Sema &S, Decl *D,
                                        Attr.getAttributeSpellingListIndex()));
 }
 
+static void handleVecTypeHint(Sema &S, Decl *D, const AttributeList &Attr) {
+  assert(Attr.getKind() == AttributeList::AT_VecTypeHint);
+
+  // Attribute has 1 argument.
+  if (!checkAttributeNumArgs(S, Attr, 1))
+    return;
+
+  QualType ParmType = S.GetTypeFromParser(Attr.getTypeArg());
+
+  if (!ParmType->isExtVectorType() && !ParmType->isFloatingType() &&
+      (ParmType->isBooleanType() ||
+       !ParmType->isIntegralType(S.getASTContext()))) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_argument_vec_type_hint)
+        << ParmType;
+    return;
+  }
+
+  if (Attr.getKind() == AttributeList::AT_VecTypeHint &&
+      D->hasAttr<VecTypeHintAttr>()) {
+    VecTypeHintAttr *A = D->getAttr<VecTypeHintAttr>();
+    if (A->getTypeHint() != ParmType) {
+      S.Diag(Attr.getLoc(), diag::warn_duplicate_attribute) << Attr.getName();
+      return;
+    }
+  }
+
+  D->addAttr(::new (S.Context) VecTypeHintAttr(Attr.getLoc(), S.Context,
+                                               ParmType, Attr.getLoc()));
+}
+
+static void handleEndianAttr(Sema &S, Decl *D, const AttributeList &Attr) {
+  if (!dyn_cast<VarDecl>(D))
+    S.Diag(Attr.getLoc(), diag::warn_attribute_wrong_decl_type) << "endian"
+                                                                << 9;
+  StringRef EndianType = Attr.getParameterName()->getName();
+  if (EndianType != "host" && EndianType != "device")
+    S.Diag(Attr.getLoc(), diag::warn_attribute_unknown_endian) << EndianType;
+}
+
 SectionAttr *Sema::mergeSectionAttr(Decl *D, SourceRange Range,
                                     StringRef Name,
                                     unsigned AttrSpellingListIndex) {
@@ -4760,7 +4799,14 @@ static void ProcessInheritableDeclAttr(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_ReqdWorkGroupSize:
     handleWorkGroupSize(S, D, Attr); break;
 
-  case AttributeList::AT_InitPriority:
+  case AttributeList::AT_VecTypeHint:
+    handleVecTypeHint(S, D, Attr); break;
+
+  case AttributeList::AT_Endian:
+    handleEndianAttr(S, D, Attr);
+    break;
+
+  case AttributeList::AT_InitPriority: 
       handleInitPriorityAttr(S, D, Attr); break;
 
   case AttributeList::AT_Packed:      handlePackedAttr      (S, D, Attr); break;
@@ -5097,37 +5143,37 @@ void Sema::DeclApplyPragmaWeak(Scope *S, NamedDecl *ND, WeakInfo &W) {
   }
 }
 
+void Sema::ProcessPragmaWeak(Scope *S, Decl *D) {
+  // It's valid to "forward-declare" #pragma weak, in which case we
+  // have to do this.
+  LoadExternalWeakUndeclaredIdentifiers();
+  if (!WeakUndeclaredIdentifiers.empty()) {
+    NamedDecl *ND = NULL;
+    if (VarDecl *VD = dyn_cast<VarDecl>(D))
+      if (VD->isExternC())
+        ND = VD;
+    if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
+      if (FD->isExternC())
+        ND = FD;
+    if (ND) {
+      if (IdentifierInfo *Id = ND->getIdentifier()) {
+        llvm::DenseMap<IdentifierInfo*,WeakInfo>::iterator I
+          = WeakUndeclaredIdentifiers.find(Id);
+        if (I != WeakUndeclaredIdentifiers.end()) {
+          WeakInfo W = I->second;
+          DeclApplyPragmaWeak(S, ND, W);
+          WeakUndeclaredIdentifiers[Id] = W;
+        }
+      }
+    }
+  }
+}
+
 /// ProcessDeclAttributes - Given a declarator (PD) with attributes indicated in
 /// it, apply them to D.  This is a bit tricky because PD can have attributes
 /// specified in many different places, and we need to find and apply them all.
 void Sema::ProcessDeclAttributes(Scope *S, Decl *D, const Declarator &PD,
                                  bool NonInheritable, bool Inheritable) {
-  // It's valid to "forward-declare" #pragma weak, in which case we
-  // have to do this.
-  if (Inheritable) {
-    LoadExternalWeakUndeclaredIdentifiers();
-    if (!WeakUndeclaredIdentifiers.empty()) {
-      NamedDecl *ND = NULL;
-      if (VarDecl *VD = dyn_cast<VarDecl>(D))
-        if (VD->isExternC())
-          ND = VD;
-      if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
-        if (FD->isExternC())
-          ND = FD;
-      if (ND) {
-        if (IdentifierInfo *Id = ND->getIdentifier()) {
-          llvm::DenseMap<IdentifierInfo*,WeakInfo>::iterator I
-            = WeakUndeclaredIdentifiers.find(Id);
-          if (I != WeakUndeclaredIdentifiers.end()) {
-            WeakInfo W = I->second;
-            DeclApplyPragmaWeak(S, ND, W);
-            WeakUndeclaredIdentifiers[Id] = W;
-          }
-        }
-      }
-    }
-  }
-
   // Apply decl attributes from the DeclSpec if present.
   if (const AttributeList *Attrs = PD.getDeclSpec().getAttributes().getList())
     ProcessDeclAttributeList(S, D, Attrs, NonInheritable, Inheritable);
