@@ -636,6 +636,11 @@ def ReqdWorkGroupSize : InheritableAttr {
               UnsignedArgument<"ZDim">];
 }
 
+def Endian : InheritableAttr {
+  let Spellings = [GNU<"endian">];
+  let Args = [IdentifierArgument<"platform">];
+}
+
 def WorkGroupSizeHint :  InheritableAttr {
   let Spellings = [GNU<"work_group_size_hint">];
   let Args = [UnsignedArgument<"XDim">, 
@@ -724,8 +729,9 @@ def VectorSize : Attr {
   let ASTNode = 0;
 }
 
-def VecTypeHint : IgnoredAttr {
+def VecTypeHint : InheritableAttr {
   let Spellings = [GNU<"vec_type_hint">];
+  let Args = [TypeArgument<"TypeHint">, SourceLocArgument<"TypeLoc">];
 }
 
 def Visibility : InheritableAttr {

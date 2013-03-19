@@ -262,9 +262,9 @@ unsigned CGDebugInfo::getLineNumber(SourceLocation Loc) {
 }
 
 /// getColumnNumber - Get column number for the location.
-unsigned CGDebugInfo::getColumnNumber(SourceLocation Loc) {
+unsigned CGDebugInfo::getColumnNumber(SourceLocation Loc, bool Force) {
   // We may not want column information at all.
-  if (!CGM.getCodeGenOpts().DebugColumnInfo)
+  if (!Force && !CGM.getCodeGenOpts().DebugColumnInfo)
     return 0;
 
   // If the location is invalid then use the current column.
@@ -1314,7 +1314,7 @@ llvm::DIType CGDebugInfo::getOrCreateInterfaceType(QualType D,
                                                    SourceLocation Loc) {
   assert(CGM.getCodeGenOpts().getDebugInfo() >= CodeGenOptions::LimitedDebugInfo);
   llvm::DIType T = getOrCreateType(D, getOrCreateFile(Loc));
-  DBuilder.retainType(T);
+  RetainedTypes.push_back(D.getAsOpaquePtr());
   return T;
 }
 
@@ -1778,6 +1778,13 @@ llvm::DIType CGDebugInfo::getTypeOrNull(QualType Ty) {
   Ty = UnwrapTypeForDebugInfo(Ty, CGM.getContext());
   
   // Check for existing entry.
+  if (Ty->getTypeClass() == Type::ObjCInterface) {
+    llvm::Value *V = getCachedInterfaceTypeOrNull(Ty);
+    if (V)
+      return llvm::DIType(cast<llvm::MDNode>(V));
+    else return llvm::DIType();
+  }
+
   llvm::DenseMap<void *, llvm::WeakVH>::iterator it =
     TypeCache.find(Ty.getAsOpaquePtr());
   if (it != TypeCache.end()) {
@@ -1797,17 +1804,37 @@ llvm::DIType CGDebugInfo::getCompletedTypeOrNull(QualType Ty) {
   Ty = UnwrapTypeForDebugInfo(Ty, CGM.getContext());
 
   // Check for existing entry.
+  llvm::Value *V = 0;
   llvm::DenseMap<void *, llvm::WeakVH>::iterator it =
     CompletedTypeCache.find(Ty.getAsOpaquePtr());
-  if (it != CompletedTypeCache.end()) {
-    // Verify that the debug info still exists.
-    if (llvm::Value *V = it->second)
-      return llvm::DIType(cast<llvm::MDNode>(V));
+  if (it != CompletedTypeCache.end())
+    V = it->second;
+  else {
+    V = getCachedInterfaceTypeOrNull(Ty);
   }
+
+  // Verify that any cached debug info still exists.
+  if (V != 0)
+    return llvm::DIType(cast<llvm::MDNode>(V));
 
   return llvm::DIType();
 }
 
+/// getCachedInterfaceTypeOrNull - Get the type from the interface
+/// cache, unless it needs to regenerated. Otherwise return null.
+llvm::Value *CGDebugInfo::getCachedInterfaceTypeOrNull(QualType Ty) {
+  // Is there a cached interface that hasn't changed?
+  llvm::DenseMap<void *, std::pair<llvm::WeakVH, unsigned > >
+    ::iterator it1 = ObjCInterfaceCache.find(Ty.getAsOpaquePtr());
+
+  if (it1 != ObjCInterfaceCache.end())
+    if (ObjCInterfaceDecl* Decl = getObjCInterfaceDecl(Ty))
+      if (Checksum(Decl) == it1->second.second)
+        // Return cached forward declaration.
+        return it1->second.first;
+
+  return 0;
+}
 
 /// getOrCreateType - Get the type from the cache or create a new
 /// one if necessary.
@@ -1825,37 +1852,60 @@ llvm::DIType CGDebugInfo::getOrCreateType(QualType Ty, llvm::DIFile Unit) {
 
   // Otherwise create the type.
   llvm::DIType Res = CreateTypeNode(Ty, Unit);
+  void* TyPtr = Ty.getAsOpaquePtr();
+
+  // And update the type cache.
+  TypeCache[TyPtr] = Res;
 
   llvm::DIType TC = getTypeOrNull(Ty);
   if (TC.Verify() && TC.isForwardDecl())
-    ReplaceMap.push_back(std::make_pair(Ty.getAsOpaquePtr(),
-                                        static_cast<llvm::Value*>(TC)));
-  
-  // Do not cache the type if it may be incomplete.
-  if (maybeIncompleteInterface(Ty))
-    return Res;
+    ReplaceMap.push_back(std::make_pair(TyPtr, static_cast<llvm::Value*>(TC)));
+  else if (ObjCInterfaceDecl* Decl = getObjCInterfaceDecl(Ty)) {
+    // Interface types may have elements added to them by a
+    // subsequent implementation or extension, so we keep them in
+    // the ObjCInterfaceCache together with a checksum. Instead of
+    // the (possibly) incomplete interace type, we return a forward
+    // declaration that gets RAUW'd in CGDebugInfo::finalize().
+    llvm::DenseMap<void *, std::pair<llvm::WeakVH, unsigned > >
+      ::iterator it = ObjCInterfaceCache.find(TyPtr);
+    if (it != ObjCInterfaceCache.end())
+      TC = llvm::DIType(cast<llvm::MDNode>(it->second.first));
+    else
+      TC = DBuilder.createForwardDecl(llvm::dwarf::DW_TAG_structure_type,
+                                      Decl->getName(), TheCU, Unit,
+                                      getLineNumber(Decl->getLocation()),
+                                      TheCU.getLanguage());
+    // Store the forward declaration in the cache.
+    ObjCInterfaceCache[TyPtr] = std::make_pair(TC, Checksum(Decl));
 
-  // And update the type cache.
-  TypeCache[Ty.getAsOpaquePtr()] = Res;
+    // Register the type for replacement in finalize().
+    ReplaceMap.push_back(std::make_pair(TyPtr, static_cast<llvm::Value*>(TC)));
+    return TC;
+  }
 
   if (!Res.isForwardDecl())
-    CompletedTypeCache[Ty.getAsOpaquePtr()] = Res;
+    CompletedTypeCache[TyPtr] = Res;
 
   return Res;
 }
 
-/// clang::ParseAST handles each TopLevelDecl immediately after it was parsed.
-/// A subsequent implementation may add more ivars to an interface, which is
-/// why we cannot cache it yet.
-bool CGDebugInfo::maybeIncompleteInterface(QualType Ty) {
+/// Currently the checksum merely consists of the number of ivars.
+unsigned CGDebugInfo::Checksum(const ObjCInterfaceDecl
+                               *InterfaceDecl) {
+  unsigned IvarNo = 0;
+  for (const ObjCIvarDecl *Ivar = InterfaceDecl->all_declared_ivar_begin();
+       Ivar != 0; Ivar = Ivar->getNextIvar()) ++IvarNo;
+  return IvarNo;
+}
+
+ObjCInterfaceDecl *CGDebugInfo::getObjCInterfaceDecl(QualType Ty) {
   switch (Ty->getTypeClass()) {
   case Type::ObjCObjectPointer:
-    return maybeIncompleteInterface(cast<ObjCObjectPointerType>(Ty)->getPointeeType());
+    return getObjCInterfaceDecl(cast<ObjCObjectPointerType>(Ty)->getPointeeType());
   case Type::ObjCInterface:
-    if (ObjCInterfaceDecl *Decl = cast<ObjCInterfaceType>(Ty)->getDecl())
-      return (Decl->getImplementation() == 0);
+    return cast<ObjCInterfaceType>(Ty)->getDecl();
   default:
-    return false;
+    return 0;
   }
 }
 
@@ -2005,7 +2055,7 @@ llvm::DIType CGDebugInfo::CreateLimitedType(const RecordType *Ty) {
                                         llvm::DIArray());
   } else
     RealDecl = DBuilder.createStructType(RDContext, RDName, DefUnit, Line,
-					 Size, Align, 0, llvm::DIType(), llvm::DIArray());
+                                         Size, Align, 0, llvm::DIType(), llvm::DIArray());
 
   RegionMap[Ty->getDecl()] = llvm::WeakVH(RealDecl);
   TypeCache[QualType(Ty, 0).getAsOpaquePtr()] = llvm::DIType(RealDecl);
@@ -2241,7 +2291,8 @@ void CGDebugInfo::EmitFunctionStart(GlobalDecl GD, QualType FnType,
 
 /// EmitLocation - Emit metadata to indicate a change in line/column
 /// information in the source file.
-void CGDebugInfo::EmitLocation(CGBuilderTy &Builder, SourceLocation Loc) {
+void CGDebugInfo::EmitLocation(CGBuilderTy &Builder, SourceLocation Loc,
+                               bool ForceColumnInfo) {
   
   // Update our current location
   setLocation(Loc);
@@ -2262,9 +2313,10 @@ void CGDebugInfo::EmitLocation(CGBuilderTy &Builder, SourceLocation Loc) {
   PrevLoc = CurLoc;
 
   llvm::MDNode *Scope = LexicalBlockStack.back();
-  Builder.SetCurrentDebugLocation(llvm::DebugLoc::get(getLineNumber(CurLoc),
-                                                      getColumnNumber(CurLoc),
-                                                      Scope));
+  Builder.SetCurrentDebugLocation(llvm::DebugLoc::get
+                                  (getLineNumber(CurLoc),
+                                   getColumnNumber(CurLoc, ForceColumnInfo),
+                                   Scope));
 }
 
 /// CreateLexicalBlock - Creates a new lexical block node and pushes it on
@@ -2628,7 +2680,8 @@ namespace {
 }
 
 void CGDebugInfo::EmitDeclareOfBlockLiteralArgVariable(const CGBlockInfo &block,
-                                                       llvm::Value *addr,
+                                                       llvm::Value *Arg,
+                                                       llvm::Value *LocalAddr,
                                                        CGBuilderTy &Builder) {
   assert(CGM.getCodeGenOpts().getDebugInfo() >= CodeGenOptions::LimitedDebugInfo);
   ASTContext &C = CGM.getContext();
@@ -2755,21 +2808,27 @@ void CGDebugInfo::EmitDeclareOfBlockLiteralArgVariable(const CGBlockInfo &block,
   // Get overall information about the block.
   unsigned flags = llvm::DIDescriptor::FlagArtificial;
   llvm::MDNode *scope = LexicalBlockStack.back();
-  StringRef name = ".block_descriptor";
 
   // Create the descriptor for the parameter.
   llvm::DIVariable debugVar =
     DBuilder.createLocalVariable(llvm::dwarf::DW_TAG_arg_variable,
                                  llvm::DIDescriptor(scope), 
-                                 name, tunit, line, type, 
+                                 Arg->getName(), tunit, line, type,
                                  CGM.getLangOpts().Optimize, flags,
-                                 cast<llvm::Argument>(addr)->getArgNo() + 1);
-    
-  // Insert an llvm.dbg.value into the current block.
-  llvm::Instruction *declare =
-    DBuilder.insertDbgValueIntrinsic(addr, 0, debugVar,
-                                     Builder.GetInsertBlock());
-  declare->setDebugLoc(llvm::DebugLoc::get(line, column, scope));
+                                 cast<llvm::Argument>(Arg)->getArgNo() + 1);
+
+  if (LocalAddr) {
+    // Insert an llvm.dbg.value into the current block.
+    llvm::Instruction *DbgVal =
+      DBuilder.insertDbgValueIntrinsic(LocalAddr, 0, debugVar,
+				       Builder.GetInsertBlock());
+    DbgVal->setDebugLoc(llvm::DebugLoc::get(line, column, scope));
+  }
+
+  // Insert an llvm.dbg.declare into the current block.
+  llvm::Instruction *DbgDecl =
+    DBuilder.insertDeclare(Arg, debugVar, Builder.GetInsertBlock());
+  DbgDecl->setDebugLoc(llvm::DebugLoc::get(line, column, scope));
 }
 
 /// getStaticDataMemberDeclaration - If D is an out-of-class definition of
@@ -2904,10 +2963,17 @@ void CGDebugInfo::finalize() {
       if (llvm::Value *V = it->second)
         RepTy = llvm::DIType(cast<llvm::MDNode>(V));
     }
-    
+
     if (Ty.Verify() && Ty.isForwardDecl() && RepTy.Verify()) {
       Ty.replaceAllUsesWith(RepTy);
     }
   }
+
+  // We keep our own list of retained types, because we need to look
+  // up the final type in the type cache.
+  for (std::vector<void *>::const_iterator RI = RetainedTypes.begin(),
+         RE = RetainedTypes.end(); RI != RE; ++RI)
+    DBuilder.retainType(llvm::DIType(cast<llvm::MDNode>(TypeCache[*RI])));
+
   DBuilder.finalize();
 }

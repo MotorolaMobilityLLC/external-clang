@@ -1,9 +1,9 @@
 // RUN: %clang_cc1 -triple x86_64-apple-darwin10 -emit-llvm -g %s -o - | FileCheck %s
 
-// Debug symbols for private IVars. This test ensures that we are generating
-// DI for ivars added ny the implementation.
+// Debug symbols for private ivars. This test ensures that we are
+// generating debug info for ivars added by the implementation.
 __attribute((objc_root_class)) @interface NSObject {
-	id isa;
+  id isa;
 }
 @end
 
@@ -16,7 +16,7 @@ __attribute((objc_root_class)) @interface NSObject {
 @end
 
 @interface Delegate(NSObject)
-  - (void)f;
+- (void)f;
 @end
 
 @implementation Delegate(NSObject)
