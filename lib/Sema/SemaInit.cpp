@@ -97,6 +97,7 @@ static void CheckStringInit(Expr *Str, QualType &DeclT, const ArrayType *AT,
     DeclT = S.Context.getConstantArrayType(IAT->getElementType(),
                                            ConstVal,
                                            ArrayType::Normal, 0);
+    Str->setType(DeclT);
     return;
   }
 
@@ -293,6 +294,21 @@ void InitListChecker::FillInValueInitForField(unsigned Init, FieldDecl *Field,
   InitializedEntity MemberEntity
     = InitializedEntity::InitializeMember(Field, &ParentEntity);
   if (Init >= NumInits || !ILE->getInit(Init)) {
+    // If there's no explicit initializer but we have a default initializer, use
+    // that. This only happens in C++1y, since classes with default
+    // initializers are not aggregates in C++11.
+    if (Field->hasInClassInitializer()) {
+      Expr *DIE = CXXDefaultInitExpr::Create(SemaRef.Context,
+                                             ILE->getRBraceLoc(), Field);
+      if (Init < NumInits)
+        ILE->setInit(Init, DIE);
+      else {
+        ILE->updateInit(SemaRef.Context, Init, DIE);
+        RequiresSecondPass = true;
+      }
+      return;
+    }
+
     // FIXME: We probably don't need to handle references
     // specially here, since value-initialization of references is
     // handled in InitializationSequence.
@@ -358,15 +374,24 @@ InitListChecker::FillInValueInitializations(const InitializedEntity &Entity,
     Loc = ILE->getSyntacticForm()->getLocStart();
 
   if (const RecordType *RType = ILE->getType()->getAs<RecordType>()) {
-    if (RType->getDecl()->isUnion() &&
-        ILE->getInitializedFieldInUnion())
+    const RecordDecl *RDecl = RType->getDecl();
+    if (RDecl->isUnion() && ILE->getInitializedFieldInUnion())
       FillInValueInitForField(0, ILE->getInitializedFieldInUnion(),
                               Entity, ILE, RequiresSecondPass);
-    else {
+    else if (RDecl->isUnion() && isa<CXXRecordDecl>(RDecl) &&
+             cast<CXXRecordDecl>(RDecl)->hasInClassInitializer()) {
+      for (RecordDecl::field_iterator Field = RDecl->field_begin(),
+                                      FieldEnd = RDecl->field_end();
+           Field != FieldEnd; ++Field) {
+        if (Field->hasInClassInitializer()) {
+          FillInValueInitForField(0, *Field, Entity, ILE, RequiresSecondPass);
+          break;
+        }
+      }
+    } else {
       unsigned Init = 0;
-      for (RecordDecl::field_iterator
-             Field = RType->getDecl()->field_begin(),
-             FieldEnd = RType->getDecl()->field_end();
+      for (RecordDecl::field_iterator Field = RDecl->field_begin(),
+                                      FieldEnd = RDecl->field_end();
            Field != FieldEnd; ++Field) {
         if (Field->isUnnamedBitfield())
           continue;
@@ -381,7 +406,7 @@ InitListChecker::FillInValueInitializations(const InitializedEntity &Entity,
         ++Init;
 
         // Only look at the first initialization of a union.
-        if (RType->getDecl()->isUnion())
+        if (RDecl->isUnion())
           break;
       }
     }
@@ -1323,8 +1348,23 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
   }
 
   if (DeclType->isUnionType() && IList->getNumInits() == 0) {
-    // Value-initialize the first named member of the union.
     RecordDecl *RD = DeclType->getAs<RecordType>()->getDecl();
+
+    // If there's a default initializer, use it.
+    if (isa<CXXRecordDecl>(RD) && cast<CXXRecordDecl>(RD)->hasInClassInitializer()) {
+      if (VerifyOnly)
+        return;
+      for (RecordDecl::field_iterator FieldEnd = RD->field_end();
+           Field != FieldEnd; ++Field) {
+        if (Field->hasInClassInitializer()) {
+          StructuredList->setInitializedFieldInUnion(*Field);
+          // FIXME: Actually build a CXXDefaultInitExpr?
+          return;
+        }
+      }
+    }
+
+    // Value-initialize the first named member of the union.
     for (RecordDecl::field_iterator FieldEnd = RD->field_end();
          Field != FieldEnd; ++Field) {
       if (Field->getDeclName()) {
@@ -1428,7 +1468,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     // Find first (if any) named field and emit warning.
     for (RecordDecl::field_iterator it = Field, end = RD->field_end();
          it != end; ++it) {
-      if (!it->isUnnamedBitfield()) {
+      if (!it->isUnnamedBitfield() && !it->hasInClassInitializer()) {
         SemaRef.Diag(IList->getSourceRange().getEnd(),
                      diag::warn_missing_field_initializers) << it->getName();
         break;
@@ -1441,7 +1481,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
       !Field->getType()->isIncompleteArrayType()) {
     // FIXME: Should check for holes left by designated initializers too.
     for (; Field != FieldEnd && !hadError; ++Field) {
-      if (!Field->isUnnamedBitfield())
+      if (!Field->isUnnamedBitfield() && !Field->hasInClassInitializer())
         CheckValueInitializable(
             InitializedEntity::InitializeMember(*Field, &Entity));
     }
@@ -2409,6 +2449,7 @@ void InitializationSequence::Step::Destroy() {
   case SK_QualificationConversionRValue:
   case SK_QualificationConversionXValue:
   case SK_QualificationConversionLValue:
+  case SK_LValueToRValue:
   case SK_ListInitialization:
   case SK_ListConstructorCall:
   case SK_UnwrapInitList:
@@ -2551,6 +2592,15 @@ void InitializationSequence::AddQualificationConversionStep(QualType Ty,
     S.Kind = SK_QualificationConversionLValue;
     break;
   }
+  S.Type = Ty;
+  Steps.push_back(S);
+}
+
+void InitializationSequence::AddLValueToRValueStep(QualType Ty) {
+  assert(!Ty.hasQualifiers() && "rvalues may not have qualifiers");
+
+  Step S;
+  S.Kind = SK_LValueToRValue;
   S.Type = Ty;
   Steps.push_back(S);
 }
@@ -3351,6 +3401,57 @@ static void TryReferenceInitialization(Sema &S,
                                  T1Quals, cv2T2, T2, T2Quals, Sequence);
 }
 
+/// Converts the target of reference initialization so that it has the
+/// appropriate qualifiers and value kind.
+///
+/// In this case, 'x' is an 'int' lvalue, but it needs to be 'const int'.
+/// \code
+///   int x;
+///   const int &r = x;
+/// \endcode
+///
+/// In this case the reference is binding to a bitfield lvalue, which isn't
+/// valid. Perform a load to create a lifetime-extended temporary instead.
+/// \code
+///   const int &r = someStruct.bitfield;
+/// \endcode
+static ExprValueKind
+convertQualifiersAndValueKindIfNecessary(Sema &S,
+                                         InitializationSequence &Sequence,
+                                         Expr *Initializer,
+                                         QualType cv1T1,
+                                         Qualifiers T1Quals,
+                                         Qualifiers T2Quals,
+                                         bool IsLValueRef) {
+  bool IsNonAddressableType = Initializer->getBitField() ||
+                              Initializer->refersToVectorElement();
+
+  if (IsNonAddressableType) {
+    // C++11 [dcl.init.ref]p5: [...] Otherwise, the reference shall be an
+    // lvalue reference to a non-volatile const type, or the reference shall be
+    // an rvalue reference.
+    //
+    // If not, we can't make a temporary and bind to that. Give up and allow the
+    // error to be diagnosed later.
+    if (IsLValueRef && (!T1Quals.hasConst() || T1Quals.hasVolatile())) {
+      assert(Initializer->isGLValue());
+      return Initializer->getValueKind();
+    }
+
+    // Force a load so we can materialize a temporary.
+    Sequence.AddLValueToRValueStep(cv1T1.getUnqualifiedType());
+    return VK_RValue;
+  }
+
+  if (T1Quals != T2Quals) {
+    Sequence.AddQualificationConversionStep(cv1T1,
+                                            Initializer->getValueKind());
+  }
+
+  return Initializer->getValueKind();
+}
+
+
 /// \brief Reference initialization without resolving overloaded functions.
 static void TryReferenceInitializationCore(Sema &S,
                                            const InitializedEntity &Entity,
@@ -3406,11 +3507,11 @@ static void TryReferenceInitializationCore(Sema &S,
         Sequence.AddObjCObjectConversionStep(
                                      S.Context.getQualifiedType(T1, T2Quals));
 
-      if (T1Quals != T2Quals)
-        Sequence.AddQualificationConversionStep(cv1T1, VK_LValue);
-      bool BindingTemporary = T1Quals.hasConst() && !T1Quals.hasVolatile() &&
-        (Initializer->getBitField() || Initializer->refersToVectorElement());
-      Sequence.AddReferenceBindingStep(cv1T1, BindingTemporary);
+      ExprValueKind ValueKind =
+        convertQualifiersAndValueKindIfNecessary(S, Sequence, Initializer,
+                                                 cv1T1, T1Quals, T2Quals,
+                                                 isLValueRef);
+      Sequence.AddReferenceBindingStep(cv1T1, ValueKind == VK_RValue);
       return;
     }
 
@@ -3493,10 +3594,12 @@ static void TryReferenceInitializationCore(Sema &S,
       Sequence.AddObjCObjectConversionStep(
                                        S.Context.getQualifiedType(T1, T2Quals));
 
-    if (T1Quals != T2Quals)
-      Sequence.AddQualificationConversionStep(cv1T1, ValueKind);
-    Sequence.AddReferenceBindingStep(cv1T1,
-                                 /*bindingTemporary=*/InitCategory.isPRValue());
+    ValueKind = convertQualifiersAndValueKindIfNecessary(S, Sequence,
+                                                         Initializer, cv1T1,
+                                                         T1Quals, T2Quals,
+                                                         isLValueRef);
+
+    Sequence.AddReferenceBindingStep(cv1T1, ValueKind == VK_RValue);
     return;
   }
 
@@ -3515,6 +3618,14 @@ static void TryReferenceInitializationCore(Sema &S,
                       InitializationSequence::FK_ReferenceInitOverloadFailed,
                                     ConvOvlResult);
 
+      return;
+    }
+
+    if ((RefRelationship == Sema::Ref_Compatible ||
+         RefRelationship == Sema::Ref_Compatible_With_Added_Qualification) &&
+        isRValueRef && InitCategory.isLValue()) {
+      Sequence.SetFailed(
+        InitializationSequence::FK_RValueReferenceBindingToLValue);
       return;
     }
 
@@ -4065,6 +4176,21 @@ InitializationSequence::InitializationSequence(Sema &S,
     : FailedCandidateSet(Kind.getLocation()) {
   ASTContext &Context = S.Context;
 
+  // Eliminate non-overload placeholder types in the arguments.  We
+  // need to do this before checking whether types are dependent
+  // because lowering a pseudo-object expression might well give us
+  // something of dependent type.
+  for (unsigned I = 0; I != NumArgs; ++I)
+    if (Args[I]->getType()->isNonOverloadPlaceholderType()) {
+      // FIXME: should we be doing this here?
+      ExprResult result = S.CheckPlaceholderExpr(Args[I]);
+      if (result.isInvalid()) {
+        SetFailed(FK_PlaceholderType);
+        return;
+      }
+      Args[I] = result.take();
+    }
+
   // C++0x [dcl.init]p16:
   //   The semantics of initializers are as follows. The destination type is
   //   the type of the object or reference being initialized and the source
@@ -4081,18 +4207,6 @@ InitializationSequence::InitializationSequence(Sema &S,
 
   // Almost everything is a normal sequence.
   setSequenceKind(NormalSequence);
-
-  for (unsigned I = 0; I != NumArgs; ++I)
-    if (Args[I]->getType()->isNonOverloadPlaceholderType()) {
-      // FIXME: should we be doing this here?
-      ExprResult result = S.CheckPlaceholderExpr(Args[I]);
-      if (result.isInvalid()) {
-        SetFailed(FK_PlaceholderType);
-        return;
-      }
-      Args[I] = result.take();
-    }
-
 
   QualType SourceType;
   Expr *Initializer = 0;
@@ -4980,6 +5094,7 @@ InitializationSequence::Perform(Sema &S,
   case SK_QualificationConversionLValue:
   case SK_QualificationConversionXValue:
   case SK_QualificationConversionRValue:
+  case SK_LValueToRValue:
   case SK_ConversionSequence:
   case SK_ListInitialization:
   case SK_UnwrapInitList:
@@ -5096,6 +5211,9 @@ InitializationSequence::Perform(Sema &S,
       break;
 
     case SK_BindReferenceToTemporary:
+      // Make sure the "temporary" is actually an rvalue.
+      assert(CurInit.get()->isRValue() && "not a temporary");
+
       // Check exception specifications
       if (S.CheckExceptionSpecCompatibility(CurInit.get(), DestType))
         return ExprError();
@@ -5230,6 +5348,16 @@ InitializationSequence::Perform(Sema &S,
                    VK_XValue :
                    VK_RValue);
       CurInit = S.ImpCastExprToType(CurInit.take(), Step->Type, CK_NoOp, VK);
+      break;
+    }
+
+    case SK_LValueToRValue: {
+      assert(CurInit.get()->isGLValue() && "cannot load from a prvalue");
+      CurInit = S.Owned(ImplicitCastExpr::Create(S.Context, Step->Type,
+                                                 CK_LValueToRValue,
+                                                 CurInit.take(),
+                                                 /*BasePath=*/0,
+                                                 VK_RValue));
       break;
     }
 
@@ -5464,7 +5592,7 @@ InitializationSequence::Perform(Sema &S,
     case SK_StdInitializerList: {
       QualType Dest = Step->Type;
       QualType E;
-      bool Success = S.isStdInitializerList(Dest, &E);
+      bool Success = S.isStdInitializerList(Dest.getNonReferenceType(), &E);
       (void)Success;
       assert(Success && "Destination type changed?");
 
@@ -5590,6 +5718,26 @@ static bool DiagnoseUninitializedReference(Sema &S, SourceLocation Loc,
 //===----------------------------------------------------------------------===//
 // Diagnose initialization failures
 //===----------------------------------------------------------------------===//
+
+/// Emit notes associated with an initialization that failed due to a
+/// "simple" conversion failure.
+static void emitBadConversionNotes(Sema &S, const InitializedEntity &entity,
+                                   Expr *op) {
+  QualType destType = entity.getType();
+  if (destType.getNonReferenceType()->isObjCObjectPointerType() &&
+      op->getType()->isObjCObjectPointerType()) {
+
+    // Emit a possible note about the conversion failing because the
+    // operand is a message send with a related result type.
+    S.EmitRelatedResultTypeNote(op);
+
+    // Emit a possible note about a return failing because we're
+    // expecting a related result type.
+    if (entity.getKind() == InitializedEntity::EK_Result)
+      S.EmitRelatedResultTypeNoteForReturn(destType);
+  }
+}
+
 bool InitializationSequence::Diagnose(Sema &S,
                                       const InitializedEntity &Entity,
                                       const InitializationKind &Kind,
@@ -5734,9 +5882,7 @@ bool InitializationSequence::Diagnose(Sema &S,
       << Args[0]->isLValue()
       << Args[0]->getType()
       << Args[0]->getSourceRange();
-    if (DestType.getNonReferenceType()->isObjCObjectPointerType() &&
-        Args[0]->getType()->isObjCObjectPointerType())
-      S.EmitRelatedResultTypeNote(Args[0]);
+    emitBadConversionNotes(S, Entity, Args[0]);
     break;
 
   case FK_ConversionFailed: {
@@ -5749,9 +5895,7 @@ bool InitializationSequence::Diagnose(Sema &S,
       << Args[0]->getSourceRange();
     S.HandleFunctionTypeMismatch(PDiag, FromType, DestType);
     S.Diag(Kind.getLocation(), PDiag);
-    if (DestType.getNonReferenceType()->isObjCObjectPointerType() &&
-        Args[0]->getType()->isObjCObjectPointerType())
-      S.EmitRelatedResultTypeNote(Args[0]);
+    emitBadConversionNotes(S, Entity, Args[0]);
     break;
   }
 
@@ -5942,7 +6086,7 @@ bool InitializationSequence::Diagnose(Sema &S,
     unsigned NumInits = InitList->getNumInits();
     QualType DestType = Entity.getType();
     QualType E;
-    bool Success = S.isStdInitializerList(DestType, &E);
+    bool Success = S.isStdInitializerList(DestType.getNonReferenceType(), &E);
     (void)Success;
     assert(Success && "Where did the std::initializer_list go?");
     InitializedEntity HiddenArray = InitializedEntity::InitializeTemporary(
@@ -6159,6 +6303,10 @@ void InitializationSequence::dump(raw_ostream &OS) const {
 
     case SK_QualificationConversionLValue:
       OS << "qualification conversion (lvalue)";
+      break;
+
+    case SK_LValueToRValue:
+      OS << "load (lvalue to rvalue)";
       break;
 
     case SK_ConversionSequence:

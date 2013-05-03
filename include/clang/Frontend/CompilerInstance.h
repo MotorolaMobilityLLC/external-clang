@@ -427,6 +427,7 @@ public:
   /// {
 
   ASTReader *getModuleManager() const { return ModuleManager; }
+  void setModuleManager(ASTReader *Reader) { ModuleManager = Reader; }
 
   /// }
   /// @name Code Completion
@@ -663,7 +664,8 @@ public:
 
   virtual void makeModuleVisible(Module *Mod,
                                  Module::NameVisibilityKind Visibility,
-                                 SourceLocation ImportLoc);
+                                 SourceLocation ImportLoc,
+                                 bool Complain);
 
 };
 

@@ -14,6 +14,7 @@
 #include "clang/Driver/ArgList.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
+#include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Path.h"
@@ -36,29 +37,15 @@ Windows::Windows(const Driver &D, const llvm::Triple& Triple,
   : ToolChain(D, Triple, Args) {
 }
 
-Tool *Windows::constructTool(Action::ActionClass AC) const {
-  switch (AC) {
-  case Action::InputClass:
-  case Action::BindArchClass:
-  case Action::LipoJobClass:
-  case Action::DsymutilJobClass:
-  case Action::VerifyJobClass:
-  case Action::PreprocessJobClass:
-  case Action::PrecompileJobClass:
-  case Action::AnalyzeJobClass:
-  case Action::MigrateJobClass:
-  case Action::CompileJobClass:
-    return new tools::Clang(*this);
-  case Action::AssembleJobClass:
-    if (!useIntegratedAs() &&
-        getTriple().getEnvironment() == llvm::Triple::MachO)
-      return new tools::darwin::Assemble(*this);
-    else
-      return new tools::ClangAs(*this);
-    break;
-  case Action::LinkJobClass:
-    return new tools::visualstudio::Link(*this);
-  }
+Tool *Windows::buildLinker() const {
+  return new tools::visualstudio::Link(*this);
+}
+
+Tool *Windows::buildAssembler() const {
+  if (getTriple().getEnvironment() == llvm::Triple::MachO)
+    return new tools::darwin::Assemble(*this);
+  getDriver().Diag(clang::diag::err_no_external_windows_assembler);
+  return NULL;
 }
 
 bool Windows::IsIntegratedAssemblerDefault() const {
@@ -71,6 +58,10 @@ bool Windows::IsUnwindTablesDefault() const {
 
 bool Windows::isPICDefault() const {
   return getArch() == llvm::Triple::x86_64;
+}
+
+bool Windows::isPIEDefault() const {
+  return false;
 }
 
 bool Windows::isPICDefaultForced() const {

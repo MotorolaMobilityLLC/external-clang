@@ -20,6 +20,7 @@
 #include "clang/AST/DeclContextInternals.h"
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/AST/DeclOpenMP.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/DependentDiagnostic.h"
 #include "clang/AST/ExternalASTSource.h"
@@ -434,7 +435,7 @@ bool Decl::canBeWeakImported(bool &IsDefinition) const {
 
   // Variables, if they aren't definitions.
   if (const VarDecl *Var = dyn_cast<VarDecl>(this)) {
-    if (!Var->hasExternalStorage() || Var->getInit()) {
+    if (Var->isThisDeclarationADefinition()) {
       IsDefinition = true;
       return false;
     }
@@ -492,6 +493,7 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
     case NonTypeTemplateParm:
     case ObjCMethod:
     case ObjCProperty:
+    case MSProperty:
       return IDNS_Ordinary;
     case Label:
       return IDNS_Label;
@@ -551,6 +553,7 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
     case StaticAssert:
     case ObjCPropertyImpl:
     case Block:
+    case Captured:
     case TranslationUnit:
 
     case UsingDirective:
@@ -561,6 +564,7 @@ unsigned Decl::getIdentifierNamespaceForKind(Kind DeclKind) {
     case ObjCCategory:
     case ObjCCategoryImpl:
     case Import:
+    case OMPThreadPrivate:
     case Empty:
       // Never looked up by name.
       return 0;
@@ -836,6 +840,7 @@ DeclContext *DeclContext::getPrimaryContext() {
   case Decl::TranslationUnit:
   case Decl::LinkageSpec:
   case Decl::Block:
+  case Decl::Captured:
     // There is only one DeclContext for these entities.
     return this;
 

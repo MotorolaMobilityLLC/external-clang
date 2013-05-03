@@ -52,75 +52,20 @@ void BugReporterContext::anchor() {}
 // Helper routines for walking the ExplodedGraph and fetching statements.
 //===----------------------------------------------------------------------===//
 
-static inline const Stmt *GetStmt(const ProgramPoint &P) {
-  if (Optional<StmtPoint> SP = P.getAs<StmtPoint>())
-    return SP->getStmt();
-  if (Optional<BlockEdge> BE = P.getAs<BlockEdge>())
-    return BE->getSrc()->getTerminator();
-  if (Optional<CallEnter> CE = P.getAs<CallEnter>())
-    return CE->getCallExpr();
-  if (Optional<CallExitEnd> CEE = P.getAs<CallExitEnd>())
-    return CEE->getCalleeContext()->getCallSite();
-
-  return 0;
-}
-
-static inline const ExplodedNode*
-GetPredecessorNode(const ExplodedNode *N) {
-  return N->pred_empty() ? NULL : *(N->pred_begin());
-}
-
-static inline const ExplodedNode*
-GetSuccessorNode(const ExplodedNode *N) {
-  return N->succ_empty() ? NULL : *(N->succ_begin());
-}
-
 static const Stmt *GetPreviousStmt(const ExplodedNode *N) {
-  for (N = GetPredecessorNode(N); N; N = GetPredecessorNode(N))
-    if (const Stmt *S = GetStmt(N->getLocation()))
+  for (N = N->getFirstPred(); N; N = N->getFirstPred())
+    if (const Stmt *S = PathDiagnosticLocation::getStmt(N))
       return S;
-
-  return 0;
-}
-
-static const Stmt *GetNextStmt(const ExplodedNode *N) {
-  for (N = GetSuccessorNode(N); N; N = GetSuccessorNode(N))
-    if (const Stmt *S = GetStmt(N->getLocation())) {
-      // Check if the statement is '?' or '&&'/'||'.  These are "merges",
-      // not actual statement points.
-      switch (S->getStmtClass()) {
-        case Stmt::ChooseExprClass:
-        case Stmt::BinaryConditionalOperatorClass: continue;
-        case Stmt::ConditionalOperatorClass: continue;
-        case Stmt::BinaryOperatorClass: {
-          BinaryOperatorKind Op = cast<BinaryOperator>(S)->getOpcode();
-          if (Op == BO_LAnd || Op == BO_LOr)
-            continue;
-          break;
-        }
-        default:
-          break;
-      }
-      return S;
-    }
 
   return 0;
 }
 
 static inline const Stmt*
 GetCurrentOrPreviousStmt(const ExplodedNode *N) {
-  if (const Stmt *S = GetStmt(N->getLocation()))
+  if (const Stmt *S = PathDiagnosticLocation::getStmt(N))
     return S;
 
   return GetPreviousStmt(N);
-}
-
-static inline const Stmt*
-GetCurrentOrNextStmt(const ExplodedNode *N) {
-  if (const Stmt *S = GetStmt(N->getLocation()))
-    return S;
-
-  return GetNextStmt(N);
 }
 
 //===----------------------------------------------------------------------===//
@@ -355,7 +300,7 @@ public:
 
 PathDiagnosticLocation
 PathDiagnosticBuilder::ExecutionContinues(const ExplodedNode *N) {
-  if (const Stmt *S = GetNextStmt(N))
+  if (const Stmt *S = PathDiagnosticLocation::getNextStmt(N))
     return PathDiagnosticLocation(S, getSourceManager(), LC);
 
   return PathDiagnosticLocation::createDeclEnd(N->getLocationContext(),
@@ -578,7 +523,7 @@ static bool GenerateMinimalPathDiagnostic(PathDiagnostic& PD,
   while (NextNode) {
     N = NextNode;
     PDB.LC = N->getLocationContext();
-    NextNode = GetPredecessorNode(N);
+    NextNode = N->getFirstPred();
 
     ProgramPoint P = N->getLocation();
 
@@ -640,7 +585,7 @@ static bool GenerateMinimalPathDiagnostic(PathDiagnostic& PD,
 
         case Stmt::GotoStmtClass:
         case Stmt::IndirectGotoStmtClass: {
-          const Stmt *S = GetNextStmt(N);
+          const Stmt *S = PathDiagnosticLocation::getNextStmt(N);
 
           if (!S)
             break;
@@ -1026,7 +971,8 @@ public:
     PrevLoc = PathDiagnosticLocation();
   }
   
-  void addEdge(PathDiagnosticLocation NewLoc, bool alwaysAdd = false);
+  void addEdge(PathDiagnosticLocation NewLoc, bool alwaysAdd = false,
+               bool IsPostJump = false);
 
   void rawAddEdge(PathDiagnosticLocation NewLoc);
 
@@ -1122,7 +1068,8 @@ void EdgeBuilder::rawAddEdge(PathDiagnosticLocation NewLoc) {
   PrevLoc = NewLoc;
 }
 
-void EdgeBuilder::addEdge(PathDiagnosticLocation NewLoc, bool alwaysAdd) {
+void EdgeBuilder::addEdge(PathDiagnosticLocation NewLoc, bool alwaysAdd,
+                          bool IsPostJump) {
 
   if (!alwaysAdd && NewLoc.asLocation().isMacroID())
     return;
@@ -1135,13 +1082,14 @@ void EdgeBuilder::addEdge(PathDiagnosticLocation NewLoc, bool alwaysAdd) {
     // Is the top location context the same as the one for the new location?
     if (TopContextLoc == CLoc) {
       if (alwaysAdd) {
-        if (IsConsumedExpr(TopContextLoc) &&
-            !IsControlFlowExpr(TopContextLoc.asStmt()))
-            TopContextLoc.markDead();
+        if (IsConsumedExpr(TopContextLoc))
+          TopContextLoc.markDead();
 
         rawAddEdge(NewLoc);
       }
 
+      if (IsPostJump)
+        TopContextLoc.markDead();
       return;
     }
 
@@ -1149,13 +1097,13 @@ void EdgeBuilder::addEdge(PathDiagnosticLocation NewLoc, bool alwaysAdd) {
       if (alwaysAdd) {
         rawAddEdge(NewLoc);
 
-        if (IsConsumedExpr(CLoc) && !IsControlFlowExpr(CLoc.asStmt())) {
-          CLocs.push_back(ContextLocation(CLoc, true));
+        if (IsConsumedExpr(CLoc)) {
+          CLocs.push_back(ContextLocation(CLoc, /*IsDead=*/true));
           return;
         }
       }
 
-      CLocs.push_back(CLoc);
+      CLocs.push_back(ContextLocation(CLoc, /*IsDead=*/IsPostJump));
       return;
     }
 
@@ -1340,7 +1288,7 @@ static const Stmt *getStmtBeforeCond(ParentMap &PM, const Stmt *Term,
       if (!isContainedByStmt(PM, Term, S))
         return S;
     }
-    N = GetPredecessorNode(N);
+    N = N->getFirstPred();
   }
   return 0;
 }
@@ -1385,7 +1333,7 @@ static bool GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
   const ExplodedNode *NextNode = N->pred_empty() ? NULL : *(N->pred_begin());
   while (NextNode) {
     N = NextNode;
-    NextNode = GetPredecessorNode(N);
+    NextNode = N->getFirstPred();
     ProgramPoint P = N->getLocation();
 
     do {
@@ -1409,7 +1357,7 @@ static bool GenerateExtensivePathDiagnostic(PathDiagnostic& PD,
         GRBugReporter& BR = PDB.getBugReporter();
         BR.addCallPieceLocationContextPair(C, CE->getCalleeContext());
 
-        EB.addEdge(C->callReturn, true);
+        EB.addEdge(C->callReturn, /*AlwaysAdd=*/true, /*IsPostJump=*/true);
         EB.flushLocations();
 
         PD.getActivePath().push_front(C);
@@ -1758,7 +1706,7 @@ const Stmt *BugReport::getStmt() const {
       S = GetPreviousStmt(ErrorNode);
   }
   if (!S)
-    S = GetStmt(ProgP);
+    S = PathDiagnosticLocation::getStmt(ErrorNode);
 
   return S;
 }
@@ -1785,22 +1733,7 @@ PathDiagnosticLocation BugReport::getLocation(const SourceManager &SM) const {
   if (ErrorNode) {
     assert(!Location.isValid() &&
      "Either Location or ErrorNode should be specified but not both.");
-
-    if (const Stmt *S = GetCurrentOrPreviousStmt(ErrorNode)) {
-      const LocationContext *LC = ErrorNode->getLocationContext();
-
-      // For member expressions, return the location of the '.' or '->'.
-      if (const MemberExpr *ME = dyn_cast<MemberExpr>(S))
-        return PathDiagnosticLocation::createMemberLoc(ME, SM);
-      // For binary operators, return the location of the operator.
-      if (const BinaryOperator *B = dyn_cast<BinaryOperator>(S))
-        return PathDiagnosticLocation::createOperatorLoc(B, SM);
-
-      if (ErrorNode->getLocation().getAs<PostStmtPurgeDeadSymbols>())
-        return PathDiagnosticLocation::createEnd(S, SM, LC);
-
-      return PathDiagnosticLocation::createBegin(S, SM, LC);
-    }
+    return PathDiagnosticLocation::createEndOfPath(ErrorNode, SM);
   } else {
     assert(Location.isValid());
     return Location;
@@ -1878,140 +1811,169 @@ namespace {
 /// node maps.
 class ReportGraph {
 public:
-  OwningPtr<ExplodedGraph> Graph;
   InterExplodedGraphMap BackMap;
-  ExplodedNode *ErrorNode;
+  OwningPtr<ExplodedGraph> Graph;
+  const ExplodedNode *ErrorNode;
   size_t Index;
 };
 
 /// A wrapper around a trimmed graph and its node maps.
 class TrimmedGraph {
-  InterExplodedGraphMap ForwardMap;
   InterExplodedGraphMap InverseMap;
+
+  typedef llvm::DenseMap<const ExplodedNode *, unsigned> PriorityMapTy;
+  PriorityMapTy PriorityMap;
+
+  typedef std::pair<const ExplodedNode *, size_t> NodeIndexPair;
+  SmallVector<NodeIndexPair, 32> ReportNodes;
+
   OwningPtr<ExplodedGraph> G;
+
+  /// A helper class for sorting ExplodedNodes by priority.
+  template <bool Descending>
+  class PriorityCompare {
+    const PriorityMapTy &PriorityMap;
+
+  public:
+    PriorityCompare(const PriorityMapTy &M) : PriorityMap(M) {}
+
+    bool operator()(const ExplodedNode *LHS, const ExplodedNode *RHS) const {
+      PriorityMapTy::const_iterator LI = PriorityMap.find(LHS);
+      PriorityMapTy::const_iterator RI = PriorityMap.find(RHS);
+      PriorityMapTy::const_iterator E = PriorityMap.end();
+
+      if (LI == E)
+        return Descending;
+      if (RI == E)
+        return !Descending;
+
+      return Descending ? LI->second > RI->second
+                        : LI->second < RI->second;
+    }
+
+    bool operator()(const NodeIndexPair &LHS, const NodeIndexPair &RHS) const {
+      return (*this)(LHS.first, RHS.first);
+    }
+  };
+
 public:
-  /// 
   TrimmedGraph(const ExplodedGraph *OriginalGraph,
-               ArrayRef<const ExplodedNode *> Nodes) {
-    // The trimmed graph is created in the body of the constructor to ensure
-    // that the DenseMaps have been initialized already.
-    G.reset(OriginalGraph->trim(Nodes, &ForwardMap, &InverseMap));
-  }
+               ArrayRef<const ExplodedNode *> Nodes);
 
-  void createBestReportGraph(ArrayRef<const ExplodedNode *> Nodes,
-                             ReportGraph &GraphWrapper) const;
+  bool popNextReportGraph(ReportGraph &GraphWrapper);
 };
-
 }
 
-
-void TrimmedGraph::createBestReportGraph(ArrayRef<const ExplodedNode *> Nodes,
-                                         ReportGraph &GraphWrapper) const {
-  assert(!GraphWrapper.Graph && "ReportGraph is already in use");
-  assert(GraphWrapper.BackMap.empty() && "ReportGraph is already in use");
+TrimmedGraph::TrimmedGraph(const ExplodedGraph *OriginalGraph,
+                           ArrayRef<const ExplodedNode *> Nodes) {
+  // The trimmed graph is created in the body of the constructor to ensure
+  // that the DenseMaps have been initialized already.
+  InterExplodedGraphMap ForwardMap;
+  G.reset(OriginalGraph->trim(Nodes, &ForwardMap, &InverseMap));
 
   // Find the (first) error node in the trimmed graph.  We just need to consult
   // the node map which maps from nodes in the original graph to nodes
   // in the new graph.
-  std::queue<const ExplodedNode *> WS;
-  typedef llvm::SmallDenseMap<const ExplodedNode *, size_t, 32> IndexMapTy;
-  IndexMapTy IndexMap;
+  llvm::SmallPtrSet<const ExplodedNode *, 32> RemainingNodes;
 
   for (unsigned i = 0, count = Nodes.size(); i < count; ++i) {
-    const ExplodedNode *OriginalNode = Nodes[i];
-    if (const ExplodedNode *N = ForwardMap.lookup(OriginalNode)) {
-      WS.push(N);
-      IndexMap[OriginalNode] = i;
+    if (const ExplodedNode *NewNode = ForwardMap.lookup(Nodes[i])) {
+      ReportNodes.push_back(std::make_pair(NewNode, i));
+      RemainingNodes.insert(NewNode);
     }
   }
 
-  assert(!WS.empty() && "No error node found in the trimmed graph.");
+  assert(!RemainingNodes.empty() && "No error node found in the trimmed graph");
 
-  // Create a new graph with a single path.  This is the graph
-  // that will be returned to the caller.
-  ExplodedGraph *GNew = new ExplodedGraph();
-  GraphWrapper.Graph.reset(GNew);
+  // Perform a forward BFS to find all the shortest paths.
+  std::queue<const ExplodedNode *> WS;
 
-  // Sometimes the trimmed graph can contain a cycle.  Perform a reverse BFS
-  // to the root node, and then construct a new graph that contains only
-  // a single path.
-  llvm::DenseMap<const ExplodedNode *, unsigned> Visited;
-
-  unsigned cnt = 0;
-  const ExplodedNode *Root = 0;
+  assert(G->num_roots() == 1);
+  WS.push(*G->roots_begin());
+  unsigned Priority = 0;
 
   while (!WS.empty()) {
     const ExplodedNode *Node = WS.front();
     WS.pop();
 
-    if (Visited.find(Node) != Visited.end())
+    PriorityMapTy::iterator PriorityEntry;
+    bool IsNew;
+    llvm::tie(PriorityEntry, IsNew) =
+      PriorityMap.insert(std::make_pair(Node, Priority));
+    ++Priority;
+
+    if (!IsNew) {
+      assert(PriorityEntry->second <= Priority);
       continue;
-
-    Visited[Node] = cnt++;
-
-    if (Node->pred_empty()) {
-      Root = Node;
-      break;
     }
 
-    for (ExplodedNode::const_pred_iterator I=Node->pred_begin(),
-         E=Node->pred_end(); I!=E; ++I)
+    if (RemainingNodes.erase(Node))
+      if (RemainingNodes.empty())
+        break;
+
+    for (ExplodedNode::const_pred_iterator I = Node->succ_begin(),
+                                           E = Node->succ_end();
+         I != E; ++I)
       WS.push(*I);
   }
 
-  assert(Root);
+  // Sort the error paths from longest to shortest.
+  std::sort(ReportNodes.begin(), ReportNodes.end(),
+            PriorityCompare<true>(PriorityMap));
+}
 
-  // Now walk from the root down the BFS path, always taking the successor
-  // with the lowest number.
-  ExplodedNode *Last = 0;
-  for ( const ExplodedNode *N = Root ;;) {
-    // Lookup the number associated with the current node.
-    llvm::DenseMap<const ExplodedNode *,unsigned>::iterator I = Visited.find(N);
-    assert(I != Visited.end());
+bool TrimmedGraph::popNextReportGraph(ReportGraph &GraphWrapper) {
+  if (ReportNodes.empty())
+    return false;
 
+  const ExplodedNode *OrigN;
+  llvm::tie(OrigN, GraphWrapper.Index) = ReportNodes.pop_back_val();
+  assert(PriorityMap.find(OrigN) != PriorityMap.end() &&
+         "error node not accessible from root");
+
+  // Create a new graph with a single path.  This is the graph
+  // that will be returned to the caller.
+  ExplodedGraph *GNew = new ExplodedGraph();
+  GraphWrapper.Graph.reset(GNew);
+  GraphWrapper.BackMap.clear();
+
+  // Now walk from the error node up the BFS path, always taking the
+  // predeccessor with the lowest number.
+  ExplodedNode *Succ = 0;
+  while (true) {
     // Create the equivalent node in the new graph with the same state
     // and location.
-    ExplodedNode *NewN = GNew->getNode(N->getLocation(), N->getState());
+    ExplodedNode *NewN = GNew->getNode(OrigN->getLocation(), OrigN->getState(),
+                                       OrigN->isSink());
 
     // Store the mapping to the original node.
-    InterExplodedGraphMap::const_iterator IMitr = InverseMap.find(N);
+    InterExplodedGraphMap::const_iterator IMitr = InverseMap.find(OrigN);
     assert(IMitr != InverseMap.end() && "No mapping to original node.");
     GraphWrapper.BackMap[NewN] = IMitr->second;
 
     // Link up the new node with the previous node.
-    if (Last)
-      NewN->addPredecessor(Last, *GNew);
+    if (Succ)
+      Succ->addPredecessor(NewN, *GNew);
+    else
+      GraphWrapper.ErrorNode = NewN;
 
-    Last = NewN;
+    Succ = NewN;
 
     // Are we at the final node?
-    IndexMapTy::iterator IMI = IndexMap.find(IMitr->second);
-    if (IMI != IndexMap.end()) {
-      GraphWrapper.ErrorNode = NewN;
-      GraphWrapper.Index = IMI->second;
+    if (OrigN->pred_empty()) {
+      GNew->addRoot(NewN);
       break;
     }
 
-    // Find the next successor node.  We choose the node that is marked
-    // with the lowest DFS number.
-    unsigned MinVal = -1U;
-    for (ExplodedNode::const_succ_iterator SI = N->succ_begin(),
-                                           SE = N->succ_end();
-         SI != SE; ++SI) {
-      I = Visited.find(*SI);
-
-      if (I == Visited.end())
-        continue;
-
-      if (I->second < MinVal) {
-        N = *SI;
-        MinVal = I->second;
-      }
-    }
-
-    assert(MinVal != -1U);
+    // Find the next predeccessor node.  We choose the node that is marked
+    // with the lowest BFS number.
+    OrigN = *std::min_element(OrigN->pred_begin(), OrigN->pred_end(),
+                          PriorityCompare<false>(PriorityMap));
   }
+
+  return true;
 }
+
 
 /// CompactPathDiagnostic - This function postprocesses a PathDiagnostic object
 ///  and collapses PathDiagosticPieces that are expanded by macros.
@@ -2115,6 +2077,7 @@ bool GRBugReporter::generatePathDiagnostic(PathDiagnostic& PD,
   assert(!bugReports.empty());
 
   bool HasValid = false;
+  bool HasInvalid = false;
   SmallVector<const ExplodedNode *, 32> errorNodes;
   for (ArrayRef<BugReport*>::iterator I = bugReports.begin(),
                                       E = bugReports.end(); I != E; ++I) {
@@ -2122,6 +2085,8 @@ bool GRBugReporter::generatePathDiagnostic(PathDiagnostic& PD,
       HasValid = true;
       errorNodes.push_back((*I)->getErrorNode());
     } else {
+      // Keep the errorNodes list in sync with the bugReports list.
+      HasInvalid = true;
       errorNodes.push_back(0);
     }
   }
@@ -2135,21 +2100,14 @@ bool GRBugReporter::generatePathDiagnostic(PathDiagnostic& PD,
   PathGenerationScheme ActiveScheme = PC.getGenerationScheme();
 
   TrimmedGraph TrimG(&getGraph(), errorNodes);
+  ReportGraph ErrorGraph;
 
-  for (size_t Remaining = bugReports.size(); Remaining > 0; --Remaining) {
-    // Construct a new graph that contains only a single path from the error
-    // node to a root.
-    ReportGraph ErrorGraph;
-    TrimG.createBestReportGraph(errorNodes, ErrorGraph);
-
+  while (TrimG.popNextReportGraph(ErrorGraph)) {
     // Find the BugReport with the original location.
     assert(ErrorGraph.Index < bugReports.size());
     BugReport *R = bugReports[ErrorGraph.Index];
     assert(R && "No original report found for sliced graph.");
     assert(R->isValid() && "Report selected by trimmed graph marked invalid.");
-
-    // Don't try to reuse this report if it ends up being suppressed.
-    errorNodes[ErrorGraph.Index] = 0;
 
     // Start building the path diagnostic...
     PathDiagnosticBuilder PDB(*this, R, ErrorGraph.BackMap, &PC);
@@ -2238,6 +2196,8 @@ bool GRBugReporter::generatePathDiagnostic(PathDiagnostic& PD,
   }
 
   // We suppressed all the reports in this equivalence class.
+  assert(!HasInvalid && "Inconsistent suppression");
+  (void)HasInvalid;
   return false;
 }
 

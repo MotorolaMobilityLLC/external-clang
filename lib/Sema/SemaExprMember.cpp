@@ -105,7 +105,8 @@ static IMAKind ClassifyImplicitMemberAccess(Sema &SemaRef,
     NamedDecl *D = *I;
 
     if (D->isCXXInstanceMember()) {
-      if (dyn_cast<FieldDecl>(D) || dyn_cast<IndirectFieldDecl>(D))
+      if (dyn_cast<FieldDecl>(D) || dyn_cast<MSPropertyDecl>(D)
+          || dyn_cast<IndirectFieldDecl>(D))
         isField = true;
 
       CXXRecordDecl *R = cast<CXXRecordDecl>(D->getDeclContext());
@@ -797,6 +798,19 @@ Sema::BuildAnonymousStructUnionMemberReference(const CXXScopeSpec &SS,
   return Owned(result);
 }
 
+static ExprResult
+BuildMSPropertyRefExpr(Sema &S, Expr *BaseExpr, bool IsArrow,
+                       const CXXScopeSpec &SS,
+                       MSPropertyDecl *PD,
+                       const DeclarationNameInfo &NameInfo) {
+  // Property names are always simple identifiers and therefore never
+  // require any interesting additional storage.
+  return new (S.Context) MSPropertyRefExpr(BaseExpr, PD, IsArrow,
+                                           S.Context.PseudoObjectTy, VK_LValue,
+                                           SS.getWithLocInContext(S.Context),
+                                           NameInfo.getLoc());
+}
+
 /// \brief Build a MemberExpr AST node.
 static MemberExpr *BuildMemberExpr(Sema &SemaRef,
                                    ASTContext &C, Expr *Base, bool isArrow,
@@ -953,6 +967,10 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
   if (FieldDecl *FD = dyn_cast<FieldDecl>(MemberDecl))
     return BuildFieldReferenceExpr(*this, BaseExpr, IsArrow,
                                    SS, FD, FoundDecl, MemberNameInfo);
+
+  if (MSPropertyDecl *PD = dyn_cast<MSPropertyDecl>(MemberDecl))
+    return BuildMSPropertyRefExpr(*this, BaseExpr, IsArrow, SS, PD,
+                                  MemberNameInfo);
 
   if (IndirectFieldDecl *FD = dyn_cast<IndirectFieldDecl>(MemberDecl))
     // We may have found a field within an anonymous union or struct
@@ -1149,29 +1167,14 @@ Sema::LookupMemberExpr(LookupResult &R, ExprResult &BaseExpr,
       // There's an implicit 'isa' ivar on all objects.
       // But we only actually find it this way on objects of type 'id',
       // apparently.
-      if (OTy->isObjCId() && Member->isStr("isa")) {
-        Diag(MemberLoc, diag::warn_objc_isa_use);
+      if (OTy->isObjCId() && Member->isStr("isa"))
         return Owned(new (Context) ObjCIsaExpr(BaseExpr.take(), IsArrow, MemberLoc,
+                                               OpLoc,
                                                Context.getObjCClassType()));
-      }
-
       if (ShouldTryAgainWithRedefinitionType(*this, BaseExpr))
         return LookupMemberExpr(R, BaseExpr, IsArrow, OpLoc, SS,
                                 ObjCImpDecl, HasTemplateArgs);
       goto fail;
-    }
-    else if (Member && Member->isStr("isa")) {
-      // If an ivar is (1) the first ivar in a root class and (2) named `isa`,
-      // then issue the same deprecated warning that id->isa gets.
-      ObjCInterfaceDecl *ClassDeclared = 0;
-      if (ObjCIvarDecl *IV = 
-            IDecl->lookupInstanceVariable(Member, ClassDeclared)) {
-        if (!ClassDeclared->getSuperClass()
-            && (*ClassDeclared->ivar_begin()) == IV) {
-          Diag(MemberLoc, diag::warn_objc_isa_use);
-          Diag(IV->getLocation(), diag::note_ivar_decl);
-        }
-      }
     }
     
     if (RequireCompleteType(OpLoc, BaseType, diag::err_typecheck_incomplete_tag,
@@ -1286,7 +1289,7 @@ Sema::LookupMemberExpr(LookupResult &R, ExprResult &BaseExpr,
     }
 
     ObjCIvarRefExpr *Result = new (Context) ObjCIvarRefExpr(IV, IV->getType(),
-                                                            MemberLoc,
+                                                            MemberLoc, OpLoc,
                                                             BaseExpr.take(),
                                                             IsArrow);
 

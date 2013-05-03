@@ -68,12 +68,14 @@ void ExprEngine::VisitBinaryOperator(const BinaryOperator* B,
         // SymSymExpr.
         unsigned Count = currBldrCtx->blockCount();
         if (LeftV.getAs<Loc>() &&
-            RHS->getType()->isIntegerType() && RightV.isUnknown()) {
+            RHS->getType()->isIntegralOrEnumerationType() &&
+            RightV.isUnknown()) {
           RightV = svalBuilder.conjureSymbolVal(RHS, LCtx, RHS->getType(),
                                                 Count);
         }
         if (RightV.getAs<Loc>() &&
-            LHS->getType()->isIntegerType() && LeftV.isUnknown()) {
+            LHS->getType()->isIntegralOrEnumerationType() &&
+            LeftV.isUnknown()) {
           LeftV = svalBuilder.conjureSymbolVal(LHS, LCtx, LHS->getType(),
                                                Count);
         }
@@ -423,11 +425,6 @@ void ExprEngine::VisitCompoundLiteralExpr(const CompoundLiteralExpr *CL,
     B.generateNode(CL, Pred, state->BindExpr(CL, LC, ILV));
 }
 
-/// The GDM component containing the set of global variables which have been
-/// previously initialized with explicit initializers.
-REGISTER_TRAIT_WITH_PROGRAMSTATE(InitializedGlobalsSet,
-                                 llvm::ImmutableSet<const VarDecl *> )
-
 void ExprEngine::VisitDeclStmt(const DeclStmt *DS, ExplodedNode *Pred,
                                ExplodedNodeSet &Dst) {
   // Assumption: The CFG has one DeclStmt per Decl.
@@ -438,15 +435,6 @@ void ExprEngine::VisitDeclStmt(const DeclStmt *DS, ExplodedNode *Pred,
     Dst.insert(Pred);
     return;
   }
-
-  // Check if a value has been previously initialized. There will be an entry in
-  // the set for variables with global storage which have been previously
-  // initialized.
-  if (VD->hasGlobalStorage())
-    if (Pred->getState()->contains<InitializedGlobalsSet>(VD)) {
-      Dst.insert(Pred);
-      return;
-    }
   
   // FIXME: all pre/post visits should eventually be handled by ::Visit().
   ExplodedNodeSet dstPreVisit;
@@ -464,11 +452,6 @@ void ExprEngine::VisitDeclStmt(const DeclStmt *DS, ExplodedNode *Pred,
 
       // Note in the state that the initialization has occurred.
       ExplodedNode *UpdatedN = N;
-      if (VD->hasGlobalStorage()) {
-        state = state->add<InitializedGlobalsSet>(VD);
-        UpdatedN = B.generateNode(DS, N, state);
-      }
-
       SVal InitVal = state->getSVal(InitEx, LC);
 
       if (isa<CXXConstructExpr>(InitEx->IgnoreImplicit())) {
@@ -634,11 +617,15 @@ void ExprEngine::VisitGuardedExpr(const Expr *Ex,
                                   const Expr *R,
                                   ExplodedNode *Pred,
                                   ExplodedNodeSet &Dst) {
+  assert(L && R);
+
   StmtNodeBuilder B(Pred, Dst, *currBldrCtx);
   ProgramStateRef state = Pred->getState();
   const LocationContext *LCtx = Pred->getLocationContext();
   const CFGBlock *SrcBlock = 0;
 
+  // Find the predecessor block.
+  ProgramStateRef SrcState = state;
   for (const ExplodedNode *N = Pred ; N ; N = *N->pred_begin()) {
     ProgramPoint PP = N->getLocation();
     if (PP.getAs<PreStmtPurgeDeadSymbols>() || PP.getAs<BlockEntrance>()) {
@@ -646,6 +633,7 @@ void ExprEngine::VisitGuardedExpr(const Expr *Ex,
       continue;
     }
     SrcBlock = PP.castAs<BlockEdge>().getSrc();
+    SrcState = N->getState();
     break;
   }
 
@@ -661,14 +649,25 @@ void ExprEngine::VisitGuardedExpr(const Expr *Ex,
     CFGElement CE = *I;
     if (Optional<CFGStmt> CS = CE.getAs<CFGStmt>()) {
       const Expr *ValEx = cast<Expr>(CS->getStmt());
-      hasValue = true;
-      V = state->getSVal(ValEx, LCtx);
+      ValEx = ValEx->IgnoreParens();
+
+      // For GNU extension '?:' operator, the left hand side will be an
+      // OpaqueValueExpr, so get the underlying expression.
+      if (const OpaqueValueExpr *OpaqueEx = dyn_cast<OpaqueValueExpr>(L))
+        L = OpaqueEx->getSourceExpr();
+
+      // If the last expression in the predecessor block matches true or false
+      // subexpression, get its the value.
+      if (ValEx == L->IgnoreParens() || ValEx == R->IgnoreParens()) {
+        hasValue = true;
+        V = SrcState->getSVal(ValEx, LCtx);
+      }
       break;
     }
   }
 
-  assert(hasValue);
-  (void) hasValue;
+  if (!hasValue)
+    V = svalBuilder.conjureSymbolVal(0, Ex, LCtx, currBldrCtx->blockCount());
 
   // Generate a new node with the binding from the appropriate path.
   B.generateNode(Ex, Pred, state->BindExpr(Ex, LCtx, V, true));
@@ -681,8 +680,9 @@ VisitOffsetOfExpr(const OffsetOfExpr *OOE,
   APSInt IV;
   if (OOE->EvaluateAsInt(IV, getContext())) {
     assert(IV.getBitWidth() == getContext().getTypeSize(OOE->getType()));
-    assert(OOE->getType()->isIntegerType());
-    assert(IV.isSigned() == OOE->getType()->isSignedIntegerOrEnumerationType());
+    assert(OOE->getType()->isBuiltinType());
+    assert(OOE->getType()->getAs<BuiltinType>()->isInteger());
+    assert(IV.isSigned() == OOE->getType()->isSignedIntegerType());
     SVal X = svalBuilder.makeIntVal(IV);
     B.generateNode(OOE, Pred,
                    Pred->getState()->BindExpr(OOE, Pred->getLocationContext(),

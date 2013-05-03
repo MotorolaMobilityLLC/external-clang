@@ -920,7 +920,8 @@ Sema::CheckOverload(Scope *S, FunctionDecl *New, const LookupResult &Old,
     // function templates hide function templates with different
     // return types or template parameter lists.
     bool UseMemberUsingDeclRules =
-      (OldIsUsingDecl || NewIsUsingDecl) && CurContext->isRecord();
+      (OldIsUsingDecl || NewIsUsingDecl) && CurContext->isRecord() &&
+      !New->getFriendObjectKind();
 
     if (FunctionTemplateDecl *OldT = dyn_cast<FunctionTemplateDecl>(OldD)) {
       if (!IsOverload(New, OldT->getTemplatedDecl(), UseMemberUsingDeclRules)) {
@@ -938,6 +939,9 @@ Sema::CheckOverload(Scope *S, FunctionDecl *New, const LookupResult &Old,
           HideUsingShadowDecl(S, cast<UsingShadowDecl>(*I));
           continue;
         }
+
+        if (!shouldLinkPossiblyHiddenDecl(*I, New))
+          continue;
 
         Match = *I;
         return Ovl_Match;
@@ -3937,6 +3941,15 @@ CompareDerivedToBaseConversions(Sema &S,
   return ImplicitConversionSequence::Indistinguishable;
 }
 
+/// \brief Determine whether the given type is valid, e.g., it is not an invalid
+/// C++ class.
+static bool isTypeValid(QualType T) {
+  if (CXXRecordDecl *Record = T->getAsCXXRecordDecl())
+    return !Record->isInvalidDecl();
+
+  return true;
+}
+
 /// CompareReferenceRelationship - Compare the two types T1 and T2 to
 /// determine whether they are reference-related,
 /// reference-compatible, reference-compatible with added
@@ -3970,7 +3983,8 @@ Sema::CompareReferenceRelationship(SourceLocation Loc,
   if (UnqualT1 == UnqualT2) {
     // Nothing to do.
   } else if (!RequireCompleteType(Loc, OrigT2, 0) &&
-           IsDerivedFrom(UnqualT2, UnqualT1))
+             isTypeValid(UnqualT1) && isTypeValid(UnqualT2) &&
+             IsDerivedFrom(UnqualT2, UnqualT1))
     DerivedToBase = true;
   else if (UnqualT1->isObjCObjectOrInterfaceType() &&
            UnqualT2->isObjCObjectOrInterfaceType() &&
@@ -5013,7 +5027,7 @@ ExprResult Sema::CheckConvertedConstantExpression(Expr *From, QualType T,
   Expr::EvalResult Eval;
   Eval.Diag = &Notes;
 
-  if (!Result.get()->EvaluateAsRValue(Eval, Context)) {
+  if (!Result.get()->EvaluateAsRValue(Eval, Context) || !Eval.Val.isInt()) {
     // The expression can't be folded, so we can't keep it at this position in
     // the AST.
     Result = ExprError();
@@ -5462,7 +5476,7 @@ void Sema::AddFunctionCandidates(const UnresolvedSetImpl &Fns,
 void Sema::AddMethodCandidate(DeclAccessPair FoundDecl,
                               QualType ObjectType,
                               Expr::Classification ObjectClassification,
-                              Expr **Args, unsigned NumArgs,
+                              ArrayRef<Expr *> Args,
                               OverloadCandidateSet& CandidateSet,
                               bool SuppressUserConversions) {
   NamedDecl *Decl = FoundDecl.getDecl();
@@ -5477,12 +5491,12 @@ void Sema::AddMethodCandidate(DeclAccessPair FoundDecl,
     AddMethodTemplateCandidate(TD, FoundDecl, ActingContext,
                                /*ExplicitArgs*/ 0,
                                ObjectType, ObjectClassification,
-                               llvm::makeArrayRef(Args, NumArgs), CandidateSet,
+                               Args, CandidateSet,
                                SuppressUserConversions);
   } else {
     AddMethodCandidate(cast<CXXMethodDecl>(Decl), FoundDecl, ActingContext,
                        ObjectType, ObjectClassification,
-                       llvm::makeArrayRef(Args, NumArgs),
+                       Args,
                        CandidateSet, SuppressUserConversions);
   }
 }
@@ -6004,13 +6018,15 @@ void Sema::AddMemberOperatorCandidates(OverloadedOperatorKind Op,
   //   constructed as follows:
   QualType T1 = Args[0]->getType();
 
-  //     -- If T1 is a class type, the set of member candidates is the
-  //        result of the qualified lookup of T1::operator@
-  //        (13.3.1.1.1); otherwise, the set of member candidates is
-  //        empty.
+  //     -- If T1 is a complete class type or a class currently being
+  //        defined, the set of member candidates is the result of the
+  //        qualified lookup of T1::operator@ (13.3.1.1.1); otherwise,
+  //        the set of member candidates is empty.
   if (const RecordType *T1Rec = T1->getAs<RecordType>()) {
-    // Complete the type if it can be completed. Otherwise, we're done.
-    if (RequireCompleteType(OpLoc, T1, 0))
+    // Complete the type if it can be completed.
+    RequireCompleteType(OpLoc, T1, 0);
+    // If the type is neither complete nor being defined, bail out now.
+    if (!T1Rec->getDecl()->getDefinition())
       return;
 
     LookupResult Operators(*this, OpName, OpLoc, LookupOrdinaryName);
@@ -6022,7 +6038,8 @@ void Sema::AddMemberOperatorCandidates(OverloadedOperatorKind Op,
          Oper != OperEnd;
          ++Oper)
       AddMethodCandidate(Oper.getPair(), Args[0]->getType(),
-                         Args[0]->Classify(Context), Args + 1, NumArgs - 1,
+                         Args[0]->Classify(Context), 
+                         llvm::makeArrayRef(Args + 1, NumArgs -1),
                          CandidateSet,
                          /* SuppressUserConversions = */ false);
   }
@@ -8497,13 +8514,35 @@ void DiagnoseBadDeduction(Sema &S, OverloadCandidate *Cand,
     return;
   }
 
-  case Sema::TDK_NonDeducedMismatch:
+  case Sema::TDK_NonDeducedMismatch: {
     // FIXME: Provide a source location to indicate what we couldn't match.
+    TemplateArgument FirstTA = *Cand->DeductionFailure.getFirstArg();
+    TemplateArgument SecondTA = *Cand->DeductionFailure.getSecondArg();
+    if (FirstTA.getKind() == TemplateArgument::Template &&
+        SecondTA.getKind() == TemplateArgument::Template) {
+      TemplateName FirstTN = FirstTA.getAsTemplate();
+      TemplateName SecondTN = SecondTA.getAsTemplate();
+      if (FirstTN.getKind() == TemplateName::Template &&
+          SecondTN.getKind() == TemplateName::Template) {
+        if (FirstTN.getAsTemplateDecl()->getName() ==
+            SecondTN.getAsTemplateDecl()->getName()) {
+          // FIXME: This fixes a bad diagnostic where both templates are named
+          // the same.  This particular case is a bit difficult since:
+          // 1) It is passed as a string to the diagnostic printer.
+          // 2) The diagnostic printer only attempts to find a better
+          //    name for types, not decls.
+          // Ideally, this should folded into the diagnostic printer.
+          S.Diag(Fn->getLocation(),
+                 diag::note_ovl_candidate_non_deduced_mismatch_qualified)
+              << FirstTN.getAsTemplateDecl() << SecondTN.getAsTemplateDecl();
+          return;
+        }
+      }
+    }
     S.Diag(Fn->getLocation(), diag::note_ovl_candidate_non_deduced_mismatch)
-      << *Cand->DeductionFailure.getFirstArg()
-      << *Cand->DeductionFailure.getSecondArg();
+      << FirstTA << SecondTA;
     return;
-
+  }
   // TODO: diagnose these individually, then kill off
   // note_ovl_candidate_bad_deduction, which is uselessly vague.
   case Sema::TDK_MiscellaneousDeductionFailure:
@@ -9098,17 +9137,19 @@ private:
           = S.DeduceTemplateArguments(FunctionTemplate, 
                                       &OvlExplicitTemplateArgs,
                                       TargetFunctionType, Specialization, 
-                                      Info)) {
+                                      Info, /*InOverloadResolution=*/true)) {
       // FIXME: make a note of the failed deduction for diagnostics.
       (void)Result;
       return false;
     } 
     
-    // Template argument deduction ensures that we have an exact match.
+    // Template argument deduction ensures that we have an exact match or
+    // compatible pointer-to-function arguments that would be adjusted by ICS.
     // This function template specicalization works.
     Specialization = cast<FunctionDecl>(Specialization->getCanonicalDecl());
-    assert(TargetFunctionType
-                      == Context.getCanonicalType(Specialization->getType()));
+    assert(S.isSameOrCompatibleFunctionType(
+              Context.getCanonicalType(Specialization->getType()),
+              Context.getCanonicalType(TargetFunctionType)));
     Matches.push_back(std::make_pair(CurAccessFunPair, Specialization));
     return true;
   }
@@ -9373,7 +9414,8 @@ Sema::ResolveSingleFunctionTemplateSpecialization(OverloadExpr *ovl,
     TemplateDeductionInfo Info(ovl->getNameLoc());
     if (TemplateDeductionResult Result
           = DeduceTemplateArguments(FunctionTemplate, &ExplicitTemplateArgs,
-                                    Specialization, Info)) {
+                                    Specialization, Info,
+                                    /*InOverloadResolution=*/true)) {
       // FIXME: make a note of the failed deduction for diagnostics.
       (void)Result;
       continue;
@@ -10945,7 +10987,8 @@ Sema::BuildCallToObjectOfClassType(Scope *S, Expr *Obj,
   for (LookupResult::iterator Oper = R.begin(), OperEnd = R.end();
        Oper != OperEnd; ++Oper) {
     AddMethodCandidate(Oper.getPair(), Object.get()->getType(),
-                       Object.get()->Classify(Context), Args, NumArgs, CandidateSet,
+                       Object.get()->Classify(Context), 
+                       llvm::makeArrayRef(Args, NumArgs), CandidateSet,
                        /*SuppressUserConversions=*/ false);
   }
 
@@ -11237,7 +11280,8 @@ Sema::BuildOverloadedArrowExpr(Scope *S, Expr *Base, SourceLocation OpLoc) {
   for (LookupResult::iterator Oper = R.begin(), OperEnd = R.end();
        Oper != OperEnd; ++Oper) {
     AddMethodCandidate(Oper.getPair(), Base->getType(), Base->Classify(Context),
-                       0, 0, CandidateSet, /*SuppressUserConversions=*/false);
+                       ArrayRef<Expr *>(), CandidateSet, 
+                       /*SuppressUserConversions=*/false);
   }
 
   bool HadMultipleCandidates = (CandidateSet.size() > 1);
