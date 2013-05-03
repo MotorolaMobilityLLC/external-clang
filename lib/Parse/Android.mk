@@ -27,6 +27,7 @@ clang_parse_SRC_FILES :=  \
 	ParseExprCXX.cpp  \
 	ParseInit.cpp  \
 	ParseObjc.cpp  \
+	ParseOpenMP.cpp  \
 	ParsePragma.cpp  \
 	ParseStmt.cpp  \
 	ParseTemplate.cpp  \

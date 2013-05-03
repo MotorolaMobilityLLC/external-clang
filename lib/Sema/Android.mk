@@ -56,6 +56,7 @@ clang_sema_SRC_FILES :=	\
 	SemaLambda.cpp	\
 	SemaLookup.cpp	\
 	SemaObjCProperty.cpp	\
+	SemaOpenMP.cpp	\
 	SemaOverload.cpp	\
 	SemaPseudoObject.cpp	\
 	SemaStmt.cpp	\

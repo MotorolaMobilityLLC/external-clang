@@ -44,5 +44,6 @@ LOCAL_MODULE := libclangARCMigrate
 LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
+include $(CLANG_VERSION_INC_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_STATIC_LIBRARY)
