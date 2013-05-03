@@ -31,6 +31,7 @@ clang_basic_SRC_FILES := \
   LangOptions.cpp \
   Module.cpp \
   ObjCRuntime.cpp \
+  OpenMPKinds.cpp \
   OperatorPrecedence.cpp \
   SourceLocation.cpp \
   SourceManager.cpp \

@@ -45,6 +45,7 @@ clang_ast_SRC_FILES :=	\
 	DeclFriend.cpp	\
 	DeclGroup.cpp	\
 	DeclObjC.cpp	\
+	DeclOpenMP.cpp	\
 	DeclPrinter.cpp	\
 	DeclTemplate.cpp	\
 	DumpXML.cpp	\
