@@ -81,6 +81,7 @@ namespace clang {
     void VisitCXXDestructorDecl(CXXDestructorDecl *D);
     void VisitCXXConversionDecl(CXXConversionDecl *D);
     void VisitFieldDecl(FieldDecl *D);
+    void VisitMSPropertyDecl(MSPropertyDecl *D);
     void VisitIndirectFieldDecl(IndirectFieldDecl *D);
     void VisitVarDecl(VarDecl *D);
     void VisitImplicitParamDecl(ImplicitParamDecl *D);
@@ -102,6 +103,7 @@ namespace clang {
     void VisitFriendTemplateDecl(FriendTemplateDecl *D);
     void VisitStaticAssertDecl(StaticAssertDecl *D);
     void VisitBlockDecl(BlockDecl *D);
+    void VisitCapturedDecl(CapturedDecl *D);
     void VisitEmptyDecl(EmptyDecl *D);
 
     void VisitDeclContext(DeclContext *DC, uint64_t LexicalOffset,
@@ -123,6 +125,7 @@ namespace clang {
     void VisitObjCCompatibleAliasDecl(ObjCCompatibleAliasDecl *D);
     void VisitObjCPropertyDecl(ObjCPropertyDecl *D);
     void VisitObjCPropertyImplDecl(ObjCPropertyImplDecl *D);
+    void VisitOMPThreadPrivateDecl(OMPThreadPrivateDecl *D);
   };
 }
 
@@ -318,7 +321,6 @@ void ASTDeclWriter::VisitFunctionDecl(FunctionDecl *D) {
   // after everything else is written.
   
   Record.push_back(D->getStorageClass()); // FIXME: stable encoding
-  Record.push_back(D->getStorageClassAsWritten());
   Record.push_back(D->IsInline);
   Record.push_back(D->isInlineSpecified());
   Record.push_back(D->isVirtualAsWritten());
@@ -662,6 +664,13 @@ void ASTDeclWriter::VisitFieldDecl(FieldDecl *D) {
   Code = serialization::DECL_FIELD;
 }
 
+void ASTDeclWriter::VisitMSPropertyDecl(MSPropertyDecl *D) {
+  VisitDeclaratorDecl(D);
+  Writer.AddIdentifierRef(D->getGetterId(), Record);
+  Writer.AddIdentifierRef(D->getSetterId(), Record);
+  Code = serialization::DECL_MS_PROPERTY;
+}
+
 void ASTDeclWriter::VisitIndirectFieldDecl(IndirectFieldDecl *D) {
   VisitValueDecl(D);
   Record.push_back(D->getChainingSize());
@@ -676,9 +685,8 @@ void ASTDeclWriter::VisitIndirectFieldDecl(IndirectFieldDecl *D) {
 void ASTDeclWriter::VisitVarDecl(VarDecl *D) {
   VisitRedeclarable(D);
   VisitDeclaratorDecl(D);
-  Record.push_back(D->getStorageClass()); // FIXME: stable encoding
-  Record.push_back(D->getStorageClassAsWritten());
-  Record.push_back(D->isThreadSpecified());
+  Record.push_back(D->getStorageClass());
+  Record.push_back(D->getTLSKind());
   Record.push_back(D->getInitStyle());
   Record.push_back(D->isExceptionVariable());
   Record.push_back(D->isNRVOVariable());
@@ -767,7 +775,7 @@ void ASTDeclWriter::VisitParmVarDecl(ParmVarDecl *D) {
 
   // Check things we know are true of *every* PARM_VAR_DECL, which is more than
   // just us assuming it.
-  assert(!D->isThreadSpecified() && "PARM_VAR_DECL can't be __thread");
+  assert(!D->getTLSKind() && "PARM_VAR_DECL can't use TLS");
   assert(D->getAccess() == AS_none && "PARM_VAR_DECL can't be public/private");
   assert(!D->isExceptionVariable() && "PARM_VAR_DECL can't be exception var");
   assert(D->getPreviousDecl() == 0 && "PARM_VAR_DECL can't be redecl");
@@ -815,6 +823,10 @@ void ASTDeclWriter::VisitBlockDecl(BlockDecl *D) {
   }
 
   Code = serialization::DECL_BLOCK;
+}
+
+void ASTDeclWriter::VisitCapturedDecl(CapturedDecl *) {
+  llvm_unreachable("not implemented yet");
 }
 
 void ASTDeclWriter::VisitLinkageSpecDecl(LinkageSpecDecl *D) {
@@ -1314,6 +1326,16 @@ void ASTDeclWriter::VisitRedeclarable(Redeclarable<T> *D) {
   
 }
 
+void ASTDeclWriter::VisitOMPThreadPrivateDecl(OMPThreadPrivateDecl *D) {
+  Record.push_back(D->varlist_size());
+  VisitDecl(D);
+  for (OMPThreadPrivateDecl::varlist_iterator I = D->varlist_begin(),
+                                              E = D->varlist_end();
+       I != E; ++I)
+    Writer.AddStmt(*I);
+  Code = serialization::DECL_OMP_THREADPRIVATE;
+}
+
 //===----------------------------------------------------------------------===//
 // ASTWriter Implementation
 //===----------------------------------------------------------------------===//
@@ -1506,8 +1528,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                       // hasExtInfo
   // VarDecl
   Abv->Add(BitCodeAbbrevOp(0));                       // StorageClass
-  Abv->Add(BitCodeAbbrevOp(0));                       // StorageClassAsWritten
-  Abv->Add(BitCodeAbbrevOp(0));                       // isThreadSpecified
+  Abv->Add(BitCodeAbbrevOp(0));                       // getTLSKind
   Abv->Add(BitCodeAbbrevOp(0));                       // hasCXXDirectInitializer
   Abv->Add(BitCodeAbbrevOp(0));                       // isExceptionVariable
   Abv->Add(BitCodeAbbrevOp(0));                       // isNRVOVariable
@@ -1586,8 +1607,7 @@ void ASTWriter::WriteDeclsBlockAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                       // hasExtInfo
   // VarDecl
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // StorageClass
-  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // StorageClassAsWritten
-  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // isThreadSpecified
+  Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 2)); // getTLSKind
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // CXXDirectInitializer
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // isExceptionVariable
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // isNRVOVariable

@@ -2744,6 +2744,10 @@ CheckPrintfHandler::checkFormatExpr(const analyze_printf::PrintfSpecifier &FS,
     return true;
 
   QualType ExprTy = E->getType();
+  while (const TypeOfExprType *TET = dyn_cast<TypeOfExprType>(ExprTy)) {
+    ExprTy = TET->getUnderlyingExpr()->getType();
+  }
+
   if (AT.matchesType(S.Context, ExprTy))
     return true;
 
@@ -2803,7 +2807,9 @@ CheckPrintfHandler::checkFormatExpr(const analyze_printf::PrintfSpecifier &FS,
   // casts to primitive types that are known to be large enough.
   bool ShouldNotPrintDirectly = false;
   if (S.Context.getTargetInfo().getTriple().isOSDarwin()) {
-    if (const TypedefType *UserTy = IntendedTy->getAs<TypedefType>()) {
+    // Use a 'while' to peel off layers of typedefs.
+    QualType TyTy = IntendedTy;
+    while (const TypedefType *UserTy = TyTy->getAs<TypedefType>()) {
       StringRef Name = UserTy->getDecl()->getName();
       QualType CastTy = llvm::StringSwitch<QualType>(Name)
         .Case("NSInteger", S.Context.LongTy)
@@ -2815,7 +2821,9 @@ CheckPrintfHandler::checkFormatExpr(const analyze_printf::PrintfSpecifier &FS,
       if (!CastTy.isNull()) {
         ShouldNotPrintDirectly = true;
         IntendedTy = CastTy;
+        break;
       }
+      TyTy = UserTy->desugar();
     }
   }
 
@@ -5695,12 +5703,14 @@ bool Sema::CheckParmsForFunctionDef(ParmVarDecl **P, ParmVarDecl **PEnd,
     //   notation in their sequences of declarator specifiers to specify
     //   variable length array types.
     QualType PType = Param->getOriginalType();
-    if (const ArrayType *AT = Context.getAsArrayType(PType)) {
+    while (const ArrayType *AT = Context.getAsArrayType(PType)) {
       if (AT->getSizeModifier() == ArrayType::Star) {
         // FIXME: This diagnostic should point the '[*]' if source-location
         // information is added for it.
         Diag(Param->getLocation(), diag::err_array_star_in_function_definition);
+        break;
       }
+      PType= AT->getElementType();
     }
   }
 

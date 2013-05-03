@@ -51,7 +51,7 @@ class CGDebugInfo {
   SourceLocation CurLoc, PrevLoc;
   llvm::DIType VTablePtrType;
   llvm::DIType ClassTy;
-  llvm::DIType ObjTy;
+  llvm::DICompositeType ObjTy;
   llvm::DIType SelTy;
   llvm::DIType OCLImage1dDITy, OCLImage1dArrayDITy, OCLImage1dBufferDITy;
   llvm::DIType OCLImage2dDITy, OCLImage2dArrayDITy;
@@ -119,6 +119,7 @@ class CGDebugInfo {
   llvm::DIType CreateType(const MemberPointerType *Ty, llvm::DIFile F);
   llvm::DIType CreateType(const AtomicType *Ty, llvm::DIFile F);
   llvm::DIType CreateEnumType(const EnumDecl *ED);
+  llvm::DIType CreateSelfType(const QualType &QualTy, llvm::DIType Ty);
   llvm::DIType getTypeOrNull(const QualType);
   llvm::DIType getCompletedTypeOrNull(const QualType);
   llvm::DIType getOrCreateMethodType(const CXXMethodDecl *Method,
@@ -261,6 +262,9 @@ public:
   /// EmitGlobalVariable - Emit global variable's debug info.
   void EmitGlobalVariable(const ValueDecl *VD, llvm::Constant *Init);
 
+  /// \brief - Emit C++ using directive.
+  void EmitUsingDirective(const UsingDirectiveDecl &UD);
+
   /// getOrCreateRecordType - Emit record type's standalone debug info. 
   llvm::DIType getOrCreateRecordType(QualType Ty, SourceLocation L);
 
@@ -280,7 +284,7 @@ private:
                                             uint64_t *OffSet);
 
   /// getContextDescriptor - Get context info for the decl.
-  llvm::DIDescriptor getContextDescriptor(const Decl *Decl);
+  llvm::DIScope getContextDescriptor(const Decl *Decl);
 
   /// createRecordFwdDecl - Create a forward decl for a RecordType in a given
   /// context.

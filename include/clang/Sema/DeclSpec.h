@@ -226,6 +226,19 @@ public:
     SCS_private_extern,
     SCS_mutable
   };
+  /// \brief Thread storage-class-specifier. These can be combined with
+  /// SCS_extern and SCS_static.
+  enum TSCS {
+    TSCS_unspecified,
+    /// GNU __thread.
+    TSCS___thread,
+    /// C++11 thread_local. Implies 'static' at block scope, but not at
+    /// class scope.
+    TSCS_thread_local,
+    /// C11 _Thread_local. Must be combined with either 'static' or 'extern'
+    /// if used at block scope.
+    TSCS__Thread_local
+  };
 
   // Import type specifier width enumeration and constants.
   typedef TypeSpecifierWidth TSW;
@@ -272,6 +285,7 @@ public:
   static const TST TST_typeofType = clang::TST_typeofType;
   static const TST TST_typeofExpr = clang::TST_typeofExpr;
   static const TST TST_decltype = clang::TST_decltype;
+  static const TST TST_decltype_auto = clang::TST_decltype_auto;
   static const TST TST_underlyingType = clang::TST_underlyingType;
   static const TST TST_auto = clang::TST_auto;
   static const TST TST_unknown_anytype = clang::TST_unknown_anytype;
@@ -291,7 +305,10 @@ public:
     TQ_unspecified = 0,
     TQ_const       = 1,
     TQ_restrict    = 2,
-    TQ_volatile    = 4
+    TQ_volatile    = 4,
+    // This has no corresponding Qualifiers::TQ value, because it's not treated
+    // as a qualifier in our type system.
+    TQ_atomic      = 8
   };
 
   /// ParsedSpecifiers - Flags to query which specifiers were applied.  This is
@@ -307,7 +324,7 @@ public:
 private:
   // storage-class-specifier
   /*SCS*/unsigned StorageClassSpec : 3;
-  unsigned SCS_thread_specified : 1;
+  /*TSCS*/unsigned ThreadStorageClassSpec : 2;
   unsigned SCS_extern_in_linkage_spec : 1;
 
   // type-specifier
@@ -321,7 +338,7 @@ private:
   unsigned TypeSpecOwned : 1;
 
   // type-qualifiers
-  unsigned TypeQualifiers : 3;  // Bitwise OR of TQ.
+  unsigned TypeQualifiers : 4;  // Bitwise OR of TQ.
 
   // function-specifier
   unsigned FS_inline_specified : 1;
@@ -334,8 +351,6 @@ private:
 
   // constexpr-specifier
   unsigned Constexpr_specified : 1;
-
-  /*SCS*/unsigned StorageClassSpecAsWritten : 3;
 
   union {
     UnionParsedType TypeRep;
@@ -361,7 +376,7 @@ private:
   // the setting was synthesized.
   SourceRange Range;
 
-  SourceLocation StorageClassSpecLoc, SCS_threadLoc;
+  SourceLocation StorageClassSpecLoc, ThreadStorageClassSpecLoc;
   SourceLocation TSWLoc, TSCLoc, TSSLoc, TSTLoc, AltiVecLoc;
   /// TSTNameLoc - If TypeSpecType is any of class, enum, struct, union,
   /// typename, then this is the location of the named type (if present);
@@ -369,13 +384,12 @@ private:
   /// TSTNameLoc provides source range info for tag types.
   SourceLocation TSTNameLoc;
   SourceRange TypeofParensRange;
-  SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc;
+  SourceLocation TQ_constLoc, TQ_restrictLoc, TQ_volatileLoc, TQ_atomicLoc;
   SourceLocation FS_inlineLoc, FS_virtualLoc, FS_explicitLoc, FS_noreturnLoc;
   SourceLocation FriendLoc, ModulePrivateLoc, ConstexprLoc;
 
   WrittenBuiltinSpecs writtenBS;
   void SaveWrittenBuiltinSpecs();
-  void SaveStorageSpecifierAsWritten();
 
   ObjCDeclSpec *ObjCQualifiers;
 
@@ -398,7 +412,7 @@ public:
 
   DeclSpec(AttributeFactory &attrFactory)
     : StorageClassSpec(SCS_unspecified),
-      SCS_thread_specified(false),
+      ThreadStorageClassSpec(TSCS_unspecified),
       SCS_extern_in_linkage_spec(false),
       TypeSpecWidth(TSW_unspecified),
       TypeSpecComplex(TSC_unspecified),
@@ -415,7 +429,6 @@ public:
       FS_noreturn_specified(false),
       Friend_specified(false),
       Constexpr_specified(false),
-      StorageClassSpecAsWritten(SCS_unspecified),
       Attrs(attrFactory),
       ProtocolQualifiers(0),
       NumProtocolQualifiers(0),
@@ -429,21 +442,25 @@ public:
   }
   // storage-class-specifier
   SCS getStorageClassSpec() const { return (SCS)StorageClassSpec; }
-  bool isThreadSpecified() const { return SCS_thread_specified; }
+  TSCS getThreadStorageClassSpec() const {
+    return (TSCS)ThreadStorageClassSpec;
+  }
   bool isExternInLinkageSpec() const { return SCS_extern_in_linkage_spec; }
   void setExternInLinkageSpec(bool Value) {
     SCS_extern_in_linkage_spec = Value;
   }
 
   SourceLocation getStorageClassSpecLoc() const { return StorageClassSpecLoc; }
-  SourceLocation getThreadSpecLoc() const { return SCS_threadLoc; }
+  SourceLocation getThreadStorageClassSpecLoc() const {
+    return ThreadStorageClassSpecLoc;
+  }
 
   void ClearStorageClassSpecs() {
-    StorageClassSpec     = DeclSpec::SCS_unspecified;
-    SCS_thread_specified = false;
+    StorageClassSpec           = DeclSpec::SCS_unspecified;
+    ThreadStorageClassSpec     = DeclSpec::TSCS_unspecified;
     SCS_extern_in_linkage_spec = false;
-    StorageClassSpecLoc  = SourceLocation();
-    SCS_threadLoc        = SourceLocation();
+    StorageClassSpecLoc        = SourceLocation();
+    ThreadStorageClassSpecLoc  = SourceLocation();
   }
 
   // type-specifier
@@ -488,6 +505,10 @@ public:
   SourceRange getTypeofParensRange() const { return TypeofParensRange; }
   void setTypeofParensRange(SourceRange range) { TypeofParensRange = range; }
 
+  bool containsPlaceholderType() const {
+    return TypeSpecType == TST_auto || TypeSpecType == TST_decltype_auto;
+  }
+
   /// \brief Turn a type-specifier-type into a string like "_Bool" or "union".
   static const char *getSpecifierName(DeclSpec::TST T);
   static const char *getSpecifierName(DeclSpec::TQ Q);
@@ -495,6 +516,7 @@ public:
   static const char *getSpecifierName(DeclSpec::TSC C);
   static const char *getSpecifierName(DeclSpec::TSW W);
   static const char *getSpecifierName(DeclSpec::SCS S);
+  static const char *getSpecifierName(DeclSpec::TSCS S);
 
   // type-qualifiers
 
@@ -503,6 +525,7 @@ public:
   SourceLocation getConstSpecLoc() const { return TQ_constLoc; }
   SourceLocation getRestrictSpecLoc() const { return TQ_restrictLoc; }
   SourceLocation getVolatileSpecLoc() const { return TQ_volatileLoc; }
+  SourceLocation getAtomicSpecLoc() const { return TQ_atomicLoc; }
 
   /// \brief Clear out all of the type qualifiers.
   void ClearTypeQualifiers() {
@@ -510,6 +533,7 @@ public:
     TQ_constLoc = SourceLocation();
     TQ_restrictLoc = SourceLocation();
     TQ_volatileLoc = SourceLocation();
+    TQ_atomicLoc = SourceLocation();
   }
 
   // function-specifier
@@ -548,10 +572,6 @@ public:
   /// DeclSpec includes.
   unsigned getParsedSpecifiers() const;
 
-  SCS getStorageClassSpecAsWritten() const {
-    return (SCS)StorageClassSpecAsWritten;
-  }
-
   /// isEmpty - Return true if this declaration specifier is completely empty:
   /// no tokens were parsed in the production of it.
   bool isEmpty() const {
@@ -573,8 +593,8 @@ public:
   /// diagnostics to be ignored when desired.
   bool SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
                            const char *&PrevSpec, unsigned &DiagID);
-  bool SetStorageClassSpecThread(SourceLocation Loc, const char *&PrevSpec,
-                                 unsigned &DiagID);
+  bool SetStorageClassSpecThread(TSCS TSC, SourceLocation Loc,
+                                 const char *&PrevSpec, unsigned &DiagID);
   bool SetTypeSpecWidth(TSW W, SourceLocation Loc, const char *&PrevSpec,
                         unsigned &DiagID);
   bool SetTypeSpecComplex(TSC C, SourceLocation Loc, const char *&PrevSpec,
@@ -1025,8 +1045,8 @@ struct DeclaratorChunk {
   };
 
   struct PointerTypeInfo : TypeInfoCommon {
-    /// The type qualifiers: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers: const/volatile/restrict/atomic.
+    unsigned TypeQuals : 4;
 
     /// The location of the const-qualifier, if any.
     unsigned ConstQualLoc;
@@ -1036,6 +1056,9 @@ struct DeclaratorChunk {
 
     /// The location of the restrict-qualifier, if any.
     unsigned RestrictQualLoc;
+
+    /// The location of the _Atomic-qualifier, if any.
+    unsigned AtomicQualLoc;
 
     void destroy() {
     }
@@ -1051,8 +1074,8 @@ struct DeclaratorChunk {
   };
 
   struct ArrayTypeInfo : TypeInfoCommon {
-    /// The type qualifiers for the array: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers for the array: const/volatile/restrict/_Atomic.
+    unsigned TypeQuals : 4;
 
     /// True if this dimension included the 'static' keyword.
     bool hasStatic : 1;
@@ -1274,16 +1297,16 @@ struct DeclaratorChunk {
 
   struct BlockPointerTypeInfo : TypeInfoCommon {
     /// For now, sema will catch these as invalid.
-    /// The type qualifiers: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers: const/volatile/restrict/_Atomic.
+    unsigned TypeQuals : 4;
 
     void destroy() {
     }
   };
 
   struct MemberPointerTypeInfo : TypeInfoCommon {
-    /// The type qualifiers: const/volatile/restrict.
-    unsigned TypeQuals : 3;
+    /// The type qualifiers: const/volatile/restrict/_Atomic.
+    unsigned TypeQuals : 4;
     // CXXScopeSpec has a constructor, so it can't be a direct member.
     // So we need some pointer-aligned storage and a bit of trickery.
     union {

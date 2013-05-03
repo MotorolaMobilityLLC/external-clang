@@ -75,9 +75,9 @@ public:
         CanBreakBefore(false), MustBreakBefore(false),
         ClosesTemplateDeclaration(false), MatchingParen(NULL),
         ParameterCount(0), BindingStrength(0), SplitPenalty(0),
-        LongestObjCSelectorName(0), Parent(NULL), FakeLParens(0),
-        FakeRParens(0), LastInChainOfCalls(false) {
-  }
+        LongestObjCSelectorName(0), Parent(NULL),
+        FakeRParens(0), LastInChainOfCalls(false),
+        PartOfMultiVariableDeclStmt(false), NoMoreTokensOnLevel(false) {}
 
   bool is(tok::TokenKind Kind) const { return FormatTok.Tok.is(Kind); }
 
@@ -106,6 +106,29 @@ public:
   bool isObjCAtKeyword(tok::ObjCKeywordKind Kind) const {
     return FormatTok.Tok.isObjCAtKeyword(Kind);
   }
+
+  bool isAccessSpecifier(bool ColonRequired = true) const {
+    return isOneOf(tok::kw_public, tok::kw_protected, tok::kw_private) &&
+           (!ColonRequired ||
+            (!Children.empty() && Children[0].is(tok::colon)));
+  }
+
+  bool isObjCAccessSpecifier() const {
+    return is(tok::at) && !Children.empty() &&
+           (Children[0].isObjCAtKeyword(tok::objc_public) ||
+            Children[0].isObjCAtKeyword(tok::objc_protected) ||
+            Children[0].isObjCAtKeyword(tok::objc_package) ||
+            Children[0].isObjCAtKeyword(tok::objc_private));
+  }
+
+  /// \brief Returns whether \p Tok is ([{ or a template opening <.
+  bool opensScope() const;
+  /// \brief Returns whether \p Tok is )]} or a template opening >.
+  bool closesScope() const;
+
+  bool isUnaryOperator() const;
+  bool isBinaryOperator() const;
+  bool isTrailingComment() const;
 
   FormatToken FormatTok;
 
@@ -144,20 +167,41 @@ public:
   std::vector<AnnotatedToken> Children;
   AnnotatedToken *Parent;
 
-  /// \brief Insert this many fake ( before this token for correct indentation.
-  unsigned FakeLParens;
+  /// \brief Stores the number of required fake parentheses and the
+  /// corresponding operator precedence.
+  ///
+  /// If multiple fake parentheses start at a token, this vector stores them in
+  /// reverse order, i.e. inner fake parenthesis first.
+  SmallVector<prec::Level, 4>  FakeLParens;
   /// \brief Insert this many fake ) after this token for correct indentation.
   unsigned FakeRParens;
 
   /// \brief Is this the last "." or "->" in a builder-type call?
   bool LastInChainOfCalls;
 
-  const AnnotatedToken *getPreviousNoneComment() const {
-    AnnotatedToken *Tok = Parent;
-    while (Tok != NULL && Tok->is(tok::comment))
-      Tok = Tok->Parent;
-    return Tok;
-  }
+  /// \brief Is this token part of a \c DeclStmt defining multiple variables?
+  ///
+  /// Only set if \c Type == \c TT_StartOfName.
+  bool PartOfMultiVariableDeclStmt;
+
+  /// \brief Set to \c true for "("-tokens if this is the last token other than
+  /// ")" in the next higher parenthesis level.
+  ///
+  /// If this is \c true, no more formatting decisions have to be made on the
+  /// next higher parenthesis level, enabling optimizations.
+  ///
+  /// Example:
+  /// \code
+  /// aaaaaa(aaaaaa());
+  ///              ^  // Set to true for this parenthesis.
+  /// \endcode
+  bool NoMoreTokensOnLevel;
+
+  /// \brief Returns the previous token ignoring comments.
+  AnnotatedToken *getPreviousNoneComment() const;
+
+  /// \brief Returns the next token ignoring comments.
+  const AnnotatedToken *getNextNoneComment() const;
 };
 
 class AnnotatedLine {
@@ -228,6 +272,8 @@ private:
                            const AnnotatedToken &Tok);
 
   bool canBreakBefore(const AnnotatedLine &Line, const AnnotatedToken &Right);
+
+  void printDebugInfo(const AnnotatedLine &Line);
 
   const FormatStyle &Style;
   SourceManager &SourceMgr;

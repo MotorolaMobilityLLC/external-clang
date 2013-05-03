@@ -37,6 +37,9 @@ void CodeGenFunction::EmitStopPoint(const Stmt *S) {
     else
       Loc = S->getLocStart();
     DI->EmitLocation(Builder, Loc);
+
+    if (++NumStopPoints == 1)
+      FirstStopPoint = Loc;
   }
 }
 
@@ -134,7 +137,9 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
   case Stmt::SwitchStmtClass:   EmitSwitchStmt(cast<SwitchStmt>(*S));     break;
   case Stmt::GCCAsmStmtClass:   // Intentional fall-through.
   case Stmt::MSAsmStmtClass:    EmitAsmStmt(cast<AsmStmt>(*S));           break;
-
+  case Stmt::CapturedStmtClass:
+    EmitCapturedStmt(cast<CapturedStmt>(*S));
+    break;
   case Stmt::ObjCAtTryStmtClass:
     EmitObjCAtTryStmt(cast<ObjCAtTryStmt>(*S));
     break;
@@ -319,6 +324,12 @@ CodeGenFunction::getJumpDestForLabel(const LabelDecl *D) {
 }
 
 void CodeGenFunction::EmitLabel(const LabelDecl *D) {
+  // Add this label to the current lexical scope if we're within any
+  // normal cleanups.  Jumps "in" to this label --- when permitted by
+  // the language --- may need to be routed around such cleanups.
+  if (EHStack.hasNormalCleanups() && CurLexicalScope)
+    CurLexicalScope->addLabel(D);
+
   JumpDest &Dest = LabelMap[D];
 
   // If we didn't need a forward reference to this label, just go
@@ -330,14 +341,34 @@ void CodeGenFunction::EmitLabel(const LabelDecl *D) {
   // it from the branch-fixups list.
   } else {
     assert(!Dest.getScopeDepth().isValid() && "already emitted label!");
-    Dest = JumpDest(Dest.getBlock(),
-                    EHStack.stable_begin(),
-                    Dest.getDestIndex());
-
+    Dest.setScopeDepth(EHStack.stable_begin());
     ResolveBranchFixups(Dest.getBlock());
   }
 
   EmitBlock(Dest.getBlock());
+}
+
+/// Change the cleanup scope of the labels in this lexical scope to
+/// match the scope of the enclosing context.
+void CodeGenFunction::LexicalScope::rescopeLabels() {
+  assert(!Labels.empty());
+  EHScopeStack::stable_iterator innermostScope
+    = CGF.EHStack.getInnermostNormalCleanup();
+
+  // Change the scope depth of all the labels.
+  for (SmallVectorImpl<const LabelDecl*>::const_iterator
+         i = Labels.begin(), e = Labels.end(); i != e; ++i) {
+    assert(CGF.LabelMap.count(*i));
+    JumpDest &dest = CGF.LabelMap.find(*i)->second;
+    assert(dest.getScopeDepth().isValid());
+    assert(innermostScope.encloses(dest.getScopeDepth()));
+    dest.setScopeDepth(innermostScope);
+  }
+
+  // Reparent the labels if the new scope also has cleanups.
+  if (innermostScope != EHScopeStack::stable_end() && ParentScope) {
+    ParentScope->Labels.append(Labels.begin(), Labels.end());
+  }
 }
 
 
@@ -768,8 +799,7 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
 
   // FIXME: Clean this up by using an LValue for ReturnTemp,
   // EmitStoreThroughLValue, and EmitAnyExpr.
-  if (S.getNRVOCandidate() && S.getNRVOCandidate()->isNRVOVariable() &&
-      !Target.useGlobalsForAutomaticVariables()) {
+  if (S.getNRVOCandidate() && S.getNRVOCandidate()->isNRVOVariable()) {
     // Apply the named return value optimization for this return statement,
     // which means doing nothing: the appropriate result has already been
     // constructed into the NRVO variable.
@@ -811,6 +841,9 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
     }
     }
   }
+
+  if (RV == 0 || RV->isEvaluatable(getContext()))
+    ++NumSimpleReturnExprs;
 
   cleanupScope.ForceCleanup();
   EmitBranchThroughCleanup(ReturnBlock);
@@ -1424,7 +1457,7 @@ static llvm::MDNode *getAsmSrcLocInfo(const StringLiteral *Str,
     for (unsigned i = 0, e = StrVal.size()-1; i != e; ++i) {
       if (StrVal[i] != '\n') continue;
       SourceLocation LineLoc = Str->getLocationOfByte(i+1, SM, LangOpts,
-                                                      CGF.Target);
+                                                      CGF.getTarget());
       Locs.push_back(llvm::ConstantInt::get(CGF.Int32Ty,
                                             LineLoc.getRawEncoding()));
     }
@@ -1444,7 +1477,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   for (unsigned i = 0, e = S.getNumOutputs(); i != e; i++) {
     TargetInfo::ConstraintInfo Info(S.getOutputConstraint(i),
                                     S.getOutputName(i));
-    bool IsValid = Target.validateOutputConstraint(Info); (void)IsValid;
+    bool IsValid = getTarget().validateOutputConstraint(Info); (void)IsValid;
     assert(IsValid && "Failed to parse output constraint"); 
     OutputConstraintInfos.push_back(Info);
   }
@@ -1452,8 +1485,9 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   for (unsigned i = 0, e = S.getNumInputs(); i != e; i++) {
     TargetInfo::ConstraintInfo Info(S.getInputConstraint(i),
                                     S.getInputName(i));
-    bool IsValid = Target.validateInputConstraint(OutputConstraintInfos.data(),
-                                                  S.getNumOutputs(), Info);
+    bool IsValid =
+      getTarget().validateInputConstraint(OutputConstraintInfos.data(),
+                                          S.getNumOutputs(), Info);
     assert(IsValid && "Failed to parse input constraint"); (void)IsValid;
     InputConstraintInfos.push_back(Info);
   }
@@ -1477,13 +1511,14 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
     // Simplify the output constraint.
     std::string OutputConstraint(S.getOutputConstraint(i));
-    OutputConstraint = SimplifyConstraint(OutputConstraint.c_str() + 1, Target);
+    OutputConstraint = SimplifyConstraint(OutputConstraint.c_str() + 1,
+                                          getTarget());
 
     const Expr *OutExpr = S.getOutputExpr(i);
     OutExpr = OutExpr->IgnoreParenNoopCasts(getContext());
 
     OutputConstraint = AddVariableConstraints(OutputConstraint, *OutExpr,
-                                              Target, CGM, S);
+                                              getTarget(), CGM, S);
 
     LValue Dest = EmitLValue(OutExpr);
     if (!Constraints.empty())
@@ -1564,13 +1599,13 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
     // Simplify the input constraint.
     std::string InputConstraint(S.getInputConstraint(i));
-    InputConstraint = SimplifyConstraint(InputConstraint.c_str(), Target,
+    InputConstraint = SimplifyConstraint(InputConstraint.c_str(), getTarget(),
                                          &OutputConstraintInfos);
 
     InputConstraint =
       AddVariableConstraints(InputConstraint,
                             *InputExpr->IgnoreParenNoopCasts(getContext()),
-                            Target, CGM, S);
+                            getTarget(), CGM, S);
 
     llvm::Value *Arg = EmitAsmInput(Info, InputExpr, Constraints);
 
@@ -1622,7 +1657,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
     StringRef Clobber = S.getClobber(i);
 
     if (Clobber != "memory" && Clobber != "cc")
-    Clobber = Target.getNormalizedGCCRegisterName(Clobber);
+    Clobber = getTarget().getNormalizedGCCRegisterName(Clobber);
 
     if (i != 0 || NumConstraints != 0)
       Constraints += ',';
@@ -1633,7 +1668,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   }
 
   // Add machine specific clobbers
-  std::string MachineClobbers = Target.getClobbers();
+  std::string MachineClobbers = getTarget().getClobbers();
   if (!MachineClobbers.empty()) {
     if (!Constraints.empty())
       Constraints += ',';
@@ -1709,4 +1744,8 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
 
     EmitStoreThroughLValue(RValue::get(Tmp), ResultRegDests[i]);
   }
+}
+
+void CodeGenFunction::EmitCapturedStmt(const CapturedStmt &S) {
+  llvm_unreachable("not implemented yet");
 }

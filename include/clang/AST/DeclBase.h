@@ -135,7 +135,7 @@ public:
     /// or member ends up here.
     IDNS_Ordinary            = 0x0020,
 
-    /// Objective C @protocol.
+    /// Objective C \@protocol.
     IDNS_ObjCProtocol        = 0x0040,
 
     /// This declaration is a friend function.  A friend function
@@ -399,6 +399,12 @@ public:
 #ifndef NDEBUG
     CheckAccessDeclContext();
 #endif
+    return AccessSpecifier(Access);
+  }
+
+  /// \brief Retrieve the access specifier for this declaration, even though
+  /// it may not yet have been properly set.
+  AccessSpecifier getAccessUnsafe() const {
     return AccessSpecifier(Access);
   }
 
@@ -1040,6 +1046,7 @@ public:
   bool isFunctionOrMethod() const {
     switch (DeclKind) {
     case Decl::Block:
+    case Decl::Captured:
     case Decl::ObjCMethod:
       return true;
     default:
