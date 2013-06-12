@@ -68,7 +68,9 @@ def : DiagGroup<"discard-qual">;
 def : DiagGroup<"div-by-zero">;
 
 def DocumentationHTML : DiagGroup<"documentation-html">;
-def DocumentationPedantic : DiagGroup<"documentation-pedantic">;
+def DocumentationUnknownCommand : DiagGroup<"documentation-unknown-command">;
+def DocumentationPedantic : DiagGroup<"documentation-pedantic",
+                                      [DocumentationUnknownCommand]>;
 def DocumentationDeprecatedSync : DiagGroup<"documentation-deprecated-sync">;
 def Documentation : DiagGroup<"documentation",
                               [DocumentationHTML,
@@ -83,8 +85,8 @@ def FormatExtraArgs : DiagGroup<"format-extra-args">;
 def FormatZeroLength : DiagGroup<"format-zero-length">;
 
 // Warnings for C++1y code which is not compatible with prior C++ standards.
-def CXXPre1yCompat : DiagGroup<"cxx98-cxx11-compat">;
-def CXXPre1yCompatPedantic : DiagGroup<"cxx98-cxx11-compat-pedantic",
+def CXXPre1yCompat : DiagGroup<"c++98-c++11-compat">;
+def CXXPre1yCompatPedantic : DiagGroup<"c++98-c++11-compat-pedantic",
                                        [CXXPre1yCompat]>;
 
 def CXX98CompatBindToTemporaryCopy :
@@ -134,6 +136,7 @@ def FourByteMultiChar : DiagGroup<"four-char-constants">;
 def GlobalConstructors : DiagGroup<"global-constructors">;
 def BitwiseOpParentheses: DiagGroup<"bitwise-op-parentheses">;
 def LogicalOpParentheses: DiagGroup<"logical-op-parentheses">;
+def LogicalNotParentheses: DiagGroup<"logical-not-parentheses">;
 def ShiftOpParentheses: DiagGroup<"shift-op-parentheses">;
 def OverloadedShiftOpParentheses: DiagGroup<"overloaded-shift-op-parentheses">;
 def DanglingElse: DiagGroup<"dangling-else">;
@@ -147,6 +150,7 @@ def IncompatiblePointerTypes
   : DiagGroup<"incompatible-pointer-types",
     [IncompatiblePointerTypesDiscardsQualifiers]>;
 def IncompleteUmbrella : DiagGroup<"incomplete-umbrella">;
+def IncompleteModule : DiagGroup<"incomplete-module", [IncompleteUmbrella]>;
 def InvalidNoreturn : DiagGroup<"invalid-noreturn">;
 def InvalidSourceEncoding : DiagGroup<"invalid-source-encoding">;
 def KNRPromotedParameter : DiagGroup<"knr-promoted-parameter">;
@@ -243,6 +247,7 @@ def TautologicalCompare : DiagGroup<"tautological-compare",
 def HeaderHygiene : DiagGroup<"header-hygiene">;
 def DuplicateDeclSpecifier : DiagGroup<"duplicate-decl-specifier">;
 def CompareDistinctPointerType : DiagGroup<"compare-distinct-pointer-types">;
+def Varargs : DiagGroup<"varargs">;
 
 def Unsequenced : DiagGroup<"unsequenced">;
 // GCC name for -Wunsequenced
@@ -334,7 +339,8 @@ def AutomaticReferenceCounting : DiagGroup<"arc",
 def ARCRepeatedUseOfWeakMaybe : DiagGroup<"arc-maybe-repeated-use-of-weak">;
 def ARCRepeatedUseOfWeak : DiagGroup<"arc-repeated-use-of-weak",
                                      [ARCRepeatedUseOfWeakMaybe]>;
-def Selector : DiagGroup<"selector">;
+def SelectorTypeMismatch : DiagGroup<"selector-type-mismatch">;
+def Selector : DiagGroup<"selector", [SelectorTypeMismatch]>;
 def Protocol : DiagGroup<"protocol">;
 def SuperSubClassMismatch : DiagGroup<"super-class-method-mismatch">;
 def OverridingMethodMismatch : DiagGroup<"overriding-method-mismatch">;
@@ -363,6 +369,7 @@ def DuplicateArgDecl : DiagGroup<"duplicate-method-arg">;
 def ParenthesesOnEquality : DiagGroup<"parentheses-equality">;
 def Parentheses : DiagGroup<"parentheses",
                             [LogicalOpParentheses,
+                             LogicalNotParentheses,
                              BitwiseOpParentheses,
                              ShiftOpParentheses,
                              OverloadedShiftOpParentheses,
@@ -412,7 +419,9 @@ def Format2 : DiagGroup<"format=2",
 
 def TypeSafety : DiagGroup<"type-safety">;
 
-def IntToPointerCast : DiagGroup<"int-to-pointer-cast">;
+def IntToVoidPointerCast : DiagGroup<"int-to-void-pointer-cast">;
+def IntToPointerCast : DiagGroup<"int-to-pointer-cast",
+                                 [IntToVoidPointerCast]>;
 
 def Extra : DiagGroup<"extra", [
     MissingFieldInitializers,
@@ -533,6 +542,8 @@ def ObjCStringComparison : DiagGroup<"objc-string-compare">;
 def ObjCLiteralComparison : DiagGroup<"objc-literal-compare", [
     ObjCStringComparison
   ]>;
+
+def ObjCLiteralMissingAtSign : DiagGroup<"objc-literal-missing-atsign">;
 
 // Inline ASM warnings.
 def ASMOperandWidths : DiagGroup<"asm-operand-widths">;

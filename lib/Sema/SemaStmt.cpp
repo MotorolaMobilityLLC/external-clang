@@ -22,7 +22,6 @@
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/TypeLoc.h"
-#include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Initialization.h"
 #include "clang/Sema/Lookup.h"
@@ -76,7 +75,7 @@ StmtResult Sema::ActOnDeclStmt(DeclGroupPtrTy dg, SourceLocation StartLoc,
 
 void Sema::ActOnForEachDeclStmt(DeclGroupPtrTy dg) {
   DeclGroupRef DG = dg.getAsVal<DeclGroupRef>();
-  
+
   // If we don't have a declaration, or we have an invalid declaration,
   // just return.
   if (DG.isNull() || !DG.isSingleDecl())
@@ -593,52 +592,50 @@ Sema::ActOnStartOfSwitchStmt(SourceLocation SwitchLoc, Expr *Cond,
 
   public:
     SwitchConvertDiagnoser(Expr *Cond)
-      : ICEConvertDiagnoser(false, true), Cond(Cond) { }
+        : ICEConvertDiagnoser(/*AllowScopedEnumerations*/true, false, true),
+          Cond(Cond) {}
 
-    virtual DiagnosticBuilder diagnoseNotInt(Sema &S, SourceLocation Loc,
-                                             QualType T) {
+    virtual SemaDiagnosticBuilder diagnoseNotInt(Sema &S, SourceLocation Loc,
+                                                 QualType T) {
       return S.Diag(Loc, diag::err_typecheck_statement_requires_integer) << T;
     }
 
-    virtual DiagnosticBuilder diagnoseIncomplete(Sema &S, SourceLocation Loc,
-                                                 QualType T) {
+    virtual SemaDiagnosticBuilder diagnoseIncomplete(
+        Sema &S, SourceLocation Loc, QualType T) {
       return S.Diag(Loc, diag::err_switch_incomplete_class_type)
                << T << Cond->getSourceRange();
     }
 
-    virtual DiagnosticBuilder diagnoseExplicitConv(Sema &S, SourceLocation Loc,
-                                                   QualType T,
-                                                   QualType ConvTy) {
+    virtual SemaDiagnosticBuilder diagnoseExplicitConv(
+        Sema &S, SourceLocation Loc, QualType T, QualType ConvTy) {
       return S.Diag(Loc, diag::err_switch_explicit_conversion) << T << ConvTy;
     }
 
-    virtual DiagnosticBuilder noteExplicitConv(Sema &S, CXXConversionDecl *Conv,
-                                               QualType ConvTy) {
+    virtual SemaDiagnosticBuilder noteExplicitConv(
+        Sema &S, CXXConversionDecl *Conv, QualType ConvTy) {
       return S.Diag(Conv->getLocation(), diag::note_switch_conversion)
         << ConvTy->isEnumeralType() << ConvTy;
     }
 
-    virtual DiagnosticBuilder diagnoseAmbiguous(Sema &S, SourceLocation Loc,
-                                                QualType T) {
+    virtual SemaDiagnosticBuilder diagnoseAmbiguous(Sema &S, SourceLocation Loc,
+                                                    QualType T) {
       return S.Diag(Loc, diag::err_switch_multiple_conversions) << T;
     }
 
-    virtual DiagnosticBuilder noteAmbiguous(Sema &S, CXXConversionDecl *Conv,
-                                            QualType ConvTy) {
+    virtual SemaDiagnosticBuilder noteAmbiguous(
+        Sema &S, CXXConversionDecl *Conv, QualType ConvTy) {
       return S.Diag(Conv->getLocation(), diag::note_switch_conversion)
       << ConvTy->isEnumeralType() << ConvTy;
     }
 
-    virtual DiagnosticBuilder diagnoseConversion(Sema &S, SourceLocation Loc,
-                                                 QualType T,
-                                                 QualType ConvTy) {
-      return DiagnosticBuilder::getEmpty();
+    virtual SemaDiagnosticBuilder diagnoseConversion(
+        Sema &S, SourceLocation Loc, QualType T, QualType ConvTy) {
+      llvm_unreachable("conversion functions are permitted");
     }
   } SwitchDiagnoser(Cond);
 
-  CondResult
-    = ConvertToIntegralOrEnumerationType(SwitchLoc, Cond, SwitchDiagnoser,
-                                         /*AllowScopedEnumerations*/ true);
+  CondResult =
+      PerformContextualImplicitConversion(SwitchLoc, Cond, SwitchDiagnoser);
   if (CondResult.isInvalid()) return StmtError();
   Cond = CondResult.take();
 
@@ -1123,9 +1120,9 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
 void
 Sema::DiagnoseAssignmentEnum(QualType DstType, QualType SrcType,
                              Expr *SrcExpr) {
-  unsigned DIAG = diag::warn_not_in_enum_assignement;
-  if (Diags.getDiagnosticLevel(DIAG, SrcExpr->getExprLoc())
-      == DiagnosticsEngine::Ignored)
+  if (Diags.getDiagnosticLevel(diag::warn_not_in_enum_assignment,
+                               SrcExpr->getExprLoc()) ==
+      DiagnosticsEngine::Ignored)
     return;
 
   if (const EnumType *ET = DstType->getAs<EnumType>())
@@ -1134,13 +1131,14 @@ Sema::DiagnoseAssignmentEnum(QualType DstType, QualType SrcType,
       if (!SrcExpr->isTypeDependent() && !SrcExpr->isValueDependent() &&
           SrcExpr->isIntegerConstantExpr(Context)) {
         // Get the bitwidth of the enum value before promotions.
-        unsigned DstWith = Context.getIntWidth(DstType);
+        unsigned DstWidth = Context.getIntWidth(DstType);
         bool DstIsSigned = DstType->isSignedIntegerOrEnumerationType();
 
         llvm::APSInt RhsVal = SrcExpr->EvaluateKnownConstInt(Context);
+        AdjustAPSInt(RhsVal, DstWidth, DstIsSigned);
         const EnumDecl *ED = ET->getDecl();
-        typedef SmallVector<std::pair<llvm::APSInt, EnumConstantDecl*>, 64>
-        EnumValsTy;
+        typedef SmallVector<std::pair<llvm::APSInt, EnumConstantDecl *>, 64>
+            EnumValsTy;
         EnumValsTy EnumVals;
 
         // Gather all enum values, set their type and sort them,
@@ -1148,21 +1146,21 @@ Sema::DiagnoseAssignmentEnum(QualType DstType, QualType SrcType,
         for (EnumDecl::enumerator_iterator EDI = ED->enumerator_begin();
              EDI != ED->enumerator_end(); ++EDI) {
           llvm::APSInt Val = EDI->getInitVal();
-          AdjustAPSInt(Val, DstWith, DstIsSigned);
+          AdjustAPSInt(Val, DstWidth, DstIsSigned);
           EnumVals.push_back(std::make_pair(Val, *EDI));
         }
         if (EnumVals.empty())
           return;
         std::stable_sort(EnumVals.begin(), EnumVals.end(), CmpEnumVals);
         EnumValsTy::iterator EIend =
-        std::unique(EnumVals.begin(), EnumVals.end(), EqEnumVals);
+            std::unique(EnumVals.begin(), EnumVals.end(), EqEnumVals);
 
-        // See which case values aren't in enum.
+        // See which values aren't in the enum.
         EnumValsTy::const_iterator EI = EnumVals.begin();
         while (EI != EIend && EI->first < RhsVal)
           EI++;
         if (EI == EIend || EI->first != RhsVal) {
-          Diag(SrcExpr->getExprLoc(), diag::warn_not_in_enum_assignement)
+          Diag(SrcExpr->getExprLoc(), diag::warn_not_in_enum_assignment)
           << DstType;
         }
       }
@@ -1223,75 +1221,75 @@ namespace {
     llvm::SmallPtrSet<VarDecl*, 8> &Decls;
     SmallVector<SourceRange, 10> &Ranges;
     bool Simple;
-public:
-  typedef EvaluatedExprVisitor<DeclExtractor> Inherited;
+  public:
+    typedef EvaluatedExprVisitor<DeclExtractor> Inherited;
 
-  DeclExtractor(Sema &S, llvm::SmallPtrSet<VarDecl*, 8> &Decls,
-                SmallVector<SourceRange, 10> &Ranges) :
-      Inherited(S.Context),
-      Decls(Decls),
-      Ranges(Ranges),
-      Simple(true) {}
+    DeclExtractor(Sema &S, llvm::SmallPtrSet<VarDecl*, 8> &Decls,
+                  SmallVector<SourceRange, 10> &Ranges) :
+        Inherited(S.Context),
+        Decls(Decls),
+        Ranges(Ranges),
+        Simple(true) {}
 
-  bool isSimple() { return Simple; }
+    bool isSimple() { return Simple; }
 
-  // Replaces the method in EvaluatedExprVisitor.
-  void VisitMemberExpr(MemberExpr* E) {
-    Simple = false;
-  }
-
-  // Any Stmt not whitelisted will cause the condition to be marked complex.
-  void VisitStmt(Stmt *S) {
-    Simple = false;
-  }
-
-  void VisitBinaryOperator(BinaryOperator *E) {
-    Visit(E->getLHS());
-    Visit(E->getRHS());
-  }
-
-  void VisitCastExpr(CastExpr *E) {
-    Visit(E->getSubExpr());
-  }
-
-  void VisitUnaryOperator(UnaryOperator *E) {
-    // Skip checking conditionals with derefernces.
-    if (E->getOpcode() == UO_Deref)
+    // Replaces the method in EvaluatedExprVisitor.
+    void VisitMemberExpr(MemberExpr* E) {
       Simple = false;
-    else
+    }
+
+    // Any Stmt not whitelisted will cause the condition to be marked complex.
+    void VisitStmt(Stmt *S) {
+      Simple = false;
+    }
+
+    void VisitBinaryOperator(BinaryOperator *E) {
+      Visit(E->getLHS());
+      Visit(E->getRHS());
+    }
+
+    void VisitCastExpr(CastExpr *E) {
       Visit(E->getSubExpr());
-  }
+    }
 
-  void VisitConditionalOperator(ConditionalOperator *E) {
-    Visit(E->getCond());
-    Visit(E->getTrueExpr());
-    Visit(E->getFalseExpr());
-  }
+    void VisitUnaryOperator(UnaryOperator *E) {
+      // Skip checking conditionals with derefernces.
+      if (E->getOpcode() == UO_Deref)
+        Simple = false;
+      else
+        Visit(E->getSubExpr());
+    }
 
-  void VisitParenExpr(ParenExpr *E) {
-    Visit(E->getSubExpr());
-  }
+    void VisitConditionalOperator(ConditionalOperator *E) {
+      Visit(E->getCond());
+      Visit(E->getTrueExpr());
+      Visit(E->getFalseExpr());
+    }
 
-  void VisitBinaryConditionalOperator(BinaryConditionalOperator *E) {
-    Visit(E->getOpaqueValue()->getSourceExpr());
-    Visit(E->getFalseExpr());
-  }
+    void VisitParenExpr(ParenExpr *E) {
+      Visit(E->getSubExpr());
+    }
 
-  void VisitIntegerLiteral(IntegerLiteral *E) { }
-  void VisitFloatingLiteral(FloatingLiteral *E) { }
-  void VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *E) { }
-  void VisitCharacterLiteral(CharacterLiteral *E) { }
-  void VisitGNUNullExpr(GNUNullExpr *E) { }
-  void VisitImaginaryLiteral(ImaginaryLiteral *E) { }
+    void VisitBinaryConditionalOperator(BinaryConditionalOperator *E) {
+      Visit(E->getOpaqueValue()->getSourceExpr());
+      Visit(E->getFalseExpr());
+    }
 
-  void VisitDeclRefExpr(DeclRefExpr *E) {
-    VarDecl *VD = dyn_cast<VarDecl>(E->getDecl());
-    if (!VD) return;
+    void VisitIntegerLiteral(IntegerLiteral *E) { }
+    void VisitFloatingLiteral(FloatingLiteral *E) { }
+    void VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *E) { }
+    void VisitCharacterLiteral(CharacterLiteral *E) { }
+    void VisitGNUNullExpr(GNUNullExpr *E) { }
+    void VisitImaginaryLiteral(ImaginaryLiteral *E) { }
 
-    Ranges.push_back(E->getSourceRange());
+    void VisitDeclRefExpr(DeclRefExpr *E) {
+      VarDecl *VD = dyn_cast<VarDecl>(E->getDecl());
+      if (!VD) return;
 
-    Decls.insert(VD);
-  }
+      Ranges.push_back(E->getSourceRange());
+
+      Decls.insert(VD);
+    }
 
   }; // end class DeclExtractor
 
@@ -1301,66 +1299,67 @@ public:
     llvm::SmallPtrSet<VarDecl*, 8> &Decls;
     bool FoundDecl;
 
-public:
-  typedef EvaluatedExprVisitor<DeclMatcher> Inherited;
+  public:
+    typedef EvaluatedExprVisitor<DeclMatcher> Inherited;
 
-  DeclMatcher(Sema &S, llvm::SmallPtrSet<VarDecl*, 8> &Decls, Stmt *Statement) :
-      Inherited(S.Context), Decls(Decls), FoundDecl(false) {
-    if (!Statement) return;
+    DeclMatcher(Sema &S, llvm::SmallPtrSet<VarDecl*, 8> &Decls,
+                Stmt *Statement) :
+        Inherited(S.Context), Decls(Decls), FoundDecl(false) {
+      if (!Statement) return;
 
-    Visit(Statement);
-  }
-
-  void VisitReturnStmt(ReturnStmt *S) {
-    FoundDecl = true;
-  }
-
-  void VisitBreakStmt(BreakStmt *S) {
-    FoundDecl = true;
-  }
-
-  void VisitGotoStmt(GotoStmt *S) {
-    FoundDecl = true;
-  }
-
-  void VisitCastExpr(CastExpr *E) {
-    if (E->getCastKind() == CK_LValueToRValue)
-      CheckLValueToRValueCast(E->getSubExpr());
-    else
-      Visit(E->getSubExpr());
-  }
-
-  void CheckLValueToRValueCast(Expr *E) {
-    E = E->IgnoreParenImpCasts();
-
-    if (isa<DeclRefExpr>(E)) {
-      return;
+      Visit(Statement);
     }
 
-    if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
-      Visit(CO->getCond());
-      CheckLValueToRValueCast(CO->getTrueExpr());
-      CheckLValueToRValueCast(CO->getFalseExpr());
-      return;
+    void VisitReturnStmt(ReturnStmt *S) {
+      FoundDecl = true;
     }
 
-    if (BinaryConditionalOperator *BCO =
-            dyn_cast<BinaryConditionalOperator>(E)) {
-      CheckLValueToRValueCast(BCO->getOpaqueValue()->getSourceExpr());
-      CheckLValueToRValueCast(BCO->getFalseExpr());
-      return;
+    void VisitBreakStmt(BreakStmt *S) {
+      FoundDecl = true;
     }
 
-    Visit(E);
-  }
+    void VisitGotoStmt(GotoStmt *S) {
+      FoundDecl = true;
+    }
 
-  void VisitDeclRefExpr(DeclRefExpr *E) {
-    if (VarDecl *VD = dyn_cast<VarDecl>(E->getDecl()))
-      if (Decls.count(VD))
-        FoundDecl = true;
-  }
+    void VisitCastExpr(CastExpr *E) {
+      if (E->getCastKind() == CK_LValueToRValue)
+        CheckLValueToRValueCast(E->getSubExpr());
+      else
+        Visit(E->getSubExpr());
+    }
 
-  bool FoundDeclInUse() { return FoundDecl; }
+    void CheckLValueToRValueCast(Expr *E) {
+      E = E->IgnoreParenImpCasts();
+
+      if (isa<DeclRefExpr>(E)) {
+        return;
+      }
+
+      if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
+        Visit(CO->getCond());
+        CheckLValueToRValueCast(CO->getTrueExpr());
+        CheckLValueToRValueCast(CO->getFalseExpr());
+        return;
+      }
+
+      if (BinaryConditionalOperator *BCO =
+              dyn_cast<BinaryConditionalOperator>(E)) {
+        CheckLValueToRValueCast(BCO->getOpaqueValue()->getSourceExpr());
+        CheckLValueToRValueCast(BCO->getFalseExpr());
+        return;
+      }
+
+      Visit(E);
+    }
+
+    void VisitDeclRefExpr(DeclRefExpr *E) {
+      if (VarDecl *VD = dyn_cast<VarDecl>(E->getDecl()))
+        if (Decls.count(VD))
+          FoundDecl = true;
+    }
+
+    bool FoundDeclInUse() { return FoundDecl; }
 
   };  // end class DeclMatcher
 
@@ -2310,7 +2309,7 @@ Sema::PerformMoveOrCopyInitialization(const InitializedEntity &Entity,
     InitializationKind Kind
       = InitializationKind::CreateCopy(Value->getLocStart(),
                                        Value->getLocStart());
-    InitializationSequence Seq(*this, Entity, Kind, &InitExpr, 1);
+    InitializationSequence Seq(*this, Entity, Kind, InitExpr);
 
     //   [...] If overload resolution fails, or if the type of the first
     //   parameter of the selected constructor is not an rvalue reference
@@ -2343,7 +2342,7 @@ Sema::PerformMoveOrCopyInitialization(const InitializedEntity &Entity,
 
         // Complete type-checking the initialization of the return type
         // using the constructor we found.
-        Res = Seq.Perform(*this, Entity, Kind, MultiExprArg(&Value, 1));
+        Res = Seq.Perform(*this, Entity, Kind, Value);
       }
     }
   }
@@ -2363,22 +2362,37 @@ Sema::PerformMoveOrCopyInitialization(const InitializedEntity &Entity,
 StmtResult
 Sema::ActOnCapScopeReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
   // If this is the first return we've seen, infer the return type.
-  // [expr.prim.lambda]p4 in C++11; block literals follow a superset of those
-  // rules which allows multiple return statements.
+  // [expr.prim.lambda]p4 in C++11; block literals follow the same rules.
   CapturingScopeInfo *CurCap = cast<CapturingScopeInfo>(getCurFunction());
   QualType FnRetType = CurCap->ReturnType;
 
   // For blocks/lambdas with implicit return types, we check each return
   // statement individually, and deduce the common return type when the block
   // or lambda is completed.
-  if (CurCap->HasImplicitReturnType) {
+  if (AutoType *AT =
+          FnRetType.isNull() ? 0 : FnRetType->getContainedAutoType()) {
+    // In C++1y, the return type may involve 'auto'.
+    FunctionDecl *FD = cast<LambdaScopeInfo>(CurCap)->CallOperator;
+    if (CurContext->isDependentContext()) {
+      // C++1y [dcl.spec.auto]p12:
+      //   Return type deduction [...] occurs when the definition is
+      //   instantiated even if the function body contains a return
+      //   statement with a non-type-dependent operand.
+      CurCap->ReturnType = FnRetType = Context.DependentTy;
+    } else if (DeduceFunctionTypeFromReturnExpr(FD, ReturnLoc, RetValExp, AT)) {
+      FD->setInvalidDecl();
+      return StmtError();
+    } else
+      CurCap->ReturnType = FnRetType = FD->getResultType();
+  } else if (CurCap->HasImplicitReturnType) {
+    // FIXME: Fold this into the 'auto' codepath above.
     if (RetValExp && !isa<InitListExpr>(RetValExp)) {
       ExprResult Result = DefaultFunctionArrayLvalueConversion(RetValExp);
       if (Result.isInvalid())
         return StmtError();
       RetValExp = Result.take();
 
-      if (!RetValExp->isTypeDependent())
+      if (!CurContext->isDependentContext())
         FnRetType = RetValExp->getType();
       else
         FnRetType = CurCap->ReturnType = Context.DependentTy;
@@ -2483,6 +2497,71 @@ Sema::ActOnCapScopeReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
   return Owned(Result);
 }
 
+/// Deduce the return type for a function from a returned expression, per
+/// C++1y [dcl.spec.auto]p6.
+bool Sema::DeduceFunctionTypeFromReturnExpr(FunctionDecl *FD,
+                                            SourceLocation ReturnLoc,
+                                            Expr *&RetExpr,
+                                            AutoType *AT) {
+  TypeLoc OrigResultType = FD->getTypeSourceInfo()->getTypeLoc().
+    IgnoreParens().castAs<FunctionProtoTypeLoc>().getResultLoc();
+  QualType Deduced;
+
+  if (RetExpr) {
+    //  If the deduction is for a return statement and the initializer is
+    //  a braced-init-list, the program is ill-formed.
+    if (isa<InitListExpr>(RetExpr)) {
+      Diag(RetExpr->getExprLoc(), diag::err_auto_fn_return_init_list);
+      return true;
+    }
+
+    //  Otherwise, [...] deduce a value for U using the rules of template
+    //  argument deduction.
+    DeduceAutoResult DAR = DeduceAutoType(OrigResultType, RetExpr, Deduced);
+
+    if (DAR == DAR_Failed && !FD->isInvalidDecl())
+      Diag(RetExpr->getExprLoc(), diag::err_auto_fn_deduction_failure)
+        << OrigResultType.getType() << RetExpr->getType();
+
+    if (DAR != DAR_Succeeded)
+      return true;
+  } else {
+    //  In the case of a return with no operand, the initializer is considered
+    //  to be void().
+    //
+    // Deduction here can only succeed if the return type is exactly 'cv auto'
+    // or 'decltype(auto)', so just check for that case directly.
+    if (!OrigResultType.getType()->getAs<AutoType>()) {
+      Diag(ReturnLoc, diag::err_auto_fn_return_void_but_not_auto)
+        << OrigResultType.getType();
+      return true;
+    }
+    // We always deduce U = void in this case.
+    Deduced = SubstAutoType(OrigResultType.getType(), Context.VoidTy);
+    if (Deduced.isNull())
+      return true;
+  }
+
+  //  If a function with a declared return type that contains a placeholder type
+  //  has multiple return statements, the return type is deduced for each return
+  //  statement. [...] if the type deduced is not the same in each deduction,
+  //  the program is ill-formed.
+  if (AT->isDeduced() && !FD->isInvalidDecl()) {
+    AutoType *NewAT = Deduced->getContainedAutoType();
+    if (!Context.hasSameType(AT->getDeducedType(), NewAT->getDeducedType())) {
+      Diag(ReturnLoc, diag::err_auto_fn_different_deductions)
+        << (AT->isDecltypeAuto() ? 1 : 0)
+        << NewAT->getDeducedType() << AT->getDeducedType();
+      return true;
+    }
+  } else if (!FD->isInvalidDecl()) {
+    // Update all declarations of the function to have the deduced return type.
+    Context.adjustDeducedFunctionResultType(FD, Deduced);
+  }
+
+  return false;
+}
+
 StmtResult
 Sema::ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
   // Check for unexpanded parameter packs.
@@ -2510,6 +2589,23 @@ Sema::ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
     }
   } else // If we don't have a function/method context, bail.
     return StmtError();
+
+  // FIXME: Add a flag to the ScopeInfo to indicate whether we're performing
+  // deduction.
+  bool HasDependentReturnType = FnRetType->isDependentType();
+  if (getLangOpts().CPlusPlus1y) {
+    if (AutoType *AT = FnRetType->getContainedAutoType()) {
+      FunctionDecl *FD = cast<FunctionDecl>(CurContext);
+      if (CurContext->isDependentContext())
+        HasDependentReturnType = true;
+      else if (DeduceFunctionTypeFromReturnExpr(FD, ReturnLoc, RetValExp, AT)) {
+        FD->setInvalidDecl();
+        return StmtError();
+      } else {
+        FnRetType = FD->getResultType();
+      }
+    }
+  }
 
   ReturnStmt *Result = 0;
   if (FnRetType->isVoidType()) {
@@ -2576,7 +2672,7 @@ Sema::ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
     }
 
     Result = new (Context) ReturnStmt(ReturnLoc, RetValExp, 0);
-  } else if (!RetValExp && !FnRetType->isDependentType()) {
+  } else if (!RetValExp && !HasDependentReturnType) {
     unsigned DiagID = diag::warn_return_missing_expr;  // C90 6.6.6.4p4
     // C99 6.8.6.4p1 (ext_ since GCC warns)
     if (getLangOpts().C99) DiagID = diag::ext_return_missing_expr;
@@ -2587,9 +2683,9 @@ Sema::ActOnReturnStmt(SourceLocation ReturnLoc, Expr *RetValExp) {
       Diag(ReturnLoc, DiagID) << getCurMethodDecl()->getDeclName() << 1/*meth*/;
     Result = new (Context) ReturnStmt(ReturnLoc);
   } else {
-    assert(RetValExp || FnRetType->isDependentType());
+    assert(RetValExp || HasDependentReturnType);
     const VarDecl *NRVOCandidate = 0;
-    if (!FnRetType->isDependentType() && !RetValExp->isTypeDependent()) {
+    if (!HasDependentReturnType && !RetValExp->isTypeDependent()) {
       // we have a non-void function with an expression, continue checking
 
       QualType RetType = (RelatedRetType.isNull() ? FnRetType : RelatedRetType);
@@ -2923,8 +3019,8 @@ StmtResult Sema::ActOnMSDependentExistsStmt(SourceLocation KeywordLoc,
 }
 
 RecordDecl*
-Sema::CreateCapturedStmtRecordDecl(CapturedDecl *&CD, SourceLocation Loc)
-{
+Sema::CreateCapturedStmtRecordDecl(CapturedDecl *&CD, SourceLocation Loc,
+                                   unsigned NumParams) {
   DeclContext *DC = CurContext;
   while (!(DC->isFunctionOrMethod() || DC->isRecord() || DC->isFileContext()))
     DC = DC->getParent();
@@ -2939,8 +3035,19 @@ Sema::CreateCapturedStmtRecordDecl(CapturedDecl *&CD, SourceLocation Loc)
   RD->setImplicit();
   RD->startDefinition();
 
-  CD = CapturedDecl::Create(Context, CurContext);
+  CD = CapturedDecl::Create(Context, CurContext, NumParams);
   DC->addDecl(CD);
+
+  // Build the context parameter
+  assert(NumParams > 0 && "CapturedStmt requires context parameter");
+  DC = CapturedDecl::castToDeclContext(CD);
+  IdentifierInfo *VarName = &Context.Idents.get("__context");
+  QualType ParamType = Context.getPointerType(Context.getTagDeclType(RD));
+  ImplicitParamDecl *Param
+    = ImplicitParamDecl::Create(Context, DC, Loc, VarName, ParamType);
+  DC->addDecl(Param);
+
+  CD->setContextParam(Param);
 
   return RD;
 }
@@ -2956,7 +3063,7 @@ static void buildCapturedStmtCaptureList(
     if (Cap->isThisCapture()) {
       Captures.push_back(CapturedStmt::Capture(Cap->getLocation(),
                                                CapturedStmt::VCK_This));
-      CaptureInits.push_back(Cap->getCopyExpr());
+      CaptureInits.push_back(Cap->getInitExpr());
       continue;
     }
 
@@ -2966,14 +3073,15 @@ static void buildCapturedStmtCaptureList(
     Captures.push_back(CapturedStmt::Capture(Cap->getLocation(),
                                              CapturedStmt::VCK_ByRef,
                                              Cap->getVariable()));
-    CaptureInits.push_back(Cap->getCopyExpr());
+    CaptureInits.push_back(Cap->getInitExpr());
   }
 }
 
 void Sema::ActOnCapturedRegionStart(SourceLocation Loc, Scope *CurScope,
-                                    CapturedRegionKind Kind) {
+                                    CapturedRegionKind Kind,
+                                    unsigned NumParams) {
   CapturedDecl *CD = 0;
-  RecordDecl *RD = CreateCapturedStmtRecordDecl(CD, Loc);
+  RecordDecl *RD = CreateCapturedStmtRecordDecl(CD, Loc, NumParams);
 
   // Enter the capturing scope for this captured region.
   PushCapturedRegionScope(CurScope, CD, RD, Kind);
@@ -2986,12 +3094,9 @@ void Sema::ActOnCapturedRegionStart(SourceLocation Loc, Scope *CurScope,
   PushExpressionEvaluationContext(PotentiallyEvaluated);
 }
 
-void Sema::ActOnCapturedRegionError(bool IsInstantiation) {
+void Sema::ActOnCapturedRegionError() {
   DiscardCleanupsInEvaluationContext();
   PopExpressionEvaluationContext();
-
-  if (!IsInstantiation)
-    PopDeclContext();
 
   CapturedRegionScopeInfo *RSI = getCurCapturedRegion();
   RecordDecl *Record = RSI->TheRecordDecl;
@@ -3004,6 +3109,7 @@ void Sema::ActOnCapturedRegionError(bool IsInstantiation) {
   ActOnFields(/*Scope=*/0, Record->getLocation(), Record, Fields,
               SourceLocation(), SourceLocation(), /*AttributeList=*/0);
 
+  PopDeclContext();
   PopFunctionScopeInfo();
 }
 
@@ -3017,11 +3123,15 @@ StmtResult Sema::ActOnCapturedRegionEnd(Stmt *S) {
   CapturedDecl *CD = RSI->TheCapturedDecl;
   RecordDecl *RD = RSI->TheRecordDecl;
 
-  CapturedStmt *Res = CapturedStmt::Create(getASTContext(), S, Captures,
+  CapturedStmt *Res = CapturedStmt::Create(getASTContext(), S,
+                                           RSI->CapRegionKind, Captures,
                                            CaptureInits, CD, RD);
 
   CD->setBody(Res->getCapturedStmt());
   RD->completeDefinition();
+
+  DiscardCleanupsInEvaluationContext();
+  PopExpressionEvaluationContext();
 
   PopDeclContext();
   PopFunctionScopeInfo();

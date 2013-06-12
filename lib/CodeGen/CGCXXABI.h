@@ -192,6 +192,12 @@ protected:
   /// is required.
   llvm::Constant *getMemberPointerAdjustment(const CastExpr *E);
 
+  /// \brief Computes the non-virtual adjustment needed for a member pointer
+  /// conversion along an inheritance path stored in an APValue.  Unlike
+  /// getMemberPointerAdjustment(), the adjustment can be negative if the path
+  /// is from a derived type to a base type.
+  CharUnits getMemberPointerPathAdjustment(const APValue &MP);
+
 public:
   /// Adjust the given non-null pointer to an object of polymorphic
   /// type to point to the complete object.
@@ -201,6 +207,11 @@ public:
   virtual llvm::Value *adjustToCompleteObject(CodeGenFunction &CGF,
                                               llvm::Value *ptr,
                                               QualType type) = 0;
+
+  virtual llvm::Value *GetVirtualBaseClassOffset(CodeGenFunction &CGF,
+                                                 llvm::Value *This,
+                                                 const CXXRecordDecl *ClassDecl,
+                                        const CXXRecordDecl *BaseClassDecl) = 0;
 
   /// Build the signature of the given constructor variant by adding
   /// any required parameters.  For convenience, ResTy has been

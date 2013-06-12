@@ -348,9 +348,10 @@ public:
     if (SetterName)
       SetterSel = P.PP.getSelectorTable().getSelector(1, &SetterName);
     else
-      SetterSel = SelectorTable::constructSetterName(P.PP.getIdentifierTable(),
-                                                     P.PP.getSelectorTable(),
-                                                     FD.D.getIdentifier());
+      SetterSel =
+        SelectorTable::constructSetterSelector(P.PP.getIdentifierTable(),
+                                               P.PP.getSelectorTable(),
+                                               FD.D.getIdentifier());
     bool isOverridingProperty = false;
     Decl *Property =
       P.Actions.ActOnProperty(P.getCurScope(), AtLoc, LParenLoc,
@@ -1541,6 +1542,12 @@ Parser::ParseObjCAtImplementationDeclaration(SourceLocation AtLoc) {
       return DeclGroupPtrTy();
     }
     rparenLoc = ConsumeParen();
+    if (Tok.is(tok::less)) { // we have illegal '<' try to recover
+      Diag(Tok, diag::err_unexpected_protocol_qualifier);
+      AttributeFactory attr;
+      DeclSpec DS(attr);
+      (void)ParseObjCProtocolQualifiers(DS);
+    }
     ObjCImpDecl = Actions.ActOnStartCategoryImplementation(
                                     AtLoc, nameId, nameLoc, categoryId,
                                     categoryLoc);

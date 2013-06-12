@@ -72,15 +72,13 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
   case Decl::Block:
   case Decl::Captured:
   case Decl::ClassScopeFunctionSpecialization:
+  case Decl::UsingShadow:
     llvm_unreachable("Declaration should not be in declstmts!");
   case Decl::Function:  // void X();
   case Decl::Record:    // struct/union/class X;
   case Decl::Enum:      // enum X;
   case Decl::EnumConstant: // enum ? { X = ? }
   case Decl::CXXRecord: // struct/union/class X; [C++]
-  case Decl::Using:          // using X; [C++]
-  case Decl::UsingShadow:
-  case Decl::NamespaceAlias:
   case Decl::StaticAssert: // static_assert(X, ""); [C++0x]
   case Decl::Label:        // __label__ x;
   case Decl::Import:
@@ -89,6 +87,14 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
     // None of these decls require codegen support.
     return;
 
+  case Decl::NamespaceAlias:
+    if (CGDebugInfo *DI = getDebugInfo())
+        DI->EmitNamespaceAlias(cast<NamespaceAliasDecl>(D));
+    return;
+  case Decl::Using:          // using X; [C++]
+    if (CGDebugInfo *DI = getDebugInfo())
+        DI->EmitUsingDecl(cast<UsingDecl>(D));
+    return;
   case Decl::UsingDirective: // using namespace X; [C++]
     if (CGDebugInfo *DI = getDebugInfo())
       DI->EmitUsingDirective(cast<UsingDirectiveDecl>(D));
@@ -114,12 +120,7 @@ void CodeGenFunction::EmitDecl(const Decl &D) {
 /// EmitVarDecl - This method handles emission of any variable declaration
 /// inside a function, including static vars etc.
 void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
-  switch (D.getStorageClass()) {
-  case SC_None:
-  case SC_Auto:
-  case SC_Register:
-    return EmitAutoVarDecl(D);
-  case SC_Static: {
+  if (D.isStaticLocal()) {
     llvm::GlobalValue::LinkageTypes Linkage =
       llvm::GlobalValue::InternalLinkage;
 
@@ -134,15 +135,16 @@ void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
 
     return EmitStaticVarDecl(D, Linkage);
   }
-  case SC_Extern:
-  case SC_PrivateExtern:
+
+  if (D.hasExternalStorage())
     // Don't emit it now, allow it to be emitted lazily on its first use.
     return;
-  case SC_OpenCLWorkGroupLocal:
-    return CGM.getOpenCLRuntime().EmitWorkGroupLocalVarDecl(*this, D);
-  }
 
-  llvm_unreachable("Unknown storage class");
+  if (D.getStorageClass() == SC_OpenCLWorkGroupLocal)
+    return CGM.getOpenCLRuntime().EmitWorkGroupLocalVarDecl(*this, D);
+
+  assert(D.hasLocalStorage());
+  return EmitAutoVarDecl(D);
 }
 
 static std::string GetStaticDeclName(CodeGenFunction &CGF, const VarDecl &D,
@@ -838,19 +840,19 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
     bool NRVO = getLangOpts().ElideConstructors &&
       D.isNRVOVariable();
 
-    // If this value is a POD array or struct with a statically
-    // determinable constant initializer, there are optimizations we can do.
+    // If this value is an array or struct with a statically determinable
+    // constant initializer, there are optimizations we can do.
     //
     // TODO: We should constant-evaluate the initializer of any variable,
     // as long as it is initialized by a constant expression. Currently,
     // isConstantInitializer produces wrong answers for structs with
     // reference or bitfield members, and a few other cases, and checking
     // for POD-ness protects us from some of these.
-    if (D.getInit() &&
-        (Ty->isArrayType() || Ty->isRecordType()) &&
-        (Ty.isPODType(getContext()) ||
-         getContext().getBaseElementType(Ty)->isObjCObjectPointerType()) &&
-        D.getInit()->isConstantInitializer(getContext(), false)) {
+    if (D.getInit() && (Ty->isArrayType() || Ty->isRecordType()) &&
+        (D.isConstexpr() ||
+         ((Ty.isPODType(getContext()) ||
+           getContext().getBaseElementType(Ty)->isObjCObjectPointerType()) &&
+          D.getInit()->isConstantInitializer(getContext(), false)))) {
 
       // If the variable's a const type, and it's neither an NRVO
       // candidate nor a __block variable and has no mutable members,
@@ -1078,7 +1080,7 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
     capturedByInit ? emission.Address : emission.getObjectAddress(*this);
 
   llvm::Constant *constant = 0;
-  if (emission.IsConstantAggregate) {
+  if (emission.IsConstantAggregate || D.isConstexpr()) {
     assert(!capturedByInit && "constant init contains a capturing block?");
     constant = CGM.EmitConstantInit(D, this);
   }
@@ -1087,6 +1089,13 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
     LValue lv = MakeAddrLValue(Loc, type, alignment);
     lv.setNonGC(true);
     return EmitExprAsInit(Init, &D, lv, capturedByInit);
+  }
+
+  if (!emission.IsConstantAggregate) {
+    // For simple scalar/complex initialization, store the value directly.
+    LValue lv = MakeAddrLValue(Loc, type, alignment);
+    lv.setNonGC(true);
+    return EmitStoreThroughLValue(RValue::get(constant), lv, true);
   }
 
   // If this is a simple aggregate initialization, we can optimize it

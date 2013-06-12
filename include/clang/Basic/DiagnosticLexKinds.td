@@ -408,8 +408,6 @@ def warn_pragma_include_alias_expected_filename :
 
 def err__Pragma_malformed : Error<
   "_Pragma takes a parenthesized string literal">;
-def err_pragma_comment_malformed : Error<
-  "pragma comment requires parenthesized identifier and optional string">;
 def err_pragma_message_malformed : Error<
   "pragma %select{message|warning|error}0 requires parenthesized string">;
 def err_pragma_push_pop_macro_malformed : Error<
@@ -452,7 +450,6 @@ def warn_pragma_diagnostic_unknown_warning :
 def warn_pragma_debug_unexpected_command : Warning<
   "unexpected debug command '%0'">;
 
-def err_pragma_comment_unknown_kind : Error<"unknown kind of pragma comment">;
 def err_defined_macro_name : Error<"'defined' cannot be used as a macro name">;
 def err_paste_at_start : Error<
   "'##' cannot appear at start of macro expansion">;
@@ -582,7 +579,10 @@ def warn_auto_module_import : Warning<
   "import of module '%1'">, InGroup<AutoImport>, DefaultIgnore;
 def warn_uncovered_module_header : Warning<
   "umbrella header for module '%0' does not include header '%1'">, 
-  InGroup<IncompleteUmbrella>;
+  InGroup<IncompleteUmbrella>, DefaultIgnore;
+def warn_forgotten_module_header : Warning<
+  "header '%0' is included in module '%1' but not listed in module map">,
+  InGroup<IncompleteModule>, DefaultIgnore;
 def err_expected_id_building_module : Error<
   "expected a module name in '__building_module' expression">;
   

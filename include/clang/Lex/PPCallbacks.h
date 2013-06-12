@@ -27,6 +27,7 @@ namespace clang {
   class Token;
   class IdentifierInfo;
   class MacroDirective;
+  class MacroArgs;
 
 /// \brief This interface provides a way to observe the actions of the
 /// preprocessor as it does its thing.
@@ -159,6 +160,13 @@ public:
                              const std::string &Str) {
   }
 
+  /// \brief Callback invoked when a \#pragma detect_mismatch directive is
+  /// read.
+  virtual void PragmaDetectMismatch(SourceLocation Loc,
+                                    const std::string &Name,
+                                    const std::string &Value) {
+  }
+
   /// \brief Callback invoked when a \#pragma clang __debug directive is read.
   /// \param Loc The location of the debug directive.
   /// \param DebugType The identifier following __debug.
@@ -206,7 +214,7 @@ public:
   /// \brief Called by Preprocessor::HandleMacroExpandedIdentifier when a
   /// macro invocation is found.
   virtual void MacroExpands(const Token &MacroNameTok, const MacroDirective *MD,
-                            SourceRange Range) {
+                            SourceRange Range, const MacroArgs *Args) {
   }
 
   /// \brief Hook called whenever a macro definition is seen.
@@ -351,6 +359,13 @@ public:
     Second->PragmaComment(Loc, Kind, Str);
   }
 
+  virtual void PragmaDetectMismatch(SourceLocation Loc,
+                                    const std::string &Name,
+                                    const std::string &Value) {
+    First->PragmaDetectMismatch(Loc, Name, Value);
+    Second->PragmaDetectMismatch(Loc, Name, Value);
+  }
+
   virtual void PragmaMessage(SourceLocation Loc, StringRef Namespace,
                              PragmaMessageKind Kind, StringRef Str) {
     First->PragmaMessage(Loc, Namespace, Kind, Str);
@@ -376,9 +391,9 @@ public:
   }
 
   virtual void MacroExpands(const Token &MacroNameTok, const MacroDirective *MD,
-                            SourceRange Range) {
-    First->MacroExpands(MacroNameTok, MD, Range);
-    Second->MacroExpands(MacroNameTok, MD, Range);
+                            SourceRange Range, const MacroArgs *Args) {
+    First->MacroExpands(MacroNameTok, MD, Range, Args);
+    Second->MacroExpands(MacroNameTok, MD, Range, Args);
   }
 
   virtual void MacroDefined(const Token &MacroNameTok, const MacroDirective *MD) {

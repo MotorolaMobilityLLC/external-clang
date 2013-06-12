@@ -33,6 +33,7 @@ using namespace CodeGen;
 CodeGenFunction::CodeGenFunction(CodeGenModule &cgm, bool suppressNewContext)
   : CodeGenTypeCache(cgm), CGM(cgm), Target(cgm.getTarget()),
     Builder(cgm.getModule().getContext()),
+    CapturedStmtInfo(0),
     SanitizePerformTypeCheck(CGM.getSanOpts().Null |
                              CGM.getSanOpts().Alignment |
                              CGM.getSanOpts().ObjectSize |
@@ -44,7 +45,7 @@ CodeGenFunction::CodeGenFunction(CodeGenModule &cgm, bool suppressNewContext)
     DebugInfo(0), DisableDebugInfo(false), CalleeWithThisReturn(0),
     DidCallStackSave(false),
     IndirectBranch(0), SwitchInsn(0), CaseRangeBlock(0), UnreachableBlock(0),
-    NumStopPoints(0), NumSimpleReturnExprs(0),
+    NumReturnExprs(0), NumSimpleReturnExprs(0),
     CXXABIThisDecl(0), CXXABIThisValue(0), CXXThisValue(0),
     CXXDefaultInitExprThis(0),
     CXXStructorImplicitParamDecl(0), CXXStructorImplicitParamValue(0),
@@ -188,14 +189,18 @@ void CodeGenFunction::FinishFunction(SourceLocation EndLoc) {
   assert(BreakContinueStack.empty() &&
          "mismatched push/pop in break/continue stack!");
 
-  // If the function contains only a single, simple return statement,
-  // the cleanup code may become the first breakpoint in the
-  // function. To be safe set the debug location for it to the
-  // location of the return statement.  Otherwise point it to end of
-  // the function's lexical scope.
+  bool OnlySimpleReturnStmts = NumSimpleReturnExprs > 0
+    && NumSimpleReturnExprs == NumReturnExprs;
+  // If the function contains only a simple return statement, the
+  // location before the cleanup code becomes the last useful
+  // breakpoint in the function, because the simple return expression
+  // will be evaluated after the cleanup code. To be safe, set the
+  // debug location for cleanup code to the location of the return
+  // statement. Otherwise the cleanup code should be at the end of the
+  // function's lexical scope.
   if (CGDebugInfo *DI = getDebugInfo()) {
-    if (NumSimpleReturnExprs == 1 && NumStopPoints == 1)
-      DI->EmitLocation(Builder, FirstStopPoint);
+    if (OnlySimpleReturnStmts)
+      DI->EmitLocation(Builder, LastStopPoint);
     else
       DI->EmitLocation(Builder, EndLoc);
   }
@@ -213,7 +218,7 @@ void CodeGenFunction::FinishFunction(SourceLocation EndLoc) {
     EmitRetDbgLoc = false;
 
     if (CGDebugInfo *DI = getDebugInfo())
-      if (NumSimpleReturnExprs == 1 && NumStopPoints == 1)
+      if (OnlySimpleReturnStmts)
         DI->EmitLocation(Builder, EndLoc);
   }
 
@@ -471,7 +476,8 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
   OpenCLKernelMetadata->addOperand(kernelMDNode);
 }
 
-void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
+void CodeGenFunction::StartFunction(GlobalDecl GD,
+                                    QualType RetTy,
                                     llvm::Function *Fn,
                                     const CGFunctionInfo &FnInfo,
                                     const FunctionArgList &Args,
@@ -479,7 +485,8 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
   const Decl *D = GD.getDecl();
 
   DidCallStackSave = false;
-  CurCodeDecl = CurFuncDecl = D;
+  CurCodeDecl = D;
+  CurFuncDecl = (D ? D->getNonClosureContext() : 0);
   FnRetTy = RetTy;
   CurFn = Fn;
   CurFnInfo = &FnInfo;
@@ -578,12 +585,7 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
                                         LambdaThisCaptureField);
       if (LambdaThisCaptureField) {
         // If this lambda captures this, load it.
-        QualType LambdaTagType =
-            getContext().getTagDeclType(LambdaThisCaptureField->getParent());
-        LValue LambdaLV = MakeNaturalAlignAddrLValue(CXXABIThisValue,
-                                                     LambdaTagType);
-        LValue ThisLValue = EmitLValueForField(LambdaLV,
-                                               LambdaThisCaptureField);
+        LValue ThisLValue = EmitLValueForLambdaField(LambdaThisCaptureField);
         CXXThisValue = EmitLoadOfLValue(ThisLValue).getScalarVal();
       }
     } else {
@@ -666,6 +668,7 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
 
   SourceRange BodyRange;
   if (Stmt *Body = FD->getBody()) BodyRange = Body->getSourceRange();
+  CurEHLocation = BodyRange.getEnd();
 
   // CalleeWithThisReturn keeps track of the last callee inside this function
   // that returns 'this'. Before starting the function, we set it to null.
@@ -926,6 +929,16 @@ void CodeGenFunction::EmitBranchOnBoolExpr(const Expr *Cond,
     EmitBranchOnBoolExpr(CondOp->getRHS(), TrueBlock, FalseBlock);
     cond.end(*this);
 
+    return;
+  }
+
+  if (const CXXThrowExpr *Throw = dyn_cast<CXXThrowExpr>(Cond)) {
+    // Conditional operator handling can give us a throw expression as a
+    // condition for a case like:
+    //   br(c ? throw x : y, t, f) -> br(c, br(throw x, t, f), br(y, t, f)
+    // Fold this to:
+    //   br(c, throw x, br(y, t, f))
+    EmitCXXThrowExpr(Throw, /*KeepInsertionPoint*/false);
     return;
   }
 
@@ -1438,3 +1451,5 @@ llvm::Value *CodeGenFunction::EmitFieldAnnotations(const FieldDecl *D,
 
   return V;
 }
+
+CodeGenFunction::CGCapturedStmtInfo::~CGCapturedStmtInfo() { }

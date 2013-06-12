@@ -13,7 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Lex/Preprocessor.h"
-#include "MacroArgs.h"
+#include "clang/Lex/MacroArgs.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
@@ -223,7 +223,7 @@ bool Preprocessor::HandleMacroExpandedIdentifier(Token &Identifier,
   // If this is a builtin macro, like __LINE__ or _Pragma, handle it specially.
   if (MI->isBuiltinMacro()) {
     if (Callbacks) Callbacks->MacroExpands(Identifier, MD,
-                                           Identifier.getLocation());
+                                           Identifier.getLocation(),/*Args=*/0);
     ExpandBuiltinMacro(Identifier);
     return false;
   }
@@ -277,11 +277,12 @@ bool Preprocessor::HandleMacroExpandedIdentifier(Token &Identifier,
       DelayedMacroExpandsCallbacks.push_back(
                               MacroExpandsInfo(Identifier, MD, ExpansionRange));
     } else {
-      Callbacks->MacroExpands(Identifier, MD, ExpansionRange);
+      Callbacks->MacroExpands(Identifier, MD, ExpansionRange, Args);
       if (!DelayedMacroExpandsCallbacks.empty()) {
         for (unsigned i=0, e = DelayedMacroExpandsCallbacks.size(); i!=e; ++i) {
           MacroExpandsInfo &Info = DelayedMacroExpandsCallbacks[i];
-          Callbacks->MacroExpands(Info.Tok, Info.MD, Info.Range);
+          // FIXME: We lose macro args info with delayed callback.
+          Callbacks->MacroExpands(Info.Tok, Info.MD, Info.Range, /*Args=*/0);
         }
         DelayedMacroExpandsCallbacks.clear();
       }
@@ -791,6 +792,16 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("cxx_unrestricted_unions", LangOpts.CPlusPlus11)
            .Case("cxx_user_literals", LangOpts.CPlusPlus11)
            .Case("cxx_variadic_templates", LangOpts.CPlusPlus11)
+           // C++1y features
+           .Case("cxx_binary_literals", LangOpts.CPlusPlus1y)
+           //.Case("cxx_contextual_conversions", LangOpts.CPlusPlus1y)
+           //.Case("cxx_generalized_capture", LangOpts.CPlusPlus1y)
+           //.Case("cxx_generic_lambda", LangOpts.CPlusPlus1y)
+           //.Case("cxx_relaxed_constexpr", LangOpts.CPlusPlus1y)
+           .Case("cxx_return_type_deduction", LangOpts.CPlusPlus1y)
+           //.Case("cxx_runtime_array", LangOpts.CPlusPlus1y)
+           .Case("cxx_aggregate_nsdmi", LangOpts.CPlusPlus1y)
+           //.Case("cxx_variable_templates", LangOpts.CPlusPlus1y)
            // Type traits
            .Case("has_nothrow_assign", LangOpts.CPlusPlus)
            .Case("has_nothrow_copy", LangOpts.CPlusPlus)
@@ -851,7 +862,7 @@ static bool HasExtension(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("c_atomic", true)
            .Case("c_generic_selections", true)
            .Case("c_static_assert", true)
-           // C++0x features supported by other languages as extensions.
+           // C++11 features supported by other languages as extensions.
            .Case("cxx_atomic", LangOpts.CPlusPlus)
            .Case("cxx_deleted_functions", LangOpts.CPlusPlus)
            .Case("cxx_explicit_conversions", LangOpts.CPlusPlus)
@@ -862,6 +873,8 @@ static bool HasExtension(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("cxx_range_for", LangOpts.CPlusPlus)
            .Case("cxx_reference_qualified_functions", LangOpts.CPlusPlus)
            .Case("cxx_rvalue_references", LangOpts.CPlusPlus)
+           // C++1y features supported by other languages as extensions.
+           .Case("cxx_binary_literals", true)
            .Default(false);
 }
 

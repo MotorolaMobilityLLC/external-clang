@@ -647,13 +647,16 @@ void DeclPrinter::VisitVarDecl(VarDecl *D) {
     if (SC != SC_None)
       Out << VarDecl::getStorageClassSpecifierString(SC) << " ";
 
-    switch (D->getTLSKind()) {
-    case VarDecl::TLS_None:
+    switch (D->getTSCSpec()) {
+    case TSCS_unspecified:
       break;
-    case VarDecl::TLS_Static:
+    case TSCS___thread:
+      Out << "__thread ";
+      break;
+    case TSCS__Thread_local:
       Out << "_Thread_local ";
       break;
-    case VarDecl::TLS_Dynamic:
+    case TSCS_thread_local:
       Out << "thread_local ";
       break;
     }
@@ -1177,9 +1180,9 @@ void DeclPrinter::VisitOMPThreadPrivateDecl(OMPThreadPrivateDecl *D) {
   if (!D->varlist_empty()) {
     for (OMPThreadPrivateDecl::varlist_iterator I = D->varlist_begin(),
                                                 E = D->varlist_end();
-         I != E; ++I) {
+                                                I != E; ++I) {
       Out << (I == D->varlist_begin() ? '(' : ',')
-          << *cast<NamedDecl>((*I)->getDecl());
+          << *cast<NamedDecl>(cast<DeclRefExpr>(*I)->getDecl());
     }
     Out << ")";
   }

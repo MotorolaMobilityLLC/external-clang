@@ -63,14 +63,16 @@ static llvm::Constant *buildDisposeHelper(CodeGenModule &CGM,
 /// buildBlockDescriptor is accessed from 5th field of the Block_literal
 /// meta-data and contains stationary information about the block literal.
 /// Its definition will have 4 (or optinally 6) words.
+/// \code
 /// struct Block_descriptor {
 ///   unsigned long reserved;
 ///   unsigned long size;  // size of Block_literal metadata in bytes.
 ///   void *copy_func_helper_decl;  // optional copy helper.
 ///   void *destroy_func_decl; // optioanl destructor helper.
-///   void *block_method_encoding_address;//@encode for block literal signature.
+///   void *block_method_encoding_address; // @encode for block literal signature.
 ///   void *block_layout_info; // encoding of captured block variables.
 /// };
+/// \endcode
 static llvm::Constant *buildBlockDescriptor(CodeGenModule &CGM,
                                             const CGBlockInfo &blockInfo) {
   ASTContext &C = CGM.getContext();
@@ -695,8 +697,8 @@ llvm::Value *CodeGenFunction::EmitBlockLiteral(const CGBlockInfo &blockInfo) {
   bool isLambdaConv = blockInfo.getBlockDecl()->isConversionFromLambda();
   llvm::Constant *blockFn
     = CodeGenFunction(CGM, true).GenerateBlockFunction(CurGD, blockInfo,
-                                                 CurFuncDecl, LocalDeclMap,
-                                                 isLambdaConv);
+                                                       LocalDeclMap,
+                                                       isLambdaConv);
   blockFn = llvm::ConstantExpr::getBitCast(blockFn, VoidPtrTy);
 
   // If there is nothing to capture, we can emit this as a global block.
@@ -1034,7 +1036,7 @@ CodeGenModule::GetAddrOfGlobalBlock(const BlockExpr *blockExpr,
     llvm::DenseMap<const Decl*, llvm::Value*> LocalDeclMap;
     blockFn = CodeGenFunction(*this).GenerateBlockFunction(GlobalDecl(),
                                                            blockInfo,
-                                                           0, LocalDeclMap,
+                                                           LocalDeclMap,
                                                            false);
   }
   blockFn = llvm::ConstantExpr::getBitCast(blockFn, VoidPtrTy);
@@ -1088,7 +1090,6 @@ static llvm::Constant *buildGlobalBlock(CodeGenModule &CGM,
 llvm::Function *
 CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
                                        const CGBlockInfo &blockInfo,
-                                       const Decl *outerFnDecl,
                                        const DeclMapTy &ldm,
                                        bool IsLambdaConversionToBlock) {
   const BlockDecl *blockDecl = blockInfo.getBlockDecl();
@@ -1148,7 +1149,6 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
   // Begin generating the function.
   StartFunction(blockDecl, fnType->getResultType(), fn, fnInfo, args,
                 blockInfo.getBlockExpr()->getBody()->getLocStart());
-  CurFuncDecl = outerFnDecl; // StartFunction sets this to blockDecl
 
   // Okay.  Undo some of what StartFunction did.
   
@@ -1182,23 +1182,6 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
                                                 blockInfo.CXXThisIndex,
                                                 "block.captured-this");
     CXXThisValue = Builder.CreateLoad(addr, "this");
-  }
-
-  // LoadObjCSelf() expects there to be an entry for 'self' in LocalDeclMap;
-  // appease it.
-  if (const ObjCMethodDecl *method
-        = dyn_cast_or_null<ObjCMethodDecl>(CurFuncDecl)) {
-    const VarDecl *self = method->getSelfDecl();
-
-    // There might not be a capture for 'self', but if there is...
-    if (blockInfo.Captures.count(self)) {
-      const CGBlockInfo::Capture &capture = blockInfo.getCapture(self);
-
-      llvm::Value *selfAddr = Builder.CreateStructGEP(BlockPointer,
-                                                      capture.getIndex(),
-                                                      "block.captured-self");
-      LocalDeclMap[self] = selfAddr;
-    }
   }
 
   // Also force all the constant captures.

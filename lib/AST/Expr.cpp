@@ -50,9 +50,9 @@ const CXXRecordDecl *Expr::getBestDynamicClassType() const {
   return cast<CXXRecordDecl>(D);
 }
 
-const Expr *
-Expr::skipRValueSubobjectAdjustments(
-                     SmallVectorImpl<SubobjectAdjustment> &Adjustments) const  {
+const Expr *Expr::skipRValueSubobjectAdjustments(
+    SmallVectorImpl<const Expr *> &CommaLHSs,
+    SmallVectorImpl<SubobjectAdjustment> &Adjustments) const {
   const Expr *E = this;
   while (true) {
     E = E->IgnoreParens();
@@ -76,9 +76,11 @@ Expr::skipRValueSubobjectAdjustments(
       if (!ME->isArrow() && ME->getBase()->isRValue()) {
         assert(ME->getBase()->getType()->isRecordType());
         if (FieldDecl *Field = dyn_cast<FieldDecl>(ME->getMemberDecl())) {
-          E = ME->getBase();
-          Adjustments.push_back(SubobjectAdjustment(Field));
-          continue;
+          if (!Field->isBitField()) {
+            E = ME->getBase();
+            Adjustments.push_back(SubobjectAdjustment(Field));
+            continue;
+          }
         }
       }
     } else if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
@@ -88,6 +90,11 @@ Expr::skipRValueSubobjectAdjustments(
         const MemberPointerType *MPT =
           BO->getRHS()->getType()->getAs<MemberPointerType>();
         Adjustments.push_back(SubobjectAdjustment(MPT, BO->getRHS()));
+        continue;
+      } else if (BO->getOpcode() == BO_Comma) {
+        CommaLHSs.push_back(BO->getLHS());
+        E = BO->getRHS();
+        continue;
       }
     }
 
@@ -423,7 +430,7 @@ DeclRefExpr *DeclRefExpr::Create(ASTContext &Context,
     FoundD = 0;
 
   std::size_t Size = sizeof(DeclRefExpr);
-  if (QualifierLoc != 0)
+  if (QualifierLoc)
     Size += sizeof(NestedNameSpecifierLoc);
   if (FoundD)
     Size += sizeof(NamedDecl *);
@@ -3149,7 +3156,7 @@ bool Expr::isObjCSelfExpr() const {
   return M->getSelfDecl() == Param;
 }
 
-FieldDecl *Expr::getBitField() {
+FieldDecl *Expr::getSourceBitField() {
   Expr *E = this->IgnoreParens();
 
   while (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
@@ -3165,6 +3172,11 @@ FieldDecl *Expr::getBitField() {
       if (Field->isBitField())
         return Field;
 
+  if (ObjCIvarRefExpr *IvarRef = dyn_cast<ObjCIvarRefExpr>(E))
+    if (FieldDecl *Ivar = dyn_cast<FieldDecl>(IvarRef->getDecl()))
+      if (Ivar->isBitField())
+        return Ivar;
+
   if (DeclRefExpr *DeclRef = dyn_cast<DeclRefExpr>(E))
     if (FieldDecl *Field = dyn_cast<FieldDecl>(DeclRef->getDecl()))
       if (Field->isBitField())
@@ -3172,10 +3184,10 @@ FieldDecl *Expr::getBitField() {
 
   if (BinaryOperator *BinOp = dyn_cast<BinaryOperator>(E)) {
     if (BinOp->isAssignmentOp() && BinOp->getLHS())
-      return BinOp->getLHS()->getBitField();
+      return BinOp->getLHS()->getSourceBitField();
 
     if (BinOp->getOpcode() == BO_Comma && BinOp->getRHS())
-      return BinOp->getRHS()->getBitField();
+      return BinOp->getRHS()->getSourceBitField();
   }
 
   return 0;
@@ -3560,13 +3572,12 @@ ShuffleVectorExpr::ShuffleVectorExpr(ASTContext &C, ArrayRef<Expr*> args,
   }
 }
 
-void ShuffleVectorExpr::setExprs(ASTContext &C, Expr ** Exprs,
-                                 unsigned NumExprs) {
+void ShuffleVectorExpr::setExprs(ASTContext &C, ArrayRef<Expr *> Exprs) {
   if (SubExprs) C.Deallocate(SubExprs);
 
-  SubExprs = new (C) Stmt* [NumExprs];
-  this->NumExprs = NumExprs;
-  memcpy(SubExprs, Exprs, sizeof(Expr *) * NumExprs);
+  this->NumExprs = Exprs.size();
+  SubExprs = new (C) Stmt*[NumExprs];
+  memcpy(SubExprs, Exprs.data(), sizeof(Expr *) * Exprs.size());
 }
 
 GenericSelectionExpr::GenericSelectionExpr(ASTContext &Context,

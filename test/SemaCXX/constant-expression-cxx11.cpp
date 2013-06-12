@@ -339,6 +339,46 @@ static_assert(!same(4, 4), "");
 static_assert(same(n, n), "");
 static_assert(sameTemporary(9), "");
 
+struct A { int &&r; };
+struct B { A &&a1; A &&a2; };
+
+constexpr B b1 { { 1 }, { 2 } }; // expected-note {{temporary created here}}
+static_assert(&b1.a1 != &b1.a2, "");
+static_assert(&b1.a1.r != &b1.a2.r, ""); // expected-error {{constant expression}} expected-note {{outside the expression that created the temporary}}
+
+constexpr B &&b2 { { 3 }, { 4 } }; // expected-note {{temporary created here}}
+static_assert(&b1 != &b2, "");
+static_assert(&b1.a1 != &b2.a1, ""); // expected-error {{constant expression}} expected-note {{outside the expression that created the temporary}}
+
+constexpr thread_local B b3 { { 1 }, { 2 } }; // expected-error {{constant expression}} expected-note {{reference to temporary}} expected-note {{here}}
+void foo() {
+  constexpr static B b1 { { 1 }, { 2 } }; // ok
+  constexpr thread_local B b2 { { 1 }, { 2 } }; // expected-error {{constant expression}} expected-note {{reference to temporary}} expected-note {{here}}
+  constexpr B b3 { { 1 }, { 2 } }; // expected-error {{constant expression}} expected-note {{reference to temporary}} expected-note {{here}}
+}
+
+constexpr B &&b4 = ((1, 2), 3, 4, B { {10}, {{20}} }); // expected-warning 4{{unused}}
+static_assert(&b4 != &b2, "");
+
+// Proposed DR: copy-elision doesn't trigger lifetime extension.
+constexpr B b5 = B{ {0}, {0} }; // expected-error {{constant expression}} expected-note {{reference to temporary}} expected-note {{here}}
+
+namespace NestedNonStatic {
+  // Proposed DR: for a reference constant expression to refer to a static
+  // storage duration temporary, that temporary must itself be initialized
+  // by a constant expression (a core constant expression is not enough).
+  struct A { int &&r; };
+  struct B { A &&a; };
+  constexpr B a = { A{0} }; // ok
+  constexpr B b = { A(A{0}) }; // expected-error {{constant expression}} expected-note {{reference to temporary}} expected-note {{here}}
+}
+
+namespace FakeInitList {
+  struct init_list_3_ints { const int (&x)[3]; };
+  struct init_list_2_init_list_3_ints { const init_list_3_ints (&x)[2]; };
+  constexpr init_list_2_init_list_3_ints ils = { { { { 1, 2, 3 } }, { { 4, 5, 6 } } } };
+}
+
 }
 
 constexpr int strcmp_ce(const char *p, const char *q) {
@@ -413,6 +453,19 @@ struct V {
   constexpr V() : c("hi!") {}
 };
 static_assert(V().c[1] == "i"[0], "");
+
+namespace Parens {
+  constexpr unsigned char a[] = ("foo"), b[] = {"foo"}, c[] = {("foo")},
+                          d[4] = ("foo"), e[5] = {"foo"}, f[6] = {("foo")};
+  static_assert(a[0] == 'f', "");
+  static_assert(b[1] == 'o', "");
+  static_assert(c[2] == 'o', "");
+  static_assert(d[0] == 'f', "");
+  static_assert(e[1] == 'o', "");
+  static_assert(f[2] == 'o', "");
+  static_assert(f[5] == 0, "");
+  static_assert(f[6] == 0, ""); // expected-error {{constant expression}} expected-note {{one-past-the-end}}
+}
 
 }
 
@@ -559,7 +612,7 @@ struct E {
   constexpr E() : p(&p) {}
   void *p;
 };
-constexpr const E &e1 = E(); // expected-error {{constant expression}} expected-note {{reference to temporary is not a constant expression}} expected-note {{temporary created here}}
+constexpr const E &e1 = E();
 // This is a constant expression if we elide the copy constructor call, and
 // is not a constant expression if we don't! But we do, so it is.
 constexpr E e2 = E();
@@ -765,21 +818,26 @@ namespace Temporaries {
 struct S {
   constexpr S() {}
   constexpr int f() const;
+  constexpr int g() const;
 };
 struct T : S {
   constexpr T(int n) : S(), n(n) {}
   int n;
 };
 constexpr int S::f() const {
-  // 'this' must be the postfix-expression in a class member access expression,
-  // so we can't just use
-  //   return static_cast<T*>(this)->n;
-  return this->*(int(S::*))&T::n;
+  return static_cast<const T*>(this)->n; // expected-note {{cannot cast}}
+}
+constexpr int S::g() const {
+  // FIXME: Better diagnostic for this.
+  return this->*(int(S::*))&T::n; // expected-note {{subexpression}}
 }
 // The T temporary is implicitly cast to an S subobject, but we can recover the
 // T full-object via a base-to-derived cast, or a derived-to-base-casted member
 // pointer.
+static_assert(S().f(), ""); // expected-error {{constant expression}} expected-note {{in call to '&Temporaries::S()->f()'}}
+static_assert(S().g(), ""); // expected-error {{constant expression}} expected-note {{in call to '&Temporaries::S()->g()'}}
 static_assert(T(3).f() == 3, "");
+static_assert(T(4).g() == 4, "");
 
 constexpr int f(const S &s) {
   return static_cast<const T&>(s).n;
@@ -1125,6 +1183,31 @@ namespace ComplexConstexpr {
   static_assert(&__imag test6 == &__real test6 + 1, "");
 }
 
+// _Atomic(T) is exactly like T for the purposes of constant expression
+// evaluation..
+namespace Atomic {
+  constexpr _Atomic int n = 3;
+
+  struct S { _Atomic(double) d; };
+  constexpr S s = { 0.5 };
+  constexpr double d1 = s.d;
+  constexpr double d2 = n;
+  constexpr _Atomic double d3 = n;
+
+  constexpr _Atomic(int) n2 = d3;
+  static_assert(d1 == 0.5, "");
+  static_assert(d3 == 3.0, "");
+
+  namespace PR16056 {
+    struct TestVar {
+      _Atomic(int) value;
+      constexpr TestVar(int value) : value(value) {}
+    };
+    constexpr TestVar testVar{-1};
+    static_assert(testVar.value == -1, "");
+  }
+}
+
 namespace InstantiateCaseStmt {
   template<int x> constexpr int f() { return x; }
   template<int x> int g(int c) { switch(c) { case f<x>(): return 1; } return 0; }
@@ -1239,8 +1322,23 @@ struct Wrap {
 constexpr const Wrap &g(const Wrap &w) { return w; }
 constexpr int k2 = g({0}).value; // ok
 
-constexpr const int &i = 0; // expected-error {{constant expression}} expected-note {{temporary}} expected-note 2{{here}}
-constexpr const int j = i; // expected-error {{constant expression}} expected-note {{initializer of 'i' is not a constant expression}}
+// The temporary here has static storage duration, so we can bind a constexpr
+// reference to it.
+constexpr const int &i = 1;
+constexpr const int j = i;
+static_assert(j == 1, "");
+
+// The temporary here is not const, so it can't be read outside the expression
+// in which it was created (per the C++14 rules, which we use to avoid a C++11
+// defect).
+constexpr int &&k = 1; // expected-note {{temporary created here}}
+constexpr const int l = k; // expected-error {{constant expression}} expected-note {{read of temporary}}
+
+void f() {
+  // The temporary here has automatic storage duration, so we can't bind a
+  // constexpr reference to it.
+  constexpr const int &i = 1; // expected-error {{constant expression}} expected-note 2{{temporary}}
+}
 
 }
 
@@ -1489,4 +1587,12 @@ namespace PR15884 {
   // expected-error@-2 {{constexpr variable 'p' must be initialized by a constant expression}}
   // expected-note@-3 {{pointer to temporary is not a constant expression}}
   // expected-note@-4 {{temporary created here}}
+}
+
+namespace AfterError {
+  // FIXME: Suppress the 'no return statements' diagnostic if the body is invalid.
+  constexpr int error() { // expected-error {{no return statement}}
+    return foobar; // expected-error {{undeclared identifier}}
+  }
+  constexpr int k = error(); // expected-error {{must be initialized by a constant expression}}
 }

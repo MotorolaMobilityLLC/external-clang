@@ -256,7 +256,8 @@ void Sema::LookupTemplateName(LookupResult &Found,
     assert(!SS.isSet() && "ObjectType and scope specifier cannot coexist");
     LookupCtx = computeDeclContext(ObjectType);
     isDependent = ObjectType->isDependentType();
-    assert((isDependent || !ObjectType->isIncompleteType()) &&
+    assert((isDependent || !ObjectType->isIncompleteType() ||
+            ObjectType->castAs<TagType>()->isBeingDefined()) &&
            "Caller should have completed object type");
     
     // Template names cannot appear inside an Objective-C class or object type.
@@ -2007,7 +2008,7 @@ QualType Sema::CheckTemplateIdType(TemplateName Name,
     TemplateArgLists.addOuterTemplateArguments(&TemplateArgs);
     unsigned Depth = AliasTemplate->getTemplateParameters()->getDepth();
     for (unsigned I = 0; I < Depth; ++I)
-      TemplateArgLists.addOuterTemplateArguments(0, 0);
+      TemplateArgLists.addOuterTemplateArguments(None);
 
     LocalInstantiationScope Scope(*this);
     InstantiatingTemplate Inst(*this, TemplateLoc, Template);
@@ -3793,14 +3794,14 @@ CheckTemplateArgumentAddressOfObjectOrFunction(Sema &S,
   }
 
   // Address / reference template args must have external linkage in C++98.
-  if (Entity->getLinkage() == InternalLinkage) {
+  if (Entity->getFormalLinkage() == InternalLinkage) {
     S.Diag(Arg->getLocStart(), S.getLangOpts().CPlusPlus11 ?
              diag::warn_cxx98_compat_template_arg_object_internal :
              diag::ext_template_arg_object_internal)
       << !Func << Entity << Arg->getSourceRange();
     S.Diag(Entity->getLocation(), diag::note_template_arg_internal_object)
       << !Func;
-  } else if (Entity->getLinkage() == NoLinkage) {
+  } else if (!Entity->hasLinkage()) {
     S.Diag(Arg->getLocStart(), diag::err_template_arg_object_no_linkage)
       << !Func << Entity << Arg->getSourceRange();
     S.Diag(Entity->getLocation(), diag::note_template_arg_internal_object)
@@ -5300,6 +5301,7 @@ Sema::ActOnClassTemplateSpecialization(Scope *S, unsigned TagSpec,
   } else if (TUK != TUK_Friend) {
     Diag(KWLoc, diag::err_template_spec_needs_header)
       << FixItHint::CreateInsertion(KWLoc, "template<> ");
+    TemplateKWLoc = KWLoc;
     isExplicitSpecialization = true;
   }
 
@@ -5948,9 +5950,7 @@ Sema::CheckFunctionTemplateSpecialization(FunctionDecl *FD,
           const FunctionProtoType *FPT = FT->castAs<FunctionProtoType>();
           FunctionProtoType::ExtProtoInfo EPI = FPT->getExtProtoInfo();
           EPI.TypeQuals |= Qualifiers::Const;
-          FT = Context.getFunctionType(FPT->getResultType(),
-                                       ArrayRef<QualType>(FPT->arg_type_begin(),
-                                                          FPT->getNumArgs()),
+          FT = Context.getFunctionType(FPT->getResultType(), FPT->getArgTypes(),
                                        EPI);
         }
       }

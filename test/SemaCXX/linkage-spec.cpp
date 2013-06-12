@@ -106,3 +106,14 @@ namespace PR9162 {
     return sizeof(ArtsSink);
   }
 }
+
+namespace pr14958 {
+  namespace js { extern int ObjectClass; }
+  extern "C" {
+    namespace js {}
+  }
+  int js::ObjectClass;
+}
+
+extern "C" void PR16167; // expected-error {{variable has incomplete type 'void'}}
+extern void PR16167_0; // expected-error {{variable has incomplete type 'void'}}

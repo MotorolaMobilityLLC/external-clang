@@ -377,12 +377,6 @@ bool PCHValidator::ReadPreprocessorOptions(const PreprocessorOptions &PPOpts,
                                   PP.getLangOpts());
 }
 
-void PCHValidator::ReadHeaderFileInfo(const HeaderFileInfo &HFI,
-                                      unsigned ID) {
-  PP.getHeaderSearchInfo().setHeaderFileInfoForUID(HFI, ID);
-  ++NumHeaderInfos;
-}
-
 void PCHValidator::ReadCounter(const ModuleFile &M, unsigned Value) {
   PP.setCounterValue(Value);
 }
@@ -765,6 +759,10 @@ bool ASTReader::ReadDeclContextStorage(ModuleFile &M,
 
 void ASTReader::Error(StringRef Msg) {
   Error(diag::err_fe_pch_malformed, Msg);
+  if (Context.getLangOpts().Modules && !Diags.isDiagnosticInFlight()) {
+    Diag(diag::note_module_cache_path)
+      << PP.getHeaderSearchInfo().getModuleCachePath();
+  }
 }
 
 void ASTReader::Error(unsigned DiagID,
@@ -1103,6 +1101,19 @@ bool ASTReader::ReadBlockAbbrevs(BitstreamCursor &Cursor, unsigned BlockID) {
   }
 }
 
+Token ASTReader::ReadToken(ModuleFile &F, const RecordData &Record,
+                           unsigned &Idx) {
+  Token Tok;
+  Tok.startToken();
+  Tok.setLocation(ReadSourceLocation(F, Record, Idx));
+  Tok.setLength(Record[Idx++]);
+  if (IdentifierInfo *II = getLocalIdentifier(F, Record[Idx++]))
+    Tok.setIdentifierInfo(II);
+  Tok.setKind((tok::TokenKind)Record[Idx++]);
+  Tok.setFlag((Token::TokenFlags)Record[Idx++]);
+  return Tok;
+}
+
 MacroInfo *ASTReader::ReadMacroRecord(ModuleFile &F, uint64_t Offset) {
   BitstreamCursor &Stream = F.MacroCursor;
 
@@ -1203,14 +1214,8 @@ MacroInfo *ASTReader::ReadMacroRecord(ModuleFile &F, uint64_t Offset) {
       // erroneous, just pretend we didn't see this.
       if (Macro == 0) break;
 
-      Token Tok;
-      Tok.startToken();
-      Tok.setLocation(ReadSourceLocation(F, Record[0]));
-      Tok.setLength(Record[1]);
-      if (IdentifierInfo *II = getLocalIdentifier(F, Record[2]))
-        Tok.setIdentifierInfo(II);
-      Tok.setKind((tok::TokenKind)Record[3]);
-      Tok.setFlag((Token::TokenFlags)Record[4]);
+      unsigned Idx = 0;
+      Token Tok = ReadToken(F, Record, Idx);
       Macro->AddTokenToBody(Tok);
       break;
     }
@@ -1580,18 +1585,21 @@ void ASTReader::installPCHMacroDirectives(IdentifierInfo *II,
 /// \brief For the given macro definitions, check if they are both in system
 /// modules.
 static bool areDefinedInSystemModules(MacroInfo *PrevMI, MacroInfo *NewMI,
-                                       Module *NewOwner, ASTReader &Reader) {
+                                      Module *NewOwner, ASTReader &Reader) {
   assert(PrevMI && NewMI);
-  if (!NewOwner)
-    return false;
   Module *PrevOwner = 0;
   if (SubmoduleID PrevModID = PrevMI->getOwningModuleID())
     PrevOwner = Reader.getSubmodule(PrevModID);
-  if (!PrevOwner)
+  SourceManager &SrcMgr = Reader.getSourceManager();
+  bool PrevInSystem
+    = PrevOwner? PrevOwner->IsSystem
+               : SrcMgr.isInSystemHeader(PrevMI->getDefinitionLoc());
+  bool NewInSystem
+    = NewOwner? NewOwner->IsSystem
+              : SrcMgr.isInSystemHeader(NewMI->getDefinitionLoc());
+  if (PrevOwner && PrevOwner == NewOwner)
     return false;
-  if (PrevOwner == NewOwner)
-    return false;
-  return PrevOwner->IsSystem && NewOwner->IsSystem;
+  return PrevInSystem && NewInSystem;
 }
 
 void ASTReader::installImportedMacro(IdentifierInfo *II, MacroDirective *MD,
@@ -1714,6 +1722,10 @@ InputFile ASTReader::getInputFile(ModuleFile &F, unsigned ID, bool Complain) {
          )) {
       if (Complain) {
         Error(diag::err_fe_pch_file_modified, Filename, F.FileName);
+        if (Context.getLangOpts().Modules && !Diags.isDiagnosticInFlight()) {
+          Diag(diag::note_module_cache_path)
+            << PP.getHeaderSearchInfo().getModuleCachePath();
+        }
       }
 
       IsOutOfDate = true;
@@ -2891,6 +2903,9 @@ ASTReader::ASTReadResult ASTReader::ReadAST(const std::string &FileName,
                                             ModuleKind Type,
                                             SourceLocation ImportLoc,
                                             unsigned ClientLoadCapabilities) {
+  llvm::SaveAndRestore<SourceLocation>
+    SetCurImportLocRAII(CurrentImportLoc, ImportLoc);
+
   // Bump the generation number.
   unsigned PreviousGeneration = CurrentGeneration++;
 
@@ -3321,10 +3336,10 @@ void ASTReader::finalizeForWriting() {
   HiddenNamesMap.clear();
 }
 
-/// SkipCursorToControlBlock - Given a cursor at the start of an AST file, scan
-/// ahead and drop the cursor into the start of the CONTROL_BLOCK, returning
-/// false on success and true on failure.
-static bool SkipCursorToControlBlock(BitstreamCursor &Cursor) {
+/// \brief Given a cursor at the start of an AST file, scan ahead and drop the
+/// cursor into the start of the given block ID, returning false on success and
+/// true on failure.
+static bool SkipCursorToBlock(BitstreamCursor &Cursor, unsigned BlockID) {
   while (1) {
     llvm::BitstreamEntry Entry = Cursor.advance();
     switch (Entry.Kind) {
@@ -3338,8 +3353,8 @@ static bool SkipCursorToControlBlock(BitstreamCursor &Cursor) {
       break;
         
     case llvm::BitstreamEntry::SubBlock:
-      if (Entry.ID == CONTROL_BLOCK_ID) {
-        if (Cursor.EnterSubBlock(CONTROL_BLOCK_ID))
+      if (Entry.ID == BlockID) {
+        if (Cursor.EnterSubBlock(BlockID))
           return true;
         // Found it!
         return false;
@@ -3383,7 +3398,7 @@ std::string ASTReader::getOriginalSourceFile(const std::string &ASTFileName,
   }
   
   // Scan for the CONTROL_BLOCK_ID block.
-  if (SkipCursorToControlBlock(Stream)) {
+  if (SkipCursorToBlock(Stream, CONTROL_BLOCK_ID)) {
     Diags.Report(diag::err_fe_pch_malformed_block) << ASTFileName;
     return std::string();
   }
@@ -3470,8 +3485,29 @@ bool ASTReader::readASTFileControlBlock(StringRef Filename,
   }
 
   // Scan for the CONTROL_BLOCK_ID block.
-  if (SkipCursorToControlBlock(Stream))
+  if (SkipCursorToBlock(Stream, CONTROL_BLOCK_ID))
     return true;
+
+  bool NeedsInputFiles = Listener.needsInputFileVisitation();
+  BitstreamCursor InputFilesCursor;
+  if (NeedsInputFiles) {
+    InputFilesCursor = Stream;
+    if (SkipCursorToBlock(InputFilesCursor, INPUT_FILES_BLOCK_ID))
+      return true;
+
+    // Read the abbreviations
+    while (true) {
+      uint64_t Offset = InputFilesCursor.GetCurrentBitNo();
+      unsigned Code = InputFilesCursor.ReadCode();
+
+      // We expect all abbrevs to be at the start of the block.
+      if (Code != llvm::bitc::DEFINE_ABBREV) {
+        InputFilesCursor.JumpToBit(Offset);
+        break;
+      }
+      InputFilesCursor.ReadAbbrevRecord();
+    }
+  }
   
   // Scan for ORIGINAL_FILE inside the control block.
   RecordData Record;
@@ -3526,6 +3562,35 @@ bool ASTReader::readASTFileControlBlock(StringRef Filename,
       if (ParsePreprocessorOptions(Record, false, Listener,
                                    IgnoredSuggestedPredefines))
         return true;
+      break;
+    }
+
+    case INPUT_FILE_OFFSETS: {
+      if (!NeedsInputFiles)
+        break;
+
+      unsigned NumInputFiles = Record[0];
+      unsigned NumUserFiles = Record[1];
+      const uint32_t *InputFileOffs = (const uint32_t *)Blob.data();
+      for (unsigned I = 0; I != NumInputFiles; ++I) {
+        // Go find this input file.
+        bool isSystemFile = I >= NumUserFiles;
+        BitstreamCursor &Cursor = InputFilesCursor;
+        SavedStreamPosition SavedPosition(Cursor);
+        Cursor.JumpToBit(InputFileOffs[I]);
+
+        unsigned Code = Cursor.ReadCode();
+        RecordData Record;
+        StringRef Blob;
+        bool shouldContinue = false;
+        switch ((InputFileRecordTypes)Cursor.readRecord(Code, Record, &Blob)) {
+        case INPUT_FILE:
+          shouldContinue = Listener.visitInputFile(Blob, isSystemFile);
+          break;
+        }
+        if (!shouldContinue)
+          break;
+      }
       break;
     }
 
@@ -4337,11 +4402,8 @@ namespace {
 HeaderFileInfo ASTReader::GetHeaderFileInfo(const FileEntry *FE) {
   HeaderFileInfoVisitor Visitor(FE);
   ModuleMgr.visit(&HeaderFileInfoVisitor::visit, &Visitor);
-  if (Optional<HeaderFileInfo> HFI = Visitor.getHeaderFileInfo()) {
-    if (Listener)
-      Listener->ReadHeaderFileInfo(*HFI, FE->getUID());
+  if (Optional<HeaderFileInfo> HFI = Visitor.getHeaderFileInfo())
     return *HFI;
-  }
   
   return HeaderFileInfo();
 }
@@ -6934,9 +6996,16 @@ ASTReader::ReadCXXCtorInitializers(ModuleFile &F, const RecordData &Record,
                                                MemberOrEllipsisLoc, LParenLoc,
                                                Init, RParenLoc);
       } else {
-        BOMInit = CXXCtorInitializer::Create(Context, Member, MemberOrEllipsisLoc,
-                                             LParenLoc, Init, RParenLoc,
-                                             Indices.data(), Indices.size());
+        if (IndirectMember) {
+          assert(Indices.empty() && "Indirect field improperly initialized");
+          BOMInit = new (Context) CXXCtorInitializer(Context, IndirectMember,
+                                                     MemberOrEllipsisLoc, LParenLoc,
+                                                     Init, RParenLoc);
+        } else {
+          BOMInit = CXXCtorInitializer::Create(Context, Member, MemberOrEllipsisLoc,
+                                               LParenLoc, Init, RParenLoc,
+                                               Indices.data(), Indices.size());
+        }
       }
 
       if (IsWritten)
@@ -7111,7 +7180,7 @@ CXXTemporary *ASTReader::ReadCXXTemporary(ModuleFile &F,
 }
 
 DiagnosticBuilder ASTReader::Diag(unsigned DiagID) {
-  return Diag(SourceLocation(), DiagID);
+  return Diag(CurrentImportLoc, DiagID);
 }
 
 DiagnosticBuilder ASTReader::Diag(SourceLocation Loc, unsigned DiagID) {

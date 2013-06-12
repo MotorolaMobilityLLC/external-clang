@@ -1149,6 +1149,9 @@ bool Parser::IsTemplateArgumentList(unsigned Skip) {
 ///         template-argument-list ',' template-argument
 bool
 Parser::ParseTemplateArgumentList(TemplateArgList &TemplateArgs) {
+  // Template argument lists are constant-evaluation contexts.
+  EnterExpressionEvaluationContext EvalContext(Actions,Sema::ConstantEvaluated);
+
   while (true) {
     ParsedTemplateArgument Arg = ParseTemplateArgument();
     if (Tok.is(tok::ellipsis)) {
@@ -1260,12 +1263,14 @@ void Parser::ParseLateTemplatedFuncDef(LateParsedTemplatedFunction &LMT) {
       Actions.ActOnReenterTemplateScope(getCurScope(), MD);
       ++CurTemplateDepthTracker;
     } else if (CXXRecordDecl *MD = dyn_cast_or_null<CXXRecordDecl>(*II)) {
-      bool ManageScope = MD->getDescribedClassTemplate() != 0;
+      bool IsClassTemplate = MD->getDescribedClassTemplate() != 0;
       TemplateParamScopeStack.push_back(
-          new ParseScope(this, Scope::TemplateParamScope, ManageScope));
+          new ParseScope(this, Scope::TemplateParamScope, 
+                        /*ManageScope*/IsClassTemplate));
       Actions.ActOnReenterTemplateScope(getCurScope(),
                                         MD->getDescribedClassTemplate());
-      ++CurTemplateDepthTracker;
+      if (IsClassTemplate) 
+        ++CurTemplateDepthTracker;
     }
     TemplateParamScopeStack.push_back(new ParseScope(this, Scope::DeclScope));
     Actions.PushDeclContext(Actions.getCurScope(), *II);

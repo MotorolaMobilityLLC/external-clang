@@ -333,7 +333,7 @@ static bool tryDiagnoseOverloadedCast(Sema &S, CastType CT,
     : (CT == CT_Functional)? InitializationKind::CreateFunctionalCast(range,
                                                              listInitialization)
     : InitializationKind::CreateCast(/*type range?*/ range);
-  InitializationSequence sequence(S, entity, initKind, &src, 1);
+  InitializationSequence sequence(S, entity, initKind, src);
 
   assert(sequence.Failed() && "initialization succeeded on second try?");
   switch (sequence.getFailureKind()) {
@@ -1418,7 +1418,7 @@ TryStaticImplicitCast(Sema &Self, ExprResult &SrcExpr, QualType DestType,
         ? InitializationKind::CreateFunctionalCast(OpRange, ListInitialization)
     : InitializationKind::CreateCast(OpRange);
   Expr *SrcExprRaw = SrcExpr.get();
-  InitializationSequence InitSeq(Self, Entity, InitKind, &SrcExprRaw, 1);
+  InitializationSequence InitSeq(Self, Entity, InitKind, SrcExprRaw);
 
   // At this point of CheckStaticCast, if the destination is a reference,
   // or the expression is an overload expression this has to work. 
@@ -1452,11 +1452,21 @@ static TryCastResult TryConstCast(Sema &Self, Expr *SrcExpr, QualType DestType,
   DestType = Self.Context.getCanonicalType(DestType);
   QualType SrcType = SrcExpr->getType();
   if (const ReferenceType *DestTypeTmp =DestType->getAs<ReferenceType>()) {
-    if (DestTypeTmp->isLValueReferenceType() && !SrcExpr->isLValue()) {
+    if (isa<LValueReferenceType>(DestTypeTmp) && !SrcExpr->isLValue()) {
       // Cannot const_cast non-lvalue to lvalue reference type. But if this
       // is C-style, static_cast might find a way, so we simply suggest a
       // message and tell the parent to keep searching.
       msg = diag::err_bad_cxx_cast_rvalue;
+      return TC_NotApplicable;
+    }
+
+    // It's not completely clear under the standard whether we can
+    // const_cast bit-field gl-values.  Doing so would not be
+    // intrinsically complicated, but for now, we say no for
+    // consistency with other compilers and await the word of the
+    // committee.
+    if (SrcExpr->refersToBitField()) {
+      msg = diag::err_bad_cxx_cast_bitfield;
       return TC_NotApplicable;
     }
 
@@ -1604,8 +1614,18 @@ static void checkIntToPointerCast(bool CStyle, SourceLocation Loc,
       && !SrcType->isBooleanType()
       && !SrcType->isEnumeralType()
       && !SrcExpr->isIntegerConstantExpr(Self.Context)
-      && Self.Context.getTypeSize(DestType) > Self.Context.getTypeSize(SrcType))
-    Self.Diag(Loc, diag::warn_int_to_pointer_cast) << SrcType << DestType;
+      && Self.Context.getTypeSize(DestType) >
+         Self.Context.getTypeSize(SrcType)) {
+    // Separate between casts to void* and non-void* pointers.
+    // Some APIs use (abuse) void* for something like a user context,
+    // and often that value is an integer even if it isn't a pointer itself.
+    // Having a separate warning flag allows users to control the warning
+    // for their workflow.
+    unsigned Diag = DestType->isVoidPointerType() ?
+                      diag::warn_int_to_void_pointer_cast
+                    : diag::warn_int_to_pointer_cast;
+    Self.Diag(Loc, Diag) << SrcType << DestType;
+  }
 }
 
 static TryCastResult TryReinterpretCast(Sema &Self, ExprResult &SrcExpr,
@@ -1793,10 +1813,12 @@ static TryCastResult TryReinterpretCast(Sema &Self, ExprResult &SrcExpr,
     assert(srcIsPtr && "One type must be a pointer");
     // C++ 5.2.10p4: A pointer can be explicitly converted to any integral
     //   type large enough to hold it; except in Microsoft mode, where the
-    //   integral type size doesn't matter.
+    //   integral type size doesn't matter (except we don't allow bool).
+    bool MicrosoftException = Self.getLangOpts().MicrosoftExt &&
+                              !DestType->isBooleanType();
     if ((Self.Context.getTypeSize(SrcType) >
          Self.Context.getTypeSize(DestType)) &&
-         !Self.getLangOpts().MicrosoftExt) {
+         !MicrosoftException) {
       msg = diag::err_bad_reinterpret_cast_small_int;
       return TC_Failed;
     }

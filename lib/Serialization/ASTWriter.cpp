@@ -1542,6 +1542,8 @@ void ASTWriter::WriteHeaderSearch(const HeaderSearch &HS, StringRef isysroot) {
     const HeaderFileInfo &HFI = HS.getFileInfo(File);
     if (HFI.External && Chain)
       continue;
+    if (HFI.isModuleHeader && !HFI.isCompilingModuleHeader)
+      continue;
 
     // Turn the file name into an absolute path, if it isn't already.
     const char *Filename = File->getName();
@@ -2012,18 +2014,7 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
       // tokens in it because they are created by the parser, and thus can't
       // be in a macro definition.
       const Token &Tok = MI->getReplacementToken(TokNo);
-
-      Record.push_back(Tok.getLocation().getRawEncoding());
-      Record.push_back(Tok.getLength());
-
-      // FIXME: When reading literal tokens, reconstruct the literal pointer
-      // if it is needed.
-      AddIdentifierRef(Tok.getIdentifierInfo(), Record);
-      // FIXME: Should translate token kind to a stable encoding.
-      Record.push_back(Tok.getKind());
-      // FIXME: Should translate token flags to a stable encoding.
-      Record.push_back(Tok.getFlags());
-
+      AddToken(Tok, Record);
       Stream.EmitRecord(PP_TOKEN, Record);
       Record.clear();
     }
@@ -3661,6 +3652,19 @@ void ASTWriter::WriteAttributes(ArrayRef<const Attr*> Attrs,
   }
 }
 
+void ASTWriter::AddToken(const Token &Tok, RecordDataImpl &Record) {
+  AddSourceLocation(Tok.getLocation(), Record);
+  Record.push_back(Tok.getLength());
+
+  // FIXME: When reading literal tokens, reconstruct the literal pointer
+  // if it is needed.
+  AddIdentifierRef(Tok.getIdentifierInfo(), Record);
+  // FIXME: Should translate token kind to a stable encoding.
+  Record.push_back(Tok.getKind());
+  // FIXME: Should translate token flags to a stable encoding.
+  Record.push_back(Tok.getFlags());
+}
+
 void ASTWriter::AddString(StringRef Str, RecordDataImpl &Record) {
   Record.push_back(Str.size());
   Record.insert(Record.end(), Str.begin(), Str.end());
@@ -4226,8 +4230,14 @@ void ASTWriter::ResolveDeclUpdatesBlocks() {
         URec[Idx] = GetDeclRef(reinterpret_cast<Decl *>(URec[Idx]));
         ++Idx;
         break;
-          
+
       case UPD_CXX_INSTANTIATED_STATIC_DATA_MEMBER:
+        ++Idx;
+        break;
+
+      case UPD_CXX_DEDUCED_RETURN_TYPE:
+        URec[Idx] = GetOrCreateTypeID(
+            QualType::getFromOpaquePtr(reinterpret_cast<void *>(URec[Idx])));
         ++Idx;
         break;
       }
@@ -4444,11 +4454,13 @@ void ASTWriter::AddTypeRef(QualType T, RecordDataImpl &Record) {
 }
 
 TypeID ASTWriter::GetOrCreateTypeID( QualType T) {
+  assert(Context);
   return MakeTypeID(*Context, T,
               std::bind1st(std::mem_fun(&ASTWriter::GetOrCreateTypeIdx), this));
 }
 
 TypeID ASTWriter::getTypeID(QualType T) const {
+  assert(Context);
   return MakeTypeID(*Context, T,
               std::bind1st(std::mem_fun(&ASTWriter::getTypeIdx), this));
 }
@@ -5035,12 +5047,25 @@ void ASTWriter::AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Rec
       LambdaExpr::Capture &Capture = Lambda.Captures[I];
       AddSourceLocation(Capture.getLocation(), Record);
       Record.push_back(Capture.isImplicit());
-      Record.push_back(Capture.getCaptureKind()); // FIXME: stable!
-      VarDecl *Var = Capture.capturesVariable()? Capture.getCapturedVar() : 0;
-      AddDeclRef(Var, Record);
-      AddSourceLocation(Capture.isPackExpansion()? Capture.getEllipsisLoc()
-                                                 : SourceLocation(), 
-                        Record);
+      Record.push_back(Capture.getCaptureKind());
+      switch (Capture.getCaptureKind()) {
+      case LCK_This:
+        break;
+      case LCK_ByCopy:
+      case LCK_ByRef: {
+        VarDecl *Var =
+            Capture.capturesVariable() ? Capture.getCapturedVar() : 0;
+        AddDeclRef(Var, Record);
+        AddSourceLocation(Capture.isPackExpansion() ? Capture.getEllipsisLoc()
+                                                    : SourceLocation(),
+                          Record);
+        break;
+      }
+      case LCK_Init:
+        FieldDecl *Field = Capture.getInitCaptureField();
+        AddDeclRef(Field, Record);
+        break;
+      }
     }
   }
 }
@@ -5183,6 +5208,17 @@ void ASTWriter::AddedCXXTemplateSpecialization(const FunctionTemplateDecl *TD,
   UpdateRecord &Record = DeclUpdates[TD];
   Record.push_back(UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION);
   Record.push_back(reinterpret_cast<uint64_t>(D));
+}
+
+void ASTWriter::DeducedReturnType(const FunctionDecl *FD, QualType ReturnType) {
+  assert(!WritingAST && "Already writing the AST!");
+  FD = FD->getCanonicalDecl();
+  if (!FD->isFromASTFile())
+    return; // Not a function declared in PCH and defined outside.
+
+  UpdateRecord &Record = DeclUpdates[FD];
+  Record.push_back(UPD_CXX_DEDUCED_RETURN_TYPE);
+  Record.push_back(reinterpret_cast<uint64_t>(ReturnType.getAsOpaquePtr()));
 }
 
 void ASTWriter::CompletedImplicitDefinition(const FunctionDecl *D) {

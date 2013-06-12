@@ -1507,6 +1507,13 @@ TEST(Matcher, MatchesVirtualMethod) {
       methodDecl(isVirtual())));
 }
 
+TEST(Matcher, MatchesConstMethod) {
+  EXPECT_TRUE(matches("struct A { void foo() const; };",
+                      methodDecl(isConst())));
+  EXPECT_TRUE(notMatches("struct A { void foo(); };",
+                         methodDecl(isConst())));
+}
+
 TEST(Matcher, MatchesOverridingMethod) {
   EXPECT_TRUE(matches("class X { virtual int f(); }; "
                       "class Y : public X { int f(); };",
@@ -2917,6 +2924,31 @@ TEST(SwitchCase, MatchesSwitch) {
   EXPECT_TRUE(notMatches("void x() {}", switchStmt()));
 }
 
+TEST(SwitchCase, MatchesEachCase) {
+  EXPECT_TRUE(notMatches("void x() { switch(42); }",
+                         switchStmt(forEachSwitchCase(caseStmt()))));
+  EXPECT_TRUE(matches("void x() { switch(42) case 42:; }",
+                      switchStmt(forEachSwitchCase(caseStmt()))));
+  EXPECT_TRUE(matches("void x() { switch(42) { case 42:; } }",
+                      switchStmt(forEachSwitchCase(caseStmt()))));
+  EXPECT_TRUE(notMatches(
+      "void x() { if (1) switch(42) { case 42: switch (42) { default:; } } }",
+      ifStmt(has(switchStmt(forEachSwitchCase(defaultStmt()))))));
+  EXPECT_TRUE(matches("void x() { switch(42) { case 1+1: case 4:; } }",
+                      switchStmt(forEachSwitchCase(
+                          caseStmt(hasCaseConstant(integerLiteral()))))));
+  EXPECT_TRUE(notMatches("void x() { switch(42) { case 1+1: case 2+2:; } }",
+                         switchStmt(forEachSwitchCase(
+                             caseStmt(hasCaseConstant(integerLiteral()))))));
+  EXPECT_TRUE(notMatches("void x() { switch(42) { case 1 ... 2:; } }",
+                         switchStmt(forEachSwitchCase(
+                             caseStmt(hasCaseConstant(integerLiteral()))))));
+  EXPECT_TRUE(matchAndVerifyResultTrue(
+      "void x() { switch (42) { case 1: case 2: case 3: default:; } }",
+      switchStmt(forEachSwitchCase(caseStmt().bind("x"))),
+      new VerifyIdIsBoundTo<CaseStmt>("x", 3)));
+}
+
 TEST(ExceptionHandling, SimpleCases) {
   EXPECT_TRUE(matches("void foo() try { } catch(int X) { }", catchStmt()));
   EXPECT_TRUE(matches("void foo() try { } catch(int X) { }", tryStmt()));
@@ -3896,6 +3928,27 @@ public:
 TEST(MatchFinder, InterceptsStartOfTranslationUnit) {
   MatchFinder Finder;
   VerifyStartOfTranslationUnit VerifyCallback;
+  Finder.addMatcher(decl(), &VerifyCallback);
+  OwningPtr<FrontendActionFactory> Factory(newFrontendActionFactory(&Finder));
+  ASSERT_TRUE(tooling::runToolOnCode(Factory->create(), "int x;"));
+  EXPECT_TRUE(VerifyCallback.Called);
+}
+
+class VerifyEndOfTranslationUnit : public MatchFinder::MatchCallback {
+public:
+  VerifyEndOfTranslationUnit() : Called(false) {}
+  virtual void run(const MatchFinder::MatchResult &Result) {
+    EXPECT_FALSE(Called);
+  }
+  virtual void onEndOfTranslationUnit() {
+    Called = true;
+  }
+  bool Called;
+};
+
+TEST(MatchFinder, InterceptsEndOfTranslationUnit) {
+  MatchFinder Finder;
+  VerifyEndOfTranslationUnit VerifyCallback;
   Finder.addMatcher(decl(), &VerifyCallback);
   OwningPtr<FrontendActionFactory> Factory(newFrontendActionFactory(&Finder));
   ASSERT_TRUE(tooling::runToolOnCode(Factory->create(), "int x;"));
