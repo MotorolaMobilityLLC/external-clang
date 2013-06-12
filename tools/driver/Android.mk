@@ -72,6 +72,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMInstCombine \
   libLLVMInstrumentation \
   libLLVMCodeGen \
+  libLLVMObject \
   libLLVMLinker \
   libLLVMMC \
   libLLVMMCParser \

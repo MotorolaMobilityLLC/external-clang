@@ -6,6 +6,7 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=  \
+	AttrExprArgs.inc \
 	AttrList.inc  \
 	AttrLateParsed.inc  \
 	AttrParsedAttrList.inc  \
