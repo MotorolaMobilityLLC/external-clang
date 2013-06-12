@@ -8,6 +8,7 @@ clang_codegen_TBLGEN_TABLES := \
   DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticFrontendKinds.inc \
+  DiagnosticSemaKinds.inc \
   StmtNodes.inc \
   arm_neon.inc
 

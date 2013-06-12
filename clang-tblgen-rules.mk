@@ -58,6 +58,13 @@ $(intermediates)/include/clang/Serialization/AttrPCHWrite.inc: $(CLANG_ROOT_PATH
 	$(call transform-host-clang-td-to-out,clang-attr-pch-write)
 endif
 
+ifneq ($(findstring AttrExprArgs.inc,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Parse/AttrExprArgs.inc
+$(intermediates)/include/clang/Parse/AttrExprArgs.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(intermediates)/include/clang/Parse/AttrExprArgs.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Attr.td | $(CLANG_TBLGEN)
+	$(call transform-host-clang-td-to-out,clang-attr-expr-args-list)
+endif
+
 ifneq ($(findstring AttrLateParsed.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Parse/AttrLateParsed.inc
 $(intermediates)/include/clang/Parse/AttrLateParsed.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
