@@ -18,6 +18,7 @@
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaInternal.h"
+#include "TypeLocBuilder.h"
 using namespace clang;
 using namespace sema;
 
@@ -275,11 +276,12 @@ static EnumDecl *findEnumForBlockReturn(Expr *E) {
   //   - it is an implicit integral conversion applied to an
   //     enumerator-like expression of type T or
   if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
-    // We can only see integral conversions in valid enumerator-like
-    // expressions.
+    // We can sometimes see integral conversions in valid
+    // enumerator-like expressions.
     if (ICE->getCastKind() == CK_IntegralCast)
       return findEnumForBlockReturn(ICE->getSubExpr());
-    return 0;
+
+    // Otherwise, just rely on the type.
   }
 
   //   - it is an expression of that formal enum type.
@@ -428,6 +430,88 @@ void Sema::deduceClosureReturnType(CapturingScopeInfo &CSI) {
   }
 }
 
+FieldDecl *Sema::checkInitCapture(SourceLocation Loc, bool ByRef,
+                                  IdentifierInfo *Id, Expr *InitExpr) {
+  LambdaScopeInfo *LSI = getCurLambda();
+
+  // C++1y [expr.prim.lambda]p11:
+  //   The type of [the] member corresponds to the type of a hypothetical
+  //   variable declaration of the form "auto init-capture;"
+  QualType DeductType = Context.getAutoDeductType();
+  TypeLocBuilder TLB;
+  TLB.pushTypeSpec(DeductType).setNameLoc(Loc);
+  if (ByRef) {
+    DeductType = BuildReferenceType(DeductType, true, Loc, Id);
+    assert(!DeductType.isNull() && "can't build reference to auto");
+    TLB.push<ReferenceTypeLoc>(DeductType).setSigilLoc(Loc);
+  }
+  TypeSourceInfo *TSI = TLB.getTypeSourceInfo(Context, DeductType);
+
+  InitializationKind InitKind = InitializationKind::CreateDefault(Loc);
+  Expr *Init = InitExpr;
+  if (ParenListExpr *Parens = dyn_cast<ParenListExpr>(Init)) {
+    if (Parens->getNumExprs() == 1) {
+      Init = Parens->getExpr(0);
+      InitKind = InitializationKind::CreateDirect(
+          Loc, Parens->getLParenLoc(), Parens->getRParenLoc());
+    } else {
+      // C++1y [dcl.spec.auto]p3:
+      //   In an initializer of the form ( expression-list ), the
+      //   expression-list shall be a single assignment-expression.
+      if (Parens->getNumExprs() == 0)
+        Diag(Parens->getLocStart(), diag::err_init_capture_no_expression)
+          << Id;
+      else if (Parens->getNumExprs() > 1)
+        Diag(Parens->getExpr(1)->getLocStart(),
+             diag::err_init_capture_multiple_expressions)
+          << Id;
+      return 0;
+    }
+  } else if (isa<InitListExpr>(Init))
+    // We do not need to distinguish between direct-list-initialization
+    // and copy-list-initialization here, because we will always deduce
+    // std::initializer_list<T>, and direct- and copy-list-initialization
+    // always behave the same for such a type.
+    // FIXME: We should model whether an '=' was present.
+    InitKind = InitializationKind::CreateDirectList(Loc);
+  else
+    InitKind = InitializationKind::CreateCopy(Loc, Loc);
+  QualType DeducedType;
+  if (DeduceAutoType(TSI, Init, DeducedType) == DAR_Failed) {
+    if (isa<InitListExpr>(Init))
+      Diag(Loc, diag::err_init_capture_deduction_failure_from_init_list)
+          << Id << Init->getSourceRange();
+    else
+      Diag(Loc, diag::err_init_capture_deduction_failure)
+          << Id << Init->getType() << Init->getSourceRange();
+  }
+  if (DeducedType.isNull())
+    return 0;
+
+  //   [...] a non-static data member named by the identifier is declared in
+  //   the closure type. This member is not a bit-field and not mutable.
+  // Core issue: the member is (probably...) public.
+  FieldDecl *NewFD = CheckFieldDecl(
+      Id, DeducedType, TSI, LSI->Lambda,
+      Loc, /*Mutable*/ false, /*BitWidth*/ 0, ICIS_NoInit,
+      Loc, AS_public, /*PrevDecl*/ 0, /*Declarator*/ 0);
+  LSI->Lambda->addDecl(NewFD);
+
+  if (CurContext->isDependentContext()) {
+    LSI->addInitCapture(NewFD, InitExpr);
+  } else {
+    InitializedEntity Entity = InitializedEntity::InitializeMember(NewFD);
+    InitializationSequence InitSeq(*this, Entity, InitKind, Init);
+    if (!InitSeq.Diagnose(*this, Entity, InitKind, Init)) {
+      ExprResult InitResult = InitSeq.Perform(*this, Entity, InitKind, Init);
+      if (!InitResult.isInvalid())
+        LSI->addInitCapture(NewFD, InitResult.take());
+    }
+  }
+
+  return NewFD;
+}
+
 void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
                                         Declarator &ParamInfo,
                                         Scope *CurScope) {
@@ -452,8 +536,7 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
     FunctionProtoType::ExtProtoInfo EPI;
     EPI.HasTrailingReturn = true;
     EPI.TypeQuals |= DeclSpec::TQ_const;
-    QualType MethodTy = Context.getFunctionType(Context.DependentTy,
-                                                ArrayRef<QualType>(),
+    QualType MethodTy = Context.getFunctionType(Context.DependentTy, None,
                                                 EPI);
     MethodTyInfo = Context.getTrivialTypeSourceInfo(MethodTy);
     ExplicitParams = false;
@@ -514,7 +597,10 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
     = enterLambdaScope(Method, Intro.Range, Intro.Default, ExplicitParams,
                        ExplicitResultType,
                        !Method->isConst());
- 
+
+  // Distinct capture names, for diagnostics.
+  llvm::SmallSet<IdentifierInfo*, 8> CaptureNames;
+
   // Handle explicit captures.
   SourceLocation PrevCaptureLoc
     = Intro.Default == LCD_None? Intro.Range.getBegin() : Intro.DefaultLoc;
@@ -561,6 +647,30 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
 
     assert(C->Id && "missing identifier for capture");
 
+    if (C->Init.isInvalid())
+      continue;
+    if (C->Init.isUsable()) {
+      // C++11 [expr.prim.lambda]p8:
+      //   An identifier or this shall not appear more than once in a
+      //   lambda-capture.
+      if (!CaptureNames.insert(C->Id))
+        Diag(C->Loc, diag::err_capture_more_than_once) << C->Id;
+
+      if (C->Init.get()->containsUnexpandedParameterPack())
+        ContainsUnexpandedParameterPack = true;
+
+      FieldDecl *NewFD = checkInitCapture(C->Loc, C->Kind == LCK_ByRef,
+                                          C->Id, C->Init.take());
+      // C++1y [expr.prim.lambda]p11:
+      //   Within the lambda-expression's lambda-declarator and
+      //   compound-statement, the identifier in the init-capture
+      //   hides any declaration of the same name in scopes enclosing
+      //   the lambda-expression.
+      if (NewFD)
+        PushOnScopeChains(NewFD, CurScope, false);
+      continue;
+    }
+
     // C++11 [expr.prim.lambda]p8:
     //   If a lambda-capture includes a capture-default that is &, the 
     //   identifiers in the lambda-capture shall not be preceded by &.
@@ -578,6 +688,9 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
       continue;
     }
 
+    // C++11 [expr.prim.lambda]p10:
+    //   The identifiers in a capture-list are looked up using the usual
+    //   rules for unqualified name lookup (3.4.1)
     DeclarationNameInfo Name(C->Id, C->Loc);
     LookupResult R(*this, Name, LookupOrdinaryName);
     LookupName(R, CurScope);
@@ -591,14 +704,27 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
         continue;
     }
 
-    // C++11 [expr.prim.lambda]p10:
-    //   The identifiers in a capture-list are looked up using the usual rules
-    //   for unqualified name lookup (3.4.1); each such lookup shall find a 
-    //   variable with automatic storage duration declared in the reaching 
-    //   scope of the local lambda expression.
-    // 
-    // Note that the 'reaching scope' check happens in tryCaptureVariable().
     VarDecl *Var = R.getAsSingle<VarDecl>();
+
+    // C++11 [expr.prim.lambda]p8:
+    //   An identifier or this shall not appear more than once in a
+    //   lambda-capture.
+    if (!CaptureNames.insert(C->Id)) {
+      if (Var && LSI->isCaptured(Var)) {
+        Diag(C->Loc, diag::err_capture_more_than_once)
+          << C->Id << SourceRange(LSI->getCapture(Var).getLocation())
+          << FixItHint::CreateRemoval(
+               SourceRange(PP.getLocForEndOfToken(PrevCaptureLoc), C->Loc));
+      } else
+        // Previous capture was an init-capture: no fixit.
+        Diag(C->Loc, diag::err_capture_more_than_once) << C->Id;
+      continue;
+    }
+
+    // C++11 [expr.prim.lambda]p10:
+    //   [...] each such lookup shall find a variable with automatic storage
+    //   duration declared in the reaching scope of the local lambda expression.
+    // Note that the 'reaching scope' check happens in tryCaptureVariable().
     if (!Var) {
       Diag(C->Loc, diag::err_capture_does_not_name_variable) << C->Id;
       continue;
@@ -611,18 +737,6 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
     if (!Var->hasLocalStorage()) {
       Diag(C->Loc, diag::err_capture_non_automatic_variable) << C->Id;
       Diag(Var->getLocation(), diag::note_previous_decl) << C->Id;
-      continue;
-    }
-
-    // C++11 [expr.prim.lambda]p8:
-    //   An identifier or this shall not appear more than once in a 
-    //   lambda-capture.
-    if (LSI->isCaptured(Var)) {
-      Diag(C->Loc, diag::err_capture_more_than_once) 
-        << C->Id
-        << SourceRange(LSI->getCapture(Var).getLocation())
-        << FixItHint::CreateRemoval(
-             SourceRange(PP.getLocForEndOfToken(PrevCaptureLoc), C->Loc));
       continue;
     }
 
@@ -697,18 +811,15 @@ static void addFunctionPointerConversion(Sema &S,
   {
     FunctionProtoType::ExtProtoInfo ExtInfo = Proto->getExtProtoInfo();
     ExtInfo.TypeQuals = 0;
-    FunctionTy =
-      S.Context.getFunctionType(Proto->getResultType(),
-                                ArrayRef<QualType>(Proto->arg_type_begin(),
-                                                   Proto->getNumArgs()),
-                                ExtInfo);
+    FunctionTy = S.Context.getFunctionType(Proto->getResultType(),
+                                           Proto->getArgTypes(), ExtInfo);
     FunctionPtrTy = S.Context.getPointerType(FunctionTy);
   }
   
   FunctionProtoType::ExtProtoInfo ExtInfo;
   ExtInfo.TypeQuals = Qualifiers::Const;
   QualType ConvTy =
-    S.Context.getFunctionType(FunctionPtrTy, ArrayRef<QualType>(), ExtInfo);
+    S.Context.getFunctionType(FunctionPtrTy, None, ExtInfo);
   
   SourceLocation Loc = IntroducerRange.getBegin();
   DeclarationName Name
@@ -769,18 +880,14 @@ static void addBlockPointerConversion(Sema &S,
   {
     FunctionProtoType::ExtProtoInfo ExtInfo = Proto->getExtProtoInfo();
     ExtInfo.TypeQuals = 0;
-    QualType FunctionTy
-      = S.Context.getFunctionType(Proto->getResultType(),
-                                  ArrayRef<QualType>(Proto->arg_type_begin(),
-                                                     Proto->getNumArgs()),
-                                  ExtInfo);
+    QualType FunctionTy = S.Context.getFunctionType(
+        Proto->getResultType(), Proto->getArgTypes(), ExtInfo);
     BlockPtrTy = S.Context.getBlockPointerType(FunctionTy);
   }
   
   FunctionProtoType::ExtProtoInfo ExtInfo;
   ExtInfo.TypeQuals = Qualifiers::Const;
-  QualType ConvTy = S.Context.getFunctionType(BlockPtrTy, ArrayRef<QualType>(),
-                                              ExtInfo);
+  QualType ConvTy = S.Context.getFunctionType(BlockPtrTy, None, ExtInfo);
   
   SourceLocation Loc = IntroducerRange.getBegin();
   DeclarationName Name
@@ -846,11 +953,17 @@ ExprResult Sema::ActOnLambdaExpr(SourceLocation StartLoc, Stmt *Body,
         continue;
       }
 
+      if (From.isInitCapture()) {
+        Captures.push_back(LambdaExpr::Capture(From.getInitCaptureField()));
+        CaptureInits.push_back(From.getInitExpr());
+        continue;
+      }
+
       VarDecl *Var = From.getVariable();
       LambdaCaptureKind Kind = From.isCopyCapture()? LCK_ByCopy : LCK_ByRef;
       Captures.push_back(LambdaExpr::Capture(From.getLocation(), IsImplicit, 
                                              Kind, Var, From.getEllipsisLoc()));
-      CaptureInits.push_back(From.getCopyExpr());
+      CaptureInits.push_back(From.getInitExpr());
     }
 
     switch (LSI->ImpCaptureStyle) {
@@ -891,11 +1004,8 @@ ExprResult Sema::ActOnLambdaExpr(SourceLocation StartLoc, Stmt *Body,
       // Create a function type with the inferred return type.
       const FunctionProtoType *Proto
         = CallOperator->getType()->getAs<FunctionProtoType>();
-      QualType FunctionTy
-        = Context.getFunctionType(LSI->ReturnType,
-                                  ArrayRef<QualType>(Proto->arg_type_begin(),
-                                                     Proto->getNumArgs()),
-                                  Proto->getExtProtoInfo());
+      QualType FunctionTy = Context.getFunctionType(
+          LSI->ReturnType, Proto->getArgTypes(), Proto->getExtProtoInfo());
       CallOperator->setType(FunctionTy);
     }
 
@@ -950,6 +1060,7 @@ ExprResult Sema::ActOnLambdaExpr(SourceLocation StartLoc, Stmt *Body,
   if (!CurContext->isDependentContext()) {
     switch (ExprEvalContexts.back().Context) {
     case Unevaluated:
+    case UnevaluatedAbstract:
       // We don't actually diagnose this case immediately, because we
       // could be within a context where we might find out later that
       // the expression is potentially evaluated (e.g., for typeid).

@@ -604,12 +604,12 @@ void ObjCMethodDecl::setMethodParams(ASTContext &C,
   assert((!SelLocs.empty() || isImplicit()) &&
          "No selector locs for non-implicit method");
   if (isImplicit())
-    return setParamsAndSelLocs(C, Params, ArrayRef<SourceLocation>());
+    return setParamsAndSelLocs(C, Params, llvm::None);
 
   SelLocsKind = hasStandardSelectorLocs(getSelector(), SelLocs, Params,
                                         DeclEndLoc);
   if (SelLocsKind != SelLoc_NonStandard)
-    return setParamsAndSelLocs(C, Params, ArrayRef<SourceLocation>());
+    return setParamsAndSelLocs(C, Params, llvm::None);
 
   setParamsAndSelLocs(C, Params, SelLocs);
 }
@@ -627,23 +627,29 @@ ObjCMethodDecl *ObjCMethodDecl::getNextRedeclaration() {
 
   Decl *CtxD = cast<Decl>(getDeclContext());
 
-  if (ObjCInterfaceDecl *IFD = dyn_cast<ObjCInterfaceDecl>(CtxD)) {
-    if (ObjCImplementationDecl *ImplD = Ctx.getObjCImplementation(IFD))
-      Redecl = ImplD->getMethod(getSelector(), isInstanceMethod());
+  if (!CtxD->isInvalidDecl()) {
+    if (ObjCInterfaceDecl *IFD = dyn_cast<ObjCInterfaceDecl>(CtxD)) {
+      if (ObjCImplementationDecl *ImplD = Ctx.getObjCImplementation(IFD))
+        if (!ImplD->isInvalidDecl())
+          Redecl = ImplD->getMethod(getSelector(), isInstanceMethod());
 
-  } else if (ObjCCategoryDecl *CD = dyn_cast<ObjCCategoryDecl>(CtxD)) {
-    if (ObjCCategoryImplDecl *ImplD = Ctx.getObjCImplementation(CD))
-      Redecl = ImplD->getMethod(getSelector(), isInstanceMethod());
+    } else if (ObjCCategoryDecl *CD = dyn_cast<ObjCCategoryDecl>(CtxD)) {
+      if (ObjCCategoryImplDecl *ImplD = Ctx.getObjCImplementation(CD))
+        if (!ImplD->isInvalidDecl())
+          Redecl = ImplD->getMethod(getSelector(), isInstanceMethod());
 
-  } else if (ObjCImplementationDecl *ImplD =
-               dyn_cast<ObjCImplementationDecl>(CtxD)) {
-    if (ObjCInterfaceDecl *IFD = ImplD->getClassInterface())
-      Redecl = IFD->getMethod(getSelector(), isInstanceMethod());
+    } else if (ObjCImplementationDecl *ImplD =
+                 dyn_cast<ObjCImplementationDecl>(CtxD)) {
+      if (ObjCInterfaceDecl *IFD = ImplD->getClassInterface())
+        if (!IFD->isInvalidDecl())
+          Redecl = IFD->getMethod(getSelector(), isInstanceMethod());
 
-  } else if (ObjCCategoryImplDecl *CImplD =
-               dyn_cast<ObjCCategoryImplDecl>(CtxD)) {
-    if (ObjCCategoryDecl *CatD = CImplD->getCategoryDecl())
-      Redecl = CatD->getMethod(getSelector(), isInstanceMethod());
+    } else if (ObjCCategoryImplDecl *CImplD =
+                 dyn_cast<ObjCCategoryImplDecl>(CtxD)) {
+      if (ObjCCategoryDecl *CatD = CImplD->getCategoryDecl())
+        if (!CatD->isInvalidDecl())
+          Redecl = CatD->getMethod(getSelector(), isInstanceMethod());
+    }
   }
 
   if (!Redecl && isRedeclaration()) {
@@ -1493,6 +1499,30 @@ void ObjCProtocolDecl::collectPropertiesToImplement(PropertyMap &PM,
   }
 }
 
+    
+void ObjCProtocolDecl::collectInheritedProtocolProperties(
+                                                const ObjCPropertyDecl *Property,
+                                                ProtocolPropertyMap &PM) const {
+  if (const ObjCProtocolDecl *PDecl = getDefinition()) {
+    bool MatchFound = false;
+    for (ObjCProtocolDecl::prop_iterator P = PDecl->prop_begin(),
+         E = PDecl->prop_end(); P != E; ++P) {
+      ObjCPropertyDecl *Prop = *P;
+      if (Prop == Property)
+        continue;
+      if (Prop->getIdentifier() == Property->getIdentifier()) {
+        PM[PDecl] = Prop;
+        MatchFound = true;
+        break;
+      }
+    }
+    // Scan through protocol's protocols which did not have a matching property.
+    if (!MatchFound)
+      for (ObjCProtocolDecl::protocol_iterator PI = PDecl->protocol_begin(),
+           E = PDecl->protocol_end(); PI != E; ++PI)
+        (*PI)->collectInheritedProtocolProperties(Property, PM);
+  }
+}
 
 //===----------------------------------------------------------------------===//
 // ObjCCategoryDecl
@@ -1648,12 +1678,13 @@ ObjCImplementationDecl::Create(ASTContext &C, DeclContext *DC,
                                ObjCInterfaceDecl *SuperDecl,
                                SourceLocation nameLoc,
                                SourceLocation atStartLoc,
+                               SourceLocation superLoc,
                                SourceLocation IvarLBraceLoc,
                                SourceLocation IvarRBraceLoc) {
   if (ClassInterface && ClassInterface->hasDefinition())
     ClassInterface = ClassInterface->getDefinition();
   return new (C) ObjCImplementationDecl(DC, ClassInterface, SuperDecl,
-                                        nameLoc, atStartLoc,
+                                        nameLoc, atStartLoc, superLoc,
                                         IvarLBraceLoc, IvarRBraceLoc);
 }
 

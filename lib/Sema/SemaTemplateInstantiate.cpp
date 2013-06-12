@@ -72,7 +72,7 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
       if (TemplateTemplateParmDecl *TTP 
                                       = dyn_cast<TemplateTemplateParmDecl>(D)) {
         for (unsigned I = 0, N = TTP->getDepth() + 1; I != N; ++I)
-          Result.addOuterTemplateArguments(0, 0);
+          Result.addOuterTemplateArguments(None);
         return Result;
       }
     }
@@ -116,9 +116,7 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
       } else if (FunctionTemplateDecl *FunTmpl
                                    = Function->getDescribedFunctionTemplate()) {
         // Add the "injected" template arguments.
-        std::pair<const TemplateArgument *, unsigned>
-          Injected = FunTmpl->getInjectedTemplateArgs();
-        Result.addOuterTemplateArguments(Injected.first, Injected.second);
+        Result.addOuterTemplateArguments(FunTmpl->getInjectedTemplateArgs());
       }
       
       // If this is a friend declaration and it declares an entity at
@@ -135,9 +133,10 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
     } else if (CXXRecordDecl *Rec = dyn_cast<CXXRecordDecl>(Ctx)) {
       if (ClassTemplateDecl *ClassTemplate = Rec->getDescribedClassTemplate()) {
         QualType T = ClassTemplate->getInjectedClassNameSpecialization();
-        const TemplateSpecializationType *TST
-          = cast<TemplateSpecializationType>(Context.getCanonicalType(T));
-        Result.addOuterTemplateArguments(TST->getArgs(), TST->getNumArgs());
+        const TemplateSpecializationType *TST =
+            cast<TemplateSpecializationType>(Context.getCanonicalType(T));
+        Result.addOuterTemplateArguments(
+            llvm::makeArrayRef(TST->getArgs(), TST->getNumArgs()));
         if (ClassTemplate->isMemberSpecialization())
           break;
       }
@@ -1105,7 +1104,7 @@ TemplateInstantiator::TransformPredefinedExpr(PredefinedExpr *E) {
   llvm::APInt LengthI(32, Length + 1);
   QualType ResTy;
   if (IT == PredefinedExpr::LFunction)
-    ResTy = getSema().Context.WCharTy.withConst();
+    ResTy = getSema().Context.WideCharTy.withConst();
   else
     ResTy = getSema().Context.CharTy.withConst();
   ResTy = getSema().Context.getConstantArrayType(ResTy, LengthI, 
@@ -2081,6 +2080,14 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
        E = LateAttrs.end(); I != E; ++I) {
     assert(CurrentInstantiationScope == Instantiator.getStartingScope());
     CurrentInstantiationScope = I->Scope;
+
+    // Allow 'this' within late-parsed attributes.
+    NamedDecl *ND = dyn_cast<NamedDecl>(I->NewDecl);
+    CXXRecordDecl *ThisContext =
+        dyn_cast_or_null<CXXRecordDecl>(ND->getDeclContext());
+    CXXThisScopeRAII ThisScope(*this, ThisContext, /*TypeQuals*/0,
+                               ND && ND->isCXXInstanceMember());
+
     Attr *NewAttr =
       instantiateTemplateAttribute(I->TmplAttr, Context, *this, TemplateArgs);
     I->NewDecl->addAttr(NewAttr);

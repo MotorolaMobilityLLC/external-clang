@@ -278,6 +278,15 @@ public:
     }
   }
 
+  void onEndOfTranslationUnit() {
+    for (std::vector<std::pair<const internal::DynTypedMatcher*,
+                               MatchCallback*> >::const_iterator
+             I = MatcherCallbackPairs->begin(), E = MatcherCallbackPairs->end();
+         I != E; ++I) {
+      I->second->onEndOfTranslationUnit();
+    }
+  }
+
   void set_active_ast_context(ASTContext *NewActiveASTContext) {
     ActiveASTContext = NewActiveASTContext;
   }
@@ -679,6 +688,7 @@ private:
     Visitor.set_active_ast_context(&Context);
     Visitor.onStartOfTranslationUnit();
     Visitor.TraverseDecl(Context.getTranslationUnitDecl());
+    Visitor.onEndOfTranslationUnit();
     Visitor.set_active_ast_context(NULL);
   }
 
@@ -742,6 +752,14 @@ void MatchFinder::addMatcher(const TypeLocMatcher &NodeMatch,
                              MatchCallback *Action) {
   MatcherCallbackPairs.push_back(std::make_pair(
     new TypeLocMatcher(NodeMatch), Action));
+}
+
+bool MatchFinder::addDynamicMatcher(const internal::DynTypedMatcher &NodeMatch,
+                                    MatchCallback *Action) {
+  MatcherCallbackPairs.push_back(std::make_pair(NodeMatch.clone(), Action));
+  // TODO: Do runtime type checking to make sure the matcher is one of the valid
+  // top-level matchers.
+  return true;
 }
 
 ASTConsumer *MatchFinder::newASTConsumer() {

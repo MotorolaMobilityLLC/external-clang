@@ -1220,6 +1220,7 @@ public:
     : DarwinTargetInfo<PPC32TargetInfo>(triple) {
     HasAlignMac68kSupport = true;
     BoolWidth = BoolAlign = 32; //XXX support -mone-byte-bool?
+    PtrDiffType = SignedInt;	// for http://llvm.org/bugs/show_bug.cgi?id=15726
     LongLongAlign = 32;
     SuitableAlign = 128;
     DescriptionString = "E-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
@@ -1835,6 +1836,7 @@ class X86TargetInfo : public TargetInfo {
     /// Bobcat architecture processors.
     //@{
     CK_BTVER1,
+    CK_BTVER2,
     //@}
 
     /// \name Bulldozer
@@ -1959,6 +1961,7 @@ public:
       .Case("opteron-sse3", CK_OpteronSSE3)
       .Case("amdfam10", CK_AMDFAM10)
       .Case("btver1", CK_BTVER1)
+      .Case("btver2", CK_BTVER2)
       .Case("bdver1", CK_BDVER1)
       .Case("bdver2", CK_BDVER2)
       .Case("x86-64", CK_x86_64)
@@ -2024,6 +2027,7 @@ public:
     case CK_OpteronSSE3:
     case CK_AMDFAM10:
     case CK_BTVER1:
+    case CK_BTVER2:
     case CK_BDVER1:
     case CK_BDVER2:
     case CK_x86_64:
@@ -2192,6 +2196,15 @@ void X86TargetInfo::getDefaultFeatures(llvm::StringMap<bool> &Features) const {
     setFeatureEnabled(Features, "sse4a", true);
     setFeatureEnabled(Features, "lzcnt", true);
     setFeatureEnabled(Features, "popcnt", true);
+    break;
+  case CK_BTVER2:
+    setFeatureEnabled(Features, "avx", true);
+    setFeatureEnabled(Features, "sse4a", true);
+    setFeatureEnabled(Features, "lzcnt", true);
+    setFeatureEnabled(Features, "aes", true);
+    setFeatureEnabled(Features, "pclmul", true);
+    setFeatureEnabled(Features, "bmi", true);
+    setFeatureEnabled(Features, "f16c", true);
     break;
   case CK_BDVER1:
     setFeatureEnabled(Features, "xop", true);
@@ -2610,6 +2623,9 @@ void X86TargetInfo::getTargetDefines(const LangOptions &Opts,
     break;
   case CK_BTVER1:
     defineCPUMacros(Builder, "btver1");
+    break;
+  case CK_BTVER2:
+    defineCPUMacros(Builder, "btver2");
     break;
   case CK_BDVER1:
     defineCPUMacros(Builder, "bdver1");
@@ -3292,6 +3308,8 @@ namespace {
 class AArch64TargetInfo : public TargetInfo {
   static const char * const GCCRegNames[];
   static const TargetInfo::GCCRegAlias GCCRegAliases[];
+
+  static const Builtin::Info BuiltinInfo[];
 public:
   AArch64TargetInfo(const std::string& triple) : TargetInfo(triple) {
     BigEndian = false;
@@ -3360,8 +3378,8 @@ public:
   }
   virtual void getTargetBuiltins(const Builtin::Info *&Records,
                                  unsigned &NumRecords) const {
-    Records = 0;
-    NumRecords = 0;
+    Records = BuiltinInfo;
+    NumRecords = clang::AArch64::LastTSBuiltin-Builtin::FirstTSBuiltin;
   }
   virtual bool hasFeature(StringRef Feature) const {
     return Feature == "aarch64";
@@ -3470,6 +3488,14 @@ void AArch64TargetInfo::getGCCRegAliases(const GCCRegAlias *&Aliases,
   NumAliases = llvm::array_lengthof(GCCRegAliases);
 
 }
+
+const Builtin::Info AArch64TargetInfo::BuiltinInfo[] = {
+#define BUILTIN(ID, TYPE, ATTRS) { #ID, TYPE, ATTRS, 0, ALL_LANGUAGES },
+#define LIBBUILTIN(ID, TYPE, ATTRS, HEADER) { #ID, TYPE, ATTRS, HEADER,\
+                                              ALL_LANGUAGES },
+#include "clang/Basic/BuiltinsAArch64.def"
+};
+
 } // end anonymous namespace
 
 namespace {
@@ -3501,6 +3527,34 @@ class ARMTargetInfo : public TargetInfo {
   unsigned SoftFloatABI : 1;
 
   static const Builtin::Info BuiltinInfo[];
+
+  static bool shouldUseInlineAtomic(const llvm::Triple &T) {
+    // On linux, binaries targeting old cpus call functions in libgcc to
+    // perform atomic operations. The implementation in libgcc then calls into
+    // the kernel which on armv6 and newer uses ldrex and strex. The net result
+    // is that if we assume the kernel is at least as recent as the hardware,
+    // it is safe to use atomic instructions on armv6 and newer.
+    if (T.getOS() != llvm::Triple::Linux)
+     return false;
+    StringRef ArchName = T.getArchName();
+    if (T.getArch() == llvm::Triple::arm) {
+      if (!ArchName.startswith("armv"))
+        return false;
+      StringRef VersionStr = ArchName.substr(4);
+      unsigned Version;
+      if (VersionStr.getAsInteger(10, Version))
+        return false;
+      return Version >= 6;
+    }
+    assert(T.getArch() == llvm::Triple::thumb);
+    if (!ArchName.startswith("thumbv"))
+      return false;
+    StringRef VersionStr = ArchName.substr(6);
+    unsigned Version;
+    if (VersionStr.getAsInteger(10, Version))
+      return false;
+    return Version >= 7;
+  }
 
 public:
   ARMTargetInfo(const std::string &TripleStr)
@@ -3534,8 +3588,9 @@ public:
     TheCXXABI.set(TargetCXXABI::GenericARM);
 
     // ARM has atomics up to 8 bytes
-    // FIXME: Set MaxAtomicInlineWidth if we have the feature v6e
     MaxAtomicPromoteWidth = 64;
+    if (shouldUseInlineAtomic(getTriple()))
+      MaxAtomicInlineWidth = 64;
 
     // Do force alignment of members that follow zero length bitfields.  If
     // the alignment of the zero-length bitfield is greater than the member 
@@ -3844,8 +3899,7 @@ public:
     case 'r': {
       switch (Modifier) {
       default:
-        return isInOut || (isOutput && Size >= 32) ||
-          (!isOutput && !isInOut && Size <= 32);
+        return (isInOut || isOutput || Size <= 32);
       case 'q':
         // A register of size 32 cannot fit a vector type.
         return false;
@@ -4252,6 +4306,18 @@ public:
     // FIXME: Support Sparc quad-precision long double?
     DescriptionString = "E-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
                         "i64:64:64-f32:32:32-f64:64:64-v64:64:64-n32:64-S128";
+    // This is an LP64 platform.
+    LongWidth = LongAlign = PointerWidth = PointerAlign = 64;
+
+    // OpenBSD uses long long for int64_t and intmax_t.
+    if (getTriple().getOS() == llvm::Triple::OpenBSD) {
+      IntMaxType = SignedLongLong;
+      UIntMaxType = UnsignedLongLong;
+    } else {
+      IntMaxType = SignedLong;
+      UIntMaxType = UnsignedLong;
+    }
+    Int64Type = IntMaxType;
   }
 
   virtual void getTargetDefines(const LangOptions &Opts,
@@ -4290,6 +4356,100 @@ public:
   }
 };
 } // end anonymous namespace.
+
+namespace {
+  class SystemZTargetInfo : public TargetInfo {
+    static const char *const GCCRegNames[];
+
+  public:
+    SystemZTargetInfo(const std::string& triple) : TargetInfo(triple) {
+      TLSSupported = true;
+      IntWidth = IntAlign = 32;
+      LongWidth = LongLongWidth = LongAlign = LongLongAlign = 64;
+      PointerWidth = PointerAlign = 64;
+      LongDoubleWidth = 128;
+      LongDoubleAlign = 64;
+      LongDoubleFormat = &llvm::APFloat::IEEEquad;
+      MinGlobalAlign = 16;
+      DescriptionString = "E-p:64:64:64-i1:8:16-i8:8:16-i16:16-i32:32-i64:64"
+       "-f32:32-f64:64-f128:64-a0:8:16-n32:64";
+      MaxAtomicPromoteWidth = MaxAtomicInlineWidth = 64;
+    }
+    virtual void getTargetDefines(const LangOptions &Opts,
+                                  MacroBuilder &Builder) const {
+      Builder.defineMacro("__s390__");
+      Builder.defineMacro("__s390x__");
+      Builder.defineMacro("__zarch__");
+      Builder.defineMacro("__LONG_DOUBLE_128__");
+    }
+    virtual void getTargetBuiltins(const Builtin::Info *&Records,
+                                   unsigned &NumRecords) const {
+      // FIXME: Implement.
+      Records = 0;
+      NumRecords = 0;
+    }
+
+    virtual void getGCCRegNames(const char *const *&Names,
+                                unsigned &NumNames) const;
+    virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                  unsigned &NumAliases) const {
+      // No aliases.
+      Aliases = 0;
+      NumAliases = 0;
+    }
+    virtual bool validateAsmConstraint(const char *&Name,
+                                       TargetInfo::ConstraintInfo &info) const;
+    virtual const char *getClobbers() const {
+      // FIXME: Is this really right?
+      return "";
+    }
+    virtual BuiltinVaListKind getBuiltinVaListKind() const {
+      return TargetInfo::SystemZBuiltinVaList;
+    }
+  };
+
+  const char *const SystemZTargetInfo::GCCRegNames[] = {
+    "r0",  "r1",  "r2",  "r3",  "r4",  "r5",  "r6",  "r7",
+    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15",
+    "f0",  "f2",  "f4",  "f6",  "f1",  "f3",  "f5",  "f7",
+    "f8",  "f10", "f12", "f14", "f9",  "f11", "f13", "f15"
+  };
+
+  void SystemZTargetInfo::getGCCRegNames(const char *const *&Names,
+                                         unsigned &NumNames) const {
+    Names = GCCRegNames;
+    NumNames = llvm::array_lengthof(GCCRegNames);
+  }
+
+  bool SystemZTargetInfo::
+  validateAsmConstraint(const char *&Name,
+                        TargetInfo::ConstraintInfo &Info) const {
+    switch (*Name) {
+    default:
+      return false;
+
+    case 'a': // Address register
+    case 'd': // Data register (equivalent to 'r')
+    case 'f': // Floating-point register
+      Info.setAllowsRegister();
+      return true;
+
+    case 'I': // Unsigned 8-bit constant
+    case 'J': // Unsigned 12-bit constant
+    case 'K': // Signed 16-bit constant
+    case 'L': // Signed 20-bit displacement (on all targets we support)
+    case 'M': // 0x7fffffff
+      return true;
+
+    case 'Q': // Memory with base and unsigned 12-bit displacement
+    case 'R': // Likewise, plus an index
+    case 'S': // Memory with base and signed 20-bit displacement
+    case 'T': // Likewise, plus an index
+      Info.setAllowsMemory();
+      return true;
+    }
+  }
+}
 
 namespace {
   class MSP430TargetInfo : public TargetInfo {
@@ -5256,6 +5416,14 @@ static TargetInfo *AllocateTarget(const std::string &T) {
       return new FreeBSDTargetInfo<SparcV9TargetInfo>(T);
     default:
       return new SparcV9TargetInfo(T);
+    }
+
+  case llvm::Triple::systemz:
+    switch (os) {
+    case llvm::Triple::Linux:
+      return new LinuxTargetInfo<SystemZTargetInfo>(T);
+    default:
+      return new SystemZTargetInfo(T);
     }
 
   case llvm::Triple::tce:

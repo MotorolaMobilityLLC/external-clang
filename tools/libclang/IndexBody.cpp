@@ -68,9 +68,6 @@ public:
   }
 
   bool VisitObjCMessageExpr(ObjCMessageExpr *E) {
-    if (TypeSourceInfo *Cls = E->getClassReceiverTypeInfo())
-      IndexCtx.indexTypeSourceInfo(Cls, Parent, ParentDC);
-
     if (ObjCMethodDecl *MD = E->getMethodDecl())
       IndexCtx.handleReference(MD, E->getSelectorStartLoc(),
                                Parent, ParentDC, E,
@@ -156,9 +153,11 @@ public:
     if (C.capturesThis())
       return true;
 
-    if (IndexCtx.shouldIndexFunctionLocalSymbols())
+    if (C.capturesVariable() && IndexCtx.shouldIndexFunctionLocalSymbols())
       IndexCtx.handleReference(C.getCapturedVar(), C.getLocation(),
                                Parent, ParentDC);
+
+    // FIXME: Lambda init-captures.
     return true;
   }
 

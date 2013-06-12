@@ -198,7 +198,8 @@ CodeGenFunction::GetAddressOfBaseClass(llvm::Value *Value,
   // Compute the virtual offset.
   llvm::Value *VirtualOffset = 0;
   if (VBase) {
-    VirtualOffset = GetVirtualBaseClassOffset(Value, Derived, VBase);
+    VirtualOffset =
+      CGM.getCXXABI().GetVirtualBaseClassOffset(*this, Value, Derived, VBase);
   }
 
   // Apply both offsets.
@@ -290,7 +291,7 @@ llvm::Value *CodeGenFunction::GetVTTParameter(GlobalDecl GD,
     return 0;
   }
   
-  const CXXRecordDecl *RD = cast<CXXMethodDecl>(CurFuncDecl)->getParent();
+  const CXXRecordDecl *RD = cast<CXXMethodDecl>(CurCodeDecl)->getParent();
   const CXXRecordDecl *Base = cast<CXXMethodDecl>(GD.getDecl())->getParent();
 
   llvm::Value *VTT;
@@ -859,8 +860,12 @@ namespace {
       }
 
     void addNextField(FieldDecl *F) {
-      assert(F->getFieldIndex() == LastAddedFieldIndex + 1 &&
-             "Cannot aggregate non-contiguous fields.");
+      // For the most part, the following invariant will hold:
+      //   F->getFieldIndex() == LastAddedFieldIndex + 1
+      // The one exception is that Sema won't add a copy-initializer for an
+      // unnamed bitfield, which will show up here as a gap in the sequence.
+      assert(F->getFieldIndex() >= LastAddedFieldIndex + 1 &&
+             "Cannot aggregate fields out of order.");
       LastAddedFieldIndex = F->getFieldIndex();
 
       // The 'first' and 'last' fields are chosen by offset, rather than field
@@ -1868,28 +1873,6 @@ void CodeGenFunction::PushDestructorCleanup(QualType T, llvm::Value *Addr) {
   PushDestructorCleanup(D, Addr);
 }
 
-llvm::Value *
-CodeGenFunction::GetVirtualBaseClassOffset(llvm::Value *This,
-                                           const CXXRecordDecl *ClassDecl,
-                                           const CXXRecordDecl *BaseClassDecl) {
-  llvm::Value *VTablePtr = GetVTablePtr(This, Int8PtrTy);
-  CharUnits VBaseOffsetOffset = 
-    CGM.getVTableContext().getVirtualBaseOffsetOffset(ClassDecl, BaseClassDecl);
-  
-  llvm::Value *VBaseOffsetPtr = 
-    Builder.CreateConstGEP1_64(VTablePtr, VBaseOffsetOffset.getQuantity(), 
-                               "vbase.offset.ptr");
-  llvm::Type *PtrDiffTy = 
-    ConvertType(getContext().getPointerDiffType());
-  
-  VBaseOffsetPtr = Builder.CreateBitCast(VBaseOffsetPtr, 
-                                         PtrDiffTy->getPointerTo());
-                                         
-  llvm::Value *VBaseOffset = Builder.CreateLoad(VBaseOffsetPtr, "vbase.offset");
-  
-  return VBaseOffset;
-}
-
 void
 CodeGenFunction::InitializeVTablePointer(BaseSubobject Base, 
                                          const CXXRecordDecl *NearestVBase,
@@ -1929,8 +1912,10 @@ CodeGenFunction::InitializeVTablePointer(BaseSubobject Base,
   if (CodeGenVTables::needsVTTParameter(CurGD) && NearestVBase) {
     // We need to use the virtual base offset offset because the virtual base
     // might have a different offset in the most derived class.
-    VirtualOffset = GetVirtualBaseClassOffset(LoadCXXThis(), VTableClass, 
-                                              NearestVBase);
+    VirtualOffset = CGM.getCXXABI().GetVirtualBaseClassOffset(*this,
+                                                              LoadCXXThis(),
+                                                              VTableClass,
+                                                              NearestVBase);
     NonVirtualOffset = OffsetFromNearestVBase;
   } else {
     // We can just use the base offset in the complete class.
@@ -2232,10 +2217,10 @@ void CodeGenFunction::EmitLambdaBlockInvokeBody() {
 }
 
 void CodeGenFunction::EmitLambdaToBlockPointerBody(FunctionArgList &Args) {
-  if (cast<CXXMethodDecl>(CurFuncDecl)->isVariadic()) {
+  if (cast<CXXMethodDecl>(CurCodeDecl)->isVariadic()) {
     // FIXME: Making this work correctly is nasty because it requires either
     // cloning the body of the call operator or making the call operator forward.
-    CGM.ErrorUnsupported(CurFuncDecl, "lambda conversion to variadic function");
+    CGM.ErrorUnsupported(CurCodeDecl, "lambda conversion to variadic function");
     return;
   }
 

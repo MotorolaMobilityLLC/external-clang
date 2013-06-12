@@ -18,6 +18,7 @@
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaInternal.h"
 #include "clang/Sema/Template.h"
+#include "TypeLocBuilder.h"
 
 using namespace clang;
 
@@ -179,10 +180,14 @@ namespace {
       // If any capture names a function parameter pack, that pack is expanded
       // when the lambda is expanded.
       for (LambdaExpr::capture_iterator I = Lambda->capture_begin(),
-                                        E = Lambda->capture_end(); I != E; ++I)
-        if (VarDecl *VD = I->getCapturedVar())
+                                        E = Lambda->capture_end();
+           I != E; ++I) {
+        if (I->capturesVariable()) {
+          VarDecl *VD = I->getCapturedVar();
           if (VD->isParameterPack())
             Unexpanded.push_back(std::make_pair(VD, I->getLocation()));
+        }
+      }
 
       inherited::TraverseLambdaExpr(Lambda);
 
@@ -459,17 +464,13 @@ Sema::CheckPackExpansion(TypeSourceInfo *Pattern, SourceLocation EllipsisLoc,
                                        EllipsisLoc, NumExpansions);
   if (Result.isNull())
     return 0;
-  
-  TypeSourceInfo *TSResult = Context.CreateTypeSourceInfo(Result);
-  PackExpansionTypeLoc TL =
-      TSResult->getTypeLoc().castAs<PackExpansionTypeLoc>();
+
+  TypeLocBuilder TLB;
+  TLB.pushFullCopy(Pattern->getTypeLoc());
+  PackExpansionTypeLoc TL = TLB.push<PackExpansionTypeLoc>(Result);
   TL.setEllipsisLoc(EllipsisLoc);
-  
-  // Copy over the source-location information from the type.
-  memcpy(TL.getNextTypeLoc().getOpaqueData(),
-         Pattern->getTypeLoc().getOpaqueData(),
-         Pattern->getTypeLoc().getFullDataSize());
-  return TSResult;
+
+  return TLB.getTypeSourceInfo(Context, Result);
 }
 
 QualType Sema::CheckPackExpansion(QualType Pattern, SourceRange PatternRange,

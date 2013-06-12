@@ -18,6 +18,13 @@ def w_asm_qualifier_ignored : Warning<"ignored %0 qualifier on asm">,
 def warn_file_asm_volatile : Warning<
   "meaningless 'volatile' on asm outside function">, CatInlineAsm;
 
+let CategoryName = "Inline Assembly Issue" in {
+def err_asm_empty : Error<"__asm used with no assembly instructions">;
+def err_inline_ms_asm_parsing : Error<"%0">;
+def err_msasm_unsupported_arch : Error<
+  "Unsupported architecture '%0' for MS-style inline assembly">;
+}
+
 let CategoryName = "Parse Issue" in {
 
 def ext_empty_translation_unit : Extension<
@@ -50,10 +57,6 @@ def ext_integer_complex : Extension<
   "complex integer types are a GNU extension">, InGroup<GNU>;
 def ext_thread_before : Extension<"'__thread' before '%0'">;
 
-def ext_empty_struct_union : Extension<
-  "empty %select{struct|union}0 is a GNU extension">, InGroup<GNU>;
-def warn_empty_struct_union_compat : Warning<"empty %select{struct|union}0 "
-  "has size 0 in C, size 1 in C++">, InGroup<CXXCompat>, DefaultIgnore;
 def error_empty_enum : Error<"use of empty enum">;
 def err_invalid_sign_spec : Error<"'%0' cannot be signed or unsigned">;
 def err_invalid_short_spec : Error<"'short %0' is invalid">;
@@ -778,7 +781,14 @@ def warn_pragma_unused_expected_punc : Warning<
 def err_pragma_fp_contract_scope : Error<
   "'#pragma fp_contract' should only appear at file scope or at the start of a "
   "compound expression">; 
-
+// - #pragma comment
+def err_pragma_comment_malformed : Error<
+  "pragma comment requires parenthesized identifier and optional string">;
+def err_pragma_comment_unknown_kind : Error<"unknown kind of pragma comment">;
+// - #pragma detect_mismatch
+def err_pragma_detect_mismatch_malformed : Error<
+  "pragma detect_mismatch is malformed; it requires two comma-separated "
+  "string literals">;
 
 // OpenCL Section 6.8.g
 def err_not_opencl_storage_class_specifier : Error<
@@ -808,13 +818,12 @@ def err_seh___finally_block : Error<
 def warn_pragma_omp_ignored : Warning <
   "unexpected '#pragma omp ...' in program">, InGroup<SourceUsesOpenMP>, DefaultIgnore;
 def warn_omp_extra_tokens_at_eol : Warning <
-  "extra tokens at end of '#pragma omp %0' are ignored">,
+  "extra tokens at the end of '#pragma omp %0' are ignored">,
   InGroup<ExtraTokens>;
 def err_omp_unknown_directive : Error <
   "expected an OpenMP directive">;
 def err_omp_unexpected_directive : Error <
   "unexpected OpenMP directive '#pragma omp %0'">;
-
 } // end of Parse Issue category.
 
 let CategoryName = "Modules Issue" in {

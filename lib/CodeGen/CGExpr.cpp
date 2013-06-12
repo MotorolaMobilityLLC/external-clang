@@ -295,8 +295,13 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
     return ReferenceTemporary;
   }
 
+  SmallVector<const Expr *, 2> CommaLHSs;
   SmallVector<SubobjectAdjustment, 2> Adjustments;
-  E = E->skipRValueSubobjectAdjustments(Adjustments);
+  E = E->skipRValueSubobjectAdjustments(CommaLHSs, Adjustments);
+
+  for (unsigned I = 0, N = CommaLHSs.size(); I != N; ++I)
+    CGF.EmitIgnoredExpr(CommaLHSs[I]);
+
   if (const OpaqueValueExpr *opaque = dyn_cast<OpaqueValueExpr>(E))
     if (opaque->getType()->isRecordType())
       return CGF.EmitOpaqueValueLValue(opaque).getAddress();
@@ -332,6 +337,10 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
 
   RValue RV = CGF.EmitAnyExpr(E, AggSlot);
 
+  // FIXME: This is wrong. We need to register the destructor for the temporary
+  // now, *before* we perform the adjustments, because in the case of a
+  // pointer-to-member adjustment, the adjustment might throw.
+
   // Check if need to perform derived-to-base casts and/or field accesses, to
   // get from the temporary object we created (and, potentially, for which we
   // extended the lifetime) to the subobject we're binding the reference to.
@@ -352,19 +361,9 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
       case SubobjectAdjustment::FieldAdjustment: {
         LValue LV = CGF.MakeAddrLValue(Object, E->getType());
         LV = CGF.EmitLValueForField(LV, Adjustment.Field);
-        if (LV.isSimple()) {
-          Object = LV.getAddress();
-          break;
-        }
-        
-        // For non-simple lvalues, we actually have to create a copy of
-        // the object we're binding to.
-        QualType T = Adjustment.Field->getType().getNonReferenceType()
-                                                .getUnqualifiedType();
-        Object = CreateReferenceTemporary(CGF, T, InitializedDecl);
-        LValue TempLV = CGF.MakeAddrLValue(Object,
-                                           Adjustment.Field->getType());
-        CGF.EmitStoreThroughLValue(CGF.EmitLoadOfLValue(LV), TempLV);
+        assert(LV.isSimple() &&
+               "materialized temporary field is not a simple lvalue");
+        Object = LV.getAddress();
         break;
       }
 
@@ -1793,6 +1792,13 @@ static LValue EmitFunctionDeclLValue(CodeGenFunction &CGF,
   return CGF.MakeAddrLValue(V, E->getType(), Alignment);
 }
 
+static LValue EmitCapturedFieldLValue(CodeGenFunction &CGF, const FieldDecl *FD,
+                                      llvm::Value *ThisValue) {
+  QualType TagType = CGF.getContext().getTagDeclType(FD->getParent());
+  LValue LV = CGF.MakeNaturalAlignAddrLValue(ThisValue, TagType);
+  return CGF.EmitLValueForField(LV, FD);
+}
+
 LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
   const NamedDecl *ND = E->getDecl();
   CharUnits Alignment = getContext().getDeclAlign(ND);
@@ -1844,10 +1850,11 @@ LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
     // Use special handling for lambdas.
     if (!V) {
       if (FieldDecl *FD = LambdaCaptureFields.lookup(VD)) {
-        QualType LambdaTagType = getContext().getTagDeclType(FD->getParent());
-        LValue LambdaLV = MakeNaturalAlignAddrLValue(CXXABIThisValue,
-                                                     LambdaTagType);
-        return EmitLValueForField(LambdaLV, FD);
+        return EmitCapturedFieldLValue(*this, FD, CXXABIThisValue);
+      } else if (CapturedStmtInfo) {
+        if (const FieldDecl *FD = CapturedStmtInfo->lookup(VD))
+          return EmitCapturedFieldLValue(*this, FD,
+                                         CapturedStmtInfo->getContextValue());
       }
 
       assert(isa<BlockDecl>(CurCodeDecl) && E->refersToEnclosingLocal());
@@ -2493,6 +2500,17 @@ LValue CodeGenFunction::EmitMemberExpr(const MemberExpr *E) {
     return EmitFunctionDeclLValue(*this, E, FD);
 
   llvm_unreachable("Unhandled member declaration!");
+}
+
+/// Given that we are currently emitting a lambda, emit an l-value for
+/// one of its members.
+LValue CodeGenFunction::EmitLValueForLambdaField(const FieldDecl *Field) {
+  assert(cast<CXXMethodDecl>(CurCodeDecl)->getParent()->isLambda());
+  assert(cast<CXXMethodDecl>(CurCodeDecl)->getParent() == Field->getParent());
+  QualType LambdaTagType =
+    getContext().getTagDeclType(Field->getParent());
+  LValue LambdaLV = MakeNaturalAlignAddrLValue(CXXABIThisValue, LambdaTagType);
+  return EmitLValueForField(LambdaLV, Field);
 }
 
 LValue CodeGenFunction::EmitLValueForField(LValue base,

@@ -18,6 +18,7 @@
 #include "clang/AST/Type.h"
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/SmallString.h"
 
 namespace llvm {
   class GlobalValue;
@@ -110,8 +111,13 @@ namespace clang {
       return Address;
     }
 
+    /// Corrects the low-level LLVM type for a given constraint and "usual"
+    /// type.
+    ///
+    /// \returns A pointer to a new LLVM type, possibly the same as the original
+    /// on success; 0 on failure.
     virtual llvm::Type* adjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
-                                            StringRef Constraint, 
+                                            StringRef Constraint,
                                             llvm::Type* Ty) const {
       return Ty;
     }
@@ -167,6 +173,17 @@ namespace clang {
     /// that unprototyped calls to varargs functions still succeed.
     virtual bool isNoProtoCallVariadic(const CodeGen::CallArgList &args,
                                        const FunctionNoProtoType *fnType) const;
+
+    /// Gets the linker options necessary to link a dependent library on this
+    /// platform.
+    virtual void getDependentLibraryOption(llvm::StringRef Lib,
+                                           llvm::SmallString<24> &Opt) const;
+
+    /// Gets the linker options necessary to detect object file mismatches on
+    /// this platform.
+    virtual void getDetectMismatchOption(llvm::StringRef Name,
+                                         llvm::StringRef Value,
+                                         llvm::SmallString<32> &Opt) const {}
   };
 }
 

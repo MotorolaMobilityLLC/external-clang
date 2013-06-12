@@ -108,7 +108,14 @@ static void diagnoseBadTypeAttribute(Sema &S, const AttributeList &attr,
     case AttributeList::AT_Regparm: \
     case AttributeList::AT_Pcs: \
     case AttributeList::AT_PnaclCall: \
-    case AttributeList::AT_IntelOclBicc \
+    case AttributeList::AT_IntelOclBicc
+
+// Microsoft-specific type qualifiers.
+#define MS_TYPE_ATTRS_CASELIST  \
+    case AttributeList::AT_Ptr32: \
+    case AttributeList::AT_Ptr64: \
+    case AttributeList::AT_SPtr: \
+    case AttributeList::AT_UPtr
 
 namespace {
   /// An object which stores processing state for the entire
@@ -291,6 +298,10 @@ static void processTypeAttrs(TypeProcessingState &state,
 static bool handleFunctionTypeAttr(TypeProcessingState &state,
                                    AttributeList &attr,
                                    QualType &type);
+
+static bool handleMSPointerTypeQualifierAttr(TypeProcessingState &state,
+                                             AttributeList &attr,
+                                             QualType &type);
 
 static bool handleObjCGCTypeAttr(TypeProcessingState &state,
                                  AttributeList &attr, QualType &type);
@@ -625,6 +636,10 @@ static void distributeTypeAttrsFromDeclarator(TypeProcessingState &state,
     FUNCTION_TYPE_ATTRS_CASELIST:
       distributeFunctionTypeAttrFromDeclarator(state, *attr, declSpecType);
       break;
+
+    MS_TYPE_ATTRS_CASELIST:
+      // Microsoft type attributes cannot go after the declarator-id.
+      continue;
 
     default:
       break;
@@ -1549,10 +1564,12 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
       // Is the array too large?
       unsigned ActiveSizeBits
         = ConstantArrayType::getNumAddressingBits(Context, T, ConstVal);
-      if (ActiveSizeBits > ConstantArrayType::getMaxSizeBits(Context))
+      if (ActiveSizeBits > ConstantArrayType::getMaxSizeBits(Context)) {
         Diag(ArraySize->getLocStart(), diag::err_array_too_large)
           << ConstVal.toString(10)
           << ArraySize->getSourceRange();
+        return QualType();
+      }
     }
 
     T = Context.getConstantArrayType(T, ConstVal, ASM, Quals);
@@ -2018,6 +2035,8 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
   // The TagDecl owned by the DeclSpec.
   TagDecl *OwnedTagDecl = 0;
 
+  bool ContainsPlaceholderType = false;
+
   switch (D.getName().getKind()) {
   case UnqualifiedId::IK_ImplicitSelfParam:
   case UnqualifiedId::IK_OperatorFunctionId:
@@ -2025,6 +2044,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
   case UnqualifiedId::IK_LiteralOperatorId:
   case UnqualifiedId::IK_TemplateId:
     T = ConvertDeclSpecToType(state);
+    ContainsPlaceholderType = D.getDeclSpec().containsPlaceholderType();
 
     if (!D.isInvalidType() && D.getDeclSpec().isTypeSpecOwned()) {
       OwnedTagDecl = cast<TagDecl>(D.getDeclSpec().getRepAsDecl());
@@ -2048,6 +2068,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
     // converts to.
     T = SemaRef.GetTypeFromParser(D.getName().ConversionFunctionId,
                                   &ReturnTypeInfo);
+    ContainsPlaceholderType = T->getContainedAutoType();
     break;
   }
 
@@ -2058,7 +2079,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
   // In C++11, a function declarator using 'auto' must have a trailing return
   // type (this is checked later) and we can skip this. In other languages
   // using auto, we need to check regardless.
-  if (D.getDeclSpec().containsPlaceholderType() &&
+  if (ContainsPlaceholderType &&
       (!SemaRef.getLangOpts().CPlusPlus11 || !D.isFunctionDeclarator())) {
     int Error = -1;
 
@@ -2101,10 +2122,15 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
       Error = 10; // Type alias
       break;
     case Declarator::TrailingReturnContext:
-      Error = 11; // Function return type
+      if (!SemaRef.getLangOpts().CPlusPlus1y)
+        Error = 11; // Function return type
+      break;
+    case Declarator::ConversionIdContext:
+      if (!SemaRef.getLangOpts().CPlusPlus1y)
+        Error = 12; // conversion-type-id
       break;
     case Declarator::TypeNameContext:
-      Error = 12; // Generic
+      Error = 13; // Generic
       break;
     case Declarator::FileContext:
     case Declarator::BlockContext:
@@ -2140,15 +2166,19 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
       }
     }
 
+    SourceRange AutoRange = D.getDeclSpec().getTypeSpecTypeLoc();
+    if (D.getName().getKind() == UnqualifiedId::IK_ConversionFunctionId)
+      AutoRange = D.getName().getSourceRange();
+
     if (Error != -1) {
-      SemaRef.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
-                   diag::err_auto_not_allowed)
-        << Error;
+      SemaRef.Diag(AutoRange.getBegin(), diag::err_auto_not_allowed)
+        << Error << AutoRange;
       T = SemaRef.Context.IntTy;
       D.setInvalidType(true);
     } else
-      SemaRef.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
-                   diag::warn_cxx98_compat_auto_type_specifier);
+      SemaRef.Diag(AutoRange.getBegin(),
+                   diag::warn_cxx98_compat_auto_type_specifier)
+        << AutoRange;
   }
 
   if (SemaRef.getLangOpts().CPlusPlus &&
@@ -2180,6 +2210,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
       D.setInvalidType(true);
       break;
     case Declarator::TypeNameContext:
+    case Declarator::ConversionIdContext:
     case Declarator::TemplateParamContext:
     case Declarator::CXXNewContext:
     case Declarator::CXXCatchContext:
@@ -2591,7 +2622,8 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         // trailing-return-type is only required if we're declaring a function,
         // and not, for instance, a pointer to a function.
         if (D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_auto &&
-            !FTI.hasTrailingReturnType() && chunkIndex == 0) {
+            !FTI.hasTrailingReturnType() && chunkIndex == 0 &&
+            !S.getLangOpts().CPlusPlus1y) {
           S.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
                diag::err_auto_missing_trailing_return);
           T = Context.IntTy;
@@ -3002,9 +3034,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       EPI.TypeQuals = 0;
       EPI.RefQualifier = RQ_None;
 
-      T = Context.getFunctionType(FnTy->getResultType(),
-                                  ArrayRef<QualType>(FnTy->arg_type_begin(),
-                                                     FnTy->getNumArgs()),
+      T = Context.getFunctionType(FnTy->getResultType(), FnTy->getArgTypes(),
                                   EPI);
       // Rebuild any parens around the identifier in the function type.
       for (unsigned i = 0, e = D.getNumTypeObjects(); i != e; ++i) {
@@ -3092,6 +3122,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
     case Declarator::ObjCCatchContext:
     case Declarator::BlockLiteralContext:
     case Declarator::LambdaExprContext:
+    case Declarator::ConversionIdContext:
     case Declarator::TrailingReturnContext:
     case Declarator::TemplateTypeArgContext:
       // FIXME: We may want to allow parameter packs in block-literal contexts
@@ -3280,6 +3311,14 @@ static AttributeList::Kind getAttrListKind(AttributedType::Kind kind) {
     return AttributeList::AT_PnaclCall;
   case AttributedType::attr_inteloclbicc:
     return AttributeList::AT_IntelOclBicc;
+  case AttributedType::attr_ptr32:
+    return AttributeList::AT_Ptr32;
+  case AttributedType::attr_ptr64:
+    return AttributeList::AT_Ptr64;
+  case AttributedType::attr_sptr:
+    return AttributeList::AT_SPtr;
+  case AttributedType::attr_uptr:
+    return AttributeList::AT_UPtr;
   }
   llvm_unreachable("unexpected attribute kind!");
 }
@@ -3377,9 +3416,11 @@ namespace {
         TemplateSpecializationTypeLoc NamedTL = ElabTL.getNamedTypeLoc()
             .castAs<TemplateSpecializationTypeLoc>();
         TL.copy(NamedTL);
-      }
-      else
+      } else {
         TL.copy(OldTL.castAs<TemplateSpecializationTypeLoc>());
+        assert(TL.getRAngleLoc() == OldTL.castAs<TemplateSpecializationTypeLoc>().getRAngleLoc());
+      }
+        
     }
     void VisitTypeOfExprTypeLoc(TypeOfExprTypeLoc TL) {
       assert(DS.getTypeSpecType() == DeclSpec::TST_typeofExpr);
@@ -4156,6 +4197,69 @@ namespace {
   };
 }
 
+static bool handleMSPointerTypeQualifierAttr(TypeProcessingState &State,
+                                             AttributeList &Attr,
+                                             QualType &Type) {
+  Sema &S = State.getSema();
+
+  AttributeList::Kind Kind = Attr.getKind();
+  QualType Desugared = Type;
+  const AttributedType *AT = dyn_cast<AttributedType>(Type);
+  while (AT) {
+    AttributedType::Kind CurAttrKind = AT->getAttrKind();
+
+    // You cannot specify duplicate type attributes, so if the attribute has
+    // already been applied, flag it.
+    if (getAttrListKind(CurAttrKind) == Kind) {
+      S.Diag(Attr.getLoc(), diag::warn_duplicate_attribute_exact)
+        << Attr.getName();
+      return true;
+    }
+
+    // You cannot have both __sptr and __uptr on the same type, nor can you
+    // have __ptr32 and __ptr64.
+    if ((CurAttrKind == AttributedType::attr_ptr32 &&
+         Kind == AttributeList::AT_Ptr64) ||
+        (CurAttrKind == AttributedType::attr_ptr64 &&
+         Kind == AttributeList::AT_Ptr32)) {
+      S.Diag(Attr.getLoc(), diag::err_attributes_are_not_compatible)
+        << "'__ptr32'" << "'__ptr64'";
+      return true;
+    } else if ((CurAttrKind == AttributedType::attr_sptr &&
+                Kind == AttributeList::AT_UPtr) ||
+               (CurAttrKind == AttributedType::attr_uptr &&
+                Kind == AttributeList::AT_SPtr)) {
+      S.Diag(Attr.getLoc(), diag::err_attributes_are_not_compatible)
+        << "'__sptr'" << "'__uptr'";
+      return true;
+    }
+    
+    Desugared = AT->getEquivalentType();
+    AT = dyn_cast<AttributedType>(Desugared);
+  }
+
+  // Pointer type qualifiers can only operate on pointer types, but not
+  // pointer-to-member types.
+  if (!isa<PointerType>(Desugared)) {
+    S.Diag(Attr.getLoc(), Type->isMemberPointerType() ?
+                          diag::err_attribute_no_member_pointers :
+                          diag::err_attribute_pointers_only) << Attr.getName();
+    return true;
+  }
+
+  AttributedType::Kind TAK;
+  switch (Kind) {
+  default: llvm_unreachable("Unknown attribute kind");
+  case AttributeList::AT_Ptr32: TAK = AttributedType::attr_ptr32; break;
+  case AttributeList::AT_Ptr64: TAK = AttributedType::attr_ptr64; break;
+  case AttributeList::AT_SPtr: TAK = AttributedType::attr_sptr; break;
+  case AttributeList::AT_UPtr: TAK = AttributedType::attr_uptr; break;
+  }
+
+  Type = S.Context.getAttributedType(TAK, Type, Type);
+  return false;
+}
+
 /// Process an individual function attribute.  Returns true to
 /// indicate that the attribute was handled, false if it wasn't.
 static bool handleFunctionTypeAttr(TypeProcessingState &state,
@@ -4558,11 +4662,11 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
       break;
 
     case AttributeList::AT_Win64:
-    case AttributeList::AT_Ptr32:
-    case AttributeList::AT_Ptr64:
-      // FIXME: Don't ignore these. We have partial handling for them as
-      // declaration attributes in SemaDeclAttr.cpp; that should be moved here.
       attr.setUsedAsTypeAttr();
+      break;
+    MS_TYPE_ATTRS_CASELIST:
+      if (!handleMSPointerTypeQualifierAttr(state, attr, type))
+        attr.setUsedAsTypeAttr();
       break;
 
     case AttributeList::AT_NSReturnsRetained:

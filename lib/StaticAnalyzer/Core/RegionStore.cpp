@@ -377,7 +377,7 @@ public:
   ///  version of that lvalue (i.e., a pointer to the first element of
   ///  the array).  This is called by ExprEngine when evaluating
   ///  casts from arrays to pointers.
-  SVal ArrayToPointer(Loc Array);
+  SVal ArrayToPointer(Loc Array, QualType ElementTy);
 
   StoreRef getInitialStore(const LocationContext *InitLoc) {
     return StoreRef(RBFactory.getEmptyMap().getRootWithoutRetain(), *this);
@@ -428,20 +428,6 @@ public: // Part of public interface to class.
                      .asImmutableMap()
                      .getRootWithoutRetain(), *this);
   }
-
-  /// \brief Create a new store that binds a value to a compound literal.
-  ///
-  /// \param ST The original store whose bindings are the basis for the new
-  ///        store.
-  ///
-  /// \param CL The compound literal to bind (the binding key).
-  ///
-  /// \param LC The LocationContext for the binding.
-  ///
-  /// \param V The value to bind to the compound literal.
-  StoreRef bindCompoundLiteral(Store ST,
-                               const CompoundLiteralExpr *CL,
-                               const LocationContext *LC, SVal V);
 
   /// Attempt to extract the fields of \p LCV and bind them to the struct region
   /// \p R.
@@ -1264,23 +1250,13 @@ RegionStoreManager::getSizeInElements(ProgramStateRef state,
 ///  version of that lvalue (i.e., a pointer to the first element of
 ///  the array).  This is called by ExprEngine when evaluating casts
 ///  from arrays to pointers.
-SVal RegionStoreManager::ArrayToPointer(Loc Array) {
+SVal RegionStoreManager::ArrayToPointer(Loc Array, QualType T) {
   if (!Array.getAs<loc::MemRegionVal>())
     return UnknownVal();
 
   const MemRegion* R = Array.castAs<loc::MemRegionVal>().getRegion();
-  const TypedValueRegion* ArrayR = dyn_cast<TypedValueRegion>(R);
-
-  if (!ArrayR)
-    return UnknownVal();
-
-  // Strip off typedefs from the ArrayRegion's ValueType.
-  QualType T = ArrayR->getValueType().getDesugaredType(Ctx);
-  const ArrayType *AT = cast<ArrayType>(T);
-  T = AT->getElementType();
-
   NonLoc ZeroIdx = svalBuilder.makeZeroArrayIndex();
-  return loc::MemRegionVal(MRMgr.getElementRegion(T, ZeroIdx, ArrayR, Ctx));
+  return loc::MemRegionVal(MRMgr.getElementRegion(T, ZeroIdx, R, Ctx));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1944,14 +1920,6 @@ RegionStoreManager::bind(RegionBindingsConstRef B, Loc L, SVal V) {
   // Clear out bindings that may overlap with this binding.
   RegionBindingsRef NewB = removeSubRegionBindings(B, cast<SubRegion>(R));
   return NewB.addBinding(BindingKey::Make(R, BindingKey::Direct), V);
-}
-
-// FIXME: this method should be merged into Bind().
-StoreRef RegionStoreManager::bindCompoundLiteral(Store ST,
-                                                 const CompoundLiteralExpr *CL,
-                                                 const LocationContext *LC,
-                                                 SVal V) {
-  return Bind(ST, loc::MemRegionVal(MRMgr.getCompoundLiteralRegion(CL, LC)), V);
 }
 
 RegionBindingsRef

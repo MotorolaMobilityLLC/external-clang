@@ -55,6 +55,7 @@ namespace clang {
   class ExternalASTSource;
   class ASTMutationListener;
   class IdentifierTable;
+  class MaterializeTemporaryExpr;
   class SelectorTable;
   class TargetInfo;
   class CXXABI;
@@ -162,6 +163,11 @@ class ASTContext : public RefCountedBase<ASTContext> {
   /// template patterns.
   llvm::DenseMap<const FunctionDecl*, FunctionDecl*>
     ClassScopeSpecializationPattern;
+
+  /// \brief Mapping from materialized temporaries with static storage duration
+  /// that appear in constant initializers to their evaluated values.
+  llvm::DenseMap<const MaterializeTemporaryExpr*, APValue>
+    MaterializedTemporaryValues;
 
   /// \brief Representation of a "canonical" template template parameter that
   /// is used in canonical template names.
@@ -451,7 +457,7 @@ public:
     return BumpAlloc;
   }
 
-  void *Allocate(unsigned Size, unsigned Align = 8) const {
+  void *Allocate(size_t Size, unsigned Align = 8) const {
     return BumpAlloc.Allocate(Size, Align);
   }
   void Deallocate(void *Ptr) const { }
@@ -469,6 +475,8 @@ public:
   }
 
   const TargetInfo &getTargetInfo() const { return *Target; }
+  
+  bool AtomicUsesUnsupportedLibcall(const AtomicExpr *E) const;
   
   const LangOptions& getLangOpts() const { return LangOpts; }
 
@@ -580,7 +588,12 @@ public:
   /// preprocessor is not available.
   comments::FullComment *getCommentForDecl(const Decl *D,
                                            const Preprocessor *PP) const;
-  
+
+  /// Return parsed documentation comment attached to a given declaration.
+  /// Returns NULL if no comment is attached. Does not look at any
+  /// redeclarations of the declaration.
+  comments::FullComment *getLocalCommentForDeclUncached(const Decl *D) const;
+
   comments::FullComment *cloneFullComment(comments::FullComment *FC,
                                          const Decl *D) const;
 
@@ -740,7 +753,8 @@ public:
   CanQualType VoidTy;
   CanQualType BoolTy;
   CanQualType CharTy;
-  CanQualType WCharTy;  // [C++ 3.9.1p5], integer type in C99.
+  CanQualType WCharTy;  // [C++ 3.9.1p5].
+  CanQualType WideCharTy; // Same as WCharTy in C++, integer type in C99.
   CanQualType WIntTy;   // [C99 7.24.1], integer type unchanged by default promotions.
   CanQualType Char16Ty; // [C++0x 3.9.1p5], integer type in C99.
   CanQualType Char32Ty; // [C++0x 3.9.1p5], integer type in C99.
@@ -866,6 +880,9 @@ public:
   /// \brief Change the ExtInfo on a function type.
   const FunctionType *adjustFunctionType(const FunctionType *Fn,
                                          FunctionType::ExtInfo EInfo);
+
+  /// \brief Change the result type of a function type once it is deduced.
+  void adjustDeducedFunctionResultType(FunctionDecl *FD, QualType ResultType);
 
   /// \brief Return the uniqued reference to the type for a complex
   /// number with the specified element type.
@@ -1127,10 +1144,14 @@ public:
   /// <stdint.h>.
   CanQualType getUIntMaxType() const;
 
-  /// \brief In C++, this returns the unique wchar_t type.  In C99, this
-  /// returns a type compatible with the type defined in <stddef.h> as defined
-  /// by the target.
+  /// \brief Return the unique wchar_t type available in C++ (and available as
+  /// __wchar_t as a Microsoft extension).
   QualType getWCharType() const { return WCharTy; }
+
+  /// \brief Return the type of wide characters. In C++, this returns the
+  /// unique wchar_t type. In C99, this returns a type compatible with the type
+  /// defined in <stddef.h> as defined by the target.
+  QualType getWideCharType() const { return WideCharTy; }
 
   /// \brief Return the type of "signed wchar_t".
   ///
@@ -1589,6 +1610,14 @@ public:
   /// This can be different than the ABI alignment in cases where it is
   /// beneficial for performance to overalign a data type.
   unsigned getPreferredTypeAlign(const Type *T) const;
+
+  /// \brief Return the alignment in bits that should be given to a
+  /// global variable with type \p T.
+  unsigned getAlignOfGlobalVar(QualType T) const;
+
+  /// \brief Return the alignment in characters that should be given to a
+  /// global variable with type \p T.
+  CharUnits getAlignOfGlobalVarInChars(QualType T) const;
 
   /// \brief Return a conservative estimate of the alignment of the specified
   /// decl \p D.
@@ -2094,7 +2123,12 @@ public:
   /// \brief Used by ParmVarDecl to retrieve on the side the
   /// index of the parameter when it exceeds the size of the normal bitfield.
   unsigned getParameterIndex(const ParmVarDecl *D) const;
-  
+
+  /// \brief Get the storage for the constant value of a materialized temporary
+  /// of static storage duration.
+  APValue *getMaterializedTemporaryValue(const MaterializeTemporaryExpr *E,
+                                         bool MayCreate);
+
   //===--------------------------------------------------------------------===//
   //                    Statistics
   //===--------------------------------------------------------------------===//
@@ -2186,18 +2220,17 @@ private:
                 const ObjCImplementationDecl *Impl) const;
 
 private:
-  /// \brief A set of deallocations that should be performed when the 
+  /// \brief A set of deallocations that should be performed when the
   /// ASTContext is destroyed.
-  SmallVector<std::pair<void (*)(void*), void *>, 16> Deallocations;
-                                       
+  typedef llvm::SmallDenseMap<void(*)(void*), llvm::SmallVector<void*, 16> >
+    DeallocationMap;
+  DeallocationMap Deallocations;
+
   // FIXME: This currently contains the set of StoredDeclMaps used
   // by DeclContext objects.  This probably should not be in ASTContext,
   // but we include it here so that ASTContext can quickly deallocate them.
   llvm::PointerIntPair<StoredDeclsMap*,1> LastSDM;
 
-  /// \brief A counter used to uniquely identify "blocks".
-  mutable unsigned int UniqueBlockByRefTypeID;
-  
   friend class DeclContext;
   friend class DeclarationNameTable;
   void ReleaseDeclContextMaps();

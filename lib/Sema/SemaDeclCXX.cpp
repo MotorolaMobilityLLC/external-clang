@@ -265,7 +265,7 @@ Sema::SetParamDefaultArgument(ParmVarDecl *Param, Expr *Arg,
                                                                     Param);
   InitializationKind Kind = InitializationKind::CreateCopy(Param->getLocation(),
                                                            EqualLoc);
-  InitializationSequence InitSeq(*this, Entity, Kind, &Arg, 1);
+  InitializationSequence InitSeq(*this, Entity, Kind, Arg);
   ExprResult Result = InitSeq.Perform(*this, Entity, Kind, Arg);
   if (Result.isInvalid())
     return true;
@@ -1311,7 +1311,7 @@ Sema::CheckBaseSpecifier(CXXRecordDecl *Class,
   assert(BaseDecl && "Record type has no declaration");
   BaseDecl = BaseDecl->getDefinition();
   assert(BaseDecl && "Base type is not incomplete, but has no definition");
-  CXXRecordDecl * CXXBaseDecl = cast<CXXRecordDecl>(BaseDecl);
+  CXXRecordDecl *CXXBaseDecl = cast<CXXRecordDecl>(BaseDecl);
   assert(CXXBaseDecl && "Base type is not a C++ type");
 
   // C++ [class]p3:
@@ -2157,14 +2157,12 @@ Sema::ActOnCXXInClassMemberInitializer(Decl *D, SourceLocation InitLoc,
       Diag(FD->getLocation(), diag::warn_dangling_std_initializer_list)
         << /*at end of ctor*/1 << InitExpr->getSourceRange();
     }
-    Expr **Inits = &InitExpr;
-    unsigned NumInits = 1;
     InitializedEntity Entity = InitializedEntity::InitializeMember(FD);
     InitializationKind Kind = FD->getInClassInitStyle() == ICIS_ListInit
         ? InitializationKind::CreateDirectList(InitExpr->getLocStart())
         : InitializationKind::CreateCopy(InitExpr->getLocStart(), InitLoc);
-    InitializationSequence Seq(*this, Entity, Kind, Inits, NumInits);
-    Init = Seq.Perform(*this, Entity, Kind, MultiExprArg(Inits, NumInits));
+    InitializationSequence Seq(*this, Entity, Kind, InitExpr);
+    Init = Seq.Perform(*this, Entity, Kind, InitExpr);
     if (Init.isInvalid()) {
       FD->setInvalidDecl();
       return;
@@ -2256,12 +2254,11 @@ Sema::ActOnMemInitializer(Decl *ConstructorD,
                           const DeclSpec &DS,
                           SourceLocation IdLoc,
                           SourceLocation LParenLoc,
-                          Expr **Args, unsigned NumArgs,
+                          ArrayRef<Expr *> Args,
                           SourceLocation RParenLoc,
                           SourceLocation EllipsisLoc) {
   Expr *List = new (Context) ParenListExpr(Context, LParenLoc,
-                                           llvm::makeArrayRef(Args, NumArgs),
-                                           RParenLoc);
+                                           Args, RParenLoc);
   return BuildMemInitializer(ConstructorD, S, SS, MemberOrBase, TemplateTypeTy,
                              DS, IdLoc, List, EllipsisLoc);
 }
@@ -2527,23 +2524,19 @@ Sema::BuildMemberInitializer(ValueDecl *Member, Expr *Init,
   //   foo(foo)
   // where foo is not also a parameter to the constructor.
   // TODO: implement -Wuninitialized and fold this into that framework.
-  Expr **Args;
-  unsigned NumArgs;
+  MultiExprArg Args;
   if (ParenListExpr *ParenList = dyn_cast<ParenListExpr>(Init)) {
-    Args = ParenList->getExprs();
-    NumArgs = ParenList->getNumExprs();
+    Args = MultiExprArg(ParenList->getExprs(), ParenList->getNumExprs());
   } else if (InitListExpr *InitList = dyn_cast<InitListExpr>(Init)) {
-    Args = InitList->getInits();
-    NumArgs = InitList->getNumInits();
+    Args = MultiExprArg(InitList->getInits(), InitList->getNumInits());
   } else {
     // Template instantiation doesn't reconstruct ParenListExprs for us.
-    Args = &Init;
-    NumArgs = 1;
+    Args = Init;
   }
 
   if (getDiagnostics().getDiagnosticLevel(diag::warn_field_is_uninit, IdLoc)
         != DiagnosticsEngine::Ignored)
-    for (unsigned i = 0; i < NumArgs; ++i)
+    for (unsigned i = 0, e = Args.size(); i != e; ++i)
       // FIXME: Warn about the case when other fields are used before being
       // initialized. For example, let this field be the i'th field. When
       // initializing the i'th field, throw a warning if any of the >= i'th
@@ -2564,8 +2557,7 @@ Sema::BuildMemberInitializer(ValueDecl *Member, Expr *Init,
     bool InitList = false;
     if (isa<InitListExpr>(Init)) {
       InitList = true;
-      Args = &Init;
-      NumArgs = 1;
+      Args = Init;
 
       if (isStdInitializerList(Member->getType(), 0)) {
         Diag(IdLoc, diag::warn_dangling_std_initializer_list)
@@ -2582,10 +2574,8 @@ Sema::BuildMemberInitializer(ValueDecl *Member, Expr *Init,
                : InitializationKind::CreateDirect(IdLoc, InitRange.getBegin(),
                                                   InitRange.getEnd());
 
-    InitializationSequence InitSeq(*this, MemberEntity, Kind, Args, NumArgs);
-    ExprResult MemberInit = InitSeq.Perform(*this, MemberEntity, Kind,
-                                            MultiExprArg(Args, NumArgs),
-                                            0);
+    InitializationSequence InitSeq(*this, MemberEntity, Kind, Args);
+    ExprResult MemberInit = InitSeq.Perform(*this, MemberEntity, Kind, Args, 0);
     if (MemberInit.isInvalid())
       return true;
 
@@ -2621,12 +2611,10 @@ Sema::BuildDelegatingInitializer(TypeSourceInfo *TInfo, Expr *Init,
   Diag(NameLoc, diag::warn_cxx98_compat_delegating_ctor);
 
   bool InitList = true;
-  Expr **Args = &Init;
-  unsigned NumArgs = 1;
+  MultiExprArg Args = Init;
   if (ParenListExpr *ParenList = dyn_cast<ParenListExpr>(Init)) {
     InitList = false;
-    Args = ParenList->getExprs();
-    NumArgs = ParenList->getNumExprs();
+    Args = MultiExprArg(ParenList->getExprs(), ParenList->getNumExprs());
   }
 
   SourceRange InitRange = Init->getSourceRange();
@@ -2637,10 +2625,9 @@ Sema::BuildDelegatingInitializer(TypeSourceInfo *TInfo, Expr *Init,
     InitList ? InitializationKind::CreateDirectList(NameLoc)
              : InitializationKind::CreateDirect(NameLoc, InitRange.getBegin(),
                                                 InitRange.getEnd());
-  InitializationSequence InitSeq(*this, DelegationEntity, Kind, Args, NumArgs);
+  InitializationSequence InitSeq(*this, DelegationEntity, Kind, Args);
   ExprResult DelegationInit = InitSeq.Perform(*this, DelegationEntity, Kind,
-                                              MultiExprArg(Args, NumArgs),
-                                              0);
+                                              Args, 0);
   if (DelegationInit.isInvalid())
     return true;
 
@@ -2760,12 +2747,10 @@ Sema::BuildBaseInitializer(QualType BaseType, TypeSourceInfo *BaseTInfo,
 
   // Initialize the base.
   bool InitList = true;
-  Expr **Args = &Init;
-  unsigned NumArgs = 1;
+  MultiExprArg Args = Init;
   if (ParenListExpr *ParenList = dyn_cast<ParenListExpr>(Init)) {
     InitList = false;
-    Args = ParenList->getExprs();
-    NumArgs = ParenList->getNumExprs();
+    Args = MultiExprArg(ParenList->getExprs(), ParenList->getNumExprs());
   }
 
   InitializedEntity BaseEntity =
@@ -2774,9 +2759,8 @@ Sema::BuildBaseInitializer(QualType BaseType, TypeSourceInfo *BaseTInfo,
     InitList ? InitializationKind::CreateDirectList(BaseLoc)
              : InitializationKind::CreateDirect(BaseLoc, InitRange.getBegin(),
                                                 InitRange.getEnd());
-  InitializationSequence InitSeq(*this, BaseEntity, Kind, Args, NumArgs);
-  ExprResult BaseInit = InitSeq.Perform(*this, BaseEntity, Kind,
-                                        MultiExprArg(Args, NumArgs), 0);
+  InitializationSequence InitSeq(*this, BaseEntity, Kind, Args);
+  ExprResult BaseInit = InitSeq.Perform(*this, BaseEntity, Kind, Args, 0);
   if (BaseInit.isInvalid())
     return true;
 
@@ -2862,8 +2846,7 @@ BuildImplicitBaseInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
 
       InitializationKind InitKind = InitializationKind::CreateDirect(
           Constructor->getLocation(), SourceLocation(), SourceLocation());
-      InitializationSequence InitSeq(SemaRef, InitEntity, InitKind,
-                                     Args.data(), Args.size());
+      InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, Args);
       BaseInit = InitSeq.Perform(SemaRef, InitEntity, InitKind, Args);
       break;
     }
@@ -2872,8 +2855,8 @@ BuildImplicitBaseInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
   case IIK_Default: {
     InitializationKind InitKind
       = InitializationKind::CreateDefault(Constructor->getLocation());
-    InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, 0, 0);
-    BaseInit = InitSeq.Perform(SemaRef, InitEntity, InitKind, MultiExprArg());
+    InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, None);
+    BaseInit = InitSeq.Perform(SemaRef, InitEntity, InitKind, None);
     break;
   }
 
@@ -2910,10 +2893,8 @@ BuildImplicitBaseInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
     InitializationKind InitKind
       = InitializationKind::CreateDirect(Constructor->getLocation(),
                                          SourceLocation(), SourceLocation());
-    InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, 
-                                   &CopyCtorArg, 1);
-    BaseInit = InitSeq.Perform(SemaRef, InitEntity, InitKind,
-                               MultiExprArg(&CopyCtorArg, 1));
+    InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, CopyCtorArg);
+    BaseInit = InitSeq.Perform(SemaRef, InitEntity, InitKind, CopyCtorArg);
     break;
   }
   }
@@ -3064,8 +3045,7 @@ BuildImplicitMemberInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
       InitializationKind::CreateDirect(Loc, SourceLocation(), SourceLocation());
     
     Expr *CtorArgE = CtorArg.takeAs<Expr>();
-    InitializationSequence InitSeq(SemaRef, Entities.back(), InitKind,
-                                   &CtorArgE, 1);
+    InitializationSequence InitSeq(SemaRef, Entities.back(), InitKind, CtorArgE);
     
     ExprResult MemberInit
       = InitSeq.Perform(SemaRef, Entities.back(), InitKind, 
@@ -3103,10 +3083,10 @@ BuildImplicitMemberInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
                 : InitializedEntity::InitializeMember(Field);
     InitializationKind InitKind = 
       InitializationKind::CreateDefault(Loc);
-    
-    InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, 0, 0);
-    ExprResult MemberInit = 
-      InitSeq.Perform(SemaRef, InitEntity, InitKind, MultiExprArg());
+
+    InitializationSequence InitSeq(SemaRef, InitEntity, InitKind, None);
+    ExprResult MemberInit =
+      InitSeq.Perform(SemaRef, InitEntity, InitKind, None);
 
     MemberInit = SemaRef.MaybeCreateExprWithCleanups(MemberInit);
     if (MemberInit.isInvalid())
@@ -3826,10 +3806,17 @@ Sema::MarkBaseAndMemberDestructorsReferenced(SourceLocation Location,
 
     CXXDestructorDecl *Dtor = LookupDestructor(BaseClassDecl);
     assert(Dtor && "No dtor found for BaseClassDecl!");
-    CheckDestructorAccess(ClassDecl->getLocation(), Dtor,
-                          PDiag(diag::err_access_dtor_vbase)
-                            << VBase->getType(),
-                          Context.getTypeDeclType(ClassDecl));
+    if (CheckDestructorAccess(
+            ClassDecl->getLocation(), Dtor,
+            PDiag(diag::err_access_dtor_vbase)
+                << Context.getTypeDeclType(ClassDecl) << VBase->getType(),
+            Context.getTypeDeclType(ClassDecl)) ==
+        AR_accessible) {
+      CheckDerivedToBaseConversion(
+          Context.getTypeDeclType(ClassDecl), VBase->getType(),
+          diag::err_access_dtor_vbase, 0, ClassDecl->getLocation(),
+          SourceRange(), DeclarationName(), 0);
+    }
 
     MarkFunctionReferenced(Location, const_cast<CXXDestructorDecl*>(Dtor));
     DiagnoseUseOfDecl(Dtor, Location);
@@ -4297,6 +4284,7 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
 
   // C++11 [dcl.constexpr]p4:
   // In the definition of a constexpr constructor [...]
+  bool Ctor = true;
   switch (CSM) {
   case Sema::CXXDefaultConstructor:
     // Since default constructor lookup is essentially trivial (and cannot
@@ -4314,6 +4302,12 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
 
   case Sema::CXXCopyAssignment:
   case Sema::CXXMoveAssignment:
+    if (!S.getLangOpts().CPlusPlus1y)
+      return false;
+    // In C++1y, we need to perform overload resolution.
+    Ctor = false;
+    break;
+
   case Sema::CXXDestructor:
   case Sema::CXXInvalid:
     return false;
@@ -4326,15 +4320,22 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
   // If we squint, this is guaranteed, since exactly one non-static data member
   // will be initialized (if the constructor isn't deleted), we just don't know
   // which one.
-  if (ClassDecl->isUnion())
+  if (Ctor && ClassDecl->isUnion())
     return true;
 
   //   -- the class shall not have any virtual base classes;
-  if (ClassDecl->getNumVBases())
+  if (Ctor && ClassDecl->getNumVBases())
+    return false;
+
+  // C++1y [class.copy]p26:
+  //   -- [the class] is a literal type, and
+  if (!Ctor && !ClassDecl->isLiteral())
     return false;
 
   //   -- every constructor involved in initializing [...] base class
   //      sub-objects shall be a constexpr constructor;
+  //   -- the assignment operator selected to copy/move each direct base
+  //      class is a constexpr function, and
   for (CXXRecordDecl::base_class_iterator B = ClassDecl->bases_begin(),
                                        BEnd = ClassDecl->bases_end();
        B != BEnd; ++B) {
@@ -4350,6 +4351,9 @@ static bool defaultedSpecialMemberIsConstexpr(Sema &S, CXXRecordDecl *ClassDecl,
   //      [...] shall be a constexpr constructor;
   //   -- every non-static data member and base class sub-object shall be
   //      initialized
+  //   -- for each non-stastic data member of X that is of class type (or array
+  //      thereof), the assignment operator selected to copy/move that member is
+  //      a constexpr function
   for (RecordDecl::field_iterator F = ClassDecl->field_begin(),
                                FEnd = ClassDecl->field_end();
        F != FEnd; ++F) {
@@ -4480,7 +4484,7 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
     // A defaulted special member cannot have cv-qualifiers.
     if (Type->getTypeQuals()) {
       Diag(MD->getLocation(), diag::err_defaulted_special_member_quals)
-        << (CSM == CXXMoveAssignment);
+        << (CSM == CXXMoveAssignment) << getLangOpts().CPlusPlus1y;
       HadError = true;
     }
   }
@@ -4525,13 +4529,16 @@ void Sema::CheckExplicitlyDefaultedSpecialMember(CXXMethodDecl *MD) {
   //   would have been implicitly declared as constexpr,
   // Do not apply this rule to members of class templates, since core issue 1358
   // makes such functions always instantiate to constexpr functions. For
-  // non-constructors, this is checked elsewhere.
+  // functions which cannot be constexpr (for non-constructors in C++11 and for
+  // destructors in C++1y), this is checked elsewhere.
   bool Constexpr = defaultedSpecialMemberIsConstexpr(*this, RD, CSM,
                                                      HasConstParam);
-  if (isa<CXXConstructorDecl>(MD) && MD->isConstexpr() && !Constexpr &&
+  if ((getLangOpts().CPlusPlus1y ? !isa<CXXDestructorDecl>(MD)
+                                 : isa<CXXConstructorDecl>(MD)) &&
+      MD->isConstexpr() && !Constexpr &&
       MD->getTemplatedKind() == FunctionDecl::TK_NonTemplate) {
     Diag(MD->getLocStart(), diag::err_incorrect_defaulted_constexpr) << CSM;
-    // FIXME: Explain why the constructor can't be constexpr.
+    // FIXME: Explain why the special member can't be constexpr.
     HadError = true;
   }
 
@@ -4595,7 +4602,7 @@ void Sema::CheckExplicitlyDefaultedMemberExceptionSpec(
   FunctionProtoType::ExtProtoInfo EPI;
   computeImplicitExceptionSpec(*this, MD->getLocation(), MD).getEPI(EPI);
   const FunctionProtoType *ImplicitType = cast<FunctionProtoType>(
-    Context.getFunctionType(Context.VoidTy, ArrayRef<QualType>(), EPI));
+    Context.getFunctionType(Context.VoidTy, None, EPI));
 
   // Ensure that it matches.
   CheckEquivalentExceptionSpec(
@@ -5896,7 +5903,7 @@ void Sema::CheckConstructor(CXXConstructorDecl *Constructor) {
 bool Sema::CheckDestructor(CXXDestructorDecl *Destructor) {
   CXXRecordDecl *RD = Destructor->getParent();
   
-  if (Destructor->isVirtual()) {
+  if (!Destructor->getOperatorDelete() && Destructor->isVirtual()) {
     SourceLocation Loc;
     
     if (!Destructor->isImplicit())
@@ -6030,7 +6037,7 @@ QualType Sema::CheckDestructorDeclarator(Declarator &D, QualType R,
   EPI.Variadic = false;
   EPI.TypeQuals = 0;
   EPI.RefQualifier = RQ_None;
-  return Context.getFunctionType(Context.VoidTy, ArrayRef<QualType>(), EPI);
+  return Context.getFunctionType(Context.VoidTy, None, EPI);
 }
 
 /// CheckConversionDeclarator - Called by ActOnDeclarator to check the
@@ -6111,8 +6118,7 @@ void Sema::CheckConversionDeclarator(Declarator &D, QualType &R,
   // of the errors above fired) and with the conversion type as the
   // return type.
   if (D.isInvalidType())
-    R = Context.getFunctionType(ConvType, ArrayRef<QualType>(),
-                                Proto->getExtProtoInfo());
+    R = Context.getFunctionType(ConvType, None, Proto->getExtProtoInfo());
 
   // C++0x explicit conversion operators.
   if (D.getDeclSpec().isExplicitSpecified())
@@ -7811,9 +7817,7 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
   FunctionProtoType::ExtProtoInfo EPI;
   EPI.ExceptionSpecType = EST_Unevaluated;
   EPI.ExceptionSpecDecl = DefaultCon;
-  DefaultCon->setType(Context.getFunctionType(Context.VoidTy,
-                                              ArrayRef<QualType>(),
-                                              EPI));
+  DefaultCon->setType(Context.getFunctionType(Context.VoidTy, None, EPI));
 
   // We don't need to use SpecialMemberIsTrivial here; triviality for default
   // constructors is easy to compute.
@@ -8277,9 +8281,7 @@ CXXDestructorDecl *Sema::DeclareImplicitDestructor(CXXRecordDecl *ClassDecl) {
   FunctionProtoType::ExtProtoInfo EPI;
   EPI.ExceptionSpecType = EST_Unevaluated;
   EPI.ExceptionSpecDecl = Destructor;
-  Destructor->setType(Context.getFunctionType(Context.VoidTy,
-                                              ArrayRef<QualType>(),
-                                              EPI));
+  Destructor->setType(Context.getFunctionType(Context.VoidTy, None, EPI));
 
   AddOverriddenMethods(ClassDecl, Destructor);
 
@@ -8383,9 +8385,7 @@ void Sema::AdjustDestructorExceptionSpec(CXXRecordDecl *ClassDecl,
   FunctionProtoType::ExtProtoInfo EPI = DtorType->getExtProtoInfo();
   EPI.ExceptionSpecType = EST_Unevaluated;
   EPI.ExceptionSpecDecl = Destructor;
-  Destructor->setType(Context.getFunctionType(Context.VoidTy,
-                                              ArrayRef<QualType>(),
-                                              EPI));
+  Destructor->setType(Context.getFunctionType(Context.VoidTy, None, EPI));
 
   // FIXME: If the destructor has a body that could throw, and the newly created
   // spec doesn't allow exceptions, we should emit a warning, because this
@@ -8563,7 +8563,7 @@ buildSingleCopyAssignRecursively(Sema &S, SourceLocation Loc, QualType T,
 
     ExprResult Call = S.BuildCallToMemberFunction(/*Scope=*/0,
                                                   OpEqualRef.takeAs<Expr>(),
-                                                  Loc, &From, 1, Loc);
+                                                  Loc, From, Loc);
     if (Call.isInvalid())
       return StmtError();
 
@@ -8762,21 +8762,24 @@ CXXMethodDecl *Sema::DeclareImplicitCopyAssignment(CXXRecordDecl *ClassDecl) {
 
   QualType ArgType = Context.getTypeDeclType(ClassDecl);
   QualType RetType = Context.getLValueReferenceType(ArgType);
-  if (ClassDecl->implicitCopyAssignmentHasConstParam())
+  bool Const = ClassDecl->implicitCopyAssignmentHasConstParam();
+  if (Const)
     ArgType = ArgType.withConst();
   ArgType = Context.getLValueReferenceType(ArgType);
+
+  bool Constexpr = defaultedSpecialMemberIsConstexpr(*this, ClassDecl,
+                                                     CXXCopyAssignment,
+                                                     Const);
 
   //   An implicitly-declared copy assignment operator is an inline public
   //   member of its class.
   DeclarationName Name = Context.DeclarationNames.getCXXOperatorName(OO_Equal);
   SourceLocation ClassLoc = ClassDecl->getLocation();
   DeclarationNameInfo NameInfo(Name, ClassLoc);
-  CXXMethodDecl *CopyAssignment
-    = CXXMethodDecl::Create(Context, ClassDecl, ClassLoc, NameInfo, QualType(),
-                            /*TInfo=*/0,
-                            /*StorageClass=*/SC_None,
-                            /*isInline=*/true, /*isConstexpr=*/false,
-                            SourceLocation());
+  CXXMethodDecl *CopyAssignment =
+      CXXMethodDecl::Create(Context, ClassDecl, ClassLoc, NameInfo, QualType(),
+                            /*TInfo=*/ 0, /*StorageClass=*/ SC_None,
+                            /*isInline=*/ true, Constexpr, SourceLocation());
   CopyAssignment->setAccess(AS_public);
   CopyAssignment->setDefaulted();
   CopyAssignment->setImplicit();
@@ -8801,7 +8804,7 @@ CXXMethodDecl *Sema::DeclareImplicitCopyAssignment(CXXRecordDecl *ClassDecl) {
       ? SpecialMemberIsTrivial(CopyAssignment, CXXCopyAssignment)
       : ClassDecl->hasTrivialCopyAssignment());
 
-  // C++0x [class.copy]p19:
+  // C++11 [class.copy]p19:
   //   ....  If the class definition does not explicitly declare a copy
   //   assignment operator, there is no user-declared move constructor, and
   //   there is no user-declared move assignment operator, a copy assignment
@@ -8928,7 +8931,12 @@ void Sema::DefineImplicitCopyAssignment(SourceLocation CurrentLocation,
        Field != FieldEnd; ++Field) {
     if (Field->isUnnamedBitfield())
       continue;
-    
+
+    if (Field->isInvalidDecl()) {
+      Invalid = true;
+      continue;
+    }
+
     // Check for members of reference type; we can't copy those.
     if (Field->getType()->isReferenceType()) {
       Diag(ClassDecl->getLocation(), diag::err_uninitialized_member_for_assign)
@@ -9214,18 +9222,19 @@ CXXMethodDecl *Sema::DeclareImplicitMoveAssignment(CXXRecordDecl *ClassDecl) {
   QualType RetType = Context.getLValueReferenceType(ArgType);
   ArgType = Context.getRValueReferenceType(ArgType);
 
+  bool Constexpr = defaultedSpecialMemberIsConstexpr(*this, ClassDecl,
+                                                     CXXMoveAssignment,
+                                                     false);
+
   //   An implicitly-declared move assignment operator is an inline public
   //   member of its class.
   DeclarationName Name = Context.DeclarationNames.getCXXOperatorName(OO_Equal);
   SourceLocation ClassLoc = ClassDecl->getLocation();
   DeclarationNameInfo NameInfo(Name, ClassLoc);
-  CXXMethodDecl *MoveAssignment
-    = CXXMethodDecl::Create(Context, ClassDecl, ClassLoc, NameInfo, QualType(),
-                            /*TInfo=*/0,
-                            /*StorageClass=*/SC_None,
-                            /*isInline=*/true,
-                            /*isConstexpr=*/false,
-                            SourceLocation());
+  CXXMethodDecl *MoveAssignment =
+      CXXMethodDecl::Create(Context, ClassDecl, ClassLoc, NameInfo, QualType(),
+                            /*TInfo=*/0, /*StorageClass=*/SC_None,
+                            /*isInline=*/true, Constexpr, SourceLocation());
   MoveAssignment->setAccess(AS_public);
   MoveAssignment->setDefaulted();
   MoveAssignment->setImplicit();
@@ -9310,7 +9319,7 @@ void Sema::DefineImplicitMoveAssignment(SourceLocation CurrentLocation,
   ParmVarDecl *Other = MoveAssignOperator->getParamDecl(0);
   QualType OtherRefType = Other->getType()->
       getAs<RValueReferenceType>()->getPointeeType();
-  assert(OtherRefType.getQualifiers() == 0 &&
+  assert(!OtherRefType.getQualifiers() &&
          "Bad argument type of defaulted move assignment");
 
   // Our location for everything implicitly-generated.
@@ -9381,6 +9390,11 @@ void Sema::DefineImplicitMoveAssignment(SourceLocation CurrentLocation,
        Field != FieldEnd; ++Field) {
     if (Field->isUnnamedBitfield())
       continue;
+
+    if (Field->isInvalidDecl()) {
+      Invalid = true;
+      continue;
+    }
 
     // Check for members of reference type; we can't move those.
     if (Field->getType()->isReferenceType()) {
@@ -9758,7 +9772,7 @@ CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
   SourceLocation ClassLoc = ClassDecl->getLocation();
   DeclarationNameInfo NameInfo(Name, ClassLoc);
 
-  // C++0x [class.copy]p11:
+  // C++11 [class.copy]p11:
   //   An implicitly-declared copy/move constructor is an inline public
   //   member of its class.
   CXXConstructorDecl *MoveConstructor = CXXConstructorDecl::Create(
@@ -10083,12 +10097,14 @@ Sema::CompleteConstructorCall(CXXConstructorDecl *Constructor,
     Proto->isVariadic() ? VariadicConstructor : VariadicDoesNotApply;
   SmallVector<Expr *, 8> AllArgs;
   bool Invalid = GatherArgumentsForCall(Loc, Constructor,
-                                        Proto, 0, Args, NumArgs, AllArgs, 
+                                        Proto, 0,
+                                        llvm::makeArrayRef(Args, NumArgs),
+                                        AllArgs,
                                         CallType, AllowExplicit,
                                         IsListInitialization);
   ConvertedArgs.append(AllArgs.begin(), AllArgs.end());
 
-  DiagnoseSentinelCalls(Constructor, Loc, AllArgs.data(), AllArgs.size());
+  DiagnoseSentinelCalls(Constructor, Loc, AllArgs);
 
   CheckConstructorCall(Constructor,
                        llvm::makeArrayRef<const Expr *>(AllArgs.data(),
@@ -10409,7 +10425,7 @@ bool Sema::CheckLiteralOperatorDeclaration(FunctionDecl *FnDecl) {
     if (Context.hasSameType(T, Context.UnsignedLongLongTy) ||
         Context.hasSameType(T, Context.LongDoubleTy) ||
         Context.hasSameType(T, Context.CharTy) ||
-        Context.hasSameType(T, Context.WCharTy) ||
+        Context.hasSameType(T, Context.WideCharTy) ||
         Context.hasSameType(T, Context.Char16Ty) ||
         Context.hasSameType(T, Context.Char32Ty)) {
       if (++Param == FnDecl->param_end())
@@ -10439,7 +10455,7 @@ bool Sema::CheckLiteralOperatorDeclaration(FunctionDecl *FnDecl) {
     // const char *, const wchar_t*, const char16_t*, and const char32_t*
     // are allowed as the first parameter to a two-parameter function
     if (!(Context.hasSameType(T, Context.CharTy) ||
-          Context.hasSameType(T, Context.WCharTy) ||
+          Context.hasSameType(T, Context.WideCharTy) ||
           Context.hasSameType(T, Context.Char16Ty) ||
           Context.hasSameType(T, Context.Char32Ty)))
       goto FinishedParams;
@@ -10642,9 +10658,8 @@ VarDecl *Sema::BuildExceptionDeclaration(Scope *S,
 
       Expr *opaqueValue =
         new (Context) OpaqueValueExpr(Loc, initType, VK_LValue, OK_Ordinary);
-      InitializationSequence sequence(*this, entity, initKind, &opaqueValue, 1);
-      ExprResult result = sequence.Perform(*this, entity, initKind,
-                                           MultiExprArg(&opaqueValue, 1));
+      InitializationSequence sequence(*this, entity, initKind, opaqueValue);
+      ExprResult result = sequence.Perform(*this, entity, initKind, opaqueValue);
       if (result.isInvalid())
         Invalid = true;
       else {
@@ -11718,8 +11733,7 @@ void Sema::MarkVTableUsed(SourceLocation Loc, CXXRecordDecl *Class,
   // Ignore any vtable uses in unevaluated operands or for classes that do
   // not have a vtable.
   if (!Class->isDynamicClass() || Class->isDependentContext() ||
-      CurContext->isDependentContext() ||
-      ExprEvalContexts.back().Context == Unevaluated)
+      CurContext->isDependentContext() || isUnevaluatedContext())
     return;
 
   // Try to insert this class into the map.
@@ -11827,7 +11841,7 @@ bool Sema::DefineUsedVTables() {
     Consumer.HandleVTable(Class, VTablesUsed[Canonical]);
 
     // Optionally warn if we're emitting a weak vtable.
-    if (Class->hasExternalLinkage() &&
+    if (Class->isExternallyVisible() &&
         Class->getTemplateSpecializationKind() != TSK_ImplicitInstantiation) {
       const FunctionDecl *KeyFunctionDef = 0;
       if (!KeyFunction || 
@@ -11907,10 +11921,10 @@ void Sema::SetIvarInitializers(ObjCImplementationDecl *ObjCImplementation) {
       InitializedEntity InitEntity = InitializedEntity::InitializeMember(Field);
       InitializationKind InitKind = 
         InitializationKind::CreateDefault(ObjCImplementation->getLocation());
-      
-      InitializationSequence InitSeq(*this, InitEntity, InitKind, 0, 0);
-      ExprResult MemberInit = 
-        InitSeq.Perform(*this, InitEntity, InitKind, MultiExprArg());
+
+      InitializationSequence InitSeq(*this, InitEntity, InitKind, None);
+      ExprResult MemberInit =
+        InitSeq.Perform(*this, InitEntity, InitKind, None);
       MemberInit = MaybeCreateExprWithCleanups(MemberInit);
       // Note, MemberInit could actually come back empty if no initialization 
       // is required (e.g., because it would call a trivial default constructor)

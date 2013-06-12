@@ -16,12 +16,14 @@
 #include "CodeGenModule.h"
 #include "TargetInfo.h"
 #include "clang/AST/StmtVisitor.h"
+#include "clang/Sema/SemaDiagnostic.h"
 #include "clang/Basic/PrettyStackTrace.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/Support/CallSite.h"
 using namespace clang;
 using namespace CodeGen;
 
@@ -38,8 +40,7 @@ void CodeGenFunction::EmitStopPoint(const Stmt *S) {
       Loc = S->getLocStart();
     DI->EmitLocation(Builder, Loc);
 
-    if (++NumStopPoints == 1)
-      FirstStopPoint = Loc;
+    LastStopPoint = Loc;
   }
 }
 
@@ -138,7 +139,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
   case Stmt::GCCAsmStmtClass:   // Intentional fall-through.
   case Stmt::MSAsmStmtClass:    EmitAsmStmt(cast<AsmStmt>(*S));           break;
   case Stmt::CapturedStmtClass:
-    EmitCapturedStmt(cast<CapturedStmt>(*S));
+    EmitCapturedStmt(cast<CapturedStmt>(*S), CR_Default);
     break;
   case Stmt::ObjCAtTryStmtClass:
     EmitObjCAtTryStmt(cast<ObjCAtTryStmt>(*S));
@@ -195,8 +196,8 @@ bool CodeGenFunction::EmitSimpleStmt(const Stmt *S) {
 /// EmitCompoundStmt - Emit a compound statement {..} node.  If GetLast is true,
 /// this captures the expression result of the last sub-statement and returns it
 /// (for use by the statement expression extension).
-RValue CodeGenFunction::EmitCompoundStmt(const CompoundStmt &S, bool GetLast,
-                                         AggValueSlot AggSlot) {
+llvm::Value* CodeGenFunction::EmitCompoundStmt(const CompoundStmt &S, bool GetLast,
+                                               AggValueSlot AggSlot) {
   PrettyStackTraceLoc CrashInfo(getContext().getSourceManager(),S.getLBracLoc(),
                              "LLVM IR generation of compound statement ('{}')");
 
@@ -206,17 +207,17 @@ RValue CodeGenFunction::EmitCompoundStmt(const CompoundStmt &S, bool GetLast,
   return EmitCompoundStmtWithoutScope(S, GetLast, AggSlot);
 }
 
-RValue CodeGenFunction::EmitCompoundStmtWithoutScope(const CompoundStmt &S, bool GetLast,
-                                         AggValueSlot AggSlot) {
+llvm::Value*
+CodeGenFunction::EmitCompoundStmtWithoutScope(const CompoundStmt &S,
+                                              bool GetLast,
+                                              AggValueSlot AggSlot) {
 
   for (CompoundStmt::const_body_iterator I = S.body_begin(),
        E = S.body_end()-GetLast; I != E; ++I)
     EmitStmt(*I);
 
-  RValue RV;
-  if (!GetLast)
-    RV = RValue::get(0);
-  else {
+  llvm::Value *RetAlloca = 0;
+  if (GetLast) {
     // We have to special case labels here.  They are statements, but when put
     // at the end of a statement expression, they yield the value of their
     // subexpression.  Handle this by walking through all labels we encounter,
@@ -229,10 +230,21 @@ RValue CodeGenFunction::EmitCompoundStmtWithoutScope(const CompoundStmt &S, bool
 
     EnsureInsertPoint();
 
-    RV = EmitAnyExpr(cast<Expr>(LastStmt), AggSlot);
+    QualType ExprTy = cast<Expr>(LastStmt)->getType();
+    if (hasAggregateEvaluationKind(ExprTy)) {
+      EmitAggExpr(cast<Expr>(LastStmt), AggSlot);
+    } else {
+      // We can't return an RValue here because there might be cleanups at
+      // the end of the StmtExpr.  Because of that, we have to emit the result
+      // here into a temporary alloca.
+      RetAlloca = CreateMemTemp(ExprTy);
+      EmitAnyExprToMem(cast<Expr>(LastStmt), RetAlloca, Qualifiers(),
+                       /*IsInit*/false);
+    }
+      
   }
 
-  return RV;
+  return RetAlloca;
 }
 
 void CodeGenFunction::SimplifyForwardingBlocks(llvm::BasicBlock *BB) {
@@ -418,6 +430,11 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
   // unequal to 0.  The condition must be a scalar type.
   RunCleanupsScope ConditionScope(*this);
 
+  // Also open a debugger-visible lexical scope for the condition.
+  CGDebugInfo *DI = getDebugInfo();
+  if (DI)
+    DI->EmitLexicalBlockStart(Builder, S.getSourceRange().getBegin());
+
   if (S.getConditionVariable())
     EmitAutoVarDecl(*S.getConditionVariable());
 
@@ -438,6 +455,8 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
         RunCleanupsScope ExecutedScope(*this);
         EmitStmt(Executed);
       }
+      if (DI)
+        DI->EmitLexicalBlockEnd(Builder, S.getSourceRange().getEnd());
       return;
     }
   }
@@ -474,6 +493,9 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
       Builder.SetCurrentDebugLocation(llvm::DebugLoc());
     EmitBranch(ContBlock);
   }
+
+  if (DI)
+    DI->EmitLexicalBlockEnd(Builder, S.getSourceRange().getEnd());
 
   // Emit the continuation block for code after the if.
   EmitBlock(ContBlock, true);
@@ -842,6 +864,7 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
     }
   }
 
+  ++NumReturnExprs;
   if (RV == 0 || RV->isEvaluatable(getContext()))
     ++NumSimpleReturnExprs;
 
@@ -1475,16 +1498,20 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   SmallVector<TargetInfo::ConstraintInfo, 4> InputConstraintInfos;
 
   for (unsigned i = 0, e = S.getNumOutputs(); i != e; i++) {
-    TargetInfo::ConstraintInfo Info(S.getOutputConstraint(i),
-                                    S.getOutputName(i));
+    StringRef Name;
+    if (const GCCAsmStmt *GAS = dyn_cast<GCCAsmStmt>(&S))
+      Name = GAS->getOutputName(i);
+    TargetInfo::ConstraintInfo Info(S.getOutputConstraint(i), Name);
     bool IsValid = getTarget().validateOutputConstraint(Info); (void)IsValid;
     assert(IsValid && "Failed to parse output constraint"); 
     OutputConstraintInfos.push_back(Info);
   }
 
   for (unsigned i = 0, e = S.getNumInputs(); i != e; i++) {
-    TargetInfo::ConstraintInfo Info(S.getInputConstraint(i),
-                                    S.getInputName(i));
+    StringRef Name;
+    if (const GCCAsmStmt *GAS = dyn_cast<GCCAsmStmt>(&S))
+      Name = GAS->getInputName(i);
+    TargetInfo::ConstraintInfo Info(S.getInputConstraint(i), Name);
     bool IsValid =
       getTarget().validateInputConstraint(OutputConstraintInfos.data(),
                                           S.getNumOutputs(), Info);
@@ -1554,10 +1581,15 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
           ResultRegTypes.back() = ConvertType(InputTy);
         }
       }
-      if (llvm::Type* AdjTy = 
+      if (llvm::Type* AdjTy =
             getTargetHooks().adjustInlineAsmType(*this, OutputConstraint,
                                                  ResultRegTypes.back()))
         ResultRegTypes.back() = AdjTy;
+      else {
+        CGM.getDiags().Report(S.getAsmLoc(),
+                              diag::err_asm_invalid_type_in_input)
+            << OutExpr->getType() << OutputConstraint;
+      }
     } else {
       ArgTypes.push_back(Dest.getAddress()->getType());
       Args.push_back(Dest.getAddress());
@@ -1573,8 +1605,8 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
                                             InOutConstraints);
 
       if (llvm::Type* AdjTy =
-            getTargetHooks().adjustInlineAsmType(*this, OutputConstraint,
-                                                 Arg->getType()))
+          getTargetHooks().adjustInlineAsmType(*this, OutputConstraint,
+                                               Arg->getType()))
         Arg = Builder.CreateBitCast(Arg, AdjTy);
 
       if (Info.allowsRegister())
@@ -1639,6 +1671,9 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
               getTargetHooks().adjustInlineAsmType(*this, InputConstraint,
                                                    Arg->getType()))
       Arg = Builder.CreateBitCast(Arg, AdjTy);
+    else
+      CGM.getDiags().Report(S.getAsmLoc(), diag::err_asm_invalid_type_in_input)
+          << InputExpr->getType() << InputConstraint;
 
     ArgTypes.push_back(Arg->getType());
     Args.push_back(Arg);
@@ -1746,6 +1781,94 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   }
 }
 
-void CodeGenFunction::EmitCapturedStmt(const CapturedStmt &S) {
-  llvm_unreachable("not implemented yet");
+static LValue InitCapturedStruct(CodeGenFunction &CGF, const CapturedStmt &S) {
+  const RecordDecl *RD = S.getCapturedRecordDecl();
+  QualType RecordTy = CGF.getContext().getRecordType(RD);
+
+  // Initialize the captured struct.
+  LValue SlotLV = CGF.MakeNaturalAlignAddrLValue(
+                    CGF.CreateMemTemp(RecordTy, "agg.captured"), RecordTy);
+
+  RecordDecl::field_iterator CurField = RD->field_begin();
+  for (CapturedStmt::capture_init_iterator I = S.capture_init_begin(),
+                                           E = S.capture_init_end();
+       I != E; ++I, ++CurField) {
+    LValue LV = CGF.EmitLValueForFieldInitialization(SlotLV, *CurField);
+    CGF.EmitInitializerForField(*CurField, LV, *I, ArrayRef<VarDecl *>());
+  }
+
+  return SlotLV;
+}
+
+/// Generate an outlined function for the body of a CapturedStmt, store any
+/// captured variables into the captured struct, and call the outlined function.
+llvm::Function *
+CodeGenFunction::EmitCapturedStmt(const CapturedStmt &S, CapturedRegionKind K) {
+  const CapturedDecl *CD = S.getCapturedDecl();
+  const RecordDecl *RD = S.getCapturedRecordDecl();
+  assert(CD->hasBody() && "missing CapturedDecl body");
+
+  LValue CapStruct = InitCapturedStruct(*this, S);
+
+  // Emit the CapturedDecl
+  CodeGenFunction CGF(CGM, true);
+  CGF.CapturedStmtInfo = new CGCapturedStmtInfo(S, K);
+  llvm::Function *F = CGF.GenerateCapturedStmtFunction(CD, RD);
+  delete CGF.CapturedStmtInfo;
+
+  // Emit call to the helper function.
+  EmitCallOrInvoke(F, CapStruct.getAddress());
+
+  return F;
+}
+
+/// Creates the outlined function for a CapturedStmt.
+llvm::Function *
+CodeGenFunction::GenerateCapturedStmtFunction(const CapturedDecl *CD,
+                                              const RecordDecl *RD) {
+  assert(CapturedStmtInfo &&
+    "CapturedStmtInfo should be set when generating the captured function");
+
+  // Check if we should generate debug info for this function.
+  maybeInitializeDebugInfo();
+
+  // Build the argument list.
+  ASTContext &Ctx = CGM.getContext();
+  FunctionArgList Args;
+  Args.append(CD->param_begin(), CD->param_end());
+
+  // Create the function declaration.
+  FunctionType::ExtInfo ExtInfo;
+  const CGFunctionInfo &FuncInfo =
+    CGM.getTypes().arrangeFunctionDeclaration(Ctx.VoidTy, Args, ExtInfo,
+                                              /*IsVariadic=*/false);
+  llvm::FunctionType *FuncLLVMTy = CGM.getTypes().GetFunctionType(FuncInfo);
+
+  llvm::Function *F =
+    llvm::Function::Create(FuncLLVMTy, llvm::GlobalValue::InternalLinkage,
+                           CapturedStmtInfo->getHelperName(), &CGM.getModule());
+  CGM.SetInternalFunctionAttributes(CD, F, FuncInfo);
+
+  // Generate the function.
+  StartFunction(CD, Ctx.VoidTy, F, FuncInfo, Args, CD->getBody()->getLocStart());
+
+  // Set the context parameter in CapturedStmtInfo.
+  llvm::Value *DeclPtr = LocalDeclMap[CD->getContextParam()];
+  assert(DeclPtr && "missing context parameter for CapturedStmt");
+  CapturedStmtInfo->setContextValue(Builder.CreateLoad(DeclPtr));
+
+  // If 'this' is captured, load it into CXXThisValue.
+  if (CapturedStmtInfo->isCXXThisExprCaptured()) {
+    FieldDecl *FD = CapturedStmtInfo->getThisFieldDecl();
+    LValue LV = MakeNaturalAlignAddrLValue(CapturedStmtInfo->getContextValue(),
+                                           Ctx.getTagDeclType(RD));
+    LValue ThisLValue = EmitLValueForField(LV, FD);
+
+    CXXThisValue = EmitLoadOfLValue(ThisLValue).getScalarVal();
+  }
+
+  CapturedStmtInfo->EmitBody(*this, CD->getBody());
+  FinishFunction(CD->getBodyRBrace());
+
+  return F;
 }

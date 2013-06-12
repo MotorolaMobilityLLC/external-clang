@@ -178,6 +178,12 @@ void Parser::ParseGNUAttributes(ParsedAttributes &attrs,
   }
 }
 
+/// \brief Determine whether the given attribute has all expression arguments.
+static bool attributeHasExprArgs(const IdentifierInfo &II) {
+  return llvm::StringSwitch<bool>(II.getName())
+#include "clang/Parse/AttrExprArgs.inc"
+           .Default(false);
+}
 
 /// Parse the arguments to a parameterized GNU attribute or
 /// a C++11 attribute in "gnu" namespace.
@@ -247,6 +253,10 @@ void Parser::ParseGNUAttributeArgs(IdentifierInfo *AttrName,
       TypeParsed = true;
       break;
     }
+    // If the attribute has all expression arguments, and not a "parameter",
+    // break out to handle it below.
+    if (attributeHasExprArgs(*AttrName))
+      break;
     ParmName = Tok.getIdentifierInfo();
     ParmLoc = ConsumeToken();
     break;
@@ -364,6 +374,7 @@ bool Parser::IsSimpleMicrosoftDeclSpec(IdentifierInfo *Ident) {
     .Case("novtable", true)
     .Case("selectany", true)
     .Case("thread", true)
+    .Case("safebuffers", true )
     .Default(false);
 }
 
@@ -590,7 +601,8 @@ void Parser::ParseMicrosoftTypeAttributes(ParsedAttributes &attrs) {
   while (Tok.is(tok::kw___fastcall) || Tok.is(tok::kw___stdcall) ||
          Tok.is(tok::kw___thiscall) || Tok.is(tok::kw___cdecl)   ||
          Tok.is(tok::kw___ptr64) || Tok.is(tok::kw___w64) ||
-         Tok.is(tok::kw___ptr32) || Tok.is(tok::kw___unaligned)) {
+         Tok.is(tok::kw___ptr32) || Tok.is(tok::kw___unaligned) ||
+         Tok.is(tok::kw___sptr) || Tok.is(tok::kw___uptr)) {
     IdentifierInfo *AttrName = Tok.getIdentifierInfo();
     SourceLocation AttrNameLoc = ConsumeToken();
     attrs.addNew(AttrName, AttrNameLoc, 0, AttrNameLoc, 0,
@@ -1051,9 +1063,8 @@ void Parser::ParseLexedAttribute(LateParsedAttribute &LA,
     RecordDecl *RD = dyn_cast_or_null<RecordDecl>(D->getDeclContext());
 
     // Allow 'this' within late-parsed attributes.
-    Sema::CXXThisScopeRAII ThisScope(Actions, RD,
-                                     /*TypeQuals=*/0,
-                                     ND && RD && ND->isCXXInstanceMember());
+    Sema::CXXThisScopeRAII ThisScope(Actions, RD, /*TypeQuals=*/0,
+                                     ND && ND->isCXXInstanceMember());
 
     if (LA.Decls.size() == 1) {
       // If the Decl is templatized, add template parameters to scope.
@@ -2513,7 +2524,7 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
       // erroneous: We already checked about that it has no type specifier, and
       // C++ doesn't have implicit int.  Diagnose it as a typo w.r.t. to the
       // typename.
-      if (TypeRep == 0) {
+      if (!TypeRep) {
         ConsumeToken();   // Eat the scope spec so the identifier is current.
         ParsedAttributesWithRange Attrs(AttrFactory);
         if (ParseImplicitInt(DS, &SS, TemplateInfo, AS, DSContext, Attrs)) {
@@ -2700,6 +2711,8 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
       break;
     }
 
+    case tok::kw___sptr:
+    case tok::kw___uptr:
     case tok::kw___ptr64:
     case tok::kw___ptr32:
     case tok::kw___w64:
@@ -3202,12 +3215,6 @@ void Parser::ParseStructUnionBody(SourceLocation RecordLoc,
 
   ParseScope StructScope(this, Scope::ClassScope|Scope::DeclScope);
   Actions.ActOnTagStartDefinition(getCurScope(), TagDecl);
-
-  // Empty structs are an extension in C (C99 6.7.2.1p7).
-  if (Tok.is(tok::r_brace)) {
-    Diag(Tok, diag::ext_empty_struct_union) << (TagType == TST_union);
-    Diag(Tok, diag::warn_empty_struct_union_compat) << (TagType == TST_union);
-  }
 
   SmallVector<Decl *, 32> FieldDecls;
 
@@ -4134,6 +4141,8 @@ bool Parser::isDeclarationSpecifier(bool DisambiguatingWithExpression) {
   case tok::kw___fastcall:
   case tok::kw___thiscall:
   case tok::kw___w64:
+  case tok::kw___sptr:
+  case tok::kw___uptr:
   case tok::kw___ptr64:
   case tok::kw___ptr32:
   case tok::kw___forceinline:
@@ -4310,6 +4319,8 @@ void Parser::ParseTypeQualifierListOpt(DeclSpec &DS,
       ParseOpenCLQualifiers(DS);
       break;
 
+    case tok::kw___sptr:
+    case tok::kw___uptr:
     case tok::kw___w64:
     case tok::kw___ptr64:
     case tok::kw___ptr32:

@@ -17,6 +17,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Compiler.h"
 
+#include <vector>
+
 namespace clang {
 namespace driver {
 namespace toolchains {
@@ -427,6 +429,11 @@ public:
 
   virtual bool IsMathErrnoDefault() const { return false; }
   virtual bool IsObjCNonFragileABIDefault() const { return true; }
+  virtual bool isPIEDefault() const { return true; }
+
+  virtual unsigned GetDefaultStackProtectorLevel(bool KernelOrKext) const {
+    return 1;
+  }
 
 protected:
   virtual Tool *buildAssembler() const;

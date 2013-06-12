@@ -154,6 +154,19 @@ namespace clang {
     TSK_ExplicitInstantiationDefinition
   };
 
+  /// \brief Thread storage-class-specifier.
+  enum ThreadStorageClassSpecifier {
+    TSCS_unspecified,
+    /// GNU __thread.
+    TSCS___thread,
+    /// C++11 thread_local. Implies 'static' at block scope, but not at
+    /// class scope.
+    TSCS_thread_local,
+    /// C11 _Thread_local. Must be combined with either 'static' or 'extern'
+    /// if used at block scope.
+    TSCS__Thread_local
+  };
+
   /// \brief Storage classes.
   enum StorageClass {
     // These are legal on both functions and variables.
@@ -199,6 +212,14 @@ namespace clang {
     CC_IntelOclBicc // __attribute__((intel_ocl_bicc))
   };
 
+  /// \brief The storage duration for an object (per C++ [basic.stc]).
+  enum StorageDuration {
+    SD_FullExpression, ///< Full-expression storage duration (for temporaries).
+    SD_Automatic,      ///< Automatic storage duration (most local variables).
+    SD_Thread,         ///< Thread storage duration.
+    SD_Static,         ///< Static storage duration.
+    SD_Dynamic         ///< Dynamic storage duration.
+  };
 } // end namespace clang
 
 #endif // LLVM_CLANG_BASIC_SPECIFIERS_H

@@ -307,7 +307,8 @@ class CodeGenModule : public CodeGenTypeCache {
   llvm::StringMap<llvm::GlobalVariable*> ConstantStringMap;
   llvm::DenseMap<const Decl*, llvm::Constant *> StaticLocalDeclMap;
   llvm::DenseMap<const Decl*, llvm::GlobalVariable*> StaticLocalDeclGuardMap;
-  
+  llvm::DenseMap<const Expr*, llvm::Constant *> MaterializedGlobalTemporaryMap;
+
   llvm::DenseMap<QualType, llvm::Constant *> AtomicSetterHelperFnMap;
   llvm::DenseMap<QualType, llvm::Constant *> AtomicGetterHelperFnMap;
 
@@ -355,6 +356,9 @@ class CodeGenModule : public CodeGenTypeCache {
   /// \brief The complete set of modules that has been imported.
   llvm::SetVector<clang::Module *> ImportedModules;
 
+  /// \brief A vector of metadata strings.
+  SmallVector<llvm::Value *, 16> LinkerOptionsMetadata;
+
   /// @name Cache for Objective-C runtime types
   /// @{
 
@@ -382,7 +386,7 @@ class CodeGenModule : public CodeGenTypeCache {
   void createCUDARuntime();
 
   bool isTriviallyRecursive(const FunctionDecl *F);
-  bool shouldEmitFunction(const FunctionDecl *F);
+  bool shouldEmitFunction(GlobalDecl GD);
 
   /// @name Cache for Blocks Runtime Globals
   /// @{
@@ -713,7 +717,7 @@ public:
   /// (if one is created).
   llvm::Constant *GetAddrOfConstantString(StringRef Str,
                                           const char *GlobalName=0,
-                                          unsigned Alignment=1);
+                                          unsigned Alignment=0);
 
   /// GetAddrOfConstantCString - Returns a pointer to a character array
   /// containing the literal and a terminating '\0' character. The result has
@@ -723,12 +727,17 @@ public:
   /// created).
   llvm::Constant *GetAddrOfConstantCString(const std::string &str,
                                            const char *GlobalName=0,
-                                           unsigned Alignment=1);
+                                           unsigned Alignment=0);
 
   /// GetAddrOfConstantCompoundLiteral - Returns a pointer to a constant global
   /// variable for the given file-scope compound literal expression.
   llvm::Constant *GetAddrOfConstantCompoundLiteral(const CompoundLiteralExpr*E);
-  
+
+  /// \brief Returns a pointer to a global variable representing a temporary
+  /// with static or thread storage duration.
+  llvm::Constant *GetAddrOfGlobalTemporary(const MaterializeTemporaryExpr *E,
+                                           const Expr *Inner);
+
   /// \brief Retrieve the record type that describes the state of an
   /// Objective-C fast enumeration loop (for..in).
   QualType getObjCFastEnumerationStateType();
@@ -750,8 +759,7 @@ public:
   llvm::Value *getBuiltinLibFunction(const FunctionDecl *FD,
                                      unsigned BuiltinID);
 
-  llvm::Function *getIntrinsic(unsigned IID, ArrayRef<llvm::Type*> Tys =
-                                                 ArrayRef<llvm::Type*>());
+  llvm::Function *getIntrinsic(unsigned IID, ArrayRef<llvm::Type*> Tys = None);
 
   /// EmitTopLevelDecl - Emit code for a single top level declaration.
   void EmitTopLevelDecl(Decl *D);
@@ -907,11 +915,19 @@ public:
 
   void EmitVTable(CXXRecordDecl *Class, bool DefinitionRequired);
 
-  llvm::GlobalVariable::LinkageTypes
-  getFunctionLinkage(const FunctionDecl *FD);
+  /// \brief Appends Opts to the "Linker Options" metadata value.
+  void AppendLinkerOptions(StringRef Opts);
 
-  void setFunctionLinkage(const FunctionDecl *FD, llvm::GlobalValue *V) {
-    V->setLinkage(getFunctionLinkage(FD));
+  /// \brief Appends a detect mismatch command to the linker options.
+  void AddDetectMismatch(StringRef Name, StringRef Value);
+
+  /// \brief Appends a dependent lib to the "Linker Options" metadata value.
+  void AddDependentLib(StringRef Lib);
+
+  llvm::GlobalVariable::LinkageTypes getFunctionLinkage(GlobalDecl GD);
+
+  void setFunctionLinkage(GlobalDecl GD, llvm::GlobalValue *V) {
+    V->setLinkage(getFunctionLinkage(GD));
   }
 
   /// getVTableLinkage - Return the appropriate linkage for the vtable, VTT,
@@ -1017,6 +1033,7 @@ private:
 
   void EmitNamespace(const NamespaceDecl *D);
   void EmitLinkageSpec(const LinkageSpecDecl *D);
+  void CompleteDIClassType(const CXXMethodDecl* D);
 
   /// EmitCXXConstructors - Emit constructors (base, complete) from a
   /// C++ constructor Decl.
