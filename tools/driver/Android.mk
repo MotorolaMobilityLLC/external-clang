@@ -83,7 +83,12 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMSupport \
   libLLVMTarget
 
-LOCAL_LDLIBS += -lpthread -lm -ldl
+LOCAL_LDLIBS += -lm
+ifdef USE_MINGW
+LOCAL_LDLIBS += -limagehlp
+else
+LOCAL_LDLIBS += -lpthread -ldl
+endif
 
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
