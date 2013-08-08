@@ -2062,7 +2062,11 @@ enum CXCursorKind {
    */
   CXCursor_DeclStmt                      = 231,
 
-  CXCursor_LastStmt                      = CXCursor_DeclStmt,
+  /** \brief OpenMP parallel directive.
+   */
+  CXCursor_OMPParallelDirective          = 232,
+
+  CXCursor_LastStmt                      = CXCursor_OMPParallelDirective,
 
   /**
    * \brief Cursor that represents the translation unit itself.
@@ -2666,7 +2670,10 @@ enum CXTypeKind {
   CXType_FunctionNoProto = 110,
   CXType_FunctionProto = 111,
   CXType_ConstantArray = 112,
-  CXType_Vector = 113
+  CXType_Vector = 113,
+  CXType_IncompleteArray = 114,
+  CXType_VariableArray = 115,
+  CXType_DependentSizedArray = 116
 };
 
 /**
@@ -3412,6 +3419,13 @@ typedef enum {
  * parameter respectively. The bits are formed from CXObjCDeclQualifierKind.
  */
 CINDEX_LINKAGE unsigned clang_Cursor_getObjCDeclQualifiers(CXCursor C);
+
+/**
+ * \brief Given a cursor that represents an ObjC method or property declaration,
+ * return non-zero if the declaration was affected by "@optional".
+ * Returns zero if the cursor is not such a declaration or it is "@required".
+ */
+CINDEX_LINKAGE unsigned clang_Cursor_isObjCOptional(CXCursor C);
 
 /**
  * \brief Returns non-zero if the given cursor is a variadic function or method.

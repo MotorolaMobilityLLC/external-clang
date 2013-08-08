@@ -1232,8 +1232,22 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
       DiagID = isClassMessage ? diag::warn_class_method_not_found
                               : diag::warn_inst_method_not_found;
     if (!getLangOpts().DebuggerSupport) {
-      Diag(SelLoc, DiagID)
-        << Sel << isClassMessage << SourceRange(SelectorLocs.front(), 
+      const ObjCMethodDecl *OMD = SelectorsForTypoCorrection(Sel, ReceiverType);
+      if (OMD && !OMD->isInvalidDecl()) {
+        if (getLangOpts().ObjCAutoRefCount)
+          DiagID = diag::error_method_not_found_with_typo;
+        else
+          DiagID = isClassMessage ? diag::warn_class_method_not_found_with_typo
+                                  : diag::warn_instance_method_not_found_with_typo;
+        Selector MatchedSel = OMD->getSelector();
+        SourceRange SelectorRange(SelectorLocs.front(), SelectorLocs.back());
+        Diag(SelLoc, DiagID)
+          << Sel<< isClassMessage << MatchedSel
+          << FixItHint::CreateReplacement(SelectorRange, MatchedSel.getAsString());
+      }
+      else
+        Diag(SelLoc, DiagID)
+          << Sel << isClassMessage << SourceRange(SelectorLocs.front(), 
                                                 SelectorLocs.back());
       // Find the class to which we are sending this message.
       if (ReceiverType->isObjCObjectPointerType()) {
@@ -3143,7 +3157,8 @@ diagnoseObjCARCConversion(Sema &S, SourceRange castRange,
 
 Sema::ARCConversionResult
 Sema::CheckObjCARCConversion(SourceRange castRange, QualType castType,
-                             Expr *&castExpr, CheckedConversionKind CCK) {
+                             Expr *&castExpr, CheckedConversionKind CCK,
+                             bool DiagnoseCFAudited) {
   QualType castExprType = castExpr->getType();
 
   // For the purposes of the classification, we assume reference types
@@ -3224,8 +3239,14 @@ Sema::CheckObjCARCConversion(SourceRange castRange, QualType castType,
       CCK != CCK_ImplicitConversion)
     return ACR_unbridged;
 
-  diagnoseObjCARCConversion(*this, castRange, castType, castACTC,
-                            castExpr, castExpr, exprACTC, CCK);
+  // Do not issue "bridge cast" diagnostic when implicit casting
+  // a retainable object to a CF type parameter belonging to an audited
+  // CF API function. Let caller issue a normal type mismatched diagnostic
+  // instead.
+  if (!DiagnoseCFAudited || exprACTC != ACTC_retainable ||
+      castACTC != ACTC_coreFoundation)
+    diagnoseObjCARCConversion(*this, castRange, castType, castACTC,
+                              castExpr, castExpr, exprACTC, CCK);
   return ACR_okay;
 }
 

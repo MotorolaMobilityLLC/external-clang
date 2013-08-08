@@ -159,12 +159,16 @@ include paths, or 0 otherwise:
   # include "myinclude.h"
   #endif
 
+To test for this feature, use ``#if defined(__has_include)``:
+
+.. code-block:: c++
+
   // To avoid problem with non-clang compilers not having this macro.
-  #if defined(__has_include) && __has_include("myinclude.h")
+  #if defined(__has_include)
+  #if __has_include("myinclude.h")
   # include "myinclude.h"
   #endif
-
-To test for this feature, use ``#if defined(__has_include)``.
+  #endif
 
 .. _langext-__has_include_next:
 
@@ -185,8 +189,10 @@ or 0 otherwise:
   #endif
 
   // To avoid problem with non-clang compilers not having this macro.
-  #if defined(__has_include_next) && __has_include_next("myinclude.h")
+  #if defined(__has_include_next)
+  #if __has_include_next("myinclude.h")
   # include_next "myinclude.h"
+  #endif
   #endif
 
 Note that ``__has_include_next``, like the GNU extension ``#include_next``
@@ -801,8 +807,7 @@ Use ``__has_feature(cxx_contextual_conversions)`` or
 ``__has_extension(cxx_contextual_conversions)`` to determine if the C++1y rules
 are used when performing an implicit conversion for an array bound in a
 *new-expression*, the operand of a *delete-expression*, an integral constant
-expression, or a condition in a ``switch`` statement. Clang does not yet
-support this feature.
+expression, or a condition in a ``switch`` statement.
 
 C++1y decltype(auto)
 ^^^^^^^^^^^^^^^^^^^^
@@ -821,9 +826,9 @@ for default initializers in aggregate members is enabled.
 C++1y generalized lambda capture
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Use ``__has_feature(cxx_generalized_capture)`` or
-``__has_extension(cxx_generalized_capture`` to determine if support for
-generalized lambda captures is enabled
+Use ``__has_feature(cxx_init_capture)`` or
+``__has_extension(cxx_init_capture)`` to determine if support for
+lambda captures with explicit initializers is enabled
 (for instance, ``[n(0)] { return ++n; }``).
 Clang does not yet support this feature.
 
@@ -843,7 +848,6 @@ Use ``__has_feature(cxx_relaxed_constexpr)`` or
 ``__has_extension(cxx_relaxed_constexpr)`` to determine if variable
 declarations, local variable modification, and control flow constructs
 are permitted in ``constexpr`` functions.
-Clang's implementation of this feature is incomplete.
 
 C++1y return type deduction
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1251,6 +1255,23 @@ Further examples of these attributes are available in the static analyzer's `lis
 Query for these features with ``__has_attribute(ns_consumed)``,
 ``__has_attribute(ns_returns_retained)``, etc.
 
+objc_msg_lookup_stret
+---------------------
+
+Traditionally, if a runtime is used that follows the GNU Objective-C ABI, a
+call to objc_msg_lookup() would be emitted for each message send, which would
+return a pointer to the actual implementation of the method. However,
+objc_msg_lookup() has no information at all about the method signature of the
+actual method. Therefore, certain features like forwarding messages cannot be
+correctly implemented for methods returning structs using objc_msg_lookup(), as
+methods returning structs use a slightly different calling convention.
+
+To work around this, Clang emits calls to objc_msg_lookup_stret() instead for
+methods that return structs if the runtime supports this, allowing the runtime
+to use a different forwarding handler for methods returning structs.
+
+To check if Clang emits calls to objc_msg_lookup_stret(),
+__has_feature(objc_msg_lookup_stret) can be used.
 
 Function Overloading in C
 =========================
@@ -1434,8 +1455,8 @@ for the implementation of various target-specific header files like
 
 .. code-block:: c++
 
-  // Identity operation - return 4-element vector V1.
-  __builtin_shufflevector(V1, V1, 0, 1, 2, 3)
+  // identity operation - return 4-element vector v1.
+  __builtin_shufflevector(v1, v1, 0, 1, 2, 3)
 
   // "Splat" element 0 of V1 into a 4-element result.
   __builtin_shufflevector(V1, V1, 0, 0, 0, 0)
@@ -1449,6 +1470,9 @@ for the implementation of various target-specific header files like
   // Concatenate every other element of 8-element vectors V1 and V2.
   __builtin_shufflevector(V1, V2, 0, 2, 4, 6, 8, 10, 12, 14)
 
+  // Shuffle v1 with some elements being undefined
+  __builtin_shufflevector(v1, v1, 3, -1, 1, -1)
+
 **Description**:
 
 The first two arguments to ``__builtin_shufflevector`` are vectors that have
@@ -1457,7 +1481,8 @@ specify the elements indices of the first two vectors that should be extracted
 and returned in a new vector.  These element indices are numbered sequentially
 starting with the first vector, continuing into the second vector.  Thus, if
 ``vec1`` is a 4-element vector, index 5 would refer to the second element of
-``vec2``.
+``vec2``. An index of -1 can be used to indicate that the corresponding element
+in the returned vector is a don't care and can be optimized by the backend.
 
 The result of ``__builtin_shufflevector`` is a vector with the same element
 type as ``vec1``/``vec2`` but that has an element count equal to the number of
@@ -1527,6 +1552,22 @@ correct code by avoiding expensive loops around
 implementation details of ``__sync_lock_test_and_set()``.  The
 ``__sync_swap()`` builtin is a full barrier.
 
+``__builtin_addressof``
+-----------------------
+
+``__builtin_addressof`` performs the functionality of the built-in ``&``
+operator, ignoring any ``operator&`` overload.  This is useful in constant
+expressions in C++11, where there is no other way to take the address of an
+object that overloads ``operator&``.
+
+**Example of use**:
+
+.. code-block:: c++
+
+  template<typename T> constexpr T *addressof(T &value) {
+    return __builtin_addressof(value);
+  }
+
 Multiprecision Arithmetic Builtins
 ----------------------------------
 
@@ -1555,14 +1596,59 @@ The complete list of builtins are:
 
 .. code-block:: c
 
+  unsigned char      __builtin_addcb (unsigned char x, unsigned char y, unsigned char carryin, unsigned char *carryout);
   unsigned short     __builtin_addcs (unsigned short x, unsigned short y, unsigned short carryin, unsigned short *carryout);
   unsigned           __builtin_addc  (unsigned x, unsigned y, unsigned carryin, unsigned *carryout);
   unsigned long      __builtin_addcl (unsigned long x, unsigned long y, unsigned long carryin, unsigned long *carryout);
   unsigned long long __builtin_addcll(unsigned long long x, unsigned long long y, unsigned long long carryin, unsigned long long *carryout);
+  unsigned char      __builtin_subcb (unsigned char x, unsigned char y, unsigned char carryin, unsigned char *carryout);
   unsigned short     __builtin_subcs (unsigned short x, unsigned short y, unsigned short carryin, unsigned short *carryout);
   unsigned           __builtin_subc  (unsigned x, unsigned y, unsigned carryin, unsigned *carryout);
   unsigned long      __builtin_subcl (unsigned long x, unsigned long y, unsigned long carryin, unsigned long *carryout);
   unsigned long long __builtin_subcll(unsigned long long x, unsigned long long y, unsigned long long carryin, unsigned long long *carryout);
+
+Checked Arithmetic Builtins
+---------------------------
+
+Clang provides a set of builtins that implement checked arithmetic for security
+critical applications in a manner that is fast and easily expressable in C. As
+an example of their usage:
+
+.. code-block:: c
+
+  errorcode_t security_critical_application(...) {
+    unsigned x, y, result;
+    ...
+    if (__builtin_umul_overflow(x, y, &result))
+      return kErrorCodeHackers;
+    ...
+    use_multiply(result);
+    ...
+  }
+
+A complete enumeration of the builtins are:
+
+.. code-block:: c
+
+  bool __builtin_uadd_overflow  (unsigned x, unsigned y, unsigned *sum);
+  bool __builtin_uaddl_overflow (unsigned long x, unsigned long y, unsigned long *sum);
+  bool __builtin_uaddll_overflow(unsigned long long x, unsigned long long y, unsigned long long *sum);
+  bool __builtin_usub_overflow  (unsigned x, unsigned y, unsigned *diff);
+  bool __builtin_usubl_overflow (unsigned long x, unsigned long y, unsigned long *diff);
+  bool __builtin_usubll_overflow(unsigned long long x, unsigned long long y, unsigned long long *diff);
+  bool __builtin_umul_overflow  (unsigned x, unsigned y, unsigned *prod);
+  bool __builtin_umull_overflow (unsigned long x, unsigned long y, unsigned long *prod);
+  bool __builtin_umulll_overflow(unsigned long long x, unsigned long long y, unsigned long long *prod);
+  bool __builtin_sadd_overflow  (int x, int y, int *sum);
+  bool __builtin_saddl_overflow (long x, long y, long *sum);
+  bool __builtin_saddll_overflow(long long x, long long y, long long *sum);
+  bool __builtin_ssub_overflow  (int x, int y, int *diff);
+  bool __builtin_ssubl_overflow (long x, long y, long *diff);
+  bool __builtin_ssubll_overflow(long long x, long long y, long long *diff);
+  bool __builtin_smul_overflow  (int x, int y, int *prod);
+  bool __builtin_smull_overflow (long x, long y, long *prod);
+  bool __builtin_smulll_overflow(long long x, long long y, long long *prod);
+
 
 .. _langext-__c11_atomic:
 
@@ -1588,6 +1674,36 @@ C11's ``<stdatomic.h>`` header.  These builtins provide the semantics of the
 * ``__c11_atomic_fetch_and``
 * ``__c11_atomic_fetch_or``
 * ``__c11_atomic_fetch_xor``
+
+Low-level ARM exclusive memory builtins
+---------------------------------------
+
+Clang provides overloaded builtins giving direct access to the three key ARM
+instructions for implementing atomic operations.
+
+.. code-block:: c
+  T __builtin_arm_ldrex(const volatile T *addr);
+  int __builtin_arm_strex(T val, volatile T *addr);
+  void __builtin_arm_clrex(void);
+
+The types ``T`` currently supported are:
+* Integer types with width at most 64 bits.
+* Floating-point types
+* Pointer types.
+
+Note that the compiler does not guarantee it will not insert stores which clear
+the exclusive monitor in between an ``ldrex`` and its paired ``strex``. In
+practice this is only usually a risk when the extra store is on the same cache
+line as the variable being modified and Clang will only insert stack stores on
+its own, so it is best not to use these operations on variables with automatic
+storage duration.
+
+Also, loads and stores may be implicit in code written between the ``ldrex`` and
+``strex``. Clang will not necessarily mitigate the effects of these either, so
+care should be exercised.
+
+For these reasons the higher level atomic primitives should be preferred where
+possible.
 
 Non-standard C++11 Attributes
 =============================
@@ -1650,7 +1766,7 @@ are accepted with the ``__attribute__((foo))`` syntax are also accepted as
 <http://gcc.gnu.org/onlinedocs/gcc/Function-Attributes.html>`_, `GCC variable
 attributes <http://gcc.gnu.org/onlinedocs/gcc/Variable-Attributes.html>`_, and
 `GCC type attributes
-<http://gcc.gnu.org/onlinedocs/gcc/Type-Attributes.html>`_. As with the GCC
+<http://gcc.gnu.org/onlinedocs/gcc/Type-Attributes.html>`_). As with the GCC
 implementation, these attributes must appertain to the *declarator-id* in a
 declaration, which means they must go either at the start of the declaration or
 immediately after the name being declared.
@@ -1910,11 +2026,11 @@ Type Safety Checking
 ====================
 
 Clang supports additional attributes to enable checking type safety properties
-that can't be enforced by C type system.  Usecases include:
+that can't be enforced by the C type system.  Use cases include:
 
 * MPI library implementations, where these attributes enable checking that
-  buffer type matches the passed ``MPI_Datatype``;
-* for HDF5 library there is a similar usecase as MPI;
+  the buffer type matches the passed ``MPI_Datatype``;
+* for HDF5 library there is a similar use case to MPI;
 * checking types of variadic functions' arguments for functions like
   ``fcntl()`` and ``ioctl()``.
 
@@ -1949,7 +2065,7 @@ accepts a type tag that determines the type of some other argument.
 applicable type tags.
 
 This attribute is primarily useful for checking arguments of variadic functions
-(``pointer_with_type_tag`` can be used in most of non-variadic cases).
+(``pointer_with_type_tag`` can be used in most non-variadic cases).
 
 For example:
 

@@ -47,6 +47,8 @@ namespace CodeGen {
 /// and is responsible for emitting to llvm globals or pass directly to
 /// the backend.
 class CGDebugInfo {
+  friend class NoLocation;
+  friend class ArtificialLocation;
   CodeGenModule &CGM;
   const CodeGenOptions::DebugInfoKind DebugKind;
   llvm::DIBuilder DBuilder;
@@ -60,14 +62,14 @@ class CGDebugInfo {
   llvm::DIType OCLImage2dDITy, OCLImage2dArrayDITy;
   llvm::DIType OCLImage3dDITy;
   llvm::DIType OCLEventDITy;
+  llvm::DIType BlockLiteralGeneric;
 
   /// TypeCache - Cache of previously constructed Types.
   llvm::DenseMap<void *, llvm::WeakVH> TypeCache;
 
   /// ObjCInterfaceCache - Cache of previously constructed interfaces
   /// which may change. Storing a pair of DIType and checksum.
-  llvm::DenseMap<void *, std::pair<llvm::WeakVH, unsigned > >
-    ObjCInterfaceCache;
+  llvm::DenseMap<void *, std::pair<llvm::WeakVH, unsigned> > ObjCInterfaceCache;
 
   /// RetainedTypes - list of interfaces we want to keep even if orphaned.
   std::vector<void *> RetainedTypes;
@@ -78,9 +80,6 @@ class CGDebugInfo {
   /// ReplaceMap - Cache of forward declared types to RAUW at the end of
   /// compilation.
   std::vector<std::pair<void *, llvm::WeakVH> >ReplaceMap;
-
-  bool BlockLiteralGenericSet;
-  llvm::DIType BlockLiteralGeneric;
 
   // LexicalBlockStack - Keep track of our current nested lexical block.
   std::vector<llvm::TrackingVH<llvm::MDNode> > LexicalBlockStack;
@@ -166,7 +165,7 @@ class CGDebugInfo {
 
   llvm::DIArray
   CollectTemplateParams(const TemplateParameterList *TPList,
-                        const TemplateArgumentList &TAList,
+                        ArrayRef<TemplateArgument> TAList,
                         llvm::DIFile Unit);
   llvm::DIArray
   CollectFunctionTemplateParams(const FunctionDecl *FD, llvm::DIFile Unit);
@@ -289,6 +288,8 @@ public:
   llvm::DIType getOrCreateInterfaceType(QualType Ty,
                                         SourceLocation Loc);
 
+  void completeFwdDecl(const RecordDecl &TD);
+
 private:
   /// EmitDeclare - Emit call to llvm.dbg.declare for a variable declaration.
   void EmitDeclare(const VarDecl *decl, unsigned Tag, llvm::Value *AI,
@@ -388,6 +389,47 @@ private:
   /// \param Force  Assume DebugColumnInfo option is true.
   unsigned getColumnNumber(SourceLocation Loc, bool Force=false);
 };
+
+/// NoLocation - An RAII object that temporarily disables debug
+/// locations. This is useful for emitting instructions that should be
+/// counted towards the function prologue.
+class NoLocation {
+  SourceLocation SavedLoc;
+  CGDebugInfo *DI;
+  CGBuilderTy &Builder;
+public:
+  NoLocation(CodeGenFunction &CGF, CGBuilderTy &B);
+  /// ~NoLocation - Autorestore everything back to normal.
+  ~NoLocation();
+};
+
+/// ArtificialLocation - An RAII object that temporarily switches to
+/// an artificial debug location that has a valid scope, but no line
+/// information. This is useful when emitting compiler-generated
+/// helper functions that have no source location associated with
+/// them. The DWARF specification allows the compiler to use the
+/// special line number 0 to indicate code that can not be attributed
+/// to any source location.
+///
+/// This is necessary because passing an empty SourceLocation to
+/// CGDebugInfo::setLocation() will result in the last valid location
+/// being reused.
+class ArtificialLocation {
+  SourceLocation SavedLoc;
+  CGDebugInfo *DI;
+  CGBuilderTy &Builder;
+public:
+  ArtificialLocation(CodeGenFunction &CGF, CGBuilderTy &B);
+
+  /// Set the current location to line 0, but within the current scope
+  /// (= the top of the LexicalBlockStack).
+  void Emit();
+
+  /// ~ArtificialLocation - Autorestore everything back to normal.
+  ~ArtificialLocation();
+};
+
+
 } // namespace CodeGen
 } // namespace clang
 

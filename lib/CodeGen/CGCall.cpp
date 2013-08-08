@@ -200,7 +200,10 @@ CodeGenTypes::arrangeCXXConstructorDeclaration(const CXXConstructorDecl *D,
                                                CXXCtorType ctorKind) {
   SmallVector<CanQualType, 16> argTypes;
   argTypes.push_back(GetThisType(Context, D->getParent()));
-  CanQualType resultType = Context.VoidTy;
+
+  GlobalDecl GD(D, ctorKind);
+  CanQualType resultType =
+    TheCXXABI.HasThisReturn(GD) ? argTypes.front() : Context.VoidTy;
 
   TheCXXABI.BuildConstructorSignature(D, ctorKind, resultType, argTypes);
 
@@ -225,7 +228,10 @@ CodeGenTypes::arrangeCXXDestructor(const CXXDestructorDecl *D,
                                    CXXDtorType dtorKind) {
   SmallVector<CanQualType, 2> argTypes;
   argTypes.push_back(GetThisType(Context, D->getParent()));
-  CanQualType resultType = Context.VoidTy;
+
+  GlobalDecl GD(D, dtorKind);
+  CanQualType resultType =
+    TheCXXABI.HasThisReturn(GD) ? argTypes.front() : Context.VoidTy;
 
   TheCXXABI.BuildDestructorSignature(D, dtorKind, resultType, argTypes);
 
@@ -1055,15 +1061,32 @@ void CodeGenModule::ConstructAttributeList(const CGFunctionInfo &FI,
     }
 
     FuncAttrs.addAttribute("less-precise-fpmad",
-                           CodeGenOpts.LessPreciseFPMAD ? "true" : "false");
+                           llvm::toStringRef(CodeGenOpts.LessPreciseFPMAD));
     FuncAttrs.addAttribute("no-infs-fp-math",
-                           CodeGenOpts.NoInfsFPMath ? "true" : "false");
+                           llvm::toStringRef(CodeGenOpts.NoInfsFPMath));
     FuncAttrs.addAttribute("no-nans-fp-math",
-                           CodeGenOpts.NoNaNsFPMath ? "true" : "false");
+                           llvm::toStringRef(CodeGenOpts.NoNaNsFPMath));
     FuncAttrs.addAttribute("unsafe-fp-math",
-                           CodeGenOpts.UnsafeFPMath ? "true" : "false");
+                           llvm::toStringRef(CodeGenOpts.UnsafeFPMath));
     FuncAttrs.addAttribute("use-soft-float",
-                           CodeGenOpts.SoftFloat ? "true" : "false");
+                           llvm::toStringRef(CodeGenOpts.SoftFloat));
+    FuncAttrs.addAttribute("stack-protector-buffer-size",
+                           llvm::utostr(CodeGenOpts.SSPBufferSize));
+
+    bool NoFramePointerElimNonLeaf;
+    if (!CodeGenOpts.DisableFPElim) {
+      NoFramePointerElimNonLeaf = false;
+    } else if (CodeGenOpts.OmitLeafFramePointer) {
+      NoFramePointerElimNonLeaf = true;
+    } else {
+      NoFramePointerElimNonLeaf = true;
+    }
+
+    FuncAttrs.addAttribute("no-frame-pointer-elim-non-leaf",
+                           llvm::toStringRef(NoFramePointerElimNonLeaf));
+
+    if (!CodeGenOpts.StackRealignment)
+      FuncAttrs.addAttribute("no-realign-stack");
   }
 
   QualType RetTy = FI.getReturnType();
@@ -1633,18 +1656,6 @@ static llvm::StoreInst *findDominatingStoreToReturnValue(CodeGenFunction &CGF) {
   return store;
 }
 
-/// Check whether 'this' argument of a callsite matches 'this' of the caller.
-static bool checkThisPointer(llvm::Value *ThisArg, llvm::Value *This) {
-  if (ThisArg == This)
-    return true;
-  // Check whether ThisArg is a bitcast of This.
-  llvm::BitCastInst *Bitcast;
-  if ((Bitcast = dyn_cast<llvm::BitCastInst>(ThisArg)) &&
-      Bitcast->getOperand(0) == This)
-    return true;
-  return false;
-}
-
 void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
                                          bool EmitRetDbgLoc) {
   // Functions with no result always return void.
@@ -1741,19 +1752,6 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
     llvm_unreachable("Invalid ABI kind for return argument");
   }
 
-  // If this function returns 'this', the last instruction is a CallInst
-  // that returns 'this', and 'this' argument of the CallInst points to
-  // the same object as CXXThisValue, use the return value from the CallInst.
-  // We will not need to keep 'this' alive through the callsite. It also enables
-  // optimizations in the backend, such as tail call optimization.
-  if (CalleeWithThisReturn && CGM.getCXXABI().HasThisReturn(CurGD)) {
-    llvm::BasicBlock *IP = Builder.GetInsertBlock();
-    llvm::CallInst *Callsite;
-    if (!IP->empty() && (Callsite = dyn_cast<llvm::CallInst>(&IP->back())) &&
-        Callsite->getCalledFunction() == CalleeWithThisReturn &&
-        checkThisPointer(Callsite->getOperand(0), CXXThisValue))
-      RV = Builder.CreateBitCast(Callsite, RetAI.getCoerceToType());
-  }
   llvm::Instruction *Ret = RV ? Builder.CreateRet(RV) : Builder.CreateRetVoid();
   if (!RetDbgLoc.isUnknown())
     Ret->setDebugLoc(RetDbgLoc);
@@ -1863,6 +1861,19 @@ static void emitWritebacks(CodeGenFunction &CGF,
   for (CallArgList::writeback_iterator
          i = args.writeback_begin(), e = args.writeback_end(); i != e; ++i)
     emitWriteback(CGF, *i);
+}
+
+static void deactivateArgCleanupsBeforeCall(CodeGenFunction &CGF,
+                                            const CallArgList &CallArgs) {
+  assert(CGF.getTarget().getCXXABI().isArgumentDestroyedByCallee());
+  ArrayRef<CallArgList::CallArgCleanup> Cleanups =
+    CallArgs.getCleanupsToDeactivate();
+  // Iterate in reverse to increase the likelihood of popping the cleanup.
+  for (ArrayRef<CallArgList::CallArgCleanup>::reverse_iterator
+         I = Cleanups.rbegin(), E = Cleanups.rend(); I != E; ++I) {
+    CGF.DeactivateCleanupBlock(I->Cleanup, I->IsActiveIP);
+    I->IsActiveIP->eraseFromParent();
+  }
 }
 
 static const Expr *maybeGetUnaryAddrOfOperand(const Expr *E) {
@@ -2013,12 +2024,34 @@ void CodeGenFunction::EmitCallArg(CallArgList &args, const Expr *E,
 
   if (E->isGLValue()) {
     assert(E->getObjectKind() == OK_Ordinary);
-    return args.add(EmitReferenceBindingToExpr(E, /*InitializedDecl=*/0),
-                    type);
+    return args.add(EmitReferenceBindingToExpr(E), type);
   }
 
-  if (hasAggregateEvaluationKind(type) &&
-      isa<ImplicitCastExpr>(E) &&
+  bool HasAggregateEvalKind = hasAggregateEvaluationKind(type);
+
+  // In the Microsoft C++ ABI, aggregate arguments are destructed by the callee.
+  // However, we still have to push an EH-only cleanup in case we unwind before
+  // we make it to the call.
+  if (HasAggregateEvalKind &&
+      CGM.getTarget().getCXXABI().isArgumentDestroyedByCallee()) {
+    const CXXRecordDecl *RD = type->getAsCXXRecordDecl();
+    if (RD && RD->hasNonTrivialDestructor()) {
+      AggValueSlot Slot = CreateAggTemp(type, "agg.arg.tmp");
+      Slot.setExternallyDestructed();
+      EmitAggExpr(E, Slot);
+      RValue RV = Slot.asRValue();
+      args.add(RV, type);
+
+      pushDestroy(EHCleanup, RV.getAggregateAddr(), type, destroyCXXObject,
+                  /*useEHCleanupForArray*/ true);
+      // This unreachable is a temporary marker which will be removed later.
+      llvm::Instruction *IsActive = Builder.CreateUnreachable();
+      args.addArgCleanupDeactivation(EHStack.getInnermostEHScope(), IsActive);
+      return;
+    }
+  }
+
+  if (HasAggregateEvalKind && isa<ImplicitCastExpr>(E) &&
       cast<CastExpr>(E)->getCastKind() == CK_LValueToRValue) {
     LValue L = EmitLValue(cast<CastExpr>(E)->getSubExpr());
     assert(L.isSimple());
@@ -2162,7 +2195,7 @@ static void checkArgMatches(llvm::Value *Elt, unsigned &ArgNo,
 }
 
 void CodeGenFunction::ExpandTypeToArgs(QualType Ty, RValue RV,
-                                       SmallVector<llvm::Value*,16> &Args,
+                                       SmallVectorImpl<llvm::Value *> &Args,
                                        llvm::FunctionType *IRFuncTy) {
   if (const ConstantArrayType *AT = getContext().getAsConstantArrayType(Ty)) {
     unsigned NumElts = AT->getSize().getZExtValue();
@@ -2428,6 +2461,9 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       break;
     }
   }
+
+  if (!CallArgs.getCleanupsToDeactivate().empty())
+    deactivateArgCleanupsBeforeCall(*this, CallArgs);
 
   // If the callee is a bitcast of a function to a varargs pointer to function
   // type, check to see if we can remove the bitcast.  This handles some cases

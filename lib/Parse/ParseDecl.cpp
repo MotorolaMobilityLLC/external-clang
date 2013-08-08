@@ -13,6 +13,7 @@
 
 #include "clang/Parse/Parser.h"
 #include "RAIIObjectsForParser.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/OpenCL.h"
@@ -1666,7 +1667,7 @@ Parser::DeclGroupPtrTy Parser::ParseDeclGroup(ParsingDeclSpec &DS,
       Actions.ActOnCXXForRangeDecl(ThisDecl);
     Actions.FinalizeDeclaration(ThisDecl);
     D.complete(ThisDecl);
-    return Actions.FinalizeDeclaratorGroup(getCurScope(), DS, &ThisDecl, 1);
+    return Actions.FinalizeDeclaratorGroup(getCurScope(), DS, ThisDecl);
   }
 
   SmallVector<Decl *, 8> DeclsInGroup;
@@ -1733,9 +1734,7 @@ Parser::DeclGroupPtrTy Parser::ParseDeclGroup(ParsingDeclSpec &DS,
     }
   }
 
-  return Actions.FinalizeDeclaratorGroup(getCurScope(), DS,
-                                         DeclsInGroup.data(),
-                                         DeclsInGroup.size());
+  return Actions.FinalizeDeclaratorGroup(getCurScope(), DS, DeclsInGroup);
 }
 
 /// Parse an optional simple-asm-expr and attributes, and attach them to a
@@ -1798,24 +1797,58 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
     break;
 
   case ParsedTemplateInfo::Template:
-  case ParsedTemplateInfo::ExplicitSpecialization:
+  case ParsedTemplateInfo::ExplicitSpecialization: {
     ThisDecl = Actions.ActOnTemplateDeclarator(getCurScope(),
                                                *TemplateInfo.TemplateParams,
                                                D);
-    break;
-
-  case ParsedTemplateInfo::ExplicitInstantiation: {
-    DeclResult ThisRes
-      = Actions.ActOnExplicitInstantiation(getCurScope(),
-                                           TemplateInfo.ExternLoc,
-                                           TemplateInfo.TemplateLoc,
-                                           D);
-    if (ThisRes.isInvalid()) {
+    if (Tok.is(tok::semi) &&
+	Actions.HandleVariableRedeclaration(ThisDecl, D.getCXXScopeSpec())) {
       SkipUntil(tok::semi, true, true);
       return 0;
     }
+    if (VarTemplateDecl *VT = dyn_cast_or_null<VarTemplateDecl>(ThisDecl))
+      // Re-direct this decl to refer to the templated decl so that we can
+      // initialize it.
+      ThisDecl = VT->getTemplatedDecl();
+    break;
+  }
+  case ParsedTemplateInfo::ExplicitInstantiation: {
+    if (Tok.is(tok::semi)) {
+      DeclResult ThisRes = Actions.ActOnExplicitInstantiation(
+          getCurScope(), TemplateInfo.ExternLoc, TemplateInfo.TemplateLoc, D);
+      if (ThisRes.isInvalid()) {
+        SkipUntil(tok::semi, true, true);
+        return 0;
+      }
+      ThisDecl = ThisRes.get();
+    } else {
+      // FIXME: This check should be for a variable template instantiation only.
 
-    ThisDecl = ThisRes.get();
+      // Check that this is a valid instantiation
+      if (D.getName().getKind() != UnqualifiedId::IK_TemplateId) {
+        // If the declarator-id is not a template-id, issue a diagnostic and
+        // recover by ignoring the 'template' keyword.
+        Diag(Tok, diag::err_template_defn_explicit_instantiation)
+            << 2 << FixItHint::CreateRemoval(TemplateInfo.TemplateLoc);
+        ThisDecl = Actions.ActOnDeclarator(getCurScope(), D);
+      } else {
+        SourceLocation LAngleLoc =
+            PP.getLocForEndOfToken(TemplateInfo.TemplateLoc);
+        Diag(D.getIdentifierLoc(),
+             diag::err_explicit_instantiation_with_definition)
+            << SourceRange(TemplateInfo.TemplateLoc)
+            << FixItHint::CreateInsertion(LAngleLoc, "<>");
+
+        // Recover as if it were an explicit specialization.
+        TemplateParameterLists FakedParamLists;
+        FakedParamLists.push_back(Actions.ActOnTemplateParameterList(
+            0, SourceLocation(), TemplateInfo.TemplateLoc, LAngleLoc, 0, 0,
+            LAngleLoc));
+
+        ThisDecl =
+            Actions.ActOnTemplateDeclarator(getCurScope(), FakedParamLists, D);
+      }
+    }
     break;
     }
   }
@@ -1826,6 +1859,7 @@ Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(Declarator &D,
   // If a '==' or '+=' is found, suggest a fixit to '='.
   if (isTokenEqualOrEqualTypo()) {
     ConsumeToken();
+
     if (Tok.is(tok::kw_delete)) {
       if (D.isFunctionDeclarator())
         Diag(ConsumeToken(), diag::err_default_delete_in_multiple_declaration)
@@ -4697,6 +4731,12 @@ void Parser::ParseDirectDeclarator(Declarator &D) {
     D.SetIdentifier(Tok.getIdentifierInfo(), Tok.getLocation());
     ConsumeToken();
     goto PastIdentifier;
+  } else if (Tok.is(tok::identifier) && D.diagnoseIdentifier()) {
+    Diag(Tok.getLocation(), diag::err_unexpected_unqualified_id)
+      << FixItHint::CreateRemoval(Tok.getLocation());
+    D.SetIdentifier(0, Tok.getLocation());
+    ConsumeToken();
+    goto PastIdentifier;
   }
 
   if (Tok.is(tok::l_paren)) {
@@ -5117,7 +5157,7 @@ bool Parser::isFunctionDeclaratorIdentifierList() {
 ///
 void Parser::ParseFunctionDeclaratorIdentifierList(
        Declarator &D,
-       SmallVector<DeclaratorChunk::ParamInfo, 16> &ParamInfo) {
+       SmallVectorImpl<DeclaratorChunk::ParamInfo> &ParamInfo) {
   // If there was no identifier specified for the declarator, either we are in
   // an abstract-declarator, or we are in a parameter declarator which was found
   // to be abstract.  In abstract-declarators, identifier lists are not valid:
@@ -5198,7 +5238,7 @@ void Parser::ParseFunctionDeclaratorIdentifierList(
 void Parser::ParseParameterDeclarationClause(
        Declarator &D,
        ParsedAttributes &FirstArgAttrs,
-       SmallVector<DeclaratorChunk::ParamInfo, 16> &ParamInfo,
+       SmallVectorImpl<DeclaratorChunk::ParamInfo> &ParamInfo,
        SourceLocation &EllipsisLoc) {
 
   while (1) {
@@ -5586,6 +5626,10 @@ bool Parser::TryAltiVecVectorTokenOutOfLine() {
       Tok.setKind(tok::kw___vector);
       return true;
     }
+    if (Next.getIdentifierInfo() == Ident_bool) {
+      Tok.setKind(tok::kw___vector);
+      return true;
+    }
     return false;
   }
 }
@@ -5614,6 +5658,10 @@ bool Parser::TryAltiVecTokenOutOfLine(DeclSpec &DS, SourceLocation Loc,
         isInvalid = DS.SetTypeAltiVecVector(true, Loc, PrevSpec, DiagID);
         return true;
       }
+      if (Next.getIdentifierInfo() == Ident_bool) {
+        isInvalid = DS.SetTypeAltiVecVector(true, Loc, PrevSpec, DiagID);
+        return true;
+      }
       break;
     default:
       break;
@@ -5621,6 +5669,10 @@ bool Parser::TryAltiVecTokenOutOfLine(DeclSpec &DS, SourceLocation Loc,
   } else if ((Tok.getIdentifierInfo() == Ident_pixel) &&
              DS.isTypeAltiVecVector()) {
     isInvalid = DS.SetTypeAltiVecPixel(true, Loc, PrevSpec, DiagID);
+    return true;
+  } else if ((Tok.getIdentifierInfo() == Ident_bool) &&
+             DS.isTypeAltiVecVector()) {
+    isInvalid = DS.SetTypeAltiVecBool(true, Loc, PrevSpec, DiagID);
     return true;
   }
   return false;
