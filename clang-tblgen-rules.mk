@@ -212,17 +212,17 @@ endif
 ifneq ($(findstring Options.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Driver/Options.inc
 $(intermediates)/include/clang/Driver/Options.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
-$(intermediates)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td \
-    | $(CLANG_TBLGEN)
-	$(call transform-host-clang-td-to-out,opt-parser-defs)
+$(intermediates)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(LLVM_ROOT_PATH)/include/llvm/Option/OptParser.td $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td \
+    | $(CLANG_TBLGEN) $(TBLGEN)
+	$(call transform-host-td-to-out,opt-parser-defs)
 endif
 
 ifneq ($(findstring CC1AsOptions.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Driver/CC1AsOptions.inc
 $(intermediates)/include/clang/Driver/CC1AsOptions.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
-$(intermediates)/include/clang/Driver/CC1AsOptions.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/CC1AsOptions.td $(CLANG_ROOT_PATH)/include/clang/Driver/OptParser.td \
-    | $(CLANG_TBLGEN)
-	$(call transform-host-clang-td-to-out,opt-parser-defs)
+$(intermediates)/include/clang/Driver/CC1AsOptions.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/CC1AsOptions.td $(LLVM_ROOT_PATH)/include/llvm/Option/OptParser.td \
+    | $(CLANG_TBLGEN) $(TBLGEN)
+	$(call transform-host-td-to-out,opt-parser-defs)
 endif
 
 LOCAL_C_INCLUDES += $(intermediates)/include

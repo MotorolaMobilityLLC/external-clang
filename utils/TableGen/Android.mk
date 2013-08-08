@@ -9,7 +9,6 @@ clang_tablegen_SRC_FILES := \
   ClangDiagnosticsEmitter.cpp \
   ClangSACheckersEmitter.cpp \
   NeonEmitter.cpp \
-  OptParserEmitter.cpp \
   TableGen.cpp
 
 include $(CLEAR_VARS)
