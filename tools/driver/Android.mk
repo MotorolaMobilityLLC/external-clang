@@ -82,6 +82,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMVectorize \
   libLLVMAnalysis \
   libLLVMCore \
+  libLLVMOption \
   libLLVMSupport \
   libLLVMTarget
 
