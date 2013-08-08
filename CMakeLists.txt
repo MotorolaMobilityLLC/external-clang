@@ -151,7 +151,7 @@ if (LLVM_COMPILER_IS_GCC_COMPATIBLE)
 endif ()
 
 if (APPLE)
-  set(CMAKE_MODULE_LINKER_FLAGS "-Wl,-flat_namespace -Wl,-undefined -Wl,suppress")
+  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-flat_namespace -Wl,-undefined -Wl,suppress")
 endif ()
 
 configure_file(
@@ -327,4 +327,3 @@ endif()
 
 set(BUG_REPORT_URL "http://llvm.org/bugs/" CACHE STRING
   "Default URL where bug reports are to be submitted.")
-

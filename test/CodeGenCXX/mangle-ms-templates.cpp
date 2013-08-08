@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -emit-llvm %s -o - -cxx-abi microsoft -triple=i386-pc-win32 | FileCheck %s
-// RUN: %clang_cc1 -emit-llvm %s -o - -cxx-abi microsoft -triple=x86_64-pc-win32 | FileCheck -check-prefix X64 %s
+// RUN: %clang_cc1 -std=c++11 -emit-llvm %s -o - -cxx-abi microsoft -triple=i386-pc-win32 | FileCheck %s
+// RUN: %clang_cc1 -std=c++11 -emit-llvm %s -o - -cxx-abi microsoft -triple=x86_64-pc-win32 | FileCheck -check-prefix X64 %s
 
 template<typename T>
 class Class {
@@ -133,3 +133,60 @@ void spam() {
 // CHECK: "\01??$FunctionPointerTemplate@$1?spam@@YAXXZ@@YAXXZ"
 // X64: "\01??$FunctionPointerTemplate@$1?spam@@YAXXZ@@YAXXZ"
 }
+
+// Unlike Itanium, there is no character code to indicate an argument pack.
+// Tested with MSVC 2013, the first version which supports variadic templates.
+
+template <typename ...Ts> void variadic_fn_template(const Ts &...args) { }
+void variadic_fn_instantiate() {
+  variadic_fn_template(0, 1, 3, 4);
+  variadic_fn_template(0, 1, 'a', "b");
+}
+// CHECK: "\01??$variadic_fn_template@HHHH@@YAXABH000@Z"
+// CHECK: "\01??$variadic_fn_template@HHD$$BY01D@@YAXABH0ABDAAY01$$CBD@Z"
+
+template <typename ...Ts>
+struct VariadicClass {
+  VariadicClass() { }
+  int x;
+};
+void variadic_class_instantiate() {
+  VariadicClass<int, char, bool> a;
+  VariadicClass<bool, char, int> b;
+}
+// CHECK: call {{.*}} @"\01??0?$VariadicClass@HD_N@@QAE@XZ"
+// CHECK: call {{.*}} @"\01??0?$VariadicClass@_NDH@@QAE@XZ"
+
+template <typename T>
+struct Second {};
+
+template <typename T, template <class> class>
+struct Type {};
+
+template <template <class> class T>
+struct Type2 {};
+
+template <template <class> class T, bool B>
+struct Thing;
+
+template <template <class> class T>
+struct Thing<T, false> { };
+
+template <template <class> class T>
+struct Thing<T, true> { };
+
+void template_template_fun(Type<Thing<Second, true>, Second>) { }
+// CHECK: "\01?template_template_fun@@YAXU?$Type@U?$Thing@USecond@@$00@@USecond@@@@@Z"
+
+template <typename T>
+void template_template_specialization();
+
+template <>
+void template_template_specialization<void (Type<Thing<Second, true>, Second>)>() {
+}
+// CHECK: "\01??$template_template_specialization@$$A6AXU?$Type@U?$Thing@USecond@@$00@@USecond@@@@@Z@@YAXXZ"
+
+// PR16788
+template <decltype(nullptr)> struct S1 {};
+void f(S1<nullptr>) {}
+// CHECK: "\01?f@@YAXU?$S1@$0A@@@@Z"

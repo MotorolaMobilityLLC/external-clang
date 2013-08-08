@@ -25,6 +25,7 @@ using namespace clang::serialization;
 namespace clang {
 
   class ASTStmtReader : public StmtVisitor<ASTStmtReader> {
+    friend class OMPClauseReader;
     typedef ASTReader::RecordData RecordData;
     
     ASTReader &Reader;
@@ -382,6 +383,7 @@ void ASTStmtReader::VisitMSAsmStmt(MSAsmStmt *S) {
 
 void ASTStmtReader::VisitCapturedStmt(CapturedStmt *S) {
   VisitStmt(S);
+  ++Idx;
   S->setCapturedDecl(ReadDeclAs<CapturedDecl>(Record, Idx));
   S->setCapturedRegionKind(static_cast<CapturedRegionKind>(Record[Idx++]));
   S->setCapturedRecordDecl(ReadDeclAs<RecordDecl>(Record, Idx));
@@ -723,7 +725,6 @@ void ASTStmtReader::VisitInitListExpr(InitListExpr *E) {
   } else
     E->ArrayFillerOrUnionFieldInit = ReadDeclAs<FieldDecl>(Record, Idx);
   E->sawArrayRangeDesignator(Record[Idx++]);
-  E->setInitializesStdInitializerList(Record[Idx++]);
   unsigned NumInits = Record[Idx++];
   E->reserveInits(Reader.getContext(), NumInits);
   if (isArrayFiller) {
@@ -834,6 +835,7 @@ void ASTStmtReader::VisitChooseExpr(ChooseExpr *E) {
   E->setRHS(Reader.ReadSubExpr());
   E->setBuiltinLoc(ReadSourceLocation(Record, Idx));
   E->setRParenLoc(ReadSourceLocation(Record, Idx));
+  E->setIsConditionTrue(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitGNUNullExpr(GNUNullExpr *E) {
@@ -1225,6 +1227,12 @@ void ASTStmtReader::VisitLambdaExpr(LambdaExpr *E) {
     for (unsigned I = 0; I != NumArrayIndexVars; ++I)
       ArrayIndexVars[I] = ReadDeclAs<VarDecl>(Record, Idx);
   }
+}
+
+void
+ASTStmtReader::VisitCXXStdInitializerListExpr(CXXStdInitializerListExpr *E) {
+  VisitExpr(E);
+  E->SubExpr = Reader.ReadSubExpr();
 }
 
 void ASTStmtReader::VisitCXXNamedCastExpr(CXXNamedCastExpr *E) {
@@ -1651,11 +1659,88 @@ void ASTStmtReader::VisitAsTypeExpr(AsTypeExpr *E) {
 }
 
 //===----------------------------------------------------------------------===//
+// OpenMP Clauses.
+//===----------------------------------------------------------------------===//
+
+namespace clang {
+class OMPClauseReader : public OMPClauseVisitor<OMPClauseReader> {
+  ASTStmtReader *Reader;
+  ASTContext &Context;
+  const ASTReader::RecordData &Record;
+  unsigned &Idx;
+public:
+  OMPClauseReader(ASTStmtReader *R, ASTContext &C,
+                  const ASTReader::RecordData &Record, unsigned &Idx)
+    : Reader(R), Context(C), Record(Record), Idx(Idx) { }
+#define OPENMP_CLAUSE(Name, Class)    \
+  void Visit##Class(Class *S);
+#include "clang/Basic/OpenMPKinds.def"
+  OMPClause *readClause();
+};
+}
+
+OMPClause *OMPClauseReader::readClause() {
+  OMPClause *C;
+  switch (Record[Idx++]) {
+  case OMPC_default:
+    C = new (Context) OMPDefaultClause();
+    break;
+  case OMPC_private:
+    C = OMPPrivateClause::CreateEmpty(Context, Record[Idx++]);
+    break;
+  }
+  Visit(C);
+  C->setLocStart(Reader->ReadSourceLocation(Record, Idx));
+  C->setLocEnd(Reader->ReadSourceLocation(Record, Idx));
+
+  return C;
+}
+
+void OMPClauseReader::VisitOMPDefaultClause(OMPDefaultClause *C) {
+  C->setDefaultKind(
+       static_cast<OpenMPDefaultClauseKind>(Record[Idx++]));
+  C->setLParenLoc(Reader->ReadSourceLocation(Record, Idx));
+  C->setDefaultKindKwLoc(Reader->ReadSourceLocation(Record, Idx));
+}
+
+void OMPClauseReader::VisitOMPPrivateClause(OMPPrivateClause *C) {
+  C->setLParenLoc(Reader->ReadSourceLocation(Record, Idx));
+  unsigned NumVars = C->varlist_size();
+  SmallVector<Expr *, 16> Vars;
+  Vars.reserve(NumVars);
+  for (unsigned i = 0; i != NumVars; ++i)
+    Vars.push_back(Reader->Reader.ReadSubExpr());
+  C->setVarRefs(Vars);
+}
+
+//===----------------------------------------------------------------------===//
+// OpenMP Directives.
+//===----------------------------------------------------------------------===//
+void ASTStmtReader::VisitOMPExecutableDirective(OMPExecutableDirective *E) {
+  VisitStmt(E);
+  ++Idx;
+  E->setLocStart(ReadSourceLocation(Record, Idx));
+  E->setLocEnd(ReadSourceLocation(Record, Idx));
+  OMPClauseReader ClauseReader(this, Reader.getContext(), Record, Idx);
+  SmallVector<OMPClause *, 5> Clauses;
+  for (unsigned i = 0; i < E->getNumClauses(); ++i)
+    Clauses.push_back(ClauseReader.readClause());
+  E->setClauses(Clauses);
+  E->setAssociatedStmt(Reader.ReadSubStmt());
+}
+
+void ASTStmtReader::VisitOMPParallelDirective(OMPParallelDirective *D) {
+  VisitOMPExecutableDirective(D);
+}
+
+//===----------------------------------------------------------------------===//
 // ASTReader Implementation
 //===----------------------------------------------------------------------===//
 
 Stmt *ASTReader::ReadStmt(ModuleFile &F) {
   switch (ReadingKind) {
+  case Read_None:
+    llvm_unreachable("should not call this when not reading anything");
   case Read_Decl:
   case Read_Type:
     return ReadStmtFromStream(F);
@@ -1816,7 +1901,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
 
     case STMT_CAPTURED:
       S = CapturedStmt::CreateDeserialized(Context,
-                                           Record[ASTStmtReader::NumExprFields]);
+                                           Record[ASTStmtReader::NumStmtFields]);
       break;
 
     case EXPR_PREDEFINED:
@@ -2116,6 +2201,12 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
                                               DeclarationNameInfo(),
                                               0);
       break;
+    case STMT_OMP_PARALLEL_DIRECTIVE:
+      S =
+        OMPParallelDirective::CreateEmpty(Context,
+                                          Record[ASTStmtReader::NumStmtFields],
+                                          Empty);
+      break;
         
     case EXPR_CXX_OPERATOR_CALL:
       S = new (Context) CXXOperatorCallExpr(Context, Empty);
@@ -2159,6 +2250,10 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
 
     case EXPR_USER_DEFINED_LITERAL:
       S = new (Context) UserDefinedLiteral(Context, Empty);
+      break;
+
+    case EXPR_CXX_STD_INITIALIZER_LIST:
+      S = new (Context) CXXStdInitializerListExpr(Empty);
       break;
 
     case EXPR_CXX_BOOL_LITERAL:

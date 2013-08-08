@@ -111,11 +111,12 @@ unsigned ConstantArrayType::getNumAddressingBits(ASTContext &Context,
 unsigned ConstantArrayType::getMaxSizeBits(ASTContext &Context) {
   unsigned Bits = Context.getTypeSize(Context.getSizeType());
   
-  // GCC appears to only allow 63 bits worth of address space when compiling
-  // for 64-bit, so we do the same.
-  if (Bits == 64)
-    --Bits;
-  
+  // Limit the number of bits in size_t so that maximal bit size fits 64 bit
+  // integer (see PR8256).  We can do this as currently there is no hardware
+  // that supports full 64-bit virtual space.
+  if (Bits > 61)
+    Bits = 61;
+
   return Bits;
 }
 
@@ -355,23 +356,6 @@ const Type *Type::getUnqualifiedDesugaredType() const {
     }
 #include "clang/AST/TypeNodes.def"
     }
-  }
-}
-
-bool Type::isDerivedType() const {
-  switch (CanonicalType->getTypeClass()) {
-  case Pointer:
-  case VariableArray:
-  case ConstantArray:
-  case IncompleteArray:
-  case FunctionProto:
-  case FunctionNoProto:
-  case LValueReference:
-  case RValueReference:
-  case Record:
-    return true;
-  default:
-    return false;
   }
 }
 bool Type::isClassType() const {
@@ -1858,6 +1842,47 @@ bool TagType::isBeingDefined() const {
   return getDecl()->isBeingDefined();
 }
 
+bool AttributedType::isMSTypeSpec() const {
+  switch (getAttrKind()) {
+  default:  return false;
+  case attr_ptr32:
+  case attr_ptr64:
+  case attr_sptr:
+  case attr_uptr:
+    return true;
+  }
+  llvm_unreachable("invalid attr kind");
+}
+
+bool AttributedType::isCallingConv() const {
+  switch (getAttrKind()) {
+  case attr_ptr32:
+  case attr_ptr64:
+  case attr_sptr:
+  case attr_uptr:
+  case attr_address_space:
+  case attr_regparm:
+  case attr_vector_size:
+  case attr_neon_vector_type:
+  case attr_neon_polyvector_type:
+  case attr_objc_gc:
+  case attr_objc_ownership:
+  case attr_noreturn:
+      return false;
+  case attr_pcs:
+  case attr_pcs_vfp:
+  case attr_cdecl:
+  case attr_fastcall:
+  case attr_stdcall:
+  case attr_thiscall:
+  case attr_pascal:
+  case attr_pnaclcall:
+  case attr_inteloclbicc:
+    return true;
+  }
+  llvm_unreachable("invalid attr kind");
+}
+
 CXXRecordDecl *InjectedClassNameType::getDecl() const {
   return cast<CXXRecordDecl>(getInterestingTagDecl(Decl));
 }
@@ -1917,7 +1942,8 @@ anyDependentTemplateArguments(const TemplateArgumentLoc *Args, unsigned N,
   return false;
 }
 
-bool TemplateSpecializationType::
+#ifndef NDEBUG
+static bool 
 anyDependentTemplateArguments(const TemplateArgument *Args, unsigned N,
                               bool &InstantiationDependent) {
   for (unsigned i = 0; i != N; ++i) {
@@ -1931,6 +1957,7 @@ anyDependentTemplateArguments(const TemplateArgument *Args, unsigned N,
   }
   return false;
 }
+#endif
 
 TemplateSpecializationType::
 TemplateSpecializationType(TemplateName T,
@@ -1954,8 +1981,8 @@ TemplateSpecializationType(TemplateName T,
   (void)InstantiationDependent;
   assert((!Canon.isNull() ||
           T.isDependent() || 
-          anyDependentTemplateArguments(Args, NumArgs, 
-                                        InstantiationDependent)) &&
+          ::anyDependentTemplateArguments(Args, NumArgs, 
+                                          InstantiationDependent)) &&
          "No canonical type for non-dependent class template specialization");
 
   TemplateArgument *TemplateArgs

@@ -152,7 +152,7 @@ def err_expected_ident_lparen : Error<"expected identifier or '('">;
 def err_expected_ident_lbrace : Error<"expected identifier or '{'">;
 def err_expected_lbrace : Error<"expected '{'">;
 def err_expected_lparen : Error<"expected '('">;
-def err_expected_lparen_or_lbrace : Error<"expected '('or '{'">;
+def err_expected_lparen_or_lbrace : Error<"expected '(' or '{'">;
 def err_expected_rparen : Error<"expected ')'">;
 def err_expected_lsquare : Error<"expected '['">;
 def err_expected_rsquare : Error<"expected ']'">;
@@ -309,6 +309,9 @@ def err_expected_class_name_not_template :
   Error<"'typename' is redundant; base classes are implicitly types">;
 def err_unspecified_vla_size_with_static : Error<
   "'static' may not be used with an unspecified variable length array size">;
+def warn_deprecated_register : Warning<
+  "'register' storage class specifier is deprecated">,
+  InGroup<DeprecatedRegister>;
 
 def err_expected_case_before_expression: Error<
   "expected 'case' keyword before expression">;
@@ -447,6 +450,7 @@ def err_invalid_operator_on_type : Error<
   "cannot use %select{dot|arrow}0 operator on a type">;
 def err_expected_unqualified_id : Error<
   "expected %select{identifier|unqualified-id}0">;
+def err_unexpected_unqualified_id : Error<"type-id cannot have a name">;
 def err_func_def_no_params : Error<
   "function definition does not declare parameters">;
 def err_expected_lparen_after_type : Error<
@@ -494,6 +498,9 @@ def err_misplaced_ellipsis_in_declaration : Error<
 def ext_abstract_pack_declarator_parens : ExtWarn<
   "ISO C++11 requires a parenthesized pack declaration to have a name">,
   InGroup<DiagGroup<"anonymous-pack-parens">>;
+def err_function_is_not_record : Error<
+  "unexpected '%select{.|->}0' in function call; perhaps remove the "
+  "'%select{.|->}0'?">;
 
 // C++ derived classes
 def err_dup_virtual : Error<"duplicate 'virtual' in base specifier">;
@@ -575,7 +582,7 @@ def err_two_right_angle_brackets_need_space : Error<
 def err_right_angle_bracket_equal_needs_space : Error<
   "a space is required between a right angle bracket and an equals sign "
   "(use '> =')">;
-def warn_cxx0x_right_shift_in_template_arg : Warning<
+def warn_cxx11_right_shift_in_template_arg : Warning<
   "use of right-shift operator ('>>') in template argument will require "
   "parentheses in C++11">, InGroup<CXX11Compat>;
 def warn_cxx98_compat_two_right_angle_brackets : Warning<
@@ -589,6 +596,12 @@ def err_explicit_instantiation_with_definition : Error<
     "explicit template instantiation cannot have a definition; if this "
     "definition is meant to be an explicit specialization, add '<>' after the "
     "'template' keyword">;
+def err_template_defn_explicit_instantiation : Error<
+  "%select{function|class|variable}0 cannot be defined in an explicit instantiation; if this "
+  "declaration is meant to be a %select{function|class|variable}0 definition, remove the 'template' keyword">;
+def err_friend_explicit_instantiation : Error<
+  "friend cannot be declared in an explicit instantiation; if this "
+  "declaration is meant to be a friend declaration, remove the 'template' keyword">;
 def err_explicit_instantiation_enum : Error<
     "enumerations cannot be explicitly instantiated">;
 def err_expected_template_parameter : Error<"expected template parameter">;
@@ -824,6 +837,12 @@ def err_omp_unknown_directive : Error <
   "expected an OpenMP directive">;
 def err_omp_unexpected_directive : Error <
   "unexpected OpenMP directive '#pragma omp %0'">;
+def err_omp_expected_punc : Error <
+  "expected ',' or ')' in %select{'#pragma omp %1'|'%1' clause}0">;
+def err_omp_unexpected_clause : Error <
+  "unexpected OpenMP clause '%0' in directive '#pragma omp %1'">;
+def err_omp_more_one_clause : Error <
+  "directive '#pragma omp %0' cannot contain more than one '%1' clause">;
 } // end of Parse Issue category.
 
 let CategoryName = "Modules Issue" in {

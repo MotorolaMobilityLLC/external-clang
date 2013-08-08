@@ -853,7 +853,7 @@ Controlling Code Generation
 Clang provides a number of ways to control code generation. The options
 are listed below.
 
-**-fsanitize=check1,check2,...**
+**-f[no-]sanitize=check1,check2,...**
    Turn on runtime checks for various forms of undefined or suspicious
    behavior.
 
@@ -940,6 +940,15 @@ are listed below.
       it is of the wrong dynamic type, or that its lifetime has not
       begun or has ended. Incompatible with ``-fno-rtti``.
 
+   You can turn off or modify checks for certain source files, functions
+   or even variables by providing a special file:
+
+   -  ``-fsanitize-blacklist=/path/to/blacklist/file``: disable or modify
+      sanitizer checks for objects listed in the file. See
+      :doc:`SanitizerSpecialCaseList` for file format description.
+   -  ``-fno-sanitize-blacklist``: don't use blacklist file, if it was
+      specified earlier in the command line.
+
    Experimental features of AddressSanitizer (not ready for widespread
    use, require explicit ``-fsanitize=address``):
 
@@ -971,9 +980,17 @@ are listed below.
       group.
 
    The ``-fsanitize=`` argument must also be provided when linking, in
-   order to link to the appropriate runtime library. It is not possible
-   to combine the ``-fsanitize=address`` and ``-fsanitize=thread``
-   checkers in the same program.
+   order to link to the appropriate runtime library. When using
+   ``-fsanitize=vptr`` (or a group that includes it, such as
+   ``-fsanitize=undefined``) with a C++ program, the link must be
+   performed by ``clang++``, not ``clang``, in order to link against the
+   C++-specific parts of the runtime library.
+
+   It is not possible to combine more than one of the ``-fsanitize=address``,
+   ``-fsanitize=thread``, and ``-fsanitize=memory`` checkers in the same
+   program. The ``-fsanitize=undefined`` checks can be combined with other
+   sanitizers.
+
 **-f[no-]address-sanitizer**
    Deprecated synonym for :ref:`-f[no-]sanitize=address
    <opt_fsanitize_address>`.

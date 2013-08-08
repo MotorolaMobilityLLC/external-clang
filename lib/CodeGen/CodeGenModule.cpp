@@ -190,6 +190,11 @@ void CodeGenModule::Release() {
       (Context.getLangOpts().Modules || !LinkerOptionsMetadata.empty())) {
     EmitModuleLinkOptions();
   }
+  if (CodeGenOpts.DwarfVersion)
+    // We actually want the latest version when there are conflicts.
+    // We can change from Warning to Latest if such mode is supported.
+    getModule().addModuleFlag(llvm::Module::Warning, "Dwarf Version",
+                              CodeGenOpts.DwarfVersion);
 
   SimplifyPersonality();
 
@@ -429,9 +434,6 @@ StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
     getCXXABI().getMangleContext().mangleCXXCtor(D, GD.getCtorType(), Out);
   else if (const CXXDestructorDecl *D = dyn_cast<CXXDestructorDecl>(ND))
     getCXXABI().getMangleContext().mangleCXXDtor(D, GD.getDtorType(), Out);
-  else if (const BlockDecl *BD = dyn_cast<BlockDecl>(ND))
-    getCXXABI().getMangleContext().mangleBlock(BD, Out,
-      dyn_cast_or_null<VarDecl>(initializedGlobalDecl.getDecl()));
   else
     getCXXABI().getMangleContext().mangleName(ND, Out);
 
@@ -511,6 +513,12 @@ void CodeGenModule::EmitCtorList(const CtorList &Fns, const char *GlobalName) {
 llvm::GlobalValue::LinkageTypes
 CodeGenModule::getFunctionLinkage(GlobalDecl GD) {
   const FunctionDecl *D = cast<FunctionDecl>(GD.getDecl());
+
+  if (isa<CXXDestructorDecl>(D) &&
+      getCXXABI().useThunkForDtorVariant(cast<CXXDestructorDecl>(D),
+                                         GD.getDtorType()))
+    return llvm::Function::LinkOnceODRLinkage;
+
   GVALinkage Linkage = getContext().GetGVALinkageForFunction(D);
 
   if (Linkage == GVA_Internal)
@@ -713,6 +721,14 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD,
   if (!IsIncompleteFunction)
     SetLLVMFunctionAttributes(FD, getTypes().arrangeGlobalDeclaration(GD), F);
 
+  if (getCXXABI().HasThisReturn(GD)) {
+    assert(!F->arg_empty() &&
+           F->arg_begin()->getType()
+             ->canLosslesslyBitCastTo(F->getReturnType()) &&
+           "unexpected this return");
+    F->addAttribute(1, llvm::Attribute::Returned);
+  }
+
   // Only a few attributes are set on declarations; these may later be
   // overridden by a definition.
 
@@ -734,6 +750,12 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD,
 
   if (const SectionAttr *SA = FD->getAttr<SectionAttr>())
     F->setSection(SA->getName());
+
+  // A replaceable global allocation function does not act like a builtin by
+  // default, only if it is invoked by a new-expression or delete-expression.
+  if (FD->isReplaceableGlobalAllocationFunction())
+    F->addAttribute(llvm::AttributeSet::FunctionIndex,
+                    llvm::Attribute::NoBuiltin);
 }
 
 void CodeGenModule::AddUsedGlobal(llvm::GlobalValue *GV) {
@@ -1312,13 +1334,15 @@ void CodeGenModule::EmitGlobalDefinition(GlobalDecl GD) {
 llvm::Constant *
 CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
                                        llvm::Type *Ty,
-                                       GlobalDecl D, bool ForVTable,
+                                       GlobalDecl GD, bool ForVTable,
                                        llvm::AttributeSet ExtraAttrs) {
+  const Decl *D = GD.getDecl();
+
   // Lookup the entry, lazily creating it if necessary.
   llvm::GlobalValue *Entry = GetGlobalValue(MangledName);
   if (Entry) {
     if (WeakRefReferences.erase(Entry)) {
-      const FunctionDecl *FD = cast_or_null<FunctionDecl>(D.getDecl());
+      const FunctionDecl *FD = cast_or_null<FunctionDecl>(D);
       if (FD && !FD->hasAttr<WeakAttr>())
         Entry->setLinkage(llvm::Function::ExternalLinkage);
     }
@@ -1329,6 +1353,14 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
     // Make sure the result is of the correct type.
     return llvm::ConstantExpr::getBitCast(Entry, Ty->getPointerTo());
   }
+
+  // All MSVC dtors other than the base dtor are linkonce_odr and delegate to
+  // each other bottoming out with the base dtor.  Therefore we emit non-base
+  // dtors on usage, even if there is no dtor definition in the TU.
+  if (D && isa<CXXDestructorDecl>(D) &&
+      getCXXABI().useThunkForDtorVariant(cast<CXXDestructorDecl>(D),
+                                         GD.getDtorType()))
+    DeferredDeclsToEmit.push_back(GD);
 
   // This function doesn't have a complete type (for example, the return
   // type is an incomplete struct). Use a fake type instead, and make
@@ -1347,8 +1379,8 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
                                              llvm::Function::ExternalLinkage,
                                              MangledName, &getModule());
   assert(F->getName() == MangledName && "name was uniqued!");
-  if (D.getDecl())
-    SetFunctionAttributes(D, F, IsIncompleteFunction);
+  if (D)
+    SetFunctionAttributes(GD, F, IsIncompleteFunction);
   if (ExtraAttrs.hasAttributes(llvm::AttributeSet::FunctionIndex)) {
     llvm::AttrBuilder B(ExtraAttrs, llvm::AttributeSet::FunctionIndex);
     F->addAttributes(llvm::AttributeSet::FunctionIndex,
@@ -1378,18 +1410,18 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
   //
   // We also don't emit a definition for a function if it's going to be an entry
   // in a vtable, unless it's already marked as used.
-  } else if (getLangOpts().CPlusPlus && D.getDecl()) {
+  } else if (getLangOpts().CPlusPlus && D) {
     // Look for a declaration that's lexically in a record.
-    const FunctionDecl *FD = cast<FunctionDecl>(D.getDecl());
+    const FunctionDecl *FD = cast<FunctionDecl>(D);
     FD = FD->getMostRecentDecl();
     do {
       if (isa<CXXRecordDecl>(FD->getLexicalDeclContext())) {
         if (FD->isImplicit() && !ForVTable) {
           assert(FD->isUsed() && "Sema didn't mark implicit function as used!");
-          DeferredDeclsToEmit.push_back(D.getWithDecl(FD));
+          DeferredDeclsToEmit.push_back(GD.getWithDecl(FD));
           break;
         } else if (FD->doesThisDeclarationHaveABody()) {
-          DeferredDeclsToEmit.push_back(D.getWithDecl(FD));
+          DeferredDeclsToEmit.push_back(GD.getWithDecl(FD));
           break;
         }
       }
@@ -1628,125 +1660,6 @@ CharUnits CodeGenModule::GetTargetTypeStoreSize(llvm::Type *Ty) const {
       TheDataLayout.getTypeStoreSizeInBits(Ty));
 }
 
-llvm::Constant *
-CodeGenModule::MaybeEmitGlobalStdInitializerListInitializer(const VarDecl *D,
-                                                       const Expr *rawInit) {
-  ArrayRef<ExprWithCleanups::CleanupObject> cleanups;
-  if (const ExprWithCleanups *withCleanups =
-          dyn_cast<ExprWithCleanups>(rawInit)) {
-    cleanups = withCleanups->getObjects();
-    rawInit = withCleanups->getSubExpr();
-  }
-
-  const InitListExpr *init = dyn_cast<InitListExpr>(rawInit);
-  if (!init || !init->initializesStdInitializerList() ||
-      init->getNumInits() == 0)
-    return 0;
-
-  ASTContext &ctx = getContext();
-  unsigned numInits = init->getNumInits();
-  // FIXME: This check is here because we would otherwise silently miscompile
-  // nested global std::initializer_lists. Better would be to have a real
-  // implementation.
-  for (unsigned i = 0; i < numInits; ++i) {
-    const InitListExpr *inner = dyn_cast<InitListExpr>(init->getInit(i));
-    if (inner && inner->initializesStdInitializerList()) {
-      ErrorUnsupported(inner, "nested global std::initializer_list");
-      return 0;
-    }
-  }
-
-  // Synthesize a fake VarDecl for the array and initialize that.
-  QualType elementType = init->getInit(0)->getType();
-  llvm::APInt numElements(ctx.getTypeSize(ctx.getSizeType()), numInits);
-  QualType arrayType = ctx.getConstantArrayType(elementType, numElements,
-                                                ArrayType::Normal, 0);
-
-  IdentifierInfo *name = &ctx.Idents.get(D->getNameAsString() + "__initlist");
-  TypeSourceInfo *sourceInfo = ctx.getTrivialTypeSourceInfo(
-                                              arrayType, D->getLocation());
-  VarDecl *backingArray = VarDecl::Create(ctx, const_cast<DeclContext*>(
-                                                          D->getDeclContext()),
-                                          D->getLocStart(), D->getLocation(),
-                                          name, arrayType, sourceInfo,
-                                          SC_Static);
-  backingArray->setTSCSpec(D->getTSCSpec());
-
-  // Now clone the InitListExpr to initialize the array instead.
-  // Incredible hack: we want to use the existing InitListExpr here, so we need
-  // to tell it that it no longer initializes a std::initializer_list.
-  ArrayRef<Expr*> Inits(const_cast<InitListExpr*>(init)->getInits(),
-                        init->getNumInits());
-  Expr *arrayInit = new (ctx) InitListExpr(ctx, init->getLBraceLoc(), Inits,
-                                           init->getRBraceLoc());
-  arrayInit->setType(arrayType);
-
-  if (!cleanups.empty())
-    arrayInit = ExprWithCleanups::Create(ctx, arrayInit, cleanups);
-
-  backingArray->setInit(arrayInit);
-
-  // Emit the definition of the array.
-  EmitGlobalVarDefinition(backingArray);
-
-  // Inspect the initializer list to validate it and determine its type.
-  // FIXME: doing this every time is probably inefficient; caching would be nice
-  RecordDecl *record = init->getType()->castAs<RecordType>()->getDecl();
-  RecordDecl::field_iterator field = record->field_begin();
-  if (field == record->field_end()) {
-    ErrorUnsupported(D, "weird std::initializer_list");
-    return 0;
-  }
-  QualType elementPtr = ctx.getPointerType(elementType.withConst());
-  // Start pointer.
-  if (!ctx.hasSameType(field->getType(), elementPtr)) {
-    ErrorUnsupported(D, "weird std::initializer_list");
-    return 0;
-  }
-  ++field;
-  if (field == record->field_end()) {
-    ErrorUnsupported(D, "weird std::initializer_list");
-    return 0;
-  }
-  bool isStartEnd = false;
-  if (ctx.hasSameType(field->getType(), elementPtr)) {
-    // End pointer.
-    isStartEnd = true;
-  } else if(!ctx.hasSameType(field->getType(), ctx.getSizeType())) {
-    ErrorUnsupported(D, "weird std::initializer_list");
-    return 0;
-  }
-
-  // Now build an APValue representing the std::initializer_list.
-  APValue initListValue(APValue::UninitStruct(), 0, 2);
-  APValue &startField = initListValue.getStructField(0);
-  APValue::LValuePathEntry startOffsetPathEntry;
-  startOffsetPathEntry.ArrayIndex = 0;
-  startField = APValue(APValue::LValueBase(backingArray),
-                       CharUnits::fromQuantity(0),
-                       llvm::makeArrayRef(startOffsetPathEntry),
-                       /*IsOnePastTheEnd=*/false, 0);
-
-  if (isStartEnd) {
-    APValue &endField = initListValue.getStructField(1);
-    APValue::LValuePathEntry endOffsetPathEntry;
-    endOffsetPathEntry.ArrayIndex = numInits;
-    endField = APValue(APValue::LValueBase(backingArray),
-                       ctx.getTypeSizeInChars(elementType) * numInits,
-                       llvm::makeArrayRef(endOffsetPathEntry),
-                       /*IsOnePastTheEnd=*/true, 0);
-  } else {
-    APValue &sizeField = initListValue.getStructField(1);
-    sizeField = APValue(llvm::APSInt(numElements));
-  }
-
-  // Emit the constant for the initializer_list.
-  llvm::Constant *llvmInit =
-      EmitConstantValueForMemory(initListValue, D->getType());
-  assert(llvmInit && "failed to initialize as constant");
-  return llvmInit;
-}
-
 unsigned CodeGenModule::GetGlobalVarAddressSpace(const VarDecl *D,
                                                  unsigned AddrSpace) {
   if (LangOpts.CUDA && CodeGenOpts.CUDAIsDevice) {
@@ -1817,17 +1730,9 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
     assert(!ASTTy->isIncompleteType() && "Unexpected incomplete type");
     Init = EmitNullConstant(D->getType());
   } else {
-    // If this is a std::initializer_list, emit the special initializer.
-    Init = MaybeEmitGlobalStdInitializerListInitializer(D, InitExpr);
-    // An empty init list will perform zero-initialization, which happens
-    // to be exactly what we want.
-    // FIXME: It does so in a global constructor, which is *not* what we
-    // want.
+    initializedGlobalDecl = GlobalDecl(D);
+    Init = EmitConstantInit(*InitDecl);
 
-    if (!Init) {
-      initializedGlobalDecl = GlobalDecl(D);
-      Init = EmitConstantInit(*InitDecl);
-    }
     if (!Init) {
       QualType T = InitExpr->getType();
       if (D->getType()->isReferenceType())
@@ -1907,7 +1812,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
 
   // Set the llvm linkage type as appropriate.
   llvm::GlobalValue::LinkageTypes Linkage = 
-    GetLLVMLinkageVarDefinition(D, GV);
+    GetLLVMLinkageVarDefinition(D, GV->isConstant());
   GV->setLinkage(Linkage);
   if (Linkage == llvm::GlobalVariable::CommonLinkage)
     // common vars aren't constant even if declared const.
@@ -1938,8 +1843,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
 }
 
 llvm::GlobalValue::LinkageTypes
-CodeGenModule::GetLLVMLinkageVarDefinition(const VarDecl *D,
-                                           llvm::GlobalVariable *GV) {
+CodeGenModule::GetLLVMLinkageVarDefinition(const VarDecl *D, bool isConstant) {
   GVALinkage Linkage = getContext().GetGVALinkageForVariable(D);
   if (Linkage == GVA_Internal)
     return llvm::Function::InternalLinkage;
@@ -1954,7 +1858,7 @@ CodeGenModule::GetLLVMLinkageVarDefinition(const VarDecl *D,
     // http://msdn.microsoft.com/en-us/library/5tkz6s71.aspx
     return llvm::GlobalVariable::WeakODRLinkage;
   } else if (D->hasAttr<WeakAttr>()) {
-    if (GV->isConstant())
+    if (isConstant)
       return llvm::GlobalVariable::WeakODRLinkage;
     else
       return llvm::GlobalVariable::WeakAnyLinkage;
@@ -2738,15 +2642,16 @@ llvm::Constant *CodeGenModule::GetAddrOfConstantCString(const std::string &Str,
 }
 
 llvm::Constant *CodeGenModule::GetAddrOfGlobalTemporary(
-    const MaterializeTemporaryExpr *E, const Expr *Inner) {
+    const MaterializeTemporaryExpr *E, const Expr *Init) {
   assert((E->getStorageDuration() == SD_Static ||
           E->getStorageDuration() == SD_Thread) && "not a global temporary");
   const VarDecl *VD = cast<VarDecl>(E->getExtendingDecl());
 
   // If we're not materializing a subobject of the temporary, keep the
   // cv-qualifiers from the type of the MaterializeTemporaryExpr.
-  if (Inner == E->GetTemporaryExpr())
-    Inner = E;
+  QualType MaterializedType = Init->getType();
+  if (Init == E->GetTemporaryExpr())
+    MaterializedType = E->getType();
 
   llvm::Constant *&Slot = MaterializedGlobalTemporaryMap[E];
   if (Slot)
@@ -2760,34 +2665,44 @@ llvm::Constant *CodeGenModule::GetAddrOfGlobalTemporary(
   getCXXABI().getMangleContext().mangleReferenceTemporary(VD, Out);
   Out.flush();
 
-  llvm::Constant *InitialValue = 0;
   APValue *Value = 0;
   if (E->getStorageDuration() == SD_Static) {
-    // We might have a constant initializer for this temporary.
+    // We might have a cached constant initializer for this temporary. Note
+    // that this might have a different value from the value computed by
+    // evaluating the initializer if the surrounding constant expression
+    // modifies the temporary.
     Value = getContext().getMaterializedTemporaryValue(E, false);
     if (Value && Value->isUninit())
       Value = 0;
   }
 
-  bool Constant;
+  // Try evaluating it now, it might have a constant initializer.
+  Expr::EvalResult EvalResult;
+  if (!Value && Init->EvaluateAsRValue(EvalResult, getContext()) &&
+      !EvalResult.hasSideEffects())
+    Value = &EvalResult.Val;
+
+  llvm::Constant *InitialValue = 0;
+  bool Constant = false;
+  llvm::Type *Type;
   if (Value) {
     // The temporary has a constant initializer, use it.
-    InitialValue = EmitConstantValue(*Value, Inner->getType(), 0);
-    Constant = isTypeConstant(Inner->getType(), /*ExcludeCtor*/Value);
+    InitialValue = EmitConstantValue(*Value, MaterializedType, 0);
+    Constant = isTypeConstant(MaterializedType, /*ExcludeCtor*/Value);
+    Type = InitialValue->getType();
   } else {
-    // No constant initializer, the initialization will be provided when we
+    // No initializer, the initialization will be provided when we
     // initialize the declaration which performed lifetime extension.
-    InitialValue = EmitNullConstant(Inner->getType());
-    Constant = false;
+    Type = getTypes().ConvertTypeForMem(MaterializedType);
   }
 
   // Create a global variable for this lifetime-extended temporary.
   llvm::GlobalVariable *GV =
-    new llvm::GlobalVariable(getModule(), InitialValue->getType(), Constant,
-                             llvm::GlobalValue::PrivateLinkage, InitialValue,
-                             Name.c_str());
+    new llvm::GlobalVariable(getModule(), Type, Constant,
+                             llvm::GlobalValue::PrivateLinkage,
+                             InitialValue, Name.c_str());
   GV->setAlignment(
-      getContext().getTypeAlignInChars(Inner->getType()).getQuantity());
+      getContext().getTypeAlignInChars(MaterializedType).getQuantity());
   if (VD->getTLSKind())
     setTLSMode(GV, *VD);
   Slot = GV;
@@ -2926,8 +2841,12 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
 
     EmitGlobal(cast<FunctionDecl>(D));
     break;
-      
+
   case Decl::Var:
+    // Skip variable templates
+    if (cast<VarDecl>(D)->getDescribedVarTemplate())
+      return;
+  case Decl::VarTemplateSpecialization:
     EmitGlobal(cast<VarDecl>(D));
     break;
 
@@ -2944,6 +2863,8 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
   case Decl::UsingShadow:
   case Decl::Using:
   case Decl::ClassTemplate:
+  case Decl::VarTemplate:
+  case Decl::VarTemplatePartialSpecialization:
   case Decl::FunctionTemplate:
   case Decl::TypeAliasTemplate:
   case Decl::Block:
@@ -2963,12 +2884,12 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
         cast<FunctionDecl>(D)->isLateTemplateParsed())
       return;
       
-    EmitCXXConstructors(cast<CXXConstructorDecl>(D));
+    getCXXABI().EmitCXXConstructors(cast<CXXConstructorDecl>(D));
     break;
   case Decl::CXXDestructor:
     if (cast<FunctionDecl>(D)->isLateTemplateParsed())
       return;
-    EmitCXXDestructors(cast<CXXDestructorDecl>(D));
+    getCXXABI().EmitCXXDestructors(cast<CXXDestructorDecl>(D));
     break;
 
   case Decl::StaticAssert:

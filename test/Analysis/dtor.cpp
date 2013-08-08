@@ -401,3 +401,33 @@ namespace LifetimeExtension {
     clang_analyzer_eval(SaveOnVirtualDestruct::lastOutput == 42); // expected-warning{{TRUE}}
   }
 }
+
+namespace NoReturn {
+  struct NR {
+    ~NR() __attribute__((noreturn));
+  };
+
+  void f(int **x) {
+    NR nr;
+  }
+
+  void g() {
+    int *x;
+    f(&x);
+    *x = 47; // no warning
+  }
+}
+
+namespace PseudoDtor {
+  template <typename T>
+  void destroy(T &obj) {
+    clang_analyzer_checkInlined(true); // expected-warning{{TRUE}}
+    obj.~T();
+  }
+
+  void test() {
+    int i;
+    destroy(i);
+    clang_analyzer_eval(true); // expected-warning{{TRUE}}
+  }
+}

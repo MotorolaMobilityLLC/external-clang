@@ -26,6 +26,7 @@
 #include "clang/AST/ExternalASTSource.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/RecordLayout.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/SourceManager.h"
@@ -132,8 +133,14 @@ RawComment *ASTContext::getRawCommentForDeclNoCache(const Decl *D) const {
       isa<RedeclarableTemplateDecl>(D) ||
       isa<ClassTemplateSpecializationDecl>(D))
     DeclLoc = D->getLocStart();
-  else
+  else {
     DeclLoc = D->getLocation();
+    // If location of the typedef name is in a macro, it is because being
+    // declared via a macro. Try using declaration's starting location
+    // as the "declaration location".
+    if (DeclLoc.isMacroID() && isa<TypedefDecl>(D))
+      DeclLoc = D->getLocStart();
+  }
 
   // If the declaration doesn't map directly to a location in a file, we
   // can't find the comment.
@@ -175,7 +182,8 @@ RawComment *ASTContext::getRawCommentForDeclNoCache(const Decl *D) const {
   // First check whether we have a trailing comment.
   if (Comment != RawComments.end() &&
       (*Comment)->isDocumentation() && (*Comment)->isTrailingComment() &&
-      (isa<FieldDecl>(D) || isa<EnumConstantDecl>(D) || isa<VarDecl>(D))) {
+      (isa<FieldDecl>(D) || isa<EnumConstantDecl>(D) || isa<VarDecl>(D) ||
+       isa<ObjCMethodDecl>(D) || isa<ObjCPropertyDecl>(D))) {
     std::pair<FileID, unsigned> CommentBeginDecomp
       = SourceMgr.getDecomposedLoc((*Comment)->getSourceRange().getBegin());
     // Check that Doxygen trailing comment comes after the declaration, starts
@@ -220,7 +228,7 @@ RawComment *ASTContext::getRawCommentForDeclNoCache(const Decl *D) const {
 
   // There should be no other declarations or preprocessor directives between
   // comment and declaration.
-  if (Text.find_first_of(",;{}#@") != StringRef::npos)
+  if (Text.find_first_of(";{}#@") != StringRef::npos)
     return NULL;
 
   return *Comment;
@@ -697,7 +705,7 @@ ASTContext::ASTContext(LangOptions& LOpts, SourceManager &SM,
     DependentTemplateSpecializationTypes(this_()),
     SubstTemplateTemplateParmPacks(this_()),
     GlobalNestedNameSpecifier(0), 
-    Int128Decl(0), UInt128Decl(0),
+    Int128Decl(0), UInt128Decl(0), Float128StubDecl(0),
     BuiltinVaListDecl(0),
     ObjCIdDecl(0), ObjCSelDecl(0), ObjCClassDecl(0), ObjCProtocolClassDecl(0),
     BOOLDecl(0),
@@ -854,6 +862,20 @@ TypedefDecl *ASTContext::getUInt128Decl() const {
   }
   
   return UInt128Decl;
+}
+
+TypeDecl *ASTContext::getFloat128StubType() const {
+  assert(LangOpts.CPlusPlus && "should only be called for c++");
+  if (!Float128StubDecl) {
+    Float128StubDecl = CXXRecordDecl::Create(const_cast<ASTContext &>(*this), 
+                                             TTK_Struct,
+                                             getTranslationUnitDecl(),
+                                             SourceLocation(),
+                                             SourceLocation(),
+                                             &Idents.get("__float128"));
+  }
+  
+  return Float128StubDecl;
 }
 
 void ASTContext::InitBuiltinType(CanQualType &R, BuiltinType::Kind K) {
@@ -1020,13 +1042,20 @@ void ASTContext::eraseDeclAttrs(const Decl *D) {
   }
 }
 
+// FIXME: Remove ?
 MemberSpecializationInfo *
 ASTContext::getInstantiatedFromStaticDataMember(const VarDecl *Var) {
   assert(Var->isStaticDataMember() && "Not a static data member");
-  llvm::DenseMap<const VarDecl *, MemberSpecializationInfo *>::iterator Pos
-    = InstantiatedFromStaticDataMember.find(Var);
-  if (Pos == InstantiatedFromStaticDataMember.end())
-    return 0;
+  return getTemplateOrSpecializationInfo(Var)
+      .dyn_cast<MemberSpecializationInfo *>();
+}
+
+ASTContext::TemplateOrSpecializationInfo
+ASTContext::getTemplateOrSpecializationInfo(const VarDecl *Var) {
+  llvm::DenseMap<const VarDecl *, TemplateOrSpecializationInfo>::iterator Pos =
+      TemplateOrInstantiation.find(Var);
+  if (Pos == TemplateOrInstantiation.end())
+    return TemplateOrSpecializationInfo();
 
   return Pos->second;
 }
@@ -1037,10 +1066,16 @@ ASTContext::setInstantiatedFromStaticDataMember(VarDecl *Inst, VarDecl *Tmpl,
                                           SourceLocation PointOfInstantiation) {
   assert(Inst->isStaticDataMember() && "Not a static data member");
   assert(Tmpl->isStaticDataMember() && "Not a static data member");
-  assert(!InstantiatedFromStaticDataMember[Inst] &&
-         "Already noted what static data member was instantiated from");
-  InstantiatedFromStaticDataMember[Inst] 
-    = new (*this) MemberSpecializationInfo(Tmpl, TSK, PointOfInstantiation);
+  setTemplateOrSpecializationInfo(Inst, new (*this) MemberSpecializationInfo(
+                                            Tmpl, TSK, PointOfInstantiation));
+}
+
+void
+ASTContext::setTemplateOrSpecializationInfo(VarDecl *Inst,
+                                            TemplateOrSpecializationInfo TSI) {
+  assert(!TemplateOrInstantiation[Inst] &&
+         "Already noted what the variable was instantiated from");
+  TemplateOrInstantiation[Inst] = TSI;
 }
 
 FunctionDecl *ASTContext::getClassScopeSpecializationPattern(
@@ -1115,38 +1150,6 @@ void ASTContext::setInstantiatedFromUnnamedFieldDecl(FieldDecl *Inst,
          "Already noted what unnamed field was instantiated from");
 
   InstantiatedFromUnnamedFieldDecl[Inst] = Tmpl;
-}
-
-bool ASTContext::ZeroBitfieldFollowsNonBitfield(const FieldDecl *FD, 
-                                    const FieldDecl *LastFD) const {
-  return (FD->isBitField() && LastFD && !LastFD->isBitField() &&
-          FD->getBitWidthValue(*this) == 0);
-}
-
-bool ASTContext::ZeroBitfieldFollowsBitfield(const FieldDecl *FD,
-                                             const FieldDecl *LastFD) const {
-  return (FD->isBitField() && LastFD && LastFD->isBitField() &&
-          FD->getBitWidthValue(*this) == 0 &&
-          LastFD->getBitWidthValue(*this) != 0);
-}
-
-bool ASTContext::BitfieldFollowsBitfield(const FieldDecl *FD,
-                                         const FieldDecl *LastFD) const {
-  return (FD->isBitField() && LastFD && LastFD->isBitField() &&
-          FD->getBitWidthValue(*this) &&
-          LastFD->getBitWidthValue(*this));
-}
-
-bool ASTContext::NonBitfieldFollowsBitfield(const FieldDecl *FD,
-                                         const FieldDecl *LastFD) const {
-  return (!FD->isBitField() && LastFD && LastFD->isBitField() &&
-          LastFD->getBitWidthValue(*this));
-}
-
-bool ASTContext::BitfieldFollowsNonBitfield(const FieldDecl *FD,
-                                             const FieldDecl *LastFD) const {
-  return (FD->isBitField() && LastFD && !LastFD->isBitField() &&
-          FD->getBitWidthValue(*this));
 }
 
 ASTContext::overridden_cxx_method_iterator
@@ -1283,13 +1286,14 @@ CharUnits ASTContext::getDeclAlign(const Decl *D, bool RefAsPointee) const {
       // Adjust alignments of declarations with array type by the
       // large-array alignment on the target.
       unsigned MinWidth = Target->getLargeArrayMinWidth();
-      const ArrayType *arrayType;
-      if (MinWidth && (arrayType = getAsArrayType(T))) {
-        if (isa<VariableArrayType>(arrayType))
-          Align = std::max(Align, Target->getLargeArrayAlign());
-        else if (isa<ConstantArrayType>(arrayType) &&
-                 MinWidth <= getTypeSize(cast<ConstantArrayType>(arrayType)))
-          Align = std::max(Align, Target->getLargeArrayAlign());
+      if (const ArrayType *arrayType = getAsArrayType(T)) {
+        if (MinWidth) {
+          if (isa<VariableArrayType>(arrayType))
+            Align = std::max(Align, Target->getLargeArrayAlign());
+          else if (isa<ConstantArrayType>(arrayType) &&
+                   MinWidth <= getTypeSize(cast<ConstantArrayType>(arrayType)))
+            Align = std::max(Align, Target->getLargeArrayAlign());
+        }
 
         // Walk through any array types while we're at it.
         T = getBaseElementType(arrayType);
@@ -1306,24 +1310,27 @@ CharUnits ASTContext::getDeclAlign(const Decl *D, bool RefAsPointee) const {
     // a max-field-alignment constraint (#pragma pack).  So calculate
     // the actual alignment of the field within the struct, and then
     // (as we're expected to) constrain that by the alignment of the type.
-    if (const FieldDecl *field = dyn_cast<FieldDecl>(VD)) {
-      // So calculate the alignment of the field.
-      const ASTRecordLayout &layout = getASTRecordLayout(field->getParent());
+    if (const FieldDecl *Field = dyn_cast<FieldDecl>(VD)) {
+      const RecordDecl *Parent = Field->getParent();
+      // We can only produce a sensible answer if the record is valid.
+      if (!Parent->isInvalidDecl()) {
+        const ASTRecordLayout &Layout = getASTRecordLayout(Parent);
 
-      // Start with the record's overall alignment.
-      unsigned fieldAlign = toBits(layout.getAlignment());
+        // Start with the record's overall alignment.
+        unsigned FieldAlign = toBits(Layout.getAlignment());
 
-      // Use the GCD of that and the offset within the record.
-      uint64_t offset = layout.getFieldOffset(field->getFieldIndex());
-      if (offset > 0) {
-        // Alignment is always a power of 2, so the GCD will be a power of 2,
-        // which means we get to do this crazy thing instead of Euclid's.
-        uint64_t lowBitOfOffset = offset & (~offset + 1);
-        if (lowBitOfOffset < fieldAlign)
-          fieldAlign = static_cast<unsigned>(lowBitOfOffset);
+        // Use the GCD of that and the offset within the record.
+        uint64_t Offset = Layout.getFieldOffset(Field->getFieldIndex());
+        if (Offset > 0) {
+          // Alignment is always a power of 2, so the GCD will be a power of 2,
+          // which means we get to do this crazy thing instead of Euclid's.
+          uint64_t LowBitOfOffset = Offset & (~Offset + 1);
+          if (LowBitOfOffset < FieldAlign)
+            FieldAlign = static_cast<unsigned>(LowBitOfOffset);
+        }
+
+        Align = std::min(Align, FieldAlign);
       }
-
-      Align = std::min(Align, fieldAlign);
     }
   }
 
@@ -1408,6 +1415,10 @@ ASTContext::getTypeInfoImpl(const Type *T) const {
 #define ABSTRACT_TYPE(Class, Base)
 #define NON_CANONICAL_TYPE(Class, Base)
 #define DEPENDENT_TYPE(Class, Base) case Type::Class:
+#define NON_CANONICAL_UNLESS_DEPENDENT_TYPE(Class, Base)                       \
+  case Type::Class:                                                            \
+  assert(!T->isDependentType() && "should not see dependent types here");      \
+  return getTypeInfo(cast<Class##Type>(T)->desugar().getTypePtr());
 #include "clang/AST/TypeNodes.def"
     llvm_unreachable("Should not see dependent types");
 
@@ -1600,6 +1611,8 @@ ASTContext::getTypeInfoImpl(const Type *T) const {
   }
   case Type::ObjCObject:
     return getTypeInfo(cast<ObjCObjectType>(T)->getBaseType().getTypePtr());
+  case Type::Decayed:
+    return getTypeInfo(cast<DecayedType>(T)->getDecayedType().getTypePtr());
   case Type::ObjCInterface: {
     const ObjCInterfaceType *ObjCI = cast<ObjCInterfaceType>(T);
     const ASTRecordLayout &Layout = getASTObjCInterfaceLayout(ObjCI->getDecl());
@@ -1656,38 +1669,12 @@ ASTContext::getTypeInfoImpl(const Type *T) const {
     break;
   }
 
-  case Type::TypeOfExpr:
-    return getTypeInfo(cast<TypeOfExprType>(T)->getUnderlyingExpr()->getType()
-                         .getTypePtr());
-
-  case Type::TypeOf:
-    return getTypeInfo(cast<TypeOfType>(T)->getUnderlyingType().getTypePtr());
-
-  case Type::Decltype:
-    return getTypeInfo(cast<DecltypeType>(T)->getUnderlyingExpr()->getType()
-                        .getTypePtr());
-
-  case Type::UnaryTransform:
-    return getTypeInfo(cast<UnaryTransformType>(T)->getUnderlyingType());
-
   case Type::Elaborated:
     return getTypeInfo(cast<ElaboratedType>(T)->getNamedType().getTypePtr());
 
   case Type::Attributed:
     return getTypeInfo(
                   cast<AttributedType>(T)->getEquivalentType().getTypePtr());
-
-  case Type::TemplateSpecialization: {
-    assert(getCanonicalType(T) != T &&
-           "Cannot request the size of a dependent type");
-    const TemplateSpecializationType *TST = cast<TemplateSpecializationType>(T);
-    // A type alias template specialization may refer to a typedef with the
-    // aligned attribute on it.
-    if (TST->isTypeAlias())
-      return getTypeInfo(TST->getAliasedType().getTypePtr());
-    else
-      return getTypeInfo(getCanonicalType(T));
-  }
 
   case Type::Atomic: {
     // Start with the base type information.
@@ -2149,6 +2136,45 @@ QualType ASTContext::getPointerType(QualType T) const {
   PointerType *New = new (*this, TypeAlignment) PointerType(T, Canonical);
   Types.push_back(New);
   PointerTypes.InsertNode(New, InsertPos);
+  return QualType(New, 0);
+}
+
+QualType ASTContext::getDecayedType(QualType T) const {
+  assert((T->isArrayType() || T->isFunctionType()) && "T does not decay");
+
+  llvm::FoldingSetNodeID ID;
+  DecayedType::Profile(ID, T);
+  void *InsertPos = 0;
+  if (DecayedType *DT = DecayedTypes.FindNodeOrInsertPos(ID, InsertPos))
+    return QualType(DT, 0);
+
+  QualType Decayed;
+
+  // C99 6.7.5.3p7:
+  //   A declaration of a parameter as "array of type" shall be
+  //   adjusted to "qualified pointer to type", where the type
+  //   qualifiers (if any) are those specified within the [ and ] of
+  //   the array type derivation.
+  if (T->isArrayType())
+    Decayed = getArrayDecayedType(T);
+
+  // C99 6.7.5.3p8:
+  //   A declaration of a parameter as "function returning type"
+  //   shall be adjusted to "pointer to function returning type", as
+  //   in 6.3.2.1.
+  if (T->isFunctionType())
+    Decayed = getPointerType(T);
+
+  QualType Canonical = getCanonicalType(Decayed);
+
+  // Get the new insert position for the node we care about.
+  DecayedType *NewIP = DecayedTypes.FindNodeOrInsertPos(ID, InsertPos);
+  assert(NewIP == 0 && "Shouldn't be in the map!"); (void)NewIP;
+
+  DecayedType *New =
+      new (*this, TypeAlignment) DecayedType(T, Decayed, Canonical);
+  Types.push_back(New);
+  DecayedTypes.InsertNode(New, InsertPos);
   return QualType(New, 0);
 }
 
@@ -4139,22 +4165,9 @@ const ArrayType *ASTContext::getAsArrayType(QualType T) const {
 }
 
 QualType ASTContext::getAdjustedParameterType(QualType T) const {
-  // C99 6.7.5.3p7:
-  //   A declaration of a parameter as "array of type" shall be
-  //   adjusted to "qualified pointer to type", where the type
-  //   qualifiers (if any) are those specified within the [ and ] of
-  //   the array type derivation.
-  if (T->isArrayType())
-    return getArrayDecayedType(T);
-  
-  // C99 6.7.5.3p8:
-  //   A declaration of a parameter as "function returning type"
-  //   shall be adjusted to "pointer to function returning type", as
-  //   in 6.3.2.1.
-  if (T->isFunctionType())
-    return getPointerType(T);
-  
-  return T;  
+  if (T->isArrayType() || T->isFunctionType())
+    return getDecayedType(T);
+  return T;
 }
 
 QualType ASTContext::getSignatureParameterType(QualType T) const {
@@ -4519,7 +4532,7 @@ QualType ASTContext::getBlockDescriptorType() const {
     UnsignedLongTy,
   };
 
-  const char *FieldNames[] = {
+  static const char *const FieldNames[] = {
     "reserved",
     "Size"
   };
@@ -4560,7 +4573,7 @@ QualType ASTContext::getBlockDescriptorExtendedType() const {
     getPointerType(VoidPtrTy)
   };
 
-  const char *FieldNames[] = {
+  static const char *const FieldNames[] = {
     "reserved",
     "Size",
     "CopyFuncPtr",
@@ -5420,6 +5433,20 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
       // We encode the underlying type which comes out as
       // {...};
       S += '^';
+      if (FD && OPT->getInterfaceDecl()) {
+        // Prevent recursive encoding of fields in some rare cases.
+        ObjCInterfaceDecl *OI = OPT->getInterfaceDecl();
+        SmallVector<const ObjCIvarDecl*, 32> Ivars;
+        DeepCollectObjCIvars(OI, true, Ivars);
+        for (unsigned i = 0, e = Ivars.size(); i != e; ++i) {
+          if (cast<FieldDecl>(Ivars[i]) == FD) {
+            S += '{';
+            S += OI->getIdentifier()->getName();
+            S += '}';
+            return;
+          }
+        }
+      }
       getObjCEncodingForTypeImpl(PointeeTy, S,
                                  false, ExpandPointedToStructures,
                                  NULL,
@@ -6402,15 +6429,6 @@ ASTContext::ProtocolCompatibleWithProtocol(ObjCProtocolDecl *lProto,
        E = rProto->protocol_end(); PI != E; ++PI)
     if (ProtocolCompatibleWithProtocol(lProto, *PI))
       return true;
-  return false;
-}
-
-/// QualifiedIdConformsQualifiedId - compare id<pr,...> with id<pr1,...>
-/// return true if lhs's protocols conform to rhs's protocol; false
-/// otherwise.
-bool ASTContext::QualifiedIdConformsQualifiedId(QualType lhs, QualType rhs) {
-  if (lhs->isObjCQualifiedIdType() && rhs->isObjCQualifiedIdType())
-    return ObjCQualifiedIdTypesAreCompatible(lhs, rhs, false);
   return false;
 }
 
@@ -7804,8 +7822,9 @@ GVALinkage ASTContext::GetGVALinkageForFunction(const FunctionDecl *FD) {
 
   if (!FD->isInlined())
     return External;
-    
-  if (!getLangOpts().CPlusPlus || FD->hasAttr<GNUInlineAttr>()) {
+
+  if ((!getLangOpts().CPlusPlus && !getLangOpts().MicrosoftMode) ||
+      FD->hasAttr<GNUInlineAttr>()) {
     // GNU or C99 inline semantics. Determine whether this symbol should be
     // externally visible.
     if (FD->isInlineDefinitionExternallyVisible())
@@ -7969,45 +7988,37 @@ MangleContext *ASTContext::createMangleContext() {
 CXXABI::~CXXABI() {}
 
 size_t ASTContext::getSideTableAllocatedMemory() const {
-  return ASTRecordLayouts.getMemorySize()
-    + llvm::capacity_in_bytes(ObjCLayouts)
-    + llvm::capacity_in_bytes(KeyFunctions)
-    + llvm::capacity_in_bytes(ObjCImpls)
-    + llvm::capacity_in_bytes(BlockVarCopyInits)
-    + llvm::capacity_in_bytes(DeclAttrs)
-    + llvm::capacity_in_bytes(InstantiatedFromStaticDataMember)
-    + llvm::capacity_in_bytes(InstantiatedFromUsingDecl)
-    + llvm::capacity_in_bytes(InstantiatedFromUsingShadowDecl)
-    + llvm::capacity_in_bytes(InstantiatedFromUnnamedFieldDecl)
-    + llvm::capacity_in_bytes(OverriddenMethods)
-    + llvm::capacity_in_bytes(Types)
-    + llvm::capacity_in_bytes(VariableArrayTypes)
-    + llvm::capacity_in_bytes(ClassScopeSpecializationPattern);
+  return ASTRecordLayouts.getMemorySize() +
+         llvm::capacity_in_bytes(ObjCLayouts) +
+         llvm::capacity_in_bytes(KeyFunctions) +
+         llvm::capacity_in_bytes(ObjCImpls) +
+         llvm::capacity_in_bytes(BlockVarCopyInits) +
+         llvm::capacity_in_bytes(DeclAttrs) +
+         llvm::capacity_in_bytes(TemplateOrInstantiation) +
+         llvm::capacity_in_bytes(InstantiatedFromUsingDecl) +
+         llvm::capacity_in_bytes(InstantiatedFromUsingShadowDecl) +
+         llvm::capacity_in_bytes(InstantiatedFromUnnamedFieldDecl) +
+         llvm::capacity_in_bytes(OverriddenMethods) +
+         llvm::capacity_in_bytes(Types) +
+         llvm::capacity_in_bytes(VariableArrayTypes) +
+         llvm::capacity_in_bytes(ClassScopeSpecializationPattern);
 }
 
-void ASTContext::addUnnamedTag(const TagDecl *Tag) {
-  // FIXME: This mangling should be applied to function local classes too
-  if (!Tag->getName().empty() || Tag->getTypedefNameForAnonDecl() ||
-      !isa<CXXRecordDecl>(Tag->getParent()))
-    return;
-
-  std::pair<llvm::DenseMap<const DeclContext *, unsigned>::iterator, bool> P =
-    UnnamedMangleContexts.insert(std::make_pair(Tag->getParent(), 0));
-  UnnamedMangleNumbers.insert(std::make_pair(Tag, P.first->second++));
+void ASTContext::setManglingNumber(const NamedDecl *ND, unsigned Number) {
+  if (Number > 1)
+    MangleNumbers[ND] = Number;
 }
 
-int ASTContext::getUnnamedTagManglingNumber(const TagDecl *Tag) const {
-  llvm::DenseMap<const TagDecl *, unsigned>::const_iterator I =
-    UnnamedMangleNumbers.find(Tag);
-  return I != UnnamedMangleNumbers.end() ? I->second : -1;
+unsigned ASTContext::getManglingNumber(const NamedDecl *ND) const {
+  llvm::DenseMap<const NamedDecl *, unsigned>::const_iterator I =
+    MangleNumbers.find(ND);
+  return I != MangleNumbers.end() ? I->second : 1;
 }
 
-unsigned ASTContext::getLambdaManglingNumber(CXXMethodDecl *CallOperator) {
-  CXXRecordDecl *Lambda = CallOperator->getParent();
-  return LambdaMangleContexts[Lambda->getDeclContext()]
-           .getManglingNumber(CallOperator);
+MangleNumberingContext &
+ASTContext::getManglingNumberContext(const DeclContext *DC) {
+  return MangleNumberingContexts[DC];
 }
-
 
 void ASTContext::setParameterIndex(const ParmVarDecl *D, unsigned int index) {
   ParamIndices[D] = index;
@@ -8045,4 +8056,130 @@ bool ASTContext::AtomicUsesUnsupportedLibcall(const AtomicExpr *E) const {
   unsigned Align = alignChars.getQuantity();
   unsigned MaxInlineWidthInBits = getTargetInfo().getMaxAtomicInlineWidth();
   return (Size != Align || toBits(sizeChars) > MaxInlineWidthInBits);
+}
+
+namespace {
+
+  /// \brief A \c RecursiveASTVisitor that builds a map from nodes to their
+  /// parents as defined by the \c RecursiveASTVisitor.
+  ///
+  /// Note that the relationship described here is purely in terms of AST
+  /// traversal - there are other relationships (for example declaration context)
+  /// in the AST that are better modeled by special matchers.
+  ///
+  /// FIXME: Currently only builds up the map using \c Stmt and \c Decl nodes.
+  class ParentMapASTVisitor : public RecursiveASTVisitor<ParentMapASTVisitor> {
+
+  public:
+    /// \brief Builds and returns the translation unit's parent map.
+    ///
+    ///  The caller takes ownership of the returned \c ParentMap.
+    static ASTContext::ParentMap *buildMap(TranslationUnitDecl &TU) {
+      ParentMapASTVisitor Visitor(new ASTContext::ParentMap);
+      Visitor.TraverseDecl(&TU);
+      return Visitor.Parents;
+    }
+
+  private:
+    typedef RecursiveASTVisitor<ParentMapASTVisitor> VisitorBase;
+
+    ParentMapASTVisitor(ASTContext::ParentMap *Parents) : Parents(Parents) {
+    }
+
+    bool shouldVisitTemplateInstantiations() const {
+      return true;
+    }
+    bool shouldVisitImplicitCode() const {
+      return true;
+    }
+    // Disables data recursion. We intercept Traverse* methods in the RAV, which
+    // are not triggered during data recursion.
+    bool shouldUseDataRecursionFor(clang::Stmt *S) const {
+      return false;
+    }
+
+    template <typename T>
+    bool TraverseNode(T *Node, bool(VisitorBase:: *traverse) (T *)) {
+      if (Node == NULL)
+        return true;
+      if (ParentStack.size() > 0)
+        // FIXME: Currently we add the same parent multiple times, for example
+        // when we visit all subexpressions of template instantiations; this is
+        // suboptimal, bug benign: the only way to visit those is with
+        // hasAncestor / hasParent, and those do not create new matches.
+        // The plan is to enable DynTypedNode to be storable in a map or hash
+        // map. The main problem there is to implement hash functions /
+        // comparison operators for all types that DynTypedNode supports that
+        // do not have pointer identity.
+        (*Parents)[Node].push_back(ParentStack.back());
+      ParentStack.push_back(ast_type_traits::DynTypedNode::create(*Node));
+      bool Result = (this ->* traverse) (Node);
+      ParentStack.pop_back();
+      return Result;
+    }
+
+    bool TraverseDecl(Decl *DeclNode) {
+      return TraverseNode(DeclNode, &VisitorBase::TraverseDecl);
+    }
+
+    bool TraverseStmt(Stmt *StmtNode) {
+      return TraverseNode(StmtNode, &VisitorBase::TraverseStmt);
+    }
+
+    ASTContext::ParentMap *Parents;
+    llvm::SmallVector<ast_type_traits::DynTypedNode, 16> ParentStack;
+
+    friend class RecursiveASTVisitor<ParentMapASTVisitor>;
+  };
+
+} // end namespace
+
+ASTContext::ParentVector
+ASTContext::getParents(const ast_type_traits::DynTypedNode &Node) {
+  assert(Node.getMemoizationData() &&
+         "Invariant broken: only nodes that support memoization may be "
+         "used in the parent map.");
+  if (!AllParents) {
+    // We always need to run over the whole translation unit, as
+    // hasAncestor can escape any subtree.
+    AllParents.reset(
+        ParentMapASTVisitor::buildMap(*getTranslationUnitDecl()));
+  }
+  ParentMap::const_iterator I = AllParents->find(Node.getMemoizationData());
+  if (I == AllParents->end()) {
+    return ParentVector();
+  }
+  return I->second;
+}
+
+bool
+ASTContext::ObjCMethodsAreEqual(const ObjCMethodDecl *MethodDecl,
+                                const ObjCMethodDecl *MethodImpl) {
+  // No point trying to match an unavailable/deprecated mothod.
+  if (MethodDecl->hasAttr<UnavailableAttr>()
+      || MethodDecl->hasAttr<DeprecatedAttr>())
+    return false;
+  if (MethodDecl->getObjCDeclQualifier() !=
+      MethodImpl->getObjCDeclQualifier())
+    return false;
+  if (!hasSameType(MethodDecl->getResultType(),
+                   MethodImpl->getResultType()))
+    return false;
+  
+  if (MethodDecl->param_size() != MethodImpl->param_size())
+    return false;
+  
+  for (ObjCMethodDecl::param_const_iterator IM = MethodImpl->param_begin(),
+       IF = MethodDecl->param_begin(), EM = MethodImpl->param_end(),
+       EF = MethodDecl->param_end();
+       IM != EM && IF != EF; ++IM, ++IF) {
+    const ParmVarDecl *DeclVar = (*IF);
+    const ParmVarDecl *ImplVar = (*IM);
+    if (ImplVar->getObjCDeclQualifier() != DeclVar->getObjCDeclQualifier())
+      return false;
+    if (!hasSameType(DeclVar->getType(), ImplVar->getType()))
+      return false;
+  }
+  return (MethodDecl->isVariadic() == MethodImpl->isVariadic());
+  
 }

@@ -15,9 +15,9 @@
 #define CLANG_CODEGEN_CODEGENFUNCTION_H
 
 #include "CGBuilder.h"
-#include "CGCleanup.h"
 #include "CGDebugInfo.h"
 #include "CGValue.h"
+#include "EHScopeStack.h"
 #include "CodeGenModule.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/ExprCXX.h"
@@ -241,6 +241,18 @@ public:
   llvm::DenseMap<const VarDecl *, llvm::Value *> NRVOFlags;
 
   EHScopeStack EHStack;
+  llvm::SmallVector<char, 256> LifetimeExtendedCleanupStack;
+
+  /// Header for data within LifetimeExtendedCleanupStack.
+  struct LifetimeExtendedCleanupHeader {
+    /// The size of the following cleanup object.
+    size_t Size : 29;
+    /// The kind of cleanup to push: a value from the CleanupKind enumeration.
+    unsigned Kind : 3;
+
+    size_t getSize() const { return Size; }
+    CleanupKind getKind() const { return static_cast<CleanupKind>(Kind); }
+  };
 
   /// i32s containing the indexes of the cleanup destinations.
   llvm::AllocaInst *NormalCleanupDest;
@@ -376,6 +388,23 @@ public:
     initFullExprCleanup();
   }
 
+  /// \brief Queue a cleanup to be pushed after finishing the current
+  /// full-expression.
+  template <class T, class A0, class A1, class A2, class A3>
+  void pushCleanupAfterFullExpr(CleanupKind Kind, A0 a0, A1 a1, A2 a2, A3 a3) {
+    assert(!isInConditionalBranch() && "can't defer conditional cleanup");
+
+    LifetimeExtendedCleanupHeader Header = { sizeof(T), Kind };
+
+    size_t OldSize = LifetimeExtendedCleanupStack.size();
+    LifetimeExtendedCleanupStack.resize(
+        LifetimeExtendedCleanupStack.size() + sizeof(Header) + Header.Size);
+
+    char *Buffer = &LifetimeExtendedCleanupStack[OldSize];
+    new (Buffer) LifetimeExtendedCleanupHeader(Header);
+    new (Buffer + sizeof(Header)) T(a0, a1, a2, a3);
+  }
+
   /// Set up the last cleaup that was pushed as a conditional
   /// full-expression cleanup.
   void initFullExprCleanup();
@@ -421,6 +450,7 @@ public:
   /// will be executed once the scope is exited.
   class RunCleanupsScope {
     EHScopeStack::stable_iterator CleanupStackDepth;
+    size_t LifetimeExtendedCleanupStackSize;
     bool OldDidCallStackSave;
   protected:
     bool PerformCleanup;
@@ -438,6 +468,8 @@ public:
       : PerformCleanup(true), CGF(CGF)
     {
       CleanupStackDepth = CGF.EHStack.stable_begin();
+      LifetimeExtendedCleanupStackSize =
+          CGF.LifetimeExtendedCleanupStack.size();
       OldDidCallStackSave = CGF.DidCallStackSave;
       CGF.DidCallStackSave = false;
     }
@@ -447,7 +479,8 @@ public:
     ~RunCleanupsScope() {
       if (PerformCleanup) {
         CGF.DidCallStackSave = OldDidCallStackSave;
-        CGF.PopCleanupBlocks(CleanupStackDepth);
+        CGF.PopCleanupBlocks(CleanupStackDepth,
+                             LifetimeExtendedCleanupStackSize);
       }
     }
 
@@ -461,7 +494,8 @@ public:
     void ForceCleanup() {
       assert(PerformCleanup && "Already forced cleanup");
       CGF.DidCallStackSave = OldDidCallStackSave;
-      CGF.PopCleanupBlocks(CleanupStackDepth);
+      CGF.PopCleanupBlocks(CleanupStackDepth,
+                           LifetimeExtendedCleanupStackSize);
       PerformCleanup = false;
     }
   };
@@ -513,9 +547,15 @@ public:
   };
 
 
-  /// PopCleanupBlocks - Takes the old cleanup stack size and emits
-  /// the cleanup blocks that have been added.
+  /// \brief Takes the old cleanup stack size and emits the cleanup blocks
+  /// that have been added.
   void PopCleanupBlocks(EHScopeStack::stable_iterator OldCleanupStackSize);
+
+  /// \brief Takes the old cleanup stack size and emits the cleanup blocks
+  /// that have been added, then adds all lifetime-extended cleanups from
+  /// the given position to the stack.
+  void PopCleanupBlocks(EHScopeStack::stable_iterator OldCleanupStackSize,
+                        size_t OldLifetimeExtendedStackSize);
 
   void ResolveBranchFixups(llvm::BasicBlock *Target);
 
@@ -758,10 +798,6 @@ private:
   CGDebugInfo *DebugInfo;
   bool DisableDebugInfo;
 
-  /// If the current function returns 'this', use the field to keep track of
-  /// the callee that returns 'this'.
-  llvm::Value *CalleeWithThisReturn;
-
   /// DidCallStackSave - Whether llvm.stacksave has been called. Used to avoid
   /// calling llvm.stacksave for multiple VLAs in the same scope.
   bool DidCallStackSave;
@@ -988,6 +1024,9 @@ public:
                      llvm::Value *addr, QualType type);
   void pushDestroy(CleanupKind kind, llvm::Value *addr, QualType type,
                    Destroyer *destroyer, bool useEHCleanupForArray);
+  void pushLifetimeExtendedDestroy(CleanupKind kind, llvm::Value *addr,
+                                   QualType type, Destroyer *destroyer,
+                                   bool useEHCleanupForArray);
   void emitDestroy(llvm::Value *addr, QualType type, Destroyer *destroyer,
                    bool useEHCleanupForArray);
   llvm::Function *generateDestroyHelper(llvm::Constant *addr,
@@ -1588,10 +1627,6 @@ public:
   llvm::Value *EmitDynamicCast(llvm::Value *V, const CXXDynamicCastExpr *DCE);
   llvm::Value* EmitCXXUuidofExpr(const CXXUuidofExpr *E);
 
-  void MaybeEmitStdInitializerListCleanup(llvm::Value *loc, const Expr *init);
-  void EmitStdInitializerListCleanup(llvm::Value *loc,
-                                     const InitListExpr *init);
-
   /// \brief Situations in which we might emit a check for the suitability of a
   ///        pointer or glvalue.
   enum TypeCheckKind {
@@ -1952,7 +1987,6 @@ public:
   LValue EmitInitListLValue(const InitListExpr *E);
   LValue EmitConditionalOperatorLValue(const AbstractConditionalOperator *E);
   LValue EmitCastLValue(const CastExpr *E);
-  LValue EmitNullInitializationLValue(const CXXScalarValueInitExpr *E);
   LValue EmitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *E);
   LValue EmitOpaqueValueLValue(const OpaqueValueExpr *e);
 
@@ -2069,10 +2103,8 @@ public:
   void EmitNoreturnRuntimeCallOrInvoke(llvm::Value *callee,
                                        ArrayRef<llvm::Value*> args);
 
-  llvm::Value *BuildVirtualCall(const CXXMethodDecl *MD, llvm::Value *This,
+  llvm::Value *BuildVirtualCall(GlobalDecl GD, llvm::Value *This,
                                 llvm::Type *Ty);
-  llvm::Value *BuildVirtualCall(const CXXDestructorDecl *DD, CXXDtorType Type,
-                                llvm::Value *This, llvm::Type *Ty);
   llvm::Value *BuildAppleKextVirtualCall(const CXXMethodDecl *MD, 
                                          NestedNameSpecifier *Qual,
                                          llvm::Type *Ty);
@@ -2199,10 +2231,8 @@ public:
   void EmitObjCAutoreleasePoolCleanup(llvm::Value *Ptr);
   void EmitObjCMRRAutoreleasePoolPop(llvm::Value *Ptr); 
 
-  /// EmitReferenceBindingToExpr - Emits a reference binding to the passed in
-  /// expression. Will emit a temporary variable if E is not an LValue.
-  RValue EmitReferenceBindingToExpr(const Expr* E,
-                                    const NamedDecl *InitializedDecl);
+  /// \brief Emits a reference binding to the passed in expression.
+  RValue EmitReferenceBindingToExpr(const Expr *E);
 
   //===--------------------------------------------------------------------===//
   //                           Expression Emission
@@ -2437,7 +2467,7 @@ private:
   /// Ty, into individual arguments on the provided vector \arg Args. See
   /// ABIArgInfo::Expand.
   void ExpandTypeToArgs(QualType Ty, RValue Src,
-                        SmallVector<llvm::Value*, 16> &Args,
+                        SmallVectorImpl<llvm::Value *> &Args,
                         llvm::FunctionType *IRFuncTy);
 
   llvm::Value* EmitAsmInput(const TargetInfo::ConstraintInfo &Info,
@@ -2453,8 +2483,13 @@ private:
   template<typename T>
   void EmitCallArgs(CallArgList& Args, const T* CallArgTypeInfo,
                     CallExpr::const_arg_iterator ArgBeg,
-                    CallExpr::const_arg_iterator ArgEnd) {
-      CallExpr::const_arg_iterator Arg = ArgBeg;
+                    CallExpr::const_arg_iterator ArgEnd,
+                    bool ForceColumnInfo = false) {
+    CGDebugInfo *DI = getDebugInfo();
+    SourceLocation CallLoc;
+    if (DI) CallLoc = DI->getLocation();
+
+    CallExpr::const_arg_iterator Arg = ArgBeg;
 
     // First, use the argument types that the type info knows about
     if (CallArgTypeInfo) {
@@ -2483,6 +2518,10 @@ private:
                "type mismatch in call argument!");
 #endif
         EmitCallArg(Args, *Arg, ArgType);
+
+        // Each argument expression could modify the debug
+        // location. Restore it.
+        if (DI) DI->EmitLocation(Builder, CallLoc, ForceColumnInfo);
       }
 
       // Either we've emitted all the call args, or we have a call to a
@@ -2493,8 +2532,12 @@ private:
     }
 
     // If we still have any arguments, emit them using the type of the argument.
-    for (; Arg != ArgEnd; ++Arg)
+    for (; Arg != ArgEnd; ++Arg) {
       EmitCallArg(Args, *Arg, Arg->getType());
+
+      // Restore the debug location.
+      if (DI) DI->EmitLocation(Builder, CallLoc, ForceColumnInfo);
+    }
   }
 
   const TargetCodeGenInfo &getTargetHooks() const {
