@@ -1,3 +1,5 @@
+# Don't build the library unless forced to.
+ifeq (true,$(FORCE_BUILD_LLVM_COMPONENTS))
 # Don't build the library in unbundled branches.
 ifeq (,$(TARGET_BUILD_APPS))
 
@@ -34,3 +36,4 @@ include $(CLANG_HOST_BUILD_MK)
 include $(BUILD_HOST_SHARED_LIBRARY)
 
 endif # don't build in unbundled branches
+endif # don't build unless forced to
