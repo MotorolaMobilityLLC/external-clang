@@ -97,6 +97,7 @@ include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_EXECUTABLE)
 
+ifeq (true,$(FORCE_BUILD_LLVM_COMPONENTS))
 # Make sure if clang (i.e. $(LOCAL_MODULE)) get installed,
 # clang++ will get installed as well.
 ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
@@ -108,3 +109,4 @@ $(LOCAL_MODULE) : $(CLANG_CXX)
 $(CLANG_CXX) : $(LOCAL_INSTALLED_MODULE)
 	@echo "Symlink $@ -> $<"
 	$(hide) ln -sf $(notdir $<) $@
+endif
