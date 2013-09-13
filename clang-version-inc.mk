@@ -23,7 +23,8 @@ else
 endif
 
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Basic/Version.inc
-$(intermediates)/include/clang/Basic/Version.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Version.inc.in
+$(intermediates)/include/clang/Basic/Version.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Version.inc.in \
+  $(LLVM_ROOT_PATH)/host/include/llvm/Config/config.h
 	@echo "Updating Clang version info."
 	@mkdir -p $(dir $@)
 	$(hide) sed -e "s#@CLANG_VERSION@#$(CLANG_VERSION)#g" \
