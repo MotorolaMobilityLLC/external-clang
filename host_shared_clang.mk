@@ -22,6 +22,8 @@ LOCAL_WHOLE_STATIC_LIBRARIES := \
 	libclangLex \
 	libclangFrontend \
 	libclangBasic \
+	libclangRewriteFrontend \
+	libclangRewriteCore \
 	libclangSerialization
 
 LOCAL_SHARED_LIBRARIES := libLLVM
