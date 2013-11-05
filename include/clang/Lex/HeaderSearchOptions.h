@@ -58,6 +58,20 @@ public:
           bool ignoreSysRoot)
       : Path(path), Group(group), IsFramework(isFramework),
         IgnoreSysRoot(ignoreSysRoot) {}
+
+    Entry(const Entry& rhs)
+        : Path(rhs.Path), Group(rhs.Group), IsFramework(rhs.IsFramework),
+          IgnoreSysRoot(rhs.IgnoreSysRoot) {}
+
+    Entry& operator=(const Entry& rhs)
+    {
+      if (this == &rhs)
+          return *this;
+      Path = rhs.Path;
+      Group = rhs.Group;
+      IsFramework = rhs.IsFramework;
+      IgnoreSysRoot = rhs.IgnoreSysRoot;
+    }
   };
 
   struct SystemHeaderPrefix {
