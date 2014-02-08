@@ -49,7 +49,6 @@ clang_ast_SRC_FILES :=	\
 	DeclOpenMP.cpp	\
 	DeclPrinter.cpp	\
 	DeclTemplate.cpp	\
-	DumpXML.cpp	\
 	Expr.cpp	\
 	ExprClassification.cpp	\
 	ExprConstant.cpp	\

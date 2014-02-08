@@ -9,6 +9,7 @@ TBLGEN_TABLES :=    \
 	AttrList.inc	\
 	Attrs.inc	\
 	AttrParsedAttrKinds.inc    \
+	AttrParsedAttrImpl.inc    \
 	AttrParsedAttrList.inc    \
 	AttrSpellingListIndex.inc \
 	AttrTemplateInstantiate.inc	\
