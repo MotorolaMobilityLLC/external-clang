@@ -44,6 +44,7 @@ clang_codegen_SRC_FILES := \
   CGStmt.cpp \
   CGVTT.cpp \
   CGVTables.cpp \
+  CodeGenABITypes.cpp \
   CodeGenAction.cpp \
   CodeGenFunction.cpp \
   CodeGenModule.cpp \
