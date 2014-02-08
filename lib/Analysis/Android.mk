@@ -23,6 +23,7 @@ clang_analysis_SRC_FILES := \
   CFGReachabilityAnalysis.cpp \
   CFGStmtMap.cpp \
   CocoaConventions.cpp \
+  Consumed.cpp \
   Dominators.cpp \
   FormatString.cpp \
   LiveVariables.cpp \

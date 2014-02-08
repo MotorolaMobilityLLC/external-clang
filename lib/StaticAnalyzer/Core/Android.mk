@@ -23,6 +23,7 @@ clang_static_analyzer_core_SRC_FILES := \
   CheckerHelpers.cpp \
   CheckerManager.cpp \
   CheckerRegistry.cpp \
+  CommonBugCategories.cpp \
   ConstraintManager.cpp \
   CoreEngine.cpp \
   Environment.cpp \
@@ -46,8 +47,7 @@ clang_static_analyzer_core_SRC_FILES := \
   SimpleSValBuilder.cpp \
   Store.cpp \
   SubEngine.cpp \
-  SymbolManager.cpp \
-  TextPathDiagnostics.cpp
+  SymbolManager.cpp
 
 # For the host only
 # =====================================================

@@ -13,6 +13,9 @@
 /* Directories clang will search for headers */
 #define C_INCLUDE_DIRS ""
 
+/* Linker version detected at compile time. */
+#define HOST_LINK_VERSION "2.22"
+
 /* Default <path> to all compiler invocations for --sysroot=<path>. */
 #define DEFAULT_SYSROOT ""
 

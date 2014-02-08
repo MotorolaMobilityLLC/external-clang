@@ -33,6 +33,7 @@ clang_arc_migrate_SRC_FILES := \
   TransGCAttrs.cpp \
   TransGCCalls.cpp \
   TransProperties.cpp \
+  TransProtectedScope.cpp \
   TransRetainReleaseDealloc.cpp \
   TransUnbridgedCasts.cpp \
   TransUnusedInitDelegate.cpp \
