@@ -8,6 +8,7 @@ include $(CLEAR_TBLGEN_VARS)
 TBLGEN_TABLES := \
   DiagnosticCommonKinds.inc \
   DiagnosticDriverKinds.inc \
+  DiagnosticSemaKinds.inc \
   Options.inc \
   CC1Options.inc \
   CC1AsOptions.inc
@@ -20,6 +21,7 @@ clang_driver_SRC_FILES := \
   DriverOptions.cpp \
   Job.cpp \
   Phases.cpp \
+  SanitizerArgs.cpp \
   Tool.cpp \
   ToolChain.cpp \
   ToolChains.cpp \

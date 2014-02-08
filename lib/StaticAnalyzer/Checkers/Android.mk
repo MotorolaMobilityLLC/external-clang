@@ -13,6 +13,7 @@ clang_static_analyzer_checkers_TBLGEN_TABLES := \
   StmtNodes.inc
 
 clang_static_analyzer_checkers_SRC_FILES := \
+  AllocationDiagnostics.cpp \
   AnalyzerStatsChecker.cpp \
   ArrayBoundChecker.cpp \
   ArrayBoundCheckerV2.cpp \
@@ -31,7 +32,6 @@ clang_static_analyzer_checkers_SRC_FILES := \
   CheckerDocumentation.cpp \
   ChrootChecker.cpp \
   ClangCheckers.cpp \
-  CommonBugCategories.cpp \
   DeadStoresChecker.cpp \
   DebugCheckers.cpp \
   DereferenceChecker.cpp \
@@ -42,6 +42,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   FixedAddressChecker.cpp \
   GenericTaintChecker.cpp \
   IdempotentOperationChecker.cpp \
+  IdenticalExprChecker.cpp \
   IvarInvalidationChecker.cpp \
   LLVMConventionsChecker.cpp \
   MacOSKeychainAPIChecker.cpp \
