@@ -7,9 +7,11 @@ include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=  \
 	AttrExprArgs.inc \
+	AttrIdentifierArg.inc \
 	AttrList.inc  \
 	AttrLateParsed.inc  \
 	AttrParsedAttrList.inc  \
+	AttrTypeArg.inc  \
 	Attrs.inc  \
 	CommentCommandList.inc \
 	CommentNodes.inc \
