@@ -15,6 +15,7 @@
 #include "clang/Driver/Phases.h"
 #include "clang/Driver/Types.h"
 #include "clang/Driver/Util.h"
+#include "llvm/ADT/OwningPtr.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
@@ -42,6 +43,7 @@ namespace driver {
   class Compilation;
   class InputInfo;
   class JobAction;
+  class SanitizerArgs;
   class ToolChain;
 
 /// Driver - Encapsulate logic for constructing compilation processes
@@ -266,7 +268,7 @@ public:
   /// \param TC - The default host tool chain.
   /// \param Args - The input arguments.
   /// \param Actions - The list to store the resulting actions onto.
-  void BuildActions(const ToolChain &TC, const llvm::opt::DerivedArgList &Args,
+  void BuildActions(const ToolChain &TC, llvm::opt::DerivedArgList &Args,
                     const InputList &Inputs, ActionList &Actions) const;
 
   /// BuildUniversalActions - Construct the list of actions to perform
@@ -276,7 +278,7 @@ public:
   /// \param Args - The input arguments.
   /// \param Actions - The list to store the resulting actions onto.
   void BuildUniversalActions(const ToolChain &TC,
-                             const llvm::opt::DerivedArgList &Args,
+                             llvm::opt::DerivedArgList &Args,
                              const InputList &BAInputs,
                              ActionList &Actions) const;
 
@@ -312,9 +314,6 @@ public:
   ///
   /// \param ShowHidden - Show hidden options.
   void PrintHelp(bool ShowHidden) const;
-
-  /// PrintOptions - Print the list of arguments.
-  void PrintOptions(const llvm::opt::ArgList &Args) const;
 
   /// PrintVersion - Print the driver version.
   void PrintVersion(const Compilation &C, raw_ostream &OS) const;

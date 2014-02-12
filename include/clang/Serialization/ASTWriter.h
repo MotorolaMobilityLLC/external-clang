@@ -457,7 +457,8 @@ private:
   void WriteObjCCategories();
   void WriteRedeclarations();
   void WriteMergedDecls();
-                        
+  void WriteLateParsedTemplates(Sema &SemaRef);
+
   unsigned DeclParmVarAbbrev;
   unsigned DeclContextLexicalAbbrev;
   unsigned DeclContextVisibleLookupAbbrev;
@@ -575,6 +576,11 @@ public:
   /// \brief Emits a template argument location.
   void AddTemplateArgumentLoc(const TemplateArgumentLoc &Arg,
                               RecordDataImpl &Record);
+
+  /// \brief Emits an AST template argument list info.
+  void AddASTTemplateArgumentListInfo(
+                          const ASTTemplateArgumentListInfo *ASTTemplArgList,
+                          RecordDataImpl &Record);
 
   /// \brief Emit a reference to a declaration.
   void AddDeclRef(const Decl *D, RecordDataImpl &Record);
@@ -737,6 +743,7 @@ public:
   virtual void AddedObjCPropertyInClassExtension(const ObjCPropertyDecl *Prop,
                                             const ObjCPropertyDecl *OrigProp,
                                             const ObjCCategoryDecl *ClassExt);
+  void DeclarationMarkedUsed(const Decl *D) LLVM_OVERRIDE;
 };
 
 /// \brief AST and semantic-analysis consumer that generates a
