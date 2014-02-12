@@ -287,6 +287,7 @@ void ExprEngine::processCFGElement(const CFGElement E, ExplodedNode *Pred,
       ProcessInitializer(E.castAs<CFGInitializer>().getInitializer(), Pred);
       return;
     case CFGElement::AutomaticObjectDtor:
+    case CFGElement::DeleteDtor:
     case CFGElement::BaseDtor:
     case CFGElement::MemberDtor:
     case CFGElement::TemporaryDtor:
@@ -535,6 +536,9 @@ void ExprEngine::ProcessImplicitDtor(const CFGImplicitDtor D,
   case CFGElement::TemporaryDtor:
     ProcessTemporaryDtor(D.castAs<CFGTemporaryDtor>(), Pred, Dst);
     break;
+  case CFGElement::DeleteDtor:
+    ProcessDeleteDtor(D.castAs<CFGDeleteDtor>(), Pred, Dst);
+    break;
   default:
     llvm_unreachable("Unexpected dtor kind.");
   }
@@ -559,6 +563,35 @@ void ExprEngine::ProcessAutomaticObjDtor(const CFGAutomaticObjDtor Dtor,
   }
 
   VisitCXXDestructor(varType, Region, Dtor.getTriggerStmt(), /*IsBase=*/ false,
+                     Pred, Dst);
+}
+
+void ExprEngine::ProcessDeleteDtor(const CFGDeleteDtor Dtor,
+                                   ExplodedNode *Pred,
+                                   ExplodedNodeSet &Dst) {
+  ProgramStateRef State = Pred->getState();
+  const LocationContext *LCtx = Pred->getLocationContext();
+  const CXXDeleteExpr *DE = Dtor.getDeleteExpr();
+  const Stmt *Arg = DE->getArgument();
+  SVal ArgVal = State->getSVal(Arg, LCtx);
+
+  // If the argument to delete is known to be a null value,
+  // don't run destructor.
+  if (State->isNull(ArgVal).isConstrainedTrue()) {
+    QualType DTy = DE->getDestroyedType();
+    QualType BTy = getContext().getBaseElementType(DTy);
+    const CXXRecordDecl *RD = BTy->getAsCXXRecordDecl();
+    const CXXDestructorDecl *Dtor = RD->getDestructor();
+
+    PostImplicitCall PP(Dtor, DE->getLocStart(), LCtx);
+    NodeBuilder Bldr(Pred, Dst, *currBldrCtx);
+    Bldr.generateNode(PP, Pred->getState(), Pred);
+    return;
+  }
+
+  VisitCXXDestructor(DE->getDestroyedType(),
+                     ArgVal.getAsRegion(),
+                     DE, /*IsBase=*/ false,
                      Pred, Dst);
 }
 
@@ -601,7 +634,15 @@ void ExprEngine::ProcessMemberDtor(const CFGMemberDtor D,
 
 void ExprEngine::ProcessTemporaryDtor(const CFGTemporaryDtor D,
                                       ExplodedNode *Pred,
-                                      ExplodedNodeSet &Dst) {}
+                                      ExplodedNodeSet &Dst) {
+
+  QualType varType = D.getBindTemporaryExpr()->getSubExpr()->getType();
+
+  // FIXME: Inlining of temporary destructors is not supported yet anyway, so we
+  // just put a NULL region for now. This will need to be changed later.
+  VisitCXXDestructor(varType, NULL, D.getBindTemporaryExpr(),
+                     /*IsBase=*/ false, Pred, Dst);
+}
 
 void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
                        ExplodedNodeSet &DstTop) {
@@ -708,6 +749,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::ParenListExprClass:
     case Stmt::PredefinedExprClass:
     case Stmt::ShuffleVectorExprClass:
+    case Stmt::ConvertVectorExprClass:
     case Stmt::VAArgExprClass:
     case Stmt::CUDAKernelCallExprClass:
     case Stmt::OpaqueValueExprClass:
@@ -1332,7 +1374,8 @@ void ExprEngine::processBranch(const Stmt *Condition, const Stmt *Term,
                                ExplodedNodeSet &Dst,
                                const CFGBlock *DstT,
                                const CFGBlock *DstF) {
-  PrettyStackTraceLocationContext StackCrashInfo(Pred->getLocationContext());
+  const LocationContext *LCtx = Pred->getLocationContext();
+  PrettyStackTraceLocationContext StackCrashInfo(LCtx);
   currBldrCtx = &BldCtx;
 
   // Check for NULL conditions; e.g. "for(;;)"
@@ -1344,7 +1387,6 @@ void ExprEngine::processBranch(const Stmt *Condition, const Stmt *Term,
   }
 
 
-  // Resolve the condition in the precense of nested '||' and '&&'.
   if (const Expr *Ex = dyn_cast<Expr>(Condition))
     Condition = Ex->IgnoreParens();
 
@@ -1835,7 +1877,8 @@ ProgramStateRef ExprEngine::processPointerEscapedOnBind(ProgramStateRef State,
   State = getCheckerManager().runCheckersForPointerEscape(State,
                                                           EscapedSymbols,
                                                           /*CallEvent*/ 0,
-                                                          PSK_EscapeOnBind);
+                                                          PSK_EscapeOnBind,
+                                                          0);
 
   return State;
 }
@@ -1846,7 +1889,7 @@ ExprEngine::notifyCheckersOfPointerEscape(ProgramStateRef State,
     ArrayRef<const MemRegion *> ExplicitRegions,
     ArrayRef<const MemRegion *> Regions,
     const CallEvent *Call,
-    bool IsConst) {
+    RegionAndSymbolInvalidationTraits &ITraits) {
   
   if (!Invalidated || Invalidated->empty())
     return State;
@@ -1856,17 +1899,7 @@ ExprEngine::notifyCheckersOfPointerEscape(ProgramStateRef State,
                                                            *Invalidated,
                                                            0,
                                                            PSK_EscapeOther,
-                                                           IsConst);
-
-  // Note: Due to current limitations of RegionStore, we only process the top
-  // level const pointers correctly. The lower level const pointers are
-  // currently treated as non-const.
-  if (IsConst)
-    return getCheckerManager().runCheckersForPointerEscape(State,
-                                                        *Invalidated,
-                                                        Call,
-                                                        PSK_DirectEscapeOnCall,
-                                                        true);
+                                                           &ITraits);
 
   // If the symbols were invalidated by a call, we want to find out which ones 
   // were invalidated directly due to being arguments to the call.
@@ -1888,12 +1921,12 @@ ExprEngine::notifyCheckersOfPointerEscape(ProgramStateRef State,
 
   if (!SymbolsDirectlyInvalidated.empty())
     State = getCheckerManager().runCheckersForPointerEscape(State,
-        SymbolsDirectlyInvalidated, Call, PSK_DirectEscapeOnCall);
+        SymbolsDirectlyInvalidated, Call, PSK_DirectEscapeOnCall, &ITraits);
 
   // Notify about the symbols that get indirectly invalidated by the call.
   if (!SymbolsIndirectlyInvalidated.empty())
     State = getCheckerManager().runCheckersForPointerEscape(State,
-        SymbolsIndirectlyInvalidated, Call, PSK_IndirectEscapeOnCall);
+        SymbolsIndirectlyInvalidated, Call, PSK_IndirectEscapeOnCall, &ITraits);
 
   return State;
 }

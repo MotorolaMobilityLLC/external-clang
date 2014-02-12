@@ -6,9 +6,10 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
-//
-//  This file implements serialization for Statements and Expressions.
-//
+///
+/// \file
+/// \brief Implements serialization for Statements and Expressions.
+///
 //===----------------------------------------------------------------------===//
 
 #include "clang/Serialization/ASTWriter.h"
@@ -793,6 +794,15 @@ void ASTStmtWriter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
   Code = serialization::EXPR_SHUFFLE_VECTOR;
 }
 
+void ASTStmtWriter::VisitConvertVectorExpr(ConvertVectorExpr *E) {
+  VisitExpr(E);
+  Writer.AddSourceLocation(E->getBuiltinLoc(), Record);
+  Writer.AddSourceLocation(E->getRParenLoc(), Record);
+  Writer.AddTypeSourceInfo(E->getTypeSourceInfo(), Record);
+  Writer.AddStmt(E->getSrcExpr());
+  Code = serialization::EXPR_CONVERT_VECTOR;
+}
+
 void ASTStmtWriter::VisitBlockExpr(BlockExpr *E) {
   VisitExpr(E);
   Writer.AddDeclRef(E->getBlockDecl(), Record);
@@ -1147,7 +1157,7 @@ void ASTStmtWriter::VisitCXXConstructExpr(CXXConstructExpr *E) {
   Record.push_back(E->isListInitialization());
   Record.push_back(E->requiresZeroInitialization());
   Record.push_back(E->getConstructionKind()); // FIXME: stable encoding
-  Writer.AddSourceRange(E->getParenRange(), Record);
+  Writer.AddSourceRange(E->getParenOrBraceRange(), Record);
   Code = serialization::EXPR_CXX_CONSTRUCT;
 }
 
@@ -1166,6 +1176,7 @@ void ASTStmtWriter::VisitLambdaExpr(LambdaExpr *E) {
   Record.push_back(NumArrayIndexVars);
   Writer.AddSourceRange(E->IntroducerRange, Record);
   Record.push_back(E->CaptureDefault); // FIXME: stable encoding
+  Writer.AddSourceLocation(E->CaptureDefaultLoc, Record);
   Record.push_back(E->ExplicitParams);
   Record.push_back(E->ExplicitResultType);
   Writer.AddSourceLocation(E->ClosingBrace, Record);
@@ -1224,7 +1235,7 @@ void ASTStmtWriter::VisitCXXConstCastExpr(CXXConstCastExpr *E) {
 
 void ASTStmtWriter::VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *E) {
   VisitExplicitCastExpr(E);
-  Writer.AddSourceLocation(E->getTypeBeginLoc(), Record);
+  Writer.AddSourceLocation(E->getLParenLoc(), Record);
   Writer.AddSourceLocation(E->getRParenLoc(), Record);
   Code = serialization::EXPR_CXX_FUNCTIONAL_CAST;
 }
@@ -1695,8 +1706,26 @@ void OMPClauseWriter::VisitOMPDefaultClause(OMPDefaultClause *C) {
 void OMPClauseWriter::VisitOMPPrivateClause(OMPPrivateClause *C) {
   Record.push_back(C->varlist_size());
   Writer->Writer.AddSourceLocation(C->getLParenLoc(), Record);
-  for (OMPVarList<OMPPrivateClause>::varlist_iterator I = C->varlist_begin(),
-                                                      E = C->varlist_end();
+  for (OMPPrivateClause::varlist_iterator I = C->varlist_begin(),
+                                          E = C->varlist_end();
+       I != E; ++I)
+    Writer->Writer.AddStmt(*I);
+}
+
+void OMPClauseWriter::VisitOMPFirstprivateClause(OMPFirstprivateClause *C) {
+  Record.push_back(C->varlist_size());
+  Writer->Writer.AddSourceLocation(C->getLParenLoc(), Record);
+  for (OMPFirstprivateClause::varlist_iterator I = C->varlist_begin(),
+                                               E = C->varlist_end();
+       I != E; ++I)
+    Writer->Writer.AddStmt(*I);
+}
+
+void OMPClauseWriter::VisitOMPSharedClause(OMPSharedClause *C) {
+  Record.push_back(C->varlist_size());
+  Writer->Writer.AddSourceLocation(C->getLParenLoc(), Record);
+  for (OMPSharedClause::varlist_iterator I = C->varlist_begin(),
+                                         E = C->varlist_end();
        I != E; ++I)
     Writer->Writer.AddStmt(*I);
 }
