@@ -311,9 +311,9 @@ bool Parser::parseMatcherExpressionImpl(VariantValue *Value) {
                            NameToken.Text, NameToken.Range);
   SourceRange MatcherRange = NameToken.Range;
   MatcherRange.End = EndToken.Range.End;
-  MatcherList Result = S->actOnMatcherExpression(
+  VariantMatcher Result = S->actOnMatcherExpression(
       NameToken.Text, MatcherRange, BindID, Args, Error);
-  if (Result.empty()) return false;
+  if (Result.isNull()) return false;
 
   *Value = Result;
   return true;
@@ -358,11 +358,11 @@ Parser::Parser(CodeTokenizer *Tokenizer, Sema *S,
 class RegistrySema : public Parser::Sema {
 public:
   virtual ~RegistrySema() {}
-  MatcherList actOnMatcherExpression(StringRef MatcherName,
-                                     const SourceRange &NameRange,
-                                     StringRef BindID,
-                                     ArrayRef<ParserValue> Args,
-                                     Diagnostics *Error) {
+  VariantMatcher actOnMatcherExpression(StringRef MatcherName,
+                                        const SourceRange &NameRange,
+                                        StringRef BindID,
+                                        ArrayRef<ParserValue> Args,
+                                        Diagnostics *Error) {
     if (BindID.empty()) {
       return Registry::constructMatcher(MatcherName, NameRange, Args, Error);
     } else {
@@ -390,28 +390,29 @@ bool Parser::parseExpression(StringRef Code, Sema *S,
   return true;
 }
 
-DynTypedMatcher *Parser::parseMatcherExpression(StringRef Code,
-                                                Diagnostics *Error) {
+llvm::Optional<DynTypedMatcher>
+Parser::parseMatcherExpression(StringRef Code, Diagnostics *Error) {
   RegistrySema S;
   return parseMatcherExpression(Code, &S, Error);
 }
 
-DynTypedMatcher *Parser::parseMatcherExpression(StringRef Code,
-                                                Parser::Sema *S,
-                                                Diagnostics *Error) {
+llvm::Optional<DynTypedMatcher>
+Parser::parseMatcherExpression(StringRef Code, Parser::Sema *S,
+                               Diagnostics *Error) {
   VariantValue Value;
   if (!parseExpression(Code, S, &Value, Error))
-    return NULL;
-  if (!Value.isMatchers()) {
+    return llvm::Optional<DynTypedMatcher>();
+  if (!Value.isMatcher()) {
     Error->addError(SourceRange(), Error->ET_ParserNotAMatcher);
-    return NULL;
+    return llvm::Optional<DynTypedMatcher>();
   }
-  if (Value.getMatchers().matchers().size() != 1) {
+  llvm::Optional<DynTypedMatcher> Result =
+      Value.getMatcher().getSingleMatcher();
+  if (!Result.hasValue()) {
     Error->addError(SourceRange(), Error->ET_ParserOverloadedType)
         << Value.getTypeAsString();
-    return NULL;
   }
-  return Value.getMatchers().matchers()[0]->clone();
+  return Result;
 }
 
 }  // namespace dynamic

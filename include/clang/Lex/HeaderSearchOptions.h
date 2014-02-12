@@ -134,6 +134,9 @@ public:
   /// of computing the module hash.
   llvm::SetVector<std::string> ModulesIgnoreMacros;
 
+  /// \brief The set of user-provided module-map-files.
+  llvm::SetVector<std::string> ModuleMapFiles;
+
   /// Include the compiler builtin includes.
   unsigned UseBuiltinIncludes : 1;
 
