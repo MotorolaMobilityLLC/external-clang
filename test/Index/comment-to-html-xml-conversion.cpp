@@ -457,10 +457,17 @@ void comment_to_html_conversion_25();
 // CHECK-NEXT:         (CXComment_VerbatimBlockLine Text=[ <a href="http://example.com/">Aaa</a>])
 // CHECK-NEXT:         (CXComment_VerbatimBlockLine Text=[ <a href='http://example.com/'>Aaa</a>])))]
 
-/// \function foo
-/// \class foo
-/// \method foo
-/// \interface foo
+/// \def foo_def
+/// \fn foo_fn
+/// \namespace foo_namespace
+/// \overload foo_overload
+/// \property foo_property
+/// \typedef foo_typedef
+/// \var foo_var
+/// \function foo_function
+/// \class foo_class
+/// \method foo_method
+/// \interface foo_interface
 /// Blah blah.
 void comment_to_html_conversion_26();
 
@@ -469,16 +476,37 @@ void comment_to_html_conversion_26();
 // CHECK-NEXT:    (CXComment_FullComment
 // CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
 // CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
-// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo])
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_def])
 // CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
 // CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
-// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo])
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_fn])
 // CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
 // CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
-// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo])
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_namespace])
 // CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
 // CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
-// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo])
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_overload])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_property])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_typedef])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_var])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_function])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_class])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_method])
+// CHECK-NEXT:       (CXComment_Paragraph IsWhitespace
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_VerbatimLine Text=[ foo_interface])
 // CHECK-NEXT:       (CXComment_Paragraph
 // CHECK-NEXT:         (CXComment_Text Text=[ Blah blah.])))]
 
@@ -785,6 +813,57 @@ enum class comment_to_xml_conversion_17 {
 // CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:3: EnumConstantDecl=comment_to_xml_conversion_18:{{.*}} FullCommentAsXML=[<Variable file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="3"><Name>comment_to_xml_conversion_18</Name><USR>c:@E@comment_to_xml_conversion_17@comment_to_xml_conversion_18</USR><Declaration>comment_to_xml_conversion_18</Declaration><Abstract><Para> Aaa.</Para></Abstract></Variable>]
 };
 
+//===---
+// Check that we attach comments from the base class to derived classes if they don't have a comment.
+// rdar://13647476
+//===---
+
+/// BaseToSuper1_Base
+class BaseToSuper1_Base {};
+
+class BaseToSuper1_Derived : public BaseToSuper1_Base {};
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:7: ClassDecl=BaseToSuper1_Derived:{{.*}} FullCommentAsXML=[<Class file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="7"><Name>BaseToSuper1_Base</Name><USR>c:@C@BaseToSuper1_Base</USR><Declaration>class BaseToSuper1_Derived : public BaseToSuper1_Base {}</Declaration><Abstract><Para> BaseToSuper1_Base</Para></Abstract></Class>]
+
+
+/// BaseToSuper2_Base
+class BaseToSuper2_Base {};
+
+/// BaseToSuper2_Derived
+class BaseToSuper2_Derived : public BaseToSuper2_Base {};
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:7: ClassDecl=BaseToSuper2_Derived:{{.*}} FullCommentAsXML=[<Class file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="7"><Name>BaseToSuper2_Derived</Name><USR>c:@C@BaseToSuper2_Derived</USR><Declaration>class BaseToSuper2_Derived : public BaseToSuper2_Base {}</Declaration><Abstract><Para> BaseToSuper2_Derived</Para></Abstract></Class>]
+
+class BaseToSuper2_MoreDerived : public BaseToSuper2_Derived {};
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:7: ClassDecl=BaseToSuper2_MoreDerived:{{.*}} FullCommentAsXML=[<Class file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="7"><Name>BaseToSuper2_Derived</Name><USR>c:@C@BaseToSuper2_Derived</USR><Declaration>class BaseToSuper2_MoreDerived : public BaseToSuper2_Derived {}</Declaration><Abstract><Para> BaseToSuper2_Derived</Para></Abstract></Class>]
+
+
+/// BaseToSuper3_Base
+class BaseToSuper3_Base {};
+
+class BaseToSuper3_DerivedA : public virtual BaseToSuper3_Base {};
+
+class BaseToSuper3_DerivedB : public virtual BaseToSuper3_Base {};
+
+class BaseToSuper3_MoreDerived : public BaseToSuper3_DerivedA, public BaseToSuper3_DerivedB {};
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:7: ClassDecl=BaseToSuper3_MoreDerived:{{.*}} FullCommentAsXML=[<Class file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="7"><Name>BaseToSuper3_Base</Name><USR>c:@C@BaseToSuper3_Base</USR><Declaration>class BaseToSuper3_MoreDerived : public BaseToSuper3_DerivedA,\n                                 public BaseToSuper3_DerivedB {}</Declaration><Abstract><Para> BaseToSuper3_Base</Para></Abstract></Class>]
+
+
+// Check that we propagate comments only through public inheritance.
+
+/// BaseToSuper4_Base
+class BaseToSuper4_Base {};
+
+/// BaseToSuper4_DerivedA
+class BaseToSuper4_DerivedA : virtual BaseToSuper4_Base {};
+
+class BaseToSuper4_DerivedB : public virtual BaseToSuper4_Base {};
+
+class BaseToSuper4_MoreDerived : BaseToSuper4_DerivedA, public BaseToSuper4_DerivedB {};
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:7: ClassDecl=BaseToSuper4_MoreDerived:{{.*}} FullCommentAsXML=[<Class file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="7"><Name>BaseToSuper4_Base</Name><USR>c:@C@BaseToSuper4_Base</USR><Declaration>class BaseToSuper4_MoreDerived : BaseToSuper4_DerivedA,\n                                 public BaseToSuper4_DerivedB {}</Declaration><Abstract><Para> BaseToSuper4_Base</Para></Abstract></Class>]
+
+//===---
+// Check the representation of \todo in XML.
+//===---
+
 /// Aaa.
 /// \todo Bbb.
 void comment_to_xml_conversion_todo_1();
@@ -810,6 +889,92 @@ void comment_to_xml_conversion_todo_3();
 /// \todo Ccc.
 void comment_to_xml_conversion_todo_4();
 // CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:6: FunctionDecl=comment_to_xml_conversion_todo_4:{{.*}} FullCommentAsXML=[<Function file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="6"><Name>comment_to_xml_conversion_todo_4</Name><USR>c:@F@comment_to_xml_conversion_todo_4#</USR><Declaration>void comment_to_xml_conversion_todo_4()</Declaration><Abstract><Para> Aaa. </Para></Abstract><Discussion><Para kind="todo"> Bbb. </Para><Para kind="todo"> Ccc.</Para></Discussion></Function>]
+
+
+//===---
+// Test the representation of exception specifications in AST and XML.
+//===---
+
+/// Aaa.
+/// \throws Bbb.
+void comment_to_xml_conversion_exceptions_1();
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:6: FunctionDecl=comment_to_xml_conversion_exceptions_1:{{.*}} FullCommentAsXML=[<Function file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="6"><Name>comment_to_xml_conversion_exceptions_1</Name><USR>c:@F@comment_to_xml_conversion_exceptions_1#</USR><Declaration>void comment_to_xml_conversion_exceptions_1()</Declaration><Abstract><Para> Aaa. </Para></Abstract><Exceptions><Para> Bbb.</Para></Exceptions></Function>]
+// CHECK-NEXT:  CommentAST=[
+// CHECK-NEXT:    (CXComment_FullComment
+// CHECK-NEXT:       (CXComment_Paragraph
+// CHECK-NEXT:         (CXComment_Text Text=[ Aaa.] HasTrailingNewline)
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throws]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Bbb.]))))]
+
+/// Aaa.
+/// \throw Bbb.
+void comment_to_xml_conversion_exceptions_2();
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:6: FunctionDecl=comment_to_xml_conversion_exceptions_2:{{.*}} FullCommentAsXML=[<Function file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="6"><Name>comment_to_xml_conversion_exceptions_2</Name><USR>c:@F@comment_to_xml_conversion_exceptions_2#</USR><Declaration>void comment_to_xml_conversion_exceptions_2()</Declaration><Abstract><Para> Aaa. </Para></Abstract><Exceptions><Para> Bbb.</Para></Exceptions></Function>]
+// CHECK-NEXT:  CommentAST=[
+// CHECK-NEXT:    (CXComment_FullComment
+// CHECK-NEXT:       (CXComment_Paragraph
+// CHECK-NEXT:         (CXComment_Text Text=[ Aaa.] HasTrailingNewline)
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throw]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Bbb.]))))]
+
+/// Aaa.
+/// \exception Bbb.
+void comment_to_xml_conversion_exceptions_3();
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:6: FunctionDecl=comment_to_xml_conversion_exceptions_3:{{.*}} FullCommentAsXML=[<Function file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="6"><Name>comment_to_xml_conversion_exceptions_3</Name><USR>c:@F@comment_to_xml_conversion_exceptions_3#</USR><Declaration>void comment_to_xml_conversion_exceptions_3()</Declaration><Abstract><Para> Aaa. </Para></Abstract><Exceptions><Para> Bbb.</Para></Exceptions></Function>]
+// CHECK-NEXT:  CommentAST=[
+// CHECK-NEXT:    (CXComment_FullComment
+// CHECK-NEXT:       (CXComment_Paragraph
+// CHECK-NEXT:         (CXComment_Text Text=[ Aaa.] HasTrailingNewline)
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[exception]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Bbb.]))))]
+
+/// Aaa.
+/// \throws Bbb.
+/// \throws Ccc.
+/// \throws Ddd.
+void comment_to_xml_conversion_exceptions_4();
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:6: FunctionDecl=comment_to_xml_conversion_exceptions_4:{{.*}} FullCommentAsXML=[<Function file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="6"><Name>comment_to_xml_conversion_exceptions_4</Name><USR>c:@F@comment_to_xml_conversion_exceptions_4#</USR><Declaration>void comment_to_xml_conversion_exceptions_4()</Declaration><Abstract><Para> Aaa. </Para></Abstract><Exceptions><Para> Bbb. </Para><Para> Ccc. </Para><Para> Ddd.</Para></Exceptions></Function>]
+// CHECK-NEXT:  CommentAST=[
+// CHECK-NEXT:    (CXComment_FullComment
+// CHECK-NEXT:       (CXComment_Paragraph
+// CHECK-NEXT:         (CXComment_Text Text=[ Aaa.] HasTrailingNewline)
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throws]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Bbb.] HasTrailingNewline)
+// CHECK-NEXT:           (CXComment_Text Text=[ ] IsWhitespace)))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throws]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Ccc.] HasTrailingNewline)
+// CHECK-NEXT:           (CXComment_Text Text=[ ] IsWhitespace)))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throws]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Ddd.]))))]
+
+/// Aaa.
+/// \throws Bbb.
+/// \throw Ccc.
+void comment_to_xml_conversion_exceptions_5();
+// CHECK: comment-to-html-xml-conversion.cpp:[[@LINE-1]]:6: FunctionDecl=comment_to_xml_conversion_exceptions_5:{{.*}} FullCommentAsXML=[<Function file="{{[^"]+}}comment-to-html-xml-conversion.cpp" line="[[@LINE-1]]" column="6"><Name>comment_to_xml_conversion_exceptions_5</Name><USR>c:@F@comment_to_xml_conversion_exceptions_5#</USR><Declaration>void comment_to_xml_conversion_exceptions_5()</Declaration><Abstract><Para> Aaa. </Para></Abstract><Exceptions><Para> Bbb. </Para><Para> Ccc.</Para></Exceptions></Function>]
+// CHECK-NEXT:  CommentAST=[
+// CHECK-NEXT:    (CXComment_FullComment
+// CHECK-NEXT:       (CXComment_Paragraph
+// CHECK-NEXT:         (CXComment_Text Text=[ Aaa.] HasTrailingNewline)
+// CHECK-NEXT:         (CXComment_Text Text=[ ] IsWhitespace))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throws]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Bbb.] HasTrailingNewline)
+// CHECK-NEXT:           (CXComment_Text Text=[ ] IsWhitespace)))
+// CHECK-NEXT:       (CXComment_BlockCommand CommandName=[throw]
+// CHECK-NEXT:         (CXComment_Paragraph
+// CHECK-NEXT:           (CXComment_Text Text=[ Ccc.]))))]
+
 
 // rdar://14348912
 #define NS_ENUM(_type, _name) enum _name : _type _name; enum _name : _type

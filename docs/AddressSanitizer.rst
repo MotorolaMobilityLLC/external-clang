@@ -16,6 +16,7 @@ following types of bugs:
 * Use-after-free
 * Use-after-return (to some extent)
 * Double-free, invalid free
+* Memory leaks (experimental)
 
 Typical slowdown introduced by AddressSanitizer is **2x**.
 
@@ -114,8 +115,7 @@ function attribute
 (or a deprecated synonym `no_address_safety_analysis`)
 to disable instrumentation of a particular function. This attribute may not be
 supported by other compilers, so we suggest to use it together with
-``__has_feature(address_sanitizer)``. Note: currently, this attribute will be
-lost if the function is inlined.
+``__has_feature(address_sanitizer)``.
 
 Initialization order checking
 -----------------------------
@@ -155,6 +155,12 @@ problems happening in certain source files or with certain global variables.
     global:bad_init_global=init
     type:*BadInitClassSubstring*=init
     src:bad/init/files/*=init
+
+Memory leak detection
+---------------------
+
+For the experimental memory leak detector in AddressSanitizer, see
+:doc:`LeakSanitizer`.
 
 Supported Platforms
 ===================
