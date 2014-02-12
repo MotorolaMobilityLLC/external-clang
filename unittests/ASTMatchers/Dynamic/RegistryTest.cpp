@@ -36,32 +36,34 @@ public:
     return Out;
   }
 
-  MatcherList constructMatcher(StringRef MatcherName,
-                               Diagnostics *Error = NULL) {
+  VariantMatcher constructMatcher(StringRef MatcherName,
+                                  Diagnostics *Error = NULL) {
     Diagnostics DummyError;
     if (!Error) Error = &DummyError;
-    const MatcherList Out =
+    const VariantMatcher Out =
         Registry::constructMatcher(MatcherName, SourceRange(), Args(), Error);
     EXPECT_EQ("", DummyError.toStringFull());
     return Out;
   }
 
-  MatcherList constructMatcher(StringRef MatcherName, const VariantValue &Arg1,
-                               Diagnostics *Error = NULL) {
+  VariantMatcher constructMatcher(StringRef MatcherName,
+                                  const VariantValue &Arg1,
+                                  Diagnostics *Error = NULL) {
     Diagnostics DummyError;
     if (!Error) Error = &DummyError;
-    const MatcherList Out = Registry::constructMatcher(
+    const VariantMatcher Out = Registry::constructMatcher(
         MatcherName, SourceRange(), Args(Arg1), Error);
     EXPECT_EQ("", DummyError.toStringFull());
     return Out;
   }
 
-  MatcherList constructMatcher(StringRef MatcherName, const VariantValue &Arg1,
-                               const VariantValue &Arg2,
-                               Diagnostics *Error = NULL) {
+  VariantMatcher constructMatcher(StringRef MatcherName,
+                                  const VariantValue &Arg1,
+                                  const VariantValue &Arg2,
+                                  Diagnostics *Error = NULL) {
     Diagnostics DummyError;
     if (!Error) Error = &DummyError;
-    const MatcherList Out = Registry::constructMatcher(
+    const VariantMatcher Out = Registry::constructMatcher(
         MatcherName, SourceRange(), Args(Arg1, Arg2), Error);
     EXPECT_EQ("", DummyError.toStringFull());
     return Out;
@@ -99,11 +101,12 @@ TEST_F(RegistryTest, ConstructWithSimpleArgs) {
 }
 
 TEST_F(RegistryTest, ConstructWithMatcherArgs) {
-  Matcher<Decl> HasInitializerSimple =
-      constructMatcher("varDecl", constructMatcher("hasInitializer", stmt()))
-          .getTypedMatcher<Decl>();
+  Matcher<Decl> HasInitializerSimple = constructMatcher(
+      "varDecl", constructMatcher("hasInitializer", constructMatcher("stmt")))
+      .getTypedMatcher<Decl>();
   Matcher<Decl> HasInitializerComplex = constructMatcher(
-      "varDecl", constructMatcher("hasInitializer", callExpr()))
+      "varDecl",
+      constructMatcher("hasInitializer", constructMatcher("callExpr")))
       .getTypedMatcher<Decl>();
 
   std::string code = "int i;";
@@ -118,8 +121,10 @@ TEST_F(RegistryTest, ConstructWithMatcherArgs) {
   EXPECT_TRUE(matches(code, HasInitializerSimple));
   EXPECT_TRUE(matches(code, HasInitializerComplex));
 
-  Matcher<Decl> HasParameter = functionDecl(constructMatcher(
-      "hasParameter", 1, hasName("x")).getTypedMatcher<FunctionDecl>());
+  Matcher<Decl> HasParameter =
+      functionDecl(constructMatcher(
+          "hasParameter", 1, constructMatcher("hasName", std::string("x")))
+                       .getTypedMatcher<FunctionDecl>());
   EXPECT_TRUE(matches("void f(int a, int x);", HasParameter));
   EXPECT_FALSE(matches("void f(int x, int a);", HasParameter));
 }
@@ -149,7 +154,7 @@ TEST_F(RegistryTest, OverloadedMatchers) {
 }
 
 TEST_F(RegistryTest, PolymorphicMatchers) {
-  const MatcherList IsDefinition = constructMatcher("isDefinition");
+  const VariantMatcher IsDefinition = constructMatcher("isDefinition");
   Matcher<Decl> Var =
       constructMatcher("varDecl", IsDefinition).getTypedMatcher<Decl>();
   Matcher<Decl> Class =
@@ -164,21 +169,29 @@ TEST_F(RegistryTest, PolymorphicMatchers) {
   EXPECT_FALSE(matches("void f();", Func));
 
   Matcher<Decl> Anything = constructMatcher("anything").getTypedMatcher<Decl>();
-  Matcher<Decl> RecordDecl =
-      constructMatcher("recordDecl", Anything).getTypedMatcher<Decl>();
+  Matcher<Decl> RecordDecl = constructMatcher(
+      "recordDecl", constructMatcher("hasName", std::string("Foo")),
+      VariantMatcher::SingleMatcher(Anything)).getTypedMatcher<Decl>();
 
-  EXPECT_TRUE(matches("int a;", Anything));
-  EXPECT_TRUE(matches("class A {};", Anything));
-  EXPECT_TRUE(matches("void f(){};", Anything));
-  // FIXME: A couple of tests have been suppressed.
-  // I know it'd be bad with _MSC_VER here, though.
-#if !defined(_MSC_VER)
-  EXPECT_FALSE(matches("int a;", RecordDecl));
-#endif
-  EXPECT_TRUE(matches("class A {};", RecordDecl));
-#if !defined(_MSC_VER)
-  EXPECT_FALSE(matches("void f(){};", RecordDecl));
-#endif
+  EXPECT_TRUE(matches("int Foo;", Anything));
+  EXPECT_TRUE(matches("class Foo {};", Anything));
+  EXPECT_TRUE(matches("void Foo(){};", Anything));
+  EXPECT_FALSE(matches("int Foo;", RecordDecl));
+  EXPECT_TRUE(matches("class Foo {};", RecordDecl));
+  EXPECT_FALSE(matches("void Foo(){};", RecordDecl));
+
+  Matcher<Stmt> ConstructExpr = constructMatcher(
+      "constructExpr",
+      constructMatcher(
+          "hasDeclaration",
+          constructMatcher(
+              "methodDecl",
+              constructMatcher(
+                  "ofClass", constructMatcher("hasName", std::string("Foo"))))))
+                                    .getTypedMatcher<Stmt>();
+  EXPECT_FALSE(matches("class Foo { public: Foo(); };", ConstructExpr));
+  EXPECT_TRUE(
+      matches("class Foo { public: Foo(); }; Foo foo = Foo();", ConstructExpr));
 }
 
 TEST_F(RegistryTest, TemplateArgument) {
@@ -214,8 +227,10 @@ TEST_F(RegistryTest, TypeTraversal) {
 TEST_F(RegistryTest, CXXCtorInitializer) {
   Matcher<Decl> CtorDecl = constructMatcher(
       "constructorDecl",
-      constructMatcher("hasAnyConstructorInitializer",
-                       constructMatcher("forField", hasName("foo"))))
+      constructMatcher(
+          "hasAnyConstructorInitializer",
+          constructMatcher("forField",
+                           constructMatcher("hasName", std::string("foo")))))
       .getTypedMatcher<Decl>();
   EXPECT_TRUE(matches("struct Foo { Foo() : foo(1) {} int foo; };", CtorDecl));
   EXPECT_FALSE(matches("struct Foo { Foo() {} int foo; };", CtorDecl));
@@ -253,28 +268,76 @@ TEST_F(RegistryTest, Adaptative) {
   EXPECT_FALSE(matches("void foo() { if (true) return; }", S));
 }
 
+TEST_F(RegistryTest, VariadicOp) {
+  Matcher<Decl> D = constructMatcher(
+      "anyOf",
+      constructMatcher("recordDecl",
+                       constructMatcher("hasName", std::string("Foo"))),
+      constructMatcher("namedDecl",
+                       constructMatcher("hasName", std::string("foo"))))
+      .getTypedMatcher<Decl>();
+
+  EXPECT_TRUE(matches("void foo(){}", D));
+  EXPECT_TRUE(matches("struct Foo{};", D));
+  EXPECT_FALSE(matches("int i = 0;", D));
+
+  D = constructMatcher(
+      "allOf", constructMatcher("recordDecl"),
+      constructMatcher(
+          "namedDecl",
+          constructMatcher("anyOf",
+                           constructMatcher("hasName", std::string("Foo")),
+                           constructMatcher("hasName", std::string("Bar")))))
+      .getTypedMatcher<Decl>();
+
+  EXPECT_FALSE(matches("void foo(){}", D));
+  EXPECT_TRUE(matches("struct Foo{};", D));
+  EXPECT_FALSE(matches("int i = 0;", D));
+  EXPECT_TRUE(matches("class Bar{};", D));
+  EXPECT_FALSE(matches("class OtherBar{};", D));
+}
+
 TEST_F(RegistryTest, Errors) {
   // Incorrect argument count.
   OwningPtr<Diagnostics> Error(new Diagnostics());
-  EXPECT_TRUE(constructMatcher("hasInitializer", Error.get()).empty());
+  EXPECT_TRUE(constructMatcher("hasInitializer", Error.get()).isNull());
   EXPECT_EQ("Incorrect argument count. (Expected = 1) != (Actual = 0)",
             Error->toString());
   Error.reset(new Diagnostics());
-  EXPECT_TRUE(constructMatcher("isArrow", std::string(), Error.get()).empty());
+  EXPECT_TRUE(constructMatcher("isArrow", std::string(), Error.get()).isNull());
   EXPECT_EQ("Incorrect argument count. (Expected = 0) != (Actual = 1)",
             Error->toString());
 
   // Bad argument type
   Error.reset(new Diagnostics());
-  EXPECT_TRUE(constructMatcher("ofClass", std::string(), Error.get()).empty());
+  EXPECT_TRUE(constructMatcher("ofClass", std::string(), Error.get()).isNull());
   EXPECT_EQ("Incorrect type for arg 1. (Expected = Matcher<CXXRecordDecl>) != "
             "(Actual = String)",
             Error->toString());
   Error.reset(new Diagnostics());
-  EXPECT_TRUE(constructMatcher("recordDecl", recordDecl(), parameterCountIs(3),
-                               Error.get()).empty());
+  EXPECT_TRUE(constructMatcher("recordDecl", constructMatcher("recordDecl"),
+                               constructMatcher("parameterCountIs", 3),
+                               Error.get()).isNull());
   EXPECT_EQ("Incorrect type for arg 2. (Expected = Matcher<CXXRecordDecl>) != "
             "(Actual = Matcher<FunctionDecl>)",
+            Error->toString());
+
+  // Bad argument type with variadic.
+  Error.reset(new Diagnostics());
+  EXPECT_TRUE(constructMatcher("anyOf", std::string(), Error.get()).isNull());
+  EXPECT_EQ(
+      "Incorrect type for arg 1. (Expected = Matcher<>) != (Actual = String)",
+      Error->toString());
+  Error.reset(new Diagnostics());
+  EXPECT_TRUE(constructMatcher(
+      "recordDecl",
+      constructMatcher("allOf",
+                       constructMatcher("isDerivedFrom", std::string("FOO")),
+                       constructMatcher("isArrow")),
+      Error.get()).isNull());
+  EXPECT_EQ("Incorrect type for arg 1. "
+            "(Expected = Matcher<CXXRecordDecl>) != "
+            "(Actual = Matcher<CXXRecordDecl>&Matcher<MemberExpr>)",
             Error->toString());
 }
 
