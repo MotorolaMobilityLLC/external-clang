@@ -5,8 +5,6 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
-LOCAL_CLANG := true
-
 LOCAL_MODULE := clang
 
 LOCAL_MODULE_CLASS := EXECUTABLES
@@ -112,11 +110,10 @@ ifeq (true,$(FORCE_BUILD_LLVM_COMPONENTS))
 ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
     $(ALL_MODULES.$(LOCAL_MODULE).INSTALLED) $(CLANG_CXX)
 # the additional dependency is needed when you run mm/mmm.
-CLANG_CXX_LINK := $(BUILD_OUT_EXECUTABLES)/clang++$(BUILD_EXECUTABLE_SUFFIX)
-$(LOCAL_MODULE) : $(CLANG_CXX_LINK)
+$(LOCAL_MODULE) : $(CLANG_CXX)
 
 # Symlink for clang++
-$(CLANG_CXX_LINK) : $(LOCAL_INSTALLED_MODULE)
+$(CLANG_CXX) : $(LOCAL_INSTALLED_MODULE)
 	@echo "Symlink $@ -> $<"
 	$(hide) ln -sf $(notdir $<) $@
 endif
