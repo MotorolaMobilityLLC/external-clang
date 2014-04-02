@@ -1,10 +1,7 @@
-LOCAL_CLANG := true
-
 LOCAL_CFLAGS :=	\
 	-pedantic	\
 	-Wcast-qual	\
 	-Wno-long-long	\
-        -Dsprintf=sprintf \
 	$(LOCAL_CFLAGS)
 
 LOCAL_CPPFLAGS := \
