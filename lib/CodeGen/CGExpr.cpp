@@ -85,6 +85,7 @@ llvm::AllocaInst *CodeGenFunction::CreateMemTemp(QualType Ty,
 /// EvaluateExprAsBool - Perform the usual unary conversions on the specified
 /// expression and compare the result against zero, returning an Int1Ty value.
 llvm::Value *CodeGenFunction::EvaluateExprAsBool(const Expr *E) {
+  PGO.setCurrentStmt(E);
   if (const MemberPointerType *MPT = E->getType()->getAs<MemberPointerType>()) {
     llvm::Value *MemPtr = EmitScalarExpr(E);
     return CGM.getCXXABI().EmitMemberPointerIsNotNull(*this, MemPtr, MPT);
@@ -389,7 +390,7 @@ LValue CodeGenFunction::EmitMaterializeTemporaryExpr(
     case SubobjectAdjustment::MemberPointerAdjustment: {
       llvm::Value *Ptr = EmitScalarExpr(Adjustment.Ptr.RHS);
       Object = CGM.getCXXABI().EmitMemberDataPointerAddress(
-                    *this, Object, Ptr, Adjustment.Ptr.MPT);
+          *this, E, Object, Ptr, Adjustment.Ptr.MPT);
       break;
     }
     }
@@ -1690,11 +1691,16 @@ EmitBitCastOfLValueToProperType(CodeGenFunction &CGF,
 
 static LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF,
                                       const Expr *E, const VarDecl *VD) {
+  QualType T = E->getType();
+
+  // If it's thread_local, emit a call to its wrapper function instead.
+  if (VD->getTLSKind() == VarDecl::TLS_Dynamic)
+    return CGF.CGM.getCXXABI().EmitThreadLocalVarDeclLValue(CGF, VD, T);
+
   llvm::Value *V = CGF.CGM.GetAddrOfGlobalVar(VD);
   llvm::Type *RealVarTy = CGF.getTypes().ConvertTypeForMem(VD->getType());
   V = EmitBitCastOfLValueToProperType(CGF, V, RealVarTy);
   CharUnits Alignment = CGF.getContext().getDeclAlign(VD);
-  QualType T = E->getType();
   LValue LV;
   if (VD->getType()->isReferenceType()) {
     llvm::LoadInst *LI = CGF.Builder.CreateLoad(V);
@@ -1702,7 +1708,7 @@ static LValue EmitGlobalVarDeclLValue(CodeGenFunction &CGF,
     V = LI;
     LV = CGF.MakeNaturalAlignAddrLValue(V, T);
   } else {
-    LV = CGF.MakeAddrLValue(V, E->getType(), Alignment);
+    LV = CGF.MakeAddrLValue(V, T, Alignment);
   }
   setObjCGCLValueClass(CGF.getContext(), E, LV);
   return LV;
@@ -1718,7 +1724,7 @@ static LValue EmitFunctionDeclLValue(CodeGenFunction &CGF,
       // isn't the same as the type of a use.  Correct for this with a
       // bitcast.
       QualType NoProtoType =
-          CGF.getContext().getFunctionNoProtoType(Proto->getResultType());
+          CGF.getContext().getFunctionNoProtoType(Proto->getReturnType());
       NoProtoType = CGF.getContext().getPointerType(NoProtoType);
       V = CGF.Builder.CreateBitCast(V, CGF.ConvertType(NoProtoType));
     }
@@ -1769,12 +1775,8 @@ LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
 
   if (const VarDecl *VD = dyn_cast<VarDecl>(ND)) {
     // Check if this is a global variable.
-    if (VD->hasLinkage() || VD->isStaticDataMember()) {
-      // If it's thread_local, emit a call to its wrapper function instead.
-      if (VD->getTLSKind() == VarDecl::TLS_Dynamic)
-        return CGM.getCXXABI().EmitThreadLocalDeclRefExpr(*this, E);
+    if (VD->hasLinkage() || VD->isStaticDataMember())
       return EmitGlobalVarDeclLValue(*this, E, VD);
-    }
 
     bool isBlockVariable = VD->hasAttr<BlocksAttr>();
 
@@ -2651,6 +2653,7 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
   }
 
   OpaqueValueMapping binding(*this, expr);
+  RegionCounter Cnt = getPGORegionCounter(expr);
 
   const Expr *condExpr = expr->getCond();
   bool CondExprBool;
@@ -2658,8 +2661,12 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
     const Expr *live = expr->getTrueExpr(), *dead = expr->getFalseExpr();
     if (!CondExprBool) std::swap(live, dead);
 
-    if (!ContainsLabel(dead))
+    if (!ContainsLabel(dead)) {
+      // If the true case is live, we need to track its region.
+      if (CondExprBool)
+        Cnt.beginRegion(Builder);
       return EmitLValue(live);
+    }
   }
 
   llvm::BasicBlock *lhsBlock = createBasicBlock("cond.true");
@@ -2667,10 +2674,11 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
   llvm::BasicBlock *contBlock = createBasicBlock("cond.end");
 
   ConditionalEvaluation eval(*this);
-  EmitBranchOnBoolExpr(condExpr, lhsBlock, rhsBlock);
+  EmitBranchOnBoolExpr(condExpr, lhsBlock, rhsBlock, Cnt.getCount());
 
   // Any temporaries created here are conditional.
   EmitBlock(lhsBlock);
+  Cnt.beginRegion(Builder);
   eval.begin(*this);
   LValue lhs = EmitLValue(expr->getTrueExpr());
   eval.end(*this);
@@ -2744,6 +2752,7 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_ARCReclaimReturnedObject:
   case CK_ARCExtendBlockObject:
   case CK_CopyAndAutoreleaseBlockObject:
+  case CK_AddressSpaceConversion:
     return EmitUnsupportedLValue(E, "unexpected cast lvalue");
 
   case CK_Dependent:
@@ -3061,7 +3070,7 @@ LValue CodeGenFunction::EmitObjCMessageExprLValue(const ObjCMessageExpr *E) {
   if (!RV.isScalar())
     return MakeAddrLValue(RV.getAggregateAddr(), E->getType());
 
-  assert(E->getMethodDecl()->getResultType()->isReferenceType() &&
+  assert(E->getMethodDecl()->getReturnType()->isReferenceType() &&
          "Can't have a scalar return unless the return type is a "
          "reference type!");
 
@@ -3231,8 +3240,8 @@ EmitPointerToDataMemberBinaryExpr(const BinaryOperator *E) {
   const MemberPointerType *MPT
     = E->getRHS()->getType()->getAs<MemberPointerType>();
 
-  llvm::Value *AddV =
-    CGM.getCXXABI().EmitMemberDataPointerAddress(*this, BaseV, OffsetV, MPT);
+  llvm::Value *AddV = CGM.getCXXABI().EmitMemberDataPointerAddress(
+      *this, E, BaseV, OffsetV, MPT);
 
   return MakeAddrLValue(AddV, MPT->getPointeeType());
 }

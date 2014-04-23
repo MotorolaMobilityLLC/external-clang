@@ -13,22 +13,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Tooling/CompilationDatabase.h"
-#include "clang/Tooling/CompilationDatabasePluginRegistry.h"
-#include "clang/Tooling/Tooling.h"
-#include "llvm/ADT/SmallString.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Support/system_error.h"
-#include <sstream>
-
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Driver/Action.h"
+#include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Job.h"
-#include "clang/Driver/Compilation.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
-#include "llvm/Support/Host.h"
+#include "clang/Tooling/CompilationDatabasePluginRegistry.h"
+#include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Option/Arg.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/system_error.h"
+#include <sstream>
 
 namespace clang {
 namespace tooling {
@@ -44,7 +43,7 @@ CompilationDatabase::loadFromDirectory(StringRef BuildDirectory,
        Ie = CompilationDatabasePluginRegistry::end();
        It != Ie; ++It) {
     std::string DatabaseErrorMessage;
-    OwningPtr<CompilationDatabasePlugin> Plugin(It->instantiate());
+    std::unique_ptr<CompilationDatabasePlugin> Plugin(It->instantiate());
     if (CompilationDatabase *DB =
         Plugin->loadFromDirectory(BuildDirectory, DatabaseErrorMessage))
       return DB;
@@ -158,7 +157,7 @@ public:
   UnusedInputDiagConsumer(DiagnosticConsumer *Other) : Other(Other) {}
 
   virtual void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
-                                const Diagnostic &Info) LLVM_OVERRIDE {
+                                const Diagnostic &Info) override {
     if (Info.getID() == clang::diag::warn_drv_input_file_unused) {
       // Arg 1 for this diagnostic is the option that didn't get used.
       UnusedInputs.push_back(Info.getArgStdStr(0));
@@ -204,8 +203,8 @@ private:
 ///          \li true if successful.
 ///          \li false if \c Args cannot be used for compilation jobs (e.g.
 ///          contains an option like -E or -version).
-bool stripPositionalArgs(std::vector<const char *> Args,
-                         std::vector<std::string> &Result) {
+static bool stripPositionalArgs(std::vector<const char *> Args,
+                                std::vector<std::string> &Result) {
   IntrusiveRefCntPtr<DiagnosticOptions> DiagOpts = new DiagnosticOptions();
   UnusedInputDiagConsumer DiagClient;
   DiagnosticsEngine Diagnostics(
@@ -214,7 +213,7 @@ bool stripPositionalArgs(std::vector<const char *> Args,
 
   // Neither clang executable nor default image name are required since the
   // jobs the driver builds will not be executed.
-  OwningPtr<driver::Driver> NewDriver(new driver::Driver(
+  std::unique_ptr<driver::Driver> NewDriver(new driver::Driver(
       /* ClangExecutable= */ "", llvm::sys::getDefaultTargetTriple(),
       /* DefaultImageName= */ "", Diagnostics));
   NewDriver->setCheckInputsExist(false);
@@ -237,7 +236,12 @@ bool stripPositionalArgs(std::vector<const char *> Args,
   // up with no jobs but then this is the user's fault.
   Args.push_back("placeholder.cpp");
 
-  const OwningPtr<driver::Compilation> Compilation(
+  // Remove -no-integrated-as; it's not used for syntax checking,
+  // and it confuses targets which don't support this option.
+  std::remove_if(Args.begin(), Args.end(),
+                 MatchesAny(std::string("-no-integrated-as")));
+
+  const std::unique_ptr<driver::Compilation> Compilation(
       NewDriver->BuildCompilation(Args));
 
   const driver::JobList &Jobs = Compilation->getJobs();
@@ -271,6 +275,7 @@ bool stripPositionalArgs(std::vector<const char *> Args,
   End = std::remove_if(Args.begin(), End, MatchesAny(DiagClient.UnusedInputs));
 
   // Remove the -c add above as well. It will be at the end right now.
+  assert(strcmp(*(End - 1), "-c") == 0);
   --End;
 
   Result = std::vector<std::string>(Args.begin() + 1, End);
@@ -298,7 +303,8 @@ FixedCompilationDatabase(Twine Directory, ArrayRef<std::string> CommandLine) {
   std::vector<std::string> ToolCommandLine(1, "clang-tool");
   ToolCommandLine.insert(ToolCommandLine.end(),
                          CommandLine.begin(), CommandLine.end());
-  CompileCommands.push_back(CompileCommand(Directory, ToolCommandLine));
+  CompileCommands.push_back(
+      CompileCommand(Directory, std::move(ToolCommandLine)));
 }
 
 std::vector<CompileCommand>

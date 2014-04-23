@@ -7,8 +7,7 @@ include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES := \
   DiagnosticLexKinds.inc \
-  DiagnosticCommonKinds.inc \
-  AttrSpellings.inc
+  DiagnosticCommonKinds.inc
 
 clang_lex_SRC_FILES := \
   HeaderMap.cpp \
