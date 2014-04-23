@@ -17,6 +17,9 @@ TBLGEN_TABLES := \
 clang_frontend_tool_SRC_FILES := \
   ExecuteCompilerInvocation.cpp
 
+LOCAL_CFLAGS += -DCLANG_ENABLE_STATIC_ANALYZER
+LOCAL_CFLAGS += -DCLANG_ENABLE_REWRITER
+
 LOCAL_SRC_FILES := $(clang_frontend_tool_SRC_FILES)
 
 include $(CLANG_HOST_BUILD_MK)

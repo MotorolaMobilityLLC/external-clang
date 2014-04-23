@@ -110,7 +110,7 @@ class NamedDecl : public Decl {
   DeclarationName Name;
 
 private:
-  NamedDecl *getUnderlyingDeclImpl();
+  NamedDecl *getUnderlyingDeclImpl() LLVM_READONLY;
 
 protected:
   NamedDecl(Kind DK, DeclContext *DC, SourceLocation L, DeclarationName N)
@@ -161,9 +161,8 @@ public:
   void printQualifiedName(raw_ostream &OS) const;
   void printQualifiedName(raw_ostream &OS, const PrintingPolicy &Policy) const;
 
-  // FIXME: Remove string versions.
+  // FIXME: Remove string version.
   std::string getQualifiedNameAsString() const;
-  std::string getQualifiedNameAsString(const PrintingPolicy &Policy) const;
 
   /// getNameForDiagnostic - Appends a human-readable name for this
   /// declaration into the given stream.
@@ -259,6 +258,16 @@ public:
   /// checking. Should always return true.
   bool isLinkageValid() const;
 
+  /// \brief True if something has required us to compute the linkage
+  /// of this declaration.
+  ///
+  /// Language features which can retroactively change linkage (like a
+  /// typedef name for linkage purposes) may need to consider this,
+  /// but hopefully only in transitory ways during parsing.
+  bool hasLinkageBeenComputed() const {
+    return hasCachedLinkage();
+  }
+
   /// \brief Looks through UsingDecls and ObjCCompatibleAliasDecls for
   /// the underlying named decl.
   NamedDecl *getUnderlyingDecl() {
@@ -295,7 +304,7 @@ inline raw_ostream &operator<<(raw_ostream &OS, const NamedDecl &ND) {
 /// location of the statement.  For GNU local labels (__label__), the decl
 /// location is where the __label__ is.
 class LabelDecl : public NamedDecl {
-  virtual void anchor();
+  void anchor() override;
   LabelStmt *TheStmt;
   /// LocStart - For normal labels, this is the same as the main declaration
   /// label, i.e., the location of the identifier; for GNU local labels,
@@ -320,7 +329,7 @@ public:
   bool isGnuLocal() const { return LocStart != getLocation(); }
   void setLocStart(SourceLocation L) { LocStart = L; }
 
-  SourceRange getSourceRange() const LLVM_READONLY {
+  SourceRange getSourceRange() const override LLVM_READONLY {
     return SourceRange(LocStart, getLocation());
   }
 
@@ -333,8 +342,6 @@ public:
 class NamespaceDecl : public NamedDecl, public DeclContext, 
                       public Redeclarable<NamespaceDecl> 
 {
-  virtual void anchor();
-
   /// LocStart - The starting location of the source range, pointing
   /// to either the namespace or the inline keyword.
   SourceLocation LocStart;
@@ -350,18 +357,12 @@ class NamespaceDecl : public NamedDecl, public DeclContext,
   NamespaceDecl(DeclContext *DC, bool Inline, SourceLocation StartLoc,
                 SourceLocation IdLoc, IdentifierInfo *Id,
                 NamespaceDecl *PrevDecl);
-  
+
   typedef Redeclarable<NamespaceDecl> redeclarable_base;
-  virtual NamespaceDecl *getNextRedeclaration() {
-    return RedeclLink.getNext();
-  }
-  virtual NamespaceDecl *getPreviousDeclImpl() {
-    return getPreviousDecl();
-  }
-  virtual NamespaceDecl *getMostRecentDeclImpl() {
-    return getMostRecentDecl();
-  }
-  
+  NamespaceDecl *getNextRedeclaration() override;
+  NamespaceDecl *getPreviousDeclImpl() override;
+  NamespaceDecl *getMostRecentDeclImpl() override;
+
 public:
   static NamespaceDecl *Create(ASTContext &C, DeclContext *DC,
                                bool Inline, SourceLocation StartLoc,
@@ -370,9 +371,11 @@ public:
 
   static NamespaceDecl *CreateDeserialized(ASTContext &C, unsigned ID);
 
+  typedef redeclarable_base::redecl_range redecl_range;
   typedef redeclarable_base::redecl_iterator redecl_iterator;
   using redeclarable_base::redecls_begin;
   using redeclarable_base::redecls_end;
+  using redeclarable_base::redecls;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
   using redeclarable_base::isFirstDecl;
@@ -432,14 +435,14 @@ public:
   }
 
   /// Retrieves the canonical declaration of this namespace.
-  NamespaceDecl *getCanonicalDecl() {
+  NamespaceDecl *getCanonicalDecl() override {
     return getOriginalNamespace();
   }
   const NamespaceDecl *getCanonicalDecl() const {
     return getOriginalNamespace();
   }
-  
-  virtual SourceRange getSourceRange() const LLVM_READONLY {
+
+  SourceRange getSourceRange() const override LLVM_READONLY {
     return SourceRange(LocStart, RBraceLoc);
   }
 
@@ -466,7 +469,7 @@ public:
 /// an lvalue) a function (in which case it is a function designator) or
 /// an enum constant.
 class ValueDecl : public NamedDecl {
-  virtual void anchor();
+  void anchor() override;
   QualType DeclType;
 
 protected:
@@ -567,7 +570,7 @@ public:
   /// range taking into account any outer template declarations.
   SourceLocation getOuterLocStart() const;
 
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
   SourceLocation getLocStart() const LLVM_READONLY {
     return getOuterLocStart();
   }
@@ -769,18 +772,20 @@ protected:
           TypeSourceInfo *TInfo, StorageClass SC);
 
   typedef Redeclarable<VarDecl> redeclarable_base;
-  virtual VarDecl *getNextRedeclaration() { return RedeclLink.getNext(); }
-  virtual VarDecl *getPreviousDeclImpl() {
+  VarDecl *getNextRedeclaration() override { return RedeclLink.getNext(); }
+  VarDecl *getPreviousDeclImpl() override {
     return getPreviousDecl();
   }
-  virtual VarDecl *getMostRecentDeclImpl() {
+  VarDecl *getMostRecentDeclImpl() override {
     return getMostRecentDecl();
   }
 
 public:
+  typedef redeclarable_base::redecl_range redecl_range;
   typedef redeclarable_base::redecl_iterator redecl_iterator;
   using redeclarable_base::redecls_begin;
   using redeclarable_base::redecls_end;
+  using redeclarable_base::redecls;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
   using redeclarable_base::isFirstDecl;
@@ -791,8 +796,8 @@ public:
                          StorageClass S);
 
   static VarDecl *CreateDeserialized(ASTContext &C, unsigned ID);
-  
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
+
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   /// \brief Returns the storage class as written in the source. For the
   /// computed linkage of symbol, see getLinkage.
@@ -913,7 +918,7 @@ public:
     return getKind() != Decl::ParmVar && getDeclContext()->isRecord();
   }
 
-  virtual VarDecl *getCanonicalDecl();
+  VarDecl *getCanonicalDecl() override;
   const VarDecl *getCanonicalDecl() const {
     return const_cast<VarDecl*>(this)->getCanonicalDecl();
   }
@@ -960,7 +965,7 @@ public:
 
   /// \brief Determine whether this is or was instantiated from an out-of-line
   /// definition of a static data member.
-  virtual bool isOutOfLine() const;
+  bool isOutOfLine() const override;
 
   /// \brief If this is a static data member, find its out-of-line definition.
   VarDecl *getOutOfLineDefinition();
@@ -1208,7 +1213,7 @@ public:
 };
 
 class ImplicitParamDecl : public VarDecl {
-  virtual void anchor();
+  void anchor() override;
 public:
   static ImplicitParamDecl *Create(ASTContext &C, DeclContext *DC,
                                    SourceLocation IdLoc, IdentifierInfo *Id,
@@ -1254,8 +1259,8 @@ public:
                              StorageClass S, Expr *DefArg);
 
   static ParmVarDecl *CreateDeserialized(ASTContext &C, unsigned ID);
-  
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
+
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   void setObjCMethodScopeInfo(unsigned parameterIndex) {
     ParmVarDeclBits.IsObjCMethodParam = true;
@@ -1559,18 +1564,20 @@ protected:
       DNLoc(NameInfo.getInfo()) {}
 
   typedef Redeclarable<FunctionDecl> redeclarable_base;
-  virtual FunctionDecl *getNextRedeclaration() { return RedeclLink.getNext(); }
-  virtual FunctionDecl *getPreviousDeclImpl() {
+  FunctionDecl *getNextRedeclaration() override { return RedeclLink.getNext(); }
+  FunctionDecl *getPreviousDeclImpl() override {
     return getPreviousDecl();
   }
-  virtual FunctionDecl *getMostRecentDeclImpl() {
+  FunctionDecl *getMostRecentDeclImpl() override {
     return getMostRecentDecl();
   }
 
 public:
+  typedef redeclarable_base::redecl_range redecl_range;
   typedef redeclarable_base::redecl_iterator redecl_iterator;
   using redeclarable_base::redecls_begin;
   using redeclarable_base::redecls_end;
+  using redeclarable_base::redecls;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
   using redeclarable_base::isFirstDecl;
@@ -1605,13 +1612,12 @@ public:
     return DeclarationNameInfo(getDeclName(), getLocation(), DNLoc);
   }
 
-  virtual void getNameForDiagnostic(raw_ostream &OS,
-                                    const PrintingPolicy &Policy,
-                                    bool Qualified) const;
+  void getNameForDiagnostic(raw_ostream &OS, const PrintingPolicy &Policy,
+                            bool Qualified) const override;
 
   void setRangeEnd(SourceLocation E) { EndRangeLoc = E; }
 
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   /// \brief Returns true if the function has a body (definition). The
   /// function body might be in any of the (re-)declarations of this
@@ -1620,7 +1626,7 @@ public:
   /// containing the body (if there is one).
   bool hasBody(const FunctionDecl *&Definition) const;
 
-  virtual bool hasBody() const {
+  bool hasBody() const override {
     const FunctionDecl* Definition;
     return hasBody(Definition);
   }
@@ -1648,7 +1654,7 @@ public:
   /// unnecessary AST de-serialization of the body.
   Stmt *getBody(const FunctionDecl *&Definition) const;
 
-  virtual Stmt *getBody() const {
+   Stmt *getBody() const override {
     const FunctionDecl* Definition;
     return getBody(Definition);
   }
@@ -1828,7 +1834,7 @@ public:
   void setPreviousDeclaration(FunctionDecl * PrevDecl);
 
   virtual const FunctionDecl *getCanonicalDecl() const;
-  virtual FunctionDecl *getCanonicalDecl();
+  FunctionDecl *getCanonicalDecl() override;
 
   unsigned getBuiltinID() const;
 
@@ -1836,12 +1842,24 @@ public:
   unsigned param_size() const { return getNumParams(); }
   typedef ParmVarDecl **param_iterator;
   typedef ParmVarDecl * const *param_const_iterator;
+  typedef llvm::iterator_range<param_iterator> param_range;
+  typedef llvm::iterator_range<param_const_iterator> param_const_range;
 
-  param_iterator param_begin() { return ParamInfo; }
-  param_iterator param_end()   { return ParamInfo+param_size(); }
+  param_iterator param_begin() { return param_iterator(ParamInfo); }
+  param_iterator param_end() {
+    return param_iterator(ParamInfo + param_size());
+  }
+  param_range params() { return param_range(param_begin(), param_end()); }
 
-  param_const_iterator param_begin() const { return ParamInfo; }
-  param_const_iterator param_end() const   { return ParamInfo+param_size(); }
+  param_const_iterator param_begin() const {
+    return param_const_iterator(ParamInfo);
+  }
+  param_const_iterator param_end() const {
+    return param_const_iterator(ParamInfo + param_size());
+  }
+  param_const_range params() const {
+    return param_const_range(param_begin(), param_end());
+  }
 
   /// getNumParams - Return the number of parameters this function must have
   /// based on its FunctionType.  This is the length of the ParamInfo array
@@ -1860,6 +1878,12 @@ public:
     setParams(getASTContext(), NewParamInfo);
   }
 
+  // ArrayRef iterface to parameters.
+  // FIXME: Should one day replace iterator interface.
+  ArrayRef<ParmVarDecl*> parameters() const {
+    return llvm::makeArrayRef(ParamInfo, getNumParams());
+  }
+
   const ArrayRef<NamedDecl *> &getDeclsInPrototypeScope() const {
     return DeclsInPrototypeScope;
   }
@@ -1871,8 +1895,8 @@ public:
   /// arguments (in C++).
   unsigned getMinRequiredArguments() const;
 
-  QualType getResultType() const {
-    return getType()->getAs<FunctionType>()->getResultType();
+  QualType getReturnType() const {
+    return getType()->getAs<FunctionType>()->getReturnType();
   }
 
   /// \brief Determine the type of an expression that calls this function.
@@ -1905,6 +1929,8 @@ public:
   bool isInlined() const { return IsInline; }
 
   bool isInlineDefinitionExternallyVisible() const;
+
+  bool isMSExternInline() const;
 
   bool doesDeclarationForceExternallyVisibleDefinition() const;
 
@@ -2095,7 +2121,7 @@ public:
 
   /// \brief Determine whether this is or was instantiated from an out-of-line
   /// definition of a member function.
-  virtual bool isOutOfLine() const;
+  bool isOutOfLine() const override;
 
   /// \brief Identify a memory copying or setting function.
   /// If the given function is a memory copy or setting function, returns
@@ -2234,10 +2260,10 @@ public:
     return cast<RecordDecl>(getDeclContext());
   }
 
-  SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   /// Retrieves the canonical declaration of this field.
-  FieldDecl *getCanonicalDecl() { return getFirstDecl(); }
+  FieldDecl *getCanonicalDecl() override { return getFirstDecl(); }
   const FieldDecl *getCanonicalDecl() const { return getFirstDecl(); }
 
   // Implement isa/cast/dyncast/etc.
@@ -2276,10 +2302,10 @@ public:
   void setInitExpr(Expr *E) { Init = (Stmt*) E; }
   void setInitVal(const llvm::APSInt &V) { Val = V; }
 
-  SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   /// Retrieves the canonical declaration of this enumerator.
-  EnumConstantDecl *getCanonicalDecl() { return getFirstDecl(); }
+  EnumConstantDecl *getCanonicalDecl() override { return getFirstDecl(); }
   const EnumConstantDecl *getCanonicalDecl() const { return getFirstDecl(); }
 
   // Implement isa/cast/dyncast/etc.
@@ -2293,7 +2319,7 @@ public:
 /// field injected from an anonymous union/struct into the parent scope.
 /// IndirectFieldDecl are always implicit.
 class IndirectFieldDecl : public ValueDecl {
-  virtual void anchor();
+  void anchor() override;
   NamedDecl **Chaining;
   unsigned ChainingSize;
 
@@ -2310,8 +2336,13 @@ public:
   static IndirectFieldDecl *CreateDeserialized(ASTContext &C, unsigned ID);
   
   typedef NamedDecl * const *chain_iterator;
-  chain_iterator chain_begin() const { return Chaining; }
-  chain_iterator chain_end() const  { return Chaining+ChainingSize; }
+  typedef llvm::iterator_range<chain_iterator> chain_range;
+
+  chain_range chain() const { return chain_range(chain_begin(), chain_end()); }
+  chain_iterator chain_begin() const { return chain_iterator(Chaining); }
+  chain_iterator chain_end() const {
+    return chain_iterator(Chaining + ChainingSize);
+  }
 
   unsigned getChainingSize() const { return ChainingSize; }
 
@@ -2334,7 +2365,7 @@ public:
 /// TypeDecl - Represents a declaration of a type.
 ///
 class TypeDecl : public NamedDecl {
-  virtual void anchor();
+  void anchor() override;
   /// TypeForDecl - This indicates the Type object that represents
   /// this TypeDecl.  It is a cache maintained by
   /// ASTContext::getTypedefType, ASTContext::getTagDeclType, and
@@ -2364,7 +2395,7 @@ public:
 
   SourceLocation getLocStart() const LLVM_READONLY { return LocStart; }
   void setLocStart(SourceLocation L) { LocStart = L; }
-  virtual SourceRange getSourceRange() const LLVM_READONLY {
+  SourceRange getSourceRange() const override LLVM_READONLY {
     if (LocStart.isValid())
       return SourceRange(LocStart, getLocation());
     else
@@ -2379,7 +2410,7 @@ public:
 
 /// Base class for declarations which introduce a typedef-name.
 class TypedefNameDecl : public TypeDecl, public Redeclarable<TypedefNameDecl> {
-  virtual void anchor();
+  void anchor() override;
   typedef std::pair<TypeSourceInfo*, QualType> ModedTInfo;
   llvm::PointerUnion<TypeSourceInfo*, ModedTInfo*> MaybeModedTInfo;
 
@@ -2390,20 +2421,22 @@ protected:
     : TypeDecl(DK, DC, IdLoc, Id, StartLoc), MaybeModedTInfo(TInfo) {}
 
   typedef Redeclarable<TypedefNameDecl> redeclarable_base;
-  virtual TypedefNameDecl *getNextRedeclaration() {
+  TypedefNameDecl *getNextRedeclaration() override {
     return RedeclLink.getNext();
   }
-  virtual TypedefNameDecl *getPreviousDeclImpl() {
+  TypedefNameDecl *getPreviousDeclImpl() override {
     return getPreviousDecl();
   }
-  virtual TypedefNameDecl *getMostRecentDeclImpl() {
+  TypedefNameDecl *getMostRecentDeclImpl() override {
     return getMostRecentDecl();
   }
 
 public:
+  typedef redeclarable_base::redecl_range redecl_range;
   typedef redeclarable_base::redecl_iterator redecl_iterator;
   using redeclarable_base::redecls_begin;
   using redeclarable_base::redecls_end;
+  using redeclarable_base::redecls;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
   using redeclarable_base::isFirstDecl;
@@ -2428,7 +2461,7 @@ public:
   }
 
   /// Retrieves the canonical declaration of this typedef-name.
-  TypedefNameDecl *getCanonicalDecl() { return getFirstDecl(); }
+  TypedefNameDecl *getCanonicalDecl() override { return getFirstDecl(); }
   const TypedefNameDecl *getCanonicalDecl() const { return getFirstDecl(); }
 
   // Implement isa/cast/dyncast/etc.
@@ -2450,8 +2483,8 @@ public:
                              SourceLocation StartLoc, SourceLocation IdLoc,
                              IdentifierInfo *Id, TypeSourceInfo *TInfo);
   static TypedefDecl *CreateDeserialized(ASTContext &C, unsigned ID);
-  
-  SourceRange getSourceRange() const LLVM_READONLY;
+
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -2471,7 +2504,7 @@ public:
                                IdentifierInfo *Id, TypeSourceInfo *TInfo);
   static TypeAliasDecl *CreateDeserialized(ASTContext &C, unsigned ID);
 
-  SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -2572,11 +2605,11 @@ protected:
   }
 
   typedef Redeclarable<TagDecl> redeclarable_base;
-  virtual TagDecl *getNextRedeclaration() { return RedeclLink.getNext(); }
-  virtual TagDecl *getPreviousDeclImpl() {
+  TagDecl *getNextRedeclaration() override { return RedeclLink.getNext(); }
+  TagDecl *getPreviousDeclImpl() override {
     return getPreviousDecl();
   }
-  virtual TagDecl *getMostRecentDeclImpl() {
+  TagDecl *getMostRecentDeclImpl() override {
     return getMostRecentDecl();
   }
 
@@ -2586,9 +2619,11 @@ protected:
   void completeDefinition();
 
 public:
+  typedef redeclarable_base::redecl_range redecl_range;
   typedef redeclarable_base::redecl_iterator redecl_iterator;
   using redeclarable_base::redecls_begin;
   using redeclarable_base::redecls_end;
+  using redeclarable_base::redecls;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
   using redeclarable_base::isFirstDecl;
@@ -2603,9 +2638,9 @@ public:
   /// getOuterLocStart - Return SourceLocation representing start of source
   /// range taking into account any outer template declarations.
   SourceLocation getOuterLocStart() const;
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
-  virtual TagDecl* getCanonicalDecl();
+  TagDecl* getCanonicalDecl() override;
   const TagDecl* getCanonicalDecl() const {
     return const_cast<TagDecl*>(this)->getCanonicalDecl();
   }
@@ -2773,7 +2808,7 @@ public:
 /// with a fixed underlying type, and in C we allow them to be forward-declared
 /// with no underlying type as an extension.
 class EnumDecl : public TagDecl {
-  virtual void anchor();
+  void anchor() override;
   /// IntegerType - This represent the integer type that the enum corresponds
   /// to for code generation purposes.  Note that the enumerator constants may
   /// have a different type than this does.
@@ -2819,7 +2854,7 @@ class EnumDecl : public TagDecl {
   void setInstantiationOfMemberEnum(ASTContext &C, EnumDecl *ED,
                                     TemplateSpecializationKind TSK);
 public:
-  EnumDecl *getCanonicalDecl() {
+  EnumDecl *getCanonicalDecl() override {
     return cast<EnumDecl>(TagDecl::getCanonicalDecl());
   }
   const EnumDecl *getCanonicalDecl() const {
@@ -2865,6 +2900,12 @@ public:
   // enumerator_iterator - Iterates through the enumerators of this
   // enumeration.
   typedef specific_decl_iterator<EnumConstantDecl> enumerator_iterator;
+  typedef llvm::iterator_range<specific_decl_iterator<EnumConstantDecl>>
+    enumerator_range;
+
+  enumerator_range enumerators() const {
+    return enumerator_range(enumerator_begin(), enumerator_end());
+  }
 
   enumerator_iterator enumerator_begin() const {
     const EnumDecl *E = getDefinition();
@@ -2888,26 +2929,31 @@ public:
   void setPromotionType(QualType T) { PromotionType = T; }
 
   /// getIntegerType - Return the integer type this enum decl corresponds to.
-  /// This returns a null qualtype for an enum forward definition.
+  /// This returns a null QualType for an enum forward definition with no fixed
+  /// underlying type.
   QualType getIntegerType() const {
     if (!IntegerType)
       return QualType();
-    if (const Type* T = IntegerType.dyn_cast<const Type*>())
+    if (const Type *T = IntegerType.dyn_cast<const Type*>())
       return QualType(T, 0);
-    return IntegerType.get<TypeSourceInfo*>()->getType();
+    return IntegerType.get<TypeSourceInfo*>()->getType().getUnqualifiedType();
   }
 
   /// \brief Set the underlying integer type.
   void setIntegerType(QualType T) { IntegerType = T.getTypePtrOrNull(); }
 
   /// \brief Set the underlying integer type source info.
-  void setIntegerTypeSourceInfo(TypeSourceInfo* TInfo) { IntegerType = TInfo; }
+  void setIntegerTypeSourceInfo(TypeSourceInfo *TInfo) { IntegerType = TInfo; }
 
   /// \brief Return the type source info for the underlying integer type,
   /// if no type source info exists, return 0.
-  TypeSourceInfo* getIntegerTypeSourceInfo() const {
+  TypeSourceInfo *getIntegerTypeSourceInfo() const {
     return IntegerType.dyn_cast<TypeSourceInfo*>();
   }
+
+  /// \brief Retrieve the source range that covers the underlying type if
+  /// specified.
+  SourceRange getIntegerTypeRange() const LLVM_READONLY;
 
   /// \brief Returns the width in bits required to store all the
   /// non-negative enumerators of this enum.
@@ -3106,7 +3152,9 @@ public:
   // the non-static data members of this class, ignoring any static
   // data members, functions, constructors, destructors, etc.
   typedef specific_decl_iterator<FieldDecl> field_iterator;
+  typedef llvm::iterator_range<specific_decl_iterator<FieldDecl>> field_range;
 
+  field_range fields() const { return field_range(field_begin(), field_end()); }
   field_iterator field_begin() const;
 
   field_iterator field_end() const {
@@ -3155,7 +3203,7 @@ public:
   SourceLocation getAsmLoc() const { return getLocation(); }
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
-  SourceRange getSourceRange() const LLVM_READONLY {
+  SourceRange getSourceRange() const override LLVM_READONLY {
     return SourceRange(getAsmLoc(), getRParenLoc());
   }
 
@@ -3251,7 +3299,7 @@ public:
   void setIsVariadic(bool value) { IsVariadic = value; }
 
   CompoundStmt *getCompoundBody() const { return (CompoundStmt*) Body; }
-  Stmt *getBody() const { return (Stmt*) Body; }
+  Stmt *getBody() const override { return (Stmt*) Body; }
   void setBody(CompoundStmt *B) { Body = (Stmt*) B; }
 
   void setSignatureAsWritten(TypeSourceInfo *Sig) { SignatureAsWritten = Sig; }
@@ -3261,13 +3309,31 @@ public:
   unsigned param_size() const { return getNumParams(); }
   typedef ParmVarDecl **param_iterator;
   typedef ParmVarDecl * const *param_const_iterator;
+  typedef llvm::iterator_range<param_iterator> param_range;
+  typedef llvm::iterator_range<param_const_iterator> param_const_range;
+
+  // ArrayRef access to formal parameters.
+  // FIXME: Should eventual replace iterator access.
+  ArrayRef<ParmVarDecl*> parameters() const {
+    return llvm::makeArrayRef(ParamInfo, param_size());
+  }
 
   bool param_empty() const { return NumParams == 0; }
-  param_iterator param_begin()  { return ParamInfo; }
-  param_iterator param_end()   { return ParamInfo+param_size(); }
+  param_range params() { return param_range(param_begin(), param_end()); }
+  param_iterator param_begin() { return param_iterator(ParamInfo); }
+  param_iterator param_end() {
+    return param_iterator(ParamInfo + param_size());
+  }
 
-  param_const_iterator param_begin() const { return ParamInfo; }
-  param_const_iterator param_end() const   { return ParamInfo+param_size(); }
+  param_const_range params() const {
+    return param_const_range(param_begin(), param_end());
+  }
+  param_const_iterator param_begin() const {
+    return param_const_iterator(ParamInfo);
+  }
+  param_const_iterator param_end() const {
+    return param_const_iterator(ParamInfo + param_size());
+  }
 
   unsigned getNumParams() const { return NumParams; }
   const ParmVarDecl *getParamDecl(unsigned i) const {
@@ -3290,6 +3356,16 @@ public:
 
   typedef const Capture *capture_iterator;
   typedef const Capture *capture_const_iterator;
+  typedef llvm::iterator_range<capture_iterator> capture_range;
+  typedef llvm::iterator_range<capture_const_iterator> capture_const_range;
+
+  capture_range captures() {
+    return capture_range(capture_begin(), capture_end());
+  }
+  capture_const_range captures() const {
+    return capture_const_range(capture_begin(), capture_end());
+  }
+
   capture_iterator capture_begin() { return Captures; }
   capture_iterator capture_end() { return Captures + NumCaptures; }
   capture_const_iterator capture_begin() const { return Captures; }
@@ -3321,7 +3397,7 @@ public:
     ManglingContextDecl = Ctx;
   }
 
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
+  SourceRange getSourceRange() const override LLVM_READONLY;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -3357,7 +3433,7 @@ public:
   static CapturedDecl *CreateDeserialized(ASTContext &C, unsigned ID,
                                           unsigned NumParams);
 
-  Stmt *getBody() const { return Body; }
+  Stmt *getBody() const override { return Body; }
   void setBody(Stmt *B) { Body = B; }
 
   unsigned getNumParams() const { return NumParams; }
@@ -3376,10 +3452,15 @@ public:
   void setContextParam(ImplicitParamDecl *P) { setParam(0, P); }
 
   typedef ImplicitParamDecl **param_iterator;
+  typedef llvm::iterator_range<param_iterator> param_range;
+
   /// \brief Retrieve an iterator pointing to the first parameter decl.
   param_iterator param_begin() const { return getParams(); }
   /// \brief Retrieve an iterator one past the last parameter decl.
   param_iterator param_end() const { return getParams() + NumParams; }
+
+  /// \brief Retrieve an iterator range for the parameter declarations.
+  param_range params() const { return param_range(param_begin(), param_end()); }
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -3455,9 +3536,9 @@ public:
   /// This will return an empty array if the locations of the individual
   /// identifiers aren't available.
   ArrayRef<SourceLocation> getIdentifierLocs() const;
-  
-  virtual SourceRange getSourceRange() const LLVM_READONLY;
-  
+
+  SourceRange getSourceRange() const override LLVM_READONLY;
+
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) { return K == Import; }
 };
