@@ -3,6 +3,7 @@ LOCAL_PATH:= $(call my-dir)
 clang_codegen_TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
+  AttrVisitor.inc \
   CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \
@@ -48,11 +49,11 @@ clang_codegen_SRC_FILES := \
   CodeGenAction.cpp \
   CodeGenFunction.cpp \
   CodeGenModule.cpp \
+  CodeGenPGO.cpp \
   CodeGenTBAA.cpp \
   CodeGenTypes.cpp \
   ItaniumCXXABI.cpp \
   MicrosoftCXXABI.cpp \
-  MicrosoftVBTables.cpp \
   ModuleBuilder.cpp \
   TargetInfo.cpp
 

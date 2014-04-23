@@ -35,7 +35,7 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
     return true;
 
   // Producing an alias to a base class ctor/dtor can degrade debug quality
-  // as the debugger cannot tell them appart.
+  // as the debugger cannot tell them apart.
   if (getCodeGenOpts().OptimizationLevel == 0)
     return true;
 
@@ -56,22 +56,20 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
 
   // If any field has a non-trivial destructor, we have to emit the
   // destructor separately.
-  for (CXXRecordDecl::field_iterator I = Class->field_begin(),
-         E = Class->field_end(); I != E; ++I)
+  for (const auto *I : Class->fields())
     if (I->getType().isDestructedType())
       return true;
 
   // Try to find a unique base class with a non-trivial destructor.
   const CXXRecordDecl *UniqueBase = 0;
-  for (CXXRecordDecl::base_class_const_iterator I = Class->bases_begin(),
-         E = Class->bases_end(); I != E; ++I) {
+  for (const auto &I : Class->bases()) {
 
     // We're in the base destructor, so skip virtual bases.
-    if (I->isVirtual()) continue;
+    if (I.isVirtual()) continue;
 
     // Skip base classes with trivial destructors.
     const CXXRecordDecl *Base
-      = cast<CXXRecordDecl>(I->getType()->getAs<RecordType>()->getDecl());
+      = cast<CXXRecordDecl>(I.getType()->getAs<RecordType>()->getDecl());
     if (Base->hasTrivialDestructor()) continue;
 
     // If we've already found a base class with a non-trivial
@@ -92,7 +90,13 @@ bool CodeGenModule::TryEmitBaseDestructorAsAlias(const CXXDestructorDecl *D) {
   if (!ClassLayout.getBaseClassOffset(UniqueBase).isZero())
     return true;
 
+  // Give up if the calling conventions don't match. We could update the call,
+  // but it is probably not worth it.
   const CXXDestructorDecl *BaseD = UniqueBase->getDestructor();
+  if (BaseD->getType()->getAs<FunctionType>()->getCallConv() !=
+      D->getType()->getAs<FunctionType>()->getCallConv())
+    return true;
+
   return TryEmitDefinitionAsAlias(GlobalDecl(D, Dtor_Base),
                                   GlobalDecl(BaseD, Dtor_Base),
                                   false);
@@ -107,7 +111,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   if (!getCodeGenOpts().CXXCtorDtorAliases)
     return true;
 
-  // The alias will use the linkage of the referrent.  If we can't
+  // The alias will use the linkage of the referent.  If we can't
   // support aliases with that linkage, fail.
   llvm::GlobalValue::LinkageTypes Linkage = getFunctionLinkage(AliasDecl);
 
@@ -130,7 +134,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   llvm::PointerType *AliasType
     = getTypes().GetFunctionType(AliasDecl)->getPointerTo();
 
-  // Find the referrent.  Some aliases might require a bitcast, in
+  // Find the referent.  Some aliases might require a bitcast, in
   // which case the caller is responsible for ensuring the soundness
   // of these semantics.
   llvm::GlobalValue *Ref = cast<llvm::GlobalValue>(GetAddrOfGlobal(TargetDecl));
@@ -143,7 +147,7 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
   if (llvm::GlobalValue::isDiscardableIfUnused(Linkage) &&
      (TargetLinkage != llvm::GlobalValue::AvailableExternallyLinkage ||
       !TargetDecl.getDecl()->hasAttr<AlwaysInlineAttr>())) {
-    // FIXME: An extern template instanciation will create functions with
+    // FIXME: An extern template instantiation will create functions with
     // linkage "AvailableExternally". In libc++, some classes also define
     // members with attribute "AlwaysInline" and expect no reference to
     // be generated. It is desirable to reenable this optimisation after
@@ -190,11 +194,13 @@ bool CodeGenModule::TryEmitDefinitionAsAlias(GlobalDecl AliasDecl,
 
 void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *ctor,
                                        CXXCtorType ctorType) {
-  // The complete constructor is equivalent to the base constructor
-  // for classes with no virtual bases.  Try to emit it as an alias.
-  if (getTarget().getCXXABI().hasConstructorVariants() &&
-      !ctor->getParent()->getNumVBases() &&
-      (ctorType == Ctor_Complete || ctorType == Ctor_Base)) {
+  if (!getTarget().getCXXABI().hasConstructorVariants()) {
+    // If there are no constructor variants, always emit the complete destructor.
+    ctorType = Ctor_Complete;
+  } else if (!ctor->getParent()->getNumVBases() &&
+             (ctorType == Ctor_Complete || ctorType == Ctor_Base)) {
+    // The complete constructor is equivalent to the base constructor
+    // for classes with no virtual bases.  Try to emit it as an alias.
     bool ProducedAlias =
         !TryEmitDefinitionAsAlias(GlobalDecl(ctor, Ctor_Complete),
                                   GlobalDecl(ctor, Ctor_Base), true);
@@ -205,8 +211,8 @@ void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *ctor,
   const CGFunctionInfo &fnInfo =
     getTypes().arrangeCXXConstructorDeclaration(ctor, ctorType);
 
-  llvm::Function *fn =
-    cast<llvm::Function>(GetAddrOfCXXConstructor(ctor, ctorType, &fnInfo));
+  llvm::Function *fn = cast<llvm::Function>(
+      GetAddrOfCXXConstructor(ctor, ctorType, &fnInfo, true));
   setFunctionLinkage(GlobalDecl(ctor, ctorType), fn);
 
   CodeGenFunction(*this).GenerateCode(GlobalDecl(ctor, ctorType), fn, fnInfo);
@@ -218,7 +224,8 @@ void CodeGenModule::EmitCXXConstructor(const CXXConstructorDecl *ctor,
 llvm::GlobalValue *
 CodeGenModule::GetAddrOfCXXConstructor(const CXXConstructorDecl *ctor,
                                        CXXCtorType ctorType,
-                                       const CGFunctionInfo *fnInfo) {
+                                       const CGFunctionInfo *fnInfo,
+                                       bool DontDefer) {
   GlobalDecl GD(ctor, ctorType);
   
   StringRef name = getMangledName(GD);
@@ -230,7 +237,8 @@ CodeGenModule::GetAddrOfCXXConstructor(const CXXConstructorDecl *ctor,
 
   llvm::FunctionType *fnType = getTypes().GetFunctionType(*fnInfo);
   return cast<llvm::Function>(GetOrCreateLLVMFunction(name, fnType, GD,
-                                                      /*ForVTable=*/false));
+                                                      /*ForVTable=*/false,
+                                                      DontDefer));
 }
 
 void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *dtor,
@@ -260,8 +268,8 @@ void CodeGenModule::EmitCXXDestructor(const CXXDestructorDecl *dtor,
   const CGFunctionInfo &fnInfo =
     getTypes().arrangeCXXDestructor(dtor, dtorType);
 
-  llvm::Function *fn =
-    cast<llvm::Function>(GetAddrOfCXXDestructor(dtor, dtorType, &fnInfo));
+  llvm::Function *fn = cast<llvm::Function>(
+      GetAddrOfCXXDestructor(dtor, dtorType, &fnInfo, 0, true));
   setFunctionLinkage(GlobalDecl(dtor, dtorType), fn);
 
   CodeGenFunction(*this).GenerateCode(GlobalDecl(dtor, dtorType), fn, fnInfo);
@@ -274,7 +282,8 @@ llvm::GlobalValue *
 CodeGenModule::GetAddrOfCXXDestructor(const CXXDestructorDecl *dtor,
                                       CXXDtorType dtorType,
                                       const CGFunctionInfo *fnInfo,
-                                      llvm::FunctionType *fnType) {
+                                      llvm::FunctionType *fnType,
+                                      bool DontDefer) {
   GlobalDecl GD(dtor, dtorType);
 
   StringRef name = getMangledName(GD);
@@ -286,7 +295,8 @@ CodeGenModule::GetAddrOfCXXDestructor(const CXXDestructorDecl *dtor,
     fnType = getTypes().GetFunctionType(*fnInfo);
   }
   return cast<llvm::Function>(GetOrCreateLLVMFunction(name, fnType, GD,
-                                                      /*ForVTable=*/false));
+                                                      /*ForVTable=*/false,
+                                                      DontDefer));
 }
 
 static llvm::Value *BuildAppleKextVirtualCall(CodeGenFunction &CGF,

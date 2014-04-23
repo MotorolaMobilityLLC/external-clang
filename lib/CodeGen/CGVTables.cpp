@@ -30,14 +30,7 @@ using namespace clang;
 using namespace CodeGen;
 
 CodeGenVTables::CodeGenVTables(CodeGenModule &CGM)
-  : CGM(CGM), ItaniumVTContext(CGM.getContext()) {
-  if (CGM.getTarget().getCXXABI().isMicrosoft()) {
-    // FIXME: Eventually, we should only have one of V*TContexts available.
-    // Today we use both in the Microsoft ABI as MicrosoftVFTableContext
-    // is not completely supported in CodeGen yet.
-    MicrosoftVTContext.reset(new MicrosoftVTableContext(CGM.getContext()));
-  }
-}
+    : CGM(CGM), VTContext(CGM.getContext().getVTableContext()) {}
 
 llvm::Constant *CodeGenModule::GetAddrOfThunk(GlobalDecl GD, 
                                               const ThunkInfo &Thunk) {
@@ -54,54 +47,13 @@ llvm::Constant *CodeGenModule::GetAddrOfThunk(GlobalDecl GD,
   Out.flush();
 
   llvm::Type *Ty = getTypes().GetFunctionTypeForVTable(GD);
-  return GetOrCreateLLVMFunction(Name, Ty, GD, /*ForVTable=*/true);
+  return GetOrCreateLLVMFunction(Name, Ty, GD, /*ForVTable=*/true,
+                                 /*DontDefer*/ true);
 }
 
 static void setThunkVisibility(CodeGenModule &CGM, const CXXMethodDecl *MD,
                                const ThunkInfo &Thunk, llvm::Function *Fn) {
   CGM.setGlobalVisibility(Fn, MD);
-
-  if (!CGM.getCodeGenOpts().HiddenWeakVTables)
-    return;
-
-  // If the thunk has weak/linkonce linkage, but the function must be
-  // emitted in every translation unit that references it, then we can
-  // emit its thunks with hidden visibility, since its thunks must be
-  // emitted when the function is.
-
-  // This follows CodeGenModule::setTypeVisibility; see the comments
-  // there for explanation.
-
-  if ((Fn->getLinkage() != llvm::GlobalVariable::LinkOnceODRLinkage &&
-       Fn->getLinkage() != llvm::GlobalVariable::WeakODRLinkage) ||
-      Fn->getVisibility() != llvm::GlobalVariable::DefaultVisibility)
-    return;
-
-  if (MD->getExplicitVisibility(ValueDecl::VisibilityForValue))
-    return;
-
-  switch (MD->getTemplateSpecializationKind()) {
-  case TSK_ExplicitInstantiationDefinition:
-  case TSK_ExplicitInstantiationDeclaration:
-    return;
-
-  case TSK_Undeclared:
-    break;
-
-  case TSK_ExplicitSpecialization:
-  case TSK_ImplicitInstantiation:
-    return;
-    break;
-  }
-
-  // If there's an explicit definition, and that definition is
-  // out-of-line, then we can't assume that all users will have a
-  // definition to emit.
-  const FunctionDecl *Def = 0;
-  if (MD->hasBody(Def) && Def->isOutOfLine())
-    return;
-
-  Fn->setVisibility(llvm::GlobalValue::HiddenVisibility);
 }
 
 #ifndef NDEBUG
@@ -177,7 +129,7 @@ void CodeGenFunction::GenerateVarArgsThunk(
                                       GlobalDecl GD, const ThunkInfo &Thunk) {
   const CXXMethodDecl *MD = cast<CXXMethodDecl>(GD.getDecl());
   const FunctionProtoType *FPT = MD->getType()->getAs<FunctionProtoType>();
-  QualType ResultType = FPT->getResultType();
+  QualType ResultType = FPT->getReturnType();
 
   // Get the original function
   assert(FnInfo.isVariadic());
@@ -248,17 +200,20 @@ void CodeGenFunction::StartThunk(llvm::Function *Fn, GlobalDecl GD,
   QualType ThisType = MD->getThisType(getContext());
   const FunctionProtoType *FPT = MD->getType()->getAs<FunctionProtoType>();
   QualType ResultType =
-    CGM.getCXXABI().HasThisReturn(GD) ? ThisType : FPT->getResultType();
+      CGM.getCXXABI().HasThisReturn(GD) ? ThisType : FPT->getReturnType();
   FunctionArgList FunctionArgs;
 
   // Create the implicit 'this' parameter declaration.
-  CGM.getCXXABI().BuildInstanceFunctionParams(*this, ResultType, FunctionArgs);
+  CGM.getCXXABI().buildThisParam(*this, FunctionArgs);
 
   // Add the rest of the parameters.
   for (FunctionDecl::param_const_iterator I = MD->param_begin(),
                                           E = MD->param_end();
        I != E; ++I)
     FunctionArgs.push_back(*I);
+
+  if (isa<CXXDestructorDecl>(MD))
+    CGM.getCXXABI().addImplicitStructorParams(*this, ResultType, FunctionArgs);
 
   // Start defining the function.
   StartFunction(GlobalDecl(), ResultType, Fn, FnInfo, FunctionArgs,
@@ -316,7 +271,7 @@ void CodeGenFunction::EmitCallAndReturnForThunk(GlobalDecl GD,
 
   // Determine whether we have a return value slot to use.
   QualType ResultType =
-    CGM.getCXXABI().HasThisReturn(GD) ? ThisType : FPT->getResultType();
+      CGM.getCXXABI().HasThisReturn(GD) ? ThisType : FPT->getReturnType();
   ReturnValueSlot Slot;
   if (!ResultType->isVoidType() &&
       CurFnInfo->getReturnInfo().getKind() == ABIArgInfo::Indirect &&
@@ -461,12 +416,8 @@ void CodeGenVTables::EmitThunks(GlobalDecl GD)
   if (isa<CXXDestructorDecl>(MD) && GD.getDtorType() == Dtor_Base)
     return;
 
-  const VTableContextBase::ThunkInfoVectorTy *ThunkInfoVector;
-  if (MicrosoftVTContext.isValid()) {
-    ThunkInfoVector = MicrosoftVTContext->getThunkInfo(GD);
-  } else {
-    ThunkInfoVector = ItaniumVTContext.getThunkInfo(GD);
-  }
+  const VTableContextBase::ThunkInfoVectorTy *ThunkInfoVector =
+      VTContext->getThunkInfo(GD);
 
   if (!ThunkInfoVector)
     return;
@@ -603,8 +554,8 @@ CodeGenVTables::GenerateConstructionVTable(const CXXRecordDecl *RD,
   if (CGDebugInfo *DI = CGM.getModuleDebugInfo())
     DI->completeClassData(Base.getBase());
 
-  OwningPtr<VTableLayout> VTLayout(
-      ItaniumVTContext.createConstructionVTableLayout(
+  std::unique_ptr<VTableLayout> VTLayout(
+      getItaniumVTableContext().createConstructionVTableLayout(
           Base.getBase(), Base.getBaseOffset(), BaseIsVirtual, RD));
 
   // Add the address points.
@@ -633,7 +584,7 @@ CodeGenVTables::GenerateConstructionVTable(const CXXRecordDecl *RD,
   // Create the variable that will hold the construction vtable.
   llvm::GlobalVariable *VTable = 
     CGM.CreateOrReplaceCXXRuntimeVariable(Name, ArrayType, Linkage);
-  CGM.setTypeVisibility(VTable, RD, CodeGenModule::TVK_ForConstructionVTable);
+  CGM.setGlobalVisibility(VTable, RD);
 
   // V-tables are always unnamed_addr.
   VTable->setUnnamedAddr(true);
@@ -752,7 +703,7 @@ CodeGenVTables::GenerateClassData(const CXXRecordDecl *RD) {
 /// strongly elsewhere.  Otherwise, we'd just like to avoid emitting
 /// v-tables when unnecessary.
 bool CodeGenVTables::isVTableExternal(const CXXRecordDecl *RD) {
-  assert(RD->isDynamicClass() && "Non dynamic classes have no VTable.");
+  assert(RD->isDynamicClass() && "Non-dynamic classes have no VTable.");
 
   // If we have an explicit instantiation declaration (and not a
   // definition), the v-table is defined elsewhere.
