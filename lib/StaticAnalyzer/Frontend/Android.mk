@@ -6,6 +6,7 @@ clang_static_analyzer_frontend_C_INCLUDES := \
 clang_static_analyzer_frontend_TBLGEN_TABLES := \
   AttrList.inc \
   Attrs.inc \
+  AttrVisitor.inc \
   CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \

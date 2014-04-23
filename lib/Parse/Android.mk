@@ -6,13 +6,11 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES :=  \
-	AttrExprArgs.inc \
-	AttrIdentifierArg.inc \
 	AttrList.inc  \
-	AttrLateParsed.inc  \
 	AttrParsedAttrList.inc  \
-	AttrTypeArg.inc  \
 	Attrs.inc  \
+        AttrVisitor.inc \
+        AttrParserStringSwitches.inc \
 	CommentCommandList.inc \
 	CommentNodes.inc \
 	DeclNodes.inc  \

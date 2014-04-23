@@ -15,8 +15,8 @@
 #include "clang/Basic/AllDiagnostics.h"
 #include "clang/Basic/DiagnosticCategories.h"
 #include "clang/Basic/SourceManager.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <map>
 using namespace clang;
@@ -30,9 +30,10 @@ namespace {
 // Diagnostic classes.
 enum {
   CLASS_NOTE       = 0x01,
-  CLASS_WARNING    = 0x02,
-  CLASS_EXTENSION  = 0x03,
-  CLASS_ERROR      = 0x04
+  CLASS_REMARK     = 0x02,
+  CLASS_WARNING    = 0x03,
+  CLASS_EXTENSION  = 0x04,
+  CLASS_ERROR      = 0x05
 };
 
 struct StaticDiagInfoRec {
@@ -111,7 +112,7 @@ static const StaticDiagInfoRec *GetDiagInfo(unsigned DiagID) {
     return 0;
 
   // Compute the index of the requested diagnostic in the static table.
-  // 1. Add the number of diagnostics in each category preceeding the
+  // 1. Add the number of diagnostics in each category preceding the
   //    diagnostic and of the category the diagnostic is in. This gives us
   //    the offset of the category in the table.
   // 2. Subtract the number of IDs in each category from our ID. This gives us
@@ -311,10 +312,13 @@ DiagnosticIDs::~DiagnosticIDs() {
 /// getCustomDiagID - Return an ID for a diagnostic with the specified message
 /// and level.  If this is the first request for this diagnostic, it is
 /// registered and created, otherwise the existing ID is returned.
-unsigned DiagnosticIDs::getCustomDiagID(Level L, StringRef Message) {
+///
+/// \param FormatString A fixed diagnostic format string that will be hashed and
+/// mapped to a unique DiagID.
+unsigned DiagnosticIDs::getCustomDiagID(Level L, StringRef FormatString) {
   if (CustomDiagInfo == 0)
     CustomDiagInfo = new diag::CustomDiagInfo();
-  return CustomDiagInfo->getOrCreateDiagID(L, Message, *this);
+  return CustomDiagInfo->getOrCreateDiagID(L, FormatString, *this);
 }
 
 
@@ -406,6 +410,9 @@ DiagnosticIDs::getDiagnosticLevel(unsigned DiagID, unsigned DiagClass,
   case diag::MAP_IGNORE:
     Result = DiagnosticIDs::Ignored;
     break;
+  case diag::MAP_REMARK:
+    Result = DiagnosticIDs::Remark;
+    break;
   case diag::MAP_WARNING:
     Result = DiagnosticIDs::Warning;
     break;
@@ -421,6 +428,11 @@ DiagnosticIDs::getDiagnosticLevel(unsigned DiagID, unsigned DiagClass,
   if (Diag.EnableAllWarnings && Result == DiagnosticIDs::Ignored &&
       !MappingInfo.isUser())
     Result = DiagnosticIDs::Warning;
+
+  // Diagnostics of class REMARK are either printed as remarks or in case they
+  // have been added to -Werror they are printed as errors.
+  if (DiagClass == CLASS_REMARK && Result == DiagnosticIDs::Warning)
+    Result = DiagnosticIDs::Remark;
 
   // Ignore -pedantic diagnostics inside __extension__ blocks.
   // (The diagnostics controlled by -pedantic are the extension diagnostics
