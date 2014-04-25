@@ -2,6 +2,8 @@
 
 // RUN: %clang -target aarch64-linux-eabi -mfpu=neon %s -### -o %t.o 2>&1 \
 // RUN:   | FileCheck --check-prefix=CHECK-NEON %s
+// RUN: %clang -target aarch64-linux-eabi %s -### -o %t.o 2>&1 \
+// RUN:   | FileCheck --check-prefix=CHECK-NEON %s
 // CHECK-NEON: "-target-feature" "+neon"
 
 // RUN: %clang -target aarch64-linux-eabi -mfpu=fp-armv8 %s -### -o %t.o 2>&1 \
@@ -19,8 +21,3 @@
 // CHECK-CRYPTO-NEON-FP-ARMV8: "-target-feature" "+neon"
 // CHECK-CRYPTO-NEON-FP-ARMV8: "-target-feature" "+crypto"
 
-// RUN: %clang -target aarch64-linux-eabi -mfpu=none %s -### 2>&1 \
-// RUN:   | FileCheck --check-prefix=CHECK-NO-FP %s
-// CHECK-NO-FP: "-target-feature" "-fp-armv8"
-// CHECK-NO-FP: "-target-feature" "-crypto"
-// CHECK-NO-FP: "-target-feature" "-neon"

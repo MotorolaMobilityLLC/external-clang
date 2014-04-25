@@ -9,6 +9,7 @@ TBLGEN_TABLES := \
   Attrs.inc \
   AttrList.inc \
   AttrParsedAttrList.inc    \
+  AttrVisitor.inc \
   CommentCommandList.inc \
   CommentNodes.inc \
   DeclNodes.inc \
