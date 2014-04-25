@@ -5,6 +5,7 @@ clang_static_analyzer_checkers_TBLGEN_TABLES := \
   AttrList.inc \
   AttrParsedAttrList.inc \
   Attrs.inc \
+  AttrVisitor.inc \
   Checkers.inc \
   CommentCommandList.inc \
   CommentNodes.inc \
@@ -41,7 +42,6 @@ clang_static_analyzer_checkers_SRC_FILES := \
   ExprInspectionChecker.cpp \
   FixedAddressChecker.cpp \
   GenericTaintChecker.cpp \
-  IdempotentOperationChecker.cpp \
   IdenticalExprChecker.cpp \
   IvarInvalidationChecker.cpp \
   LLVMConventionsChecker.cpp \

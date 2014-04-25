@@ -1,3 +1,8 @@
+set(LLVM_LINK_COMPONENTS
+  MC
+  Support
+  )
+
 add_clang_library(clangAnalysis
   AnalysisDeclContext.cpp
   BodyFarm.cpp
@@ -19,19 +24,8 @@ add_clang_library(clangAnalysis
   ScanfFormatString.cpp
   ThreadSafety.cpp
   UninitializedValues.cpp
-  )
 
-add_dependencies(clangAnalysis
-  ClangAttrClasses
-  ClangAttrList
-  ClangCommentNodes
-  ClangDiagnosticCommon
-  ClangDeclNodes
-  ClangDiagnosticAnalysis
-  ClangStmtNodes
-  )
-
-target_link_libraries(clangAnalysis
+  LINK_LIBS
   clangBasic
   clangAST
   )

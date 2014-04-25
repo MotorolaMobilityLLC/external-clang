@@ -34,6 +34,7 @@
 #define LLVM_CLANG_AST_MATCHERS_DYNAMIC_PARSER_H
 
 #include "clang/ASTMatchers/Dynamic/Diagnostics.h"
+#include "clang/ASTMatchers/Dynamic/Registry.h"
 #include "clang/ASTMatchers/Dynamic/VariantValue.h"
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -65,7 +66,7 @@ public:
     ///
     /// All the arguments passed here have already been processed.
     ///
-    /// \param MatcherName The matcher name found by the parser.
+    /// \param Ctor A matcher constructor looked up by lookupMatcherCtor.
     ///
     /// \param NameRange The location of the name in the matcher source.
     ///   Useful for error reporting.
@@ -78,11 +79,25 @@ public:
     /// \return The matcher objects constructed by the processor, or a null
     ///   matcher if an error occurred. In that case, \c Error will contain a
     ///   description of the error.
-    virtual VariantMatcher actOnMatcherExpression(StringRef MatcherName,
+    virtual VariantMatcher actOnMatcherExpression(MatcherCtor Ctor,
                                                   const SourceRange &NameRange,
                                                   StringRef BindID,
                                                   ArrayRef<ParserValue> Args,
                                                   Diagnostics *Error) = 0;
+
+    /// \brief Look up a matcher by name.
+    ///
+    /// \param MatcherName The matcher name found by the parser.
+    ///
+    /// \param NameRange The location of the name in the matcher source.
+    ///   Useful for error reporting.
+    ///
+    /// \return The matcher constructor, or Optional<MatcherCtor>() if an error
+    ///   occurred. In that case, \c Error will contain a description of the
+    ///   error.
+    virtual llvm::Optional<MatcherCtor>
+    lookupMatcherCtor(StringRef MatcherName, const SourceRange &NameRange,
+                      Diagnostics *Error) = 0;
   };
 
   /// \brief Parse a matcher expression, creating matchers from the registry.
@@ -129,8 +144,16 @@ public:
   static bool parseExpression(StringRef Code, Sema *S,
                               VariantValue *Value, Diagnostics *Error);
 
+  /// \brief Complete an expression at the given offset.
+  ///
+  /// \return The list of completions, which may be empty if there are no
+  /// available completions or if an error occurred.
+  static std::vector<MatcherCompletion>
+  completeExpression(StringRef Code, unsigned CompletionOffset);
+
 private:
   class CodeTokenizer;
+  struct ScopedContextEntry;
   struct TokenInfo;
 
   Parser(CodeTokenizer *Tokenizer, Sema *S,
@@ -139,9 +162,17 @@ private:
   bool parseExpressionImpl(VariantValue *Value);
   bool parseMatcherExpressionImpl(VariantValue *Value);
 
+  void addCompletion(const TokenInfo &CompToken, StringRef TypedText,
+                     StringRef Decl);
+  void addExpressionCompletions();
+
   CodeTokenizer *const Tokenizer;
   Sema *const S;
   Diagnostics *const Error;
+
+  typedef std::vector<std::pair<MatcherCtor, unsigned> > ContextStackTy;
+  ContextStackTy ContextStack;
+  std::vector<MatcherCompletion> Completions;
 };
 
 }  // namespace dynamic

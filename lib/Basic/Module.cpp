@@ -24,20 +24,21 @@
 
 using namespace clang;
 
-Module::Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent, 
+Module::Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent,
                bool IsFramework, bool IsExplicit)
   : Name(Name), DefinitionLoc(DefinitionLoc), Parent(Parent),
     Umbrella(), ASTFile(0), IsAvailable(true), IsFromModuleFile(false),
     IsFramework(IsFramework), IsExplicit(IsExplicit), IsSystem(false),
-    InferSubmodules(false), InferExplicitSubmodules(false), 
+    IsExternC(false), InferSubmodules(false), InferExplicitSubmodules(false),
     InferExportWildcard(false), ConfigMacrosExhaustive(false),
-    NameVisibility(Hidden)
-{ 
+    NameVisibility(Hidden) {
   if (Parent) {
     if (!Parent->isAvailable())
       IsAvailable = false;
     if (Parent->IsSystem)
       IsSystem = true;
+    if (Parent->IsExternC)
+      IsExternC = true;
     
     Parent->SubModuleIndex[Name] = Parent->SubModules.size();
     Parent->SubModules.push_back(this);
@@ -69,11 +70,15 @@ static bool hasFeature(StringRef Feature, const LangOptions &LangOpts,
 
 bool
 Module::isAvailable(const LangOptions &LangOpts, const TargetInfo &Target,
-                    Requirement &Req) const {
+                    Requirement &Req, HeaderDirective &MissingHeader) const {
   if (IsAvailable)
     return true;
 
   for (const Module *Current = this; Current; Current = Current->Parent) {
+    if (!Current->MissingHeaders.empty()) {
+      MissingHeader = Current->MissingHeaders.front();
+      return false;
+    }
     for (unsigned I = 0, N = Current->Requirements.size(); I != N; ++I) {
       if (hasFeature(Current->Requirements[I].first, LangOpts, Target) !=
               Current->Requirements[I].second) {

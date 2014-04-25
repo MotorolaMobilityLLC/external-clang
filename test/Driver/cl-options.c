@@ -14,11 +14,23 @@
 // RUN: %clang_cl /D foo=bar -### -- %s 2>&1 | FileCheck -check-prefix=D %s
 // D: "-D" "foo=bar"
 
+// RUN: %clang_cl /E -### -- %s 2>&1 | FileCheck -check-prefix=E %s
+// E: "-E"
+// E: "-o" "-"
+
 // RTTI is on by default; just check that we don't error.
 // RUN: %clang_cl /Zs /GR -- %s 2>&1
 
 // RUN: %clang_cl /GR- -### -- %s 2>&1 | FileCheck -check-prefix=GR_ %s
 // GR_: -fno-rtti
+
+// RUN: %clang_cl /Gy -### -- %s 2>&1 | FileCheck -check-prefix=Gy %s
+// Gy: -fdata-sections
+// Gy: -ffunction-sections
+
+// RUN: %clang_cl /Gy /Gy- -### -- %s 2>&1 | FileCheck -check-prefix=Gy_ %s
+// Gy_-NOT: -fdata-sections
+// Gy_-NOT: -ffunction-sections
 
 // RUN: %clang_cl /Imyincludedir -### -- %s 2>&1 | FileCheck -check-prefix=SLASH_I %s
 // RUN: %clang_cl /I myincludedir -### -- %s 2>&1 | FileCheck -check-prefix=SLASH_I %s
@@ -56,15 +68,33 @@
 // RUN: %clang_cl /Oy- -### -- %s 2>&1 | FileCheck -check-prefix=Oy_ %s
 // Oy_: -mdisable-fp-elim
 
-// RUN: %clang_cl /P -### -- %s 2>&1 | FileCheck -check-prefix=P %s
-// P: -E
-
 // RUN: %clang_cl /showIncludes -### -- %s 2>&1 | FileCheck -check-prefix=showIncludes %s
 // showIncludes: --show-includes
 
 // RUN: %clang_cl /Umymacro -### -- %s 2>&1 | FileCheck -check-prefix=U %s
 // RUN: %clang_cl /U mymacro -### -- %s 2>&1 | FileCheck -check-prefix=U %s
 // U: "-U" "mymacro"
+
+// RUN: %clang_cl /vd2 -### -- %s 2>&1 | FileCheck -check-prefix=VD2 %s
+// VD2: -vtordisp-mode=2
+
+// RUN: %clang_cl /vmg -### -- %s 2>&1 | FileCheck -check-prefix=VMG %s
+// VMG: "-fms-memptr-rep=virtual"
+
+// RUN: %clang_cl /vmg /vms -### -- %s 2>&1 | FileCheck -check-prefix=VMS %s
+// VMS: "-fms-memptr-rep=single"
+
+// RUN: %clang_cl /vmg /vmm -### -- %s 2>&1 | FileCheck -check-prefix=VMM %s
+// VMM: "-fms-memptr-rep=multiple"
+
+// RUN: %clang_cl /vmg /vmv -### -- %s 2>&1 | FileCheck -check-prefix=VMV %s
+// VMV: "-fms-memptr-rep=virtual"
+
+// RUN: %clang_cl /vmg /vmb -### -- %s 2>&1 | FileCheck -check-prefix=VMB %s
+// VMB: '/vmg' not allowed with '/vmb'
+
+// RUN: %clang_cl /vmg /vmm /vms -### -- %s 2>&1 | FileCheck -check-prefix=VMX %s
+// VMX: '/vms' not allowed with '/vmm'
 
 // RUN: %clang_cl /W0 -### -- %s 2>&1 | FileCheck -check-prefix=W0 %s
 // W0: -w
@@ -101,8 +131,8 @@
 
 
 // Ignored options. Check that we don't get "unused during compilation" errors.
-// (/Zs is for syntax-only, /WX is for -Werror)
-// RUN: %clang_cl /Zs /WX \
+// (/Zs is for syntax-only)
+// RUN: %clang_cl /Zs \
 // RUN:    /analyze- \
 // RUN:    /errorReport:foo \
 // RUN:    /FS \
@@ -120,7 +150,8 @@
 // RUN:    /wd1234 \
 // RUN:    /Zc:forScope \
 // RUN:    /Zc:wchar_t \
-// RUN:    -- %s
+// RUN:    -### -- %s 2>&1 | FileCheck -check-prefix=IGNORED %s
+// IGNORED-NOT: argument unused during compilation
 
 // Ignored options and compile-only options are ignored for link jobs.
 // RUN: touch %t.obj
@@ -131,7 +162,7 @@
 
 // Support ignoring warnings about unused arguments.
 // RUN: %clang_cl /Abracadabra -Qunused-arguments -### -- %s 2>&1 | FileCheck -check-prefix=UNUSED %s
-// UNUSED-NOT: warning
+// UNUSED-NOT: argument unused during compilation
 
 // Unsupported but parsed options. Check that we don't error on them.
 // (/Zs is for syntax-only)
@@ -140,7 +171,7 @@
 // RUN:     /arch:sse2 \
 // RUN:     /clr:pure \
 // RUN:     /docname \
-// RUN:     /E \
+// RUN:     /d2Zi+ \
 // RUN:     /EHsc \
 // RUN:     /EP \
 // RUN:     /F \
@@ -176,8 +207,6 @@
 // RUN:     /Gs1000 \
 // RUN:     /GT \
 // RUN:     /GX \
-// RUN:     /Gy \
-// RUN:     /Gy- \
 // RUN:     /Gz \
 // RUN:     /GZ \
 // RUN:     /H \
@@ -196,11 +225,6 @@
 // RUN:     /Qvec-report:2 \
 // RUN:     /u \
 // RUN:     /V \
-// RUN:     /vd2 \
-// RUN:     /vmb \
-// RUN:     /vmm \
-// RUN:     /vms \
-// RUN:     /vmv \
 // RUN:     /volatile \
 // RUN:     /wfoo \
 // RUN:     /WL \
@@ -223,6 +247,7 @@
 // RUN:     /ZI \
 // RUN:     /Zl \
 // RUN:     /Zp \
+// RUN:     /Zp1 \
 // RUN:     /ZW:nostdlib \
 // RUN:     -- %s 2>&1
 
@@ -232,7 +257,14 @@
 // Xclang: "hellocc1"
 
 // We support -m32 and -m64.
-// RUN: %clang_cl /Zs /WX -m32 -m64 -- %s
+// RUN: %clang_cl /Zs /WX -m32 -m64 -### -- 2>&1 %s | FileCheck -check-prefix=MFLAGS %s
+// MFLAGS-NOT: argument unused during compilation
+
+// Use -fno-rtti by default.
+// RUN: %clang_cl /c -### -- %s 2>&1 | FileCheck -check-prefix=NoRTTI %s
+// NoRTTI: "-fno-rtti"
+// RUN: %clang_cl /c /GR -### -- %s 2>&1 | FileCheck -check-prefix=RTTI %s
+// RTTI-NOT: "-fno-rtti"
 
 
 void f() { }
