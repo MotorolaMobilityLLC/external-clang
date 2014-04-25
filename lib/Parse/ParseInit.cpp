@@ -105,8 +105,6 @@ bool Parser::MayBeDesignationStart() {
       return true;
     }
   }
-  
-  return true;
 }
 
 static void CheckArrayDesignatorSyntax(Parser &P, SourceLocation Loc,
@@ -493,7 +491,7 @@ bool Parser::ParseMicrosoftIfExistsBraceInitializer(ExprVector &InitExprs,
   
   BalancedDelimiterTracker Braces(*this, tok::l_brace);
   if (Braces.consumeOpen()) {
-    Diag(Tok, diag::err_expected_lbrace);
+    Diag(Tok, diag::err_expected) << tok::l_brace;
     return false;
   }
 
@@ -512,7 +510,7 @@ bool Parser::ParseMicrosoftIfExistsBraceInitializer(ExprVector &InitExprs,
     return false;
   }
 
-  while (Tok.isNot(tok::eof)) {
+  while (!isEofOrEom()) {
     trailingComma = false;
     // If we know that this cannot be a designation, just parse the nested
     // initializer directly.

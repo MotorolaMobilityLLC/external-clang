@@ -6,6 +6,7 @@ include $(CLEAR_VARS)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES := \
+  AttrHasAttributeImpl.inc \
   DiagnosticASTKinds.inc \
   DiagnosticAnalysisKinds.inc \
   DiagnosticCommentKinds.inc \
@@ -21,6 +22,7 @@ TBLGEN_TABLES := \
   arm_neon.inc
 
 clang_basic_SRC_FILES := \
+  Attributes.cpp \
   Builtins.cpp \
   CharInfo.cpp \
   Diagnostic.cpp \
@@ -39,7 +41,8 @@ clang_basic_SRC_FILES := \
   Targets.cpp \
   TokenKinds.cpp \
   Version.cpp \
-  VersionTuple.cpp
+  VersionTuple.cpp \
+  VirtualFileSystem.cpp
 
 LOCAL_SRC_FILES := $(clang_basic_SRC_FILES)
 
