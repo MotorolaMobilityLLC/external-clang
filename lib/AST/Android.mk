@@ -10,6 +10,7 @@ TBLGEN_TABLES :=    \
 	AttrImpl.inc	\
 	AttrList.inc	\
 	Attrs.inc	\
+        AttrVisitor.inc \
 	CommentCommandInfo.inc \
 	CommentCommandList.inc \
 	CommentHTMLNamedCharacterReferences.inc \
