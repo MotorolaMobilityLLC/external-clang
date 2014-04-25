@@ -176,7 +176,7 @@ class B {};
 template <class T>
 class Base {
  public:
-  bool base_fun(void* p) { return false; }  // expected-note {{must qualify identifier to find this declaration in dependent base clas}}
+  bool base_fun(void* p) { return false; }  // expected-note {{must qualify identifier to find this declaration in dependent base class}}
   operator T*() const { return 0; }
 };
 
@@ -222,7 +222,7 @@ template <typename T> struct C : T {
 };
 
 template struct B<A>;
-template struct C<A>;  // expected-note-re 1+ {{in instantiation of member function 'PR16014::C<PR16014::A>::.*' requested here}}
+template struct C<A>;  // expected-note-re 1+ {{in instantiation of member function 'PR16014::C<PR16014::A>::{{.*}}' requested here}}
 
 template <typename T> struct D : T {
   struct Inner {
@@ -234,5 +234,28 @@ template <typename T> struct D : T {
   };
 };
 template struct D<A>;
+
+}
+
+namespace PR19233 {
+template <class T>
+struct A : T {
+  void foo() {
+    ::undef(); // expected-error {{no member named 'undef' in the global namespace}}
+  }
+  void bar() {
+    ::UndefClass::undef(); // expected-error {{no member named 'UndefClass' in the global namespace}}
+  }
+  void baz() {
+    B::qux(); // expected-error {{use of undeclared identifier 'B'}}
+  }
+};
+
+struct B { void qux(); };
+struct C : B { };
+template struct A<C>; // No error!  B is a base of A<C>, and qux is available.
+
+struct D { };
+template struct A<D>; // expected-note {{in instantiation of member function 'PR19233::A<PR19233::D>::baz' requested here}}
 
 }
