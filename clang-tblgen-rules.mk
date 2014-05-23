@@ -7,7 +7,7 @@ endif
 
 ifneq ($(strip $(TBLGEN_TABLES)),)
 
-intermediates := $(call local-intermediates-dir)
+intermediates := $(call local-generated-sources-dir)
 
 ifneq ($(findstring AttrDump.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/AST/AttrDump.inc
