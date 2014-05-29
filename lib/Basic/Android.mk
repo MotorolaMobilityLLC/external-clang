@@ -42,7 +42,8 @@ clang_basic_SRC_FILES := \
   TokenKinds.cpp \
   Version.cpp \
   VersionTuple.cpp \
-  VirtualFileSystem.cpp
+  VirtualFileSystem.cpp \
+  Warnings.cpp
 
 LOCAL_SRC_FILES := $(clang_basic_SRC_FILES)
 
