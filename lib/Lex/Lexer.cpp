@@ -10,19 +10,6 @@
 //  This file implements the Lexer and Token interfaces.
 //
 //===----------------------------------------------------------------------===//
-//
-// TODO: GCC Diagnostics emitted by the lexer:
-// PEDWARN: (form feed|vertical tab) in preprocessing directive
-//
-// Universal characters, unicode, char mapping:
-// WARNING: `%.*s' is not in NFKC
-// WARNING: `%.*s' is not in NFC
-//
-// Other:
-// TODO: Options to support:
-//    -fexec-charset,-fwide-exec-charset
-//
-//===----------------------------------------------------------------------===//
 
 #include "clang/Lex/Lexer.h"
 #include "UnicodeCharSets.h"
@@ -174,7 +161,7 @@ Lexer::Lexer(FileID FID, const llvm::MemoryBuffer *FromFile,
 /// expansion location that indicates where all lexed tokens should be
 /// "expanded from".
 ///
-/// FIXME: It would really be nice to make _Pragma just be a wrapper around a
+/// TODO: It would really be nice to make _Pragma just be a wrapper around a
 /// normal lexer that remaps tokens as they fly by.  This would require making
 /// Preprocessor::Lex virtual.  Given that, we could just dump in a magic lexer
 /// interface that could handle this stuff.  This would pull GetMappedTokenLoc
@@ -379,10 +366,10 @@ unsigned Lexer::getSpelling(const Token &Tok, const char *&Buffer,
                             const LangOptions &LangOpts, bool *Invalid) {
   assert((int)Tok.getLength() >= 0 && "Token character range is bogus!");
 
-  const char *TokStart = 0;
+  const char *TokStart = nullptr;
   // NOTE: this has to be checked *before* testing for an IdentifierInfo.
   if (Tok.is(tok::raw_identifier))
-    TokStart = Tok.getRawIdentifierData();
+    TokStart = Tok.getRawIdentifier().data();
   else if (!Tok.hasUCN()) {
     if (const IdentifierInfo *II = Tok.getIdentifierInfo()) {
       // Just return the string from the identifier table, which is very quick.
@@ -395,7 +382,7 @@ unsigned Lexer::getSpelling(const Token &Tok, const char *&Buffer,
   if (Tok.isLiteral())
     TokStart = Tok.getLiteralData();
 
-  if (TokStart == 0) {
+  if (!TokStart) {
     // Compute the start of the token in the input lexer buffer.
     bool CharDataInvalid = false;
     TokStart = SourceMgr.getCharacterData(Tok.getLocation(), &CharDataInvalid);
@@ -637,8 +624,7 @@ Lexer::ComputePreamble(const llvm::MemoryBuffer *Buffer,
       // the raw identifier to recognize and categorize preprocessor directives.
       TheLexer.LexFromRawLexer(TheTok);
       if (TheTok.getKind() == tok::raw_identifier && !TheTok.needsCleaning()) {
-        StringRef Keyword(TheTok.getRawIdentifierData(),
-                                TheTok.getLength());
+        StringRef Keyword = TheTok.getRawIdentifier();
         PreambleDirectiveKind PDK
           = llvm::StringSwitch<PreambleDirectiveKind>(Keyword)
               .Case("include", PDK_Skipped)
@@ -1287,7 +1273,7 @@ Slash:
   if (Ptr[0] == '?' && Ptr[1] == '?') {
     // If this is actually a legal trigraph (not something like "??x"), emit
     // a trigraph warning.  If so, and if trigraphs are enabled, return it.
-    if (char C = DecodeTrigraphChar(Ptr+2, Tok ? this : 0)) {
+    if (char C = DecodeTrigraphChar(Ptr+2, Tok ? this : nullptr)) {
       // Remember that this token needs to be cleaned.
       if (Tok) Tok->setFlag(Token::NeedsCleaning);
 
@@ -1450,7 +1436,7 @@ static void maybeDiagnoseIDCharCompat(DiagnosticsEngine &Diags, uint32_t C,
 bool Lexer::tryConsumeIdentifierUCN(const char *&CurPtr, unsigned Size,
                                     Token &Result) {
   const char *UCNPtr = CurPtr + Size;
-  uint32_t CodePoint = tryReadUCN(UCNPtr, CurPtr, /*Token=*/0);
+  uint32_t CodePoint = tryReadUCN(UCNPtr, CurPtr, /*Token=*/nullptr);
   if (CodePoint == 0 || !isAllowedIDChar(CodePoint, LangOpts))
     return false;
 
@@ -1733,7 +1719,8 @@ const char *Lexer::LexUDSuffix(Token &Result, const char *CurPtr,
 /// either " or L" or u8" or u" or U".
 bool Lexer::LexStringLiteral(Token &Result, const char *CurPtr,
                              tok::TokenKind Kind) {
-  const char *NulCharacter = 0; // Does this string contain the \0 character?
+  // Does this string contain the \0 character?
+  const char *NulCharacter = nullptr;
 
   if (!isLexingRawMode() &&
       (Kind == tok::utf8_string_literal ||
@@ -1869,7 +1856,8 @@ bool Lexer::LexRawStringLiteral(Token &Result, const char *CurPtr,
 /// LexAngledStringLiteral - Lex the remainder of an angled string literal,
 /// after having lexed the '<' character.  This is used for #include filenames.
 bool Lexer::LexAngledStringLiteral(Token &Result, const char *CurPtr) {
-  const char *NulCharacter = 0; // Does this string contain the \0 character?
+  // Does this string contain the \0 character?
+  const char *NulCharacter = nullptr;
   const char *AfterLessPos = CurPtr;
   char C = getAndAdvanceChar(CurPtr, Result);
   while (C != '>') {
@@ -1906,7 +1894,8 @@ bool Lexer::LexAngledStringLiteral(Token &Result, const char *CurPtr) {
 /// lexed either ' or L' or u' or U'.
 bool Lexer::LexCharConstant(Token &Result, const char *CurPtr,
                             tok::TokenKind Kind) {
-  const char *NulCharacter = 0; // Does this character contain the \0 character?
+  // Does this character contain the \0 character?
+  const char *NulCharacter = nullptr;
 
   if (!isLexingRawMode() &&
       (Kind == tok::utf16_char_constant || Kind == tok::utf32_char_constant))
@@ -2251,8 +2240,6 @@ static bool isEndOfBlockCommentWithEscapedNewLine(const char *CurPtr,
 
 #ifdef __SSE2__
 #include <emmintrin.h>
-#elif __AVX2__
-#include <avx2intrin.h>
 #elif __ALTIVEC__
 #include <altivec.h>
 #undef bool
@@ -2308,33 +2295,17 @@ bool Lexer::SkipBlockComment(Token &Result, const char *CurPtr,
         // If there is a code-completion point avoid the fast scan because it
         // doesn't check for '\0'.
         !(PP && PP->getCodeCompletionFileLoc() == FileLoc)) {
-#ifndef __AVX2__
       // While not aligned to a 16-byte boundary.
       while (C != '/' && ((intptr_t)CurPtr & 0x0F) != 0)
         C = *CurPtr++;
-#endif
 
       if (C == '/') goto FoundSlash;
 
 #ifdef __SSE2__
-#define VECTOR_TYPE             __m128i
-#define SET1_EPI8(v)            _mm_set1_epi8(v)
-#define CMPEQ_EPI8(v1,v2)       _mm_cmpeq_epi8(v1,v2)
-#define MOVEMASK_EPI8(v)        _mm_movemask_epi8(v)
-#define STEP                    16
-#elif __AVX2__
-#define VECTOR_TYPE             __m256i
-#define SET1_EPI8(v)            _mm256_set1_epi8(v)
-#define CMPEQ_EPI8(v1,v2)       _mm256_cmpeq_epi8(v1,v2)
-#define MOVEMASK_EPI8(v)        _mm256_movemask_epi8(v)
-#define STEP                    32
-#endif
-
-#if defined(__SSE2__) || defined(__AVX2__)
-      VECTOR_TYPE Slashes = SET1_EPI8('/');
-      while (CurPtr+STEP <= BufferEnd) {
-        int cmp = MOVEMASK_EPI8(CMPEQ_EPI8(*(const VECTOR_TYPE*)CurPtr,
-                                Slashes));
+      __m128i Slashes = _mm_set1_epi8('/');
+      while (CurPtr+16 <= BufferEnd) {
+        int cmp = _mm_movemask_epi8(_mm_cmpeq_epi8(*(const __m128i*)CurPtr,
+                                    Slashes));
         if (cmp != 0) {
           // Adjust the pointer to point directly after the first slash. It's
           // not necessary to set C here, it will be overwritten at the end of
@@ -2342,13 +2313,8 @@ bool Lexer::SkipBlockComment(Token &Result, const char *CurPtr,
           CurPtr += llvm::countTrailingZeros<unsigned>(cmp) + 1;
           goto FoundSlash;
         }
-        CurPtr += STEP;
+        CurPtr += 16;
       }
-#undef VECTOR_TYPE
-#undef SET1_EPI8
-#undef CMPEQ_EPI8
-#undef MOVEMASK_EPI8
-#undef STEP
 #elif __ALTIVEC__
       __vector unsigned char Slashes = {
         '/', '/', '/', '/',  '/', '/', '/', '/',
@@ -2630,7 +2596,7 @@ static const char *FindConflictEnd(const char *CurPtr, const char *BufferEnd,
     }
     return RestOfBuffer.data()+Pos;
   }
-  return 0;
+  return nullptr;
 }
 
 /// IsStartOfConflictMarker - If the specified pointer is the start of a version
@@ -2940,7 +2906,7 @@ bool Lexer::LexTokenInternal(Token &Result, bool TokAtPhysicalStartOfLine) {
 LexNextToken:
   // New token, can't need cleaning yet.
   Result.clearFlag(Token::NeedsCleaning);
-  Result.setIdentifierInfo(0);
+  Result.setIdentifierInfo(nullptr);
 
   // CurPtr - Cache BufferPtr in an automatic variable.
   const char *CurPtr = BufferPtr;
@@ -3406,7 +3372,7 @@ LexNextToken:
         // We parsed a # character.  If this occurs at the start of the line,
         // it's actually the start of a preprocessing directive.  Callback to
         // the preprocessor to handle it.
-        // FIXME: -fpreprocessed mode??
+        // TODO: -fpreprocessed mode??
         if (TokAtPhysicalStartOfLine && !LexingRawMode && !Is_PragmaLexer)
           goto HandleDirective;
 
@@ -3572,7 +3538,7 @@ LexNextToken:
       // We parsed a # character.  If this occurs at the start of the line,
       // it's actually the start of a preprocessing directive.  Callback to
       // the preprocessor to handle it.
-      // FIXME: -fpreprocessed mode??
+      // TODO: -fpreprocessed mode??
       if (TokAtPhysicalStartOfLine && !LexingRawMode && !Is_PragmaLexer)
         goto HandleDirective;
 

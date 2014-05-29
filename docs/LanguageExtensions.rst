@@ -134,6 +134,26 @@ The attribute name can also be specified with a preceding and following ``__``
 (double underscore) to avoid interference from a macro with the same name.  For
 instance, ``__always_inline__`` can be used instead of ``always_inline``.
 
+``__is_identifier``
+-------------------
+
+This function-like macro takes a single identifier argument that might be either
+a reserved word or a regular identifier. It evaluates to 1 if the argument is just
+a regular identifier and not a reserved word, in the sense that it can then be
+used as the name of a user-defined function or variable. Otherwise it evaluates
+to 0.  It can be used like this:
+
+.. code-block:: c++
+
+  ...
+  #ifdef __is_identifier          // Compatibility with non-clang compilers.
+    #if __is_identifier(__wchar_t)
+      typedef wchar_t __wchar_t;
+    #endif
+  #endif
+
+  __wchar_t WideCharacter;
+  ...
 
 Include File Checking Macros
 ============================
@@ -730,16 +750,16 @@ for default initializers in aggregate members is enabled.
 C++1y generalized lambda capture
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Use ``__has_feature(cxx_init_capture)`` or
-``__has_extension(cxx_init_capture)`` to determine if support for
+Use ``__has_feature(cxx_init_captures)`` or
+``__has_extension(cxx_init_captures)`` to determine if support for
 lambda captures with explicit initializers is enabled
 (for instance, ``[n(0)] { return ++n; }``).
 
 C++1y generic lambdas
 ^^^^^^^^^^^^^^^^^^^^^
 
-Use ``__has_feature(cxx_generic_lambda)`` or
-``__has_extension(cxx_generic_lambda)`` to determine if support for generic
+Use ``__has_feature(cxx_generic_lambdas)`` or
+``__has_extension(cxx_generic_lambdas)`` to determine if support for generic
 (polymorphic) lambdas is enabled
 (for instance, ``[] (auto x) { return x + 1; }``).
 
@@ -1546,7 +1566,7 @@ instructions for implementing atomic operations.
   void __builtin_arm_clrex(void);
 
 The types ``T`` currently supported are:
-* Integer types with width at most 64 bits (or 128 bits on ARM64).
+* Integer types with width at most 64 bits (or 128 bits on AArch64).
 * Floating-point types
 * Pointer types.
 

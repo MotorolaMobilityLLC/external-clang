@@ -40,9 +40,12 @@ clang_codegen_SRC_FILES := \
   CGObjCMac.cpp \
   CGObjCRuntime.cpp \
   CGOpenCLRuntime.cpp \
+  CGOpenMPRuntime.cpp \
+  CGLoopInfo.cpp \
   CGRTTI.cpp \
   CGRecordLayoutBuilder.cpp \
   CGStmt.cpp \
+  CGStmtOpenMP.cpp \
   CGVTT.cpp \
   CGVTables.cpp \
   CodeGenABITypes.cpp \
@@ -54,6 +57,7 @@ clang_codegen_SRC_FILES := \
   CodeGenTypes.cpp \
   ItaniumCXXABI.cpp \
   MicrosoftCXXABI.cpp \
+  MicrosoftRTTI.cpp \
   ModuleBuilder.cpp \
   TargetInfo.cpp
 
