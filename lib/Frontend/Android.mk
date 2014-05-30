@@ -50,7 +50,6 @@ clang_frontend_SRC_FILES := \
   TextDiagnostic.cpp \
   TextDiagnosticBuffer.cpp \
   TextDiagnosticPrinter.cpp \
-  Warnings.cpp \
   VerifyDiagnosticConsumer.cpp
 
 LOCAL_SRC_FILES := $(clang_frontend_SRC_FILES)

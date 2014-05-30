@@ -233,7 +233,7 @@ class TargetArch<list<string> arches> {
 def TargetARM : TargetArch<["arm", "thumb"]>;
 def TargetMSP430 : TargetArch<["msp430"]>;
 def TargetX86 : TargetArch<["x86"]>;
-def TargetX86Win : TargetArch<["x86", "x86_64"]> {
+def TargetWindows : TargetArch<["x86", "x86_64", "arm", "thumb"]> {
   let OSes = ["Win32"];
 }
 def TargetMips : TargetArch<["mips", "mipsel"]>;
@@ -673,6 +673,12 @@ def MinSize : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+def Flatten : InheritableAttr {
+  let Spellings = [GCC<"flatten">];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [FlattenDocs];
+}
+
 def Format : InheritableAttr {
   let Spellings = [GCC<"format">];
   let Args = [IdentifierArgument<"Type">, IntArgument<"FormatIdx">,
@@ -828,6 +834,12 @@ def NoMips16 : InheritableAttr, TargetSpecificAttr<TargetMips> {
   let Documentation = [Undocumented];
 }
 
+def NoSplitStack : InheritableAttr {
+  let Spellings = [GCC<"no_split_stack">];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [NoSplitStackDocs];
+}
+
 def NonNull : InheritableAttr {
   let Spellings = [GCC<"nonnull">];
   let Subjects = SubjectList<[ObjCMethod, HasFunctionProto, ParmVar], WarnDiag,
@@ -835,9 +847,8 @@ def NonNull : InheritableAttr {
   let Args = [VariadicUnsignedArgument<"Args">];
   let AdditionalMembers =
 [{bool isNonNull(unsigned idx) const {
-    for (args_iterator i = args_begin(), e = args_end();
-         i != e; ++i)
-      if (*i == idx)
+    for (const auto &V : args())
+      if (V == idx)
         return true;
     return false;
   } }];
@@ -1080,7 +1091,7 @@ def InitPriority : InheritableAttr {
 }
 
 def Section : InheritableAttr {
-  let Spellings = [GCC<"section">];
+  let Spellings = [GCC<"section">, Declspec<"allocate">];
   let Args = [StringArgument<"Name">];
   let Subjects = SubjectList<[Function, GlobalVar, 
                               ObjCMethod, ObjCProperty], ErrorDiag,
@@ -1262,21 +1273,21 @@ def X86ForceAlignArgPointer : InheritableAttr, TargetSpecificAttr<TargetX86> {
 def NoSanitizeAddress : InheritableAttr {
   let Spellings = [GCC<"no_address_safety_analysis">,
                    GCC<"no_sanitize_address">];
-  let Subjects = SubjectList<[Function, FunctionTemplate], ErrorDiag>;
+  let Subjects = SubjectList<[Function], ErrorDiag>;
   let Documentation = [NoSanitizeAddressDocs];
 }
 
 // Attribute to disable ThreadSanitizer checks.
 def NoSanitizeThread : InheritableAttr {
   let Spellings = [GNU<"no_sanitize_thread">];
-  let Subjects = SubjectList<[Function, FunctionTemplate], ErrorDiag>;
+  let Subjects = SubjectList<[Function], ErrorDiag>;
   let Documentation = [NoSanitizeThreadDocs];
 }
 
 // Attribute to disable MemorySanitizer checks.
 def NoSanitizeMemory : InheritableAttr {
   let Spellings = [GNU<"no_sanitize_memory">];
-  let Subjects = SubjectList<[Function, FunctionTemplate], ErrorDiag>;
+  let Subjects = SubjectList<[Function], ErrorDiag>;
   let Documentation = [NoSanitizeMemoryDocs];
 }
 
@@ -1331,7 +1342,7 @@ def AssertCapability : InheritableAttr {
                    CXX11<"clang", "assert_capability">,
                    GNU<"assert_shared_capability">,
                    CXX11<"clang", "assert_shared_capability">];
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let LateParsed = 1;
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
@@ -1350,7 +1361,7 @@ def AcquireCapability : InheritableAttr {
                    CXX11<"clang", "acquire_shared_capability">,
                    GNU<"exclusive_lock_function">,
                    GNU<"shared_lock_function">];
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let LateParsed = 1;
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
@@ -1368,7 +1379,7 @@ def TryAcquireCapability : InheritableAttr {
                    CXX11<"clang", "try_acquire_capability">,
                    GNU<"try_acquire_shared_capability">,
                    CXX11<"clang", "try_acquire_shared_capability">];
-  let Subjects = SubjectList<[Function, FunctionTemplate],
+  let Subjects = SubjectList<[Function],
                              ErrorDiag>;
   let LateParsed = 1;
   let TemplateDependent = 1;
@@ -1389,7 +1400,7 @@ def ReleaseCapability : InheritableAttr {
                    GNU<"release_generic_capability">,
                    CXX11<"clang", "release_generic_capability">,
                    GNU<"unlock_function">];
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let LateParsed = 1;
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
@@ -1417,7 +1428,7 @@ def RequiresCapability : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let DuplicatesAllowedWhileMerging = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Accessors = [Accessor<"isShared", [GNU<"requires_shared_capability">,
                                          GNU<"shared_locks_required">,
                                 CXX11<"clang","requires_shared_capability">]>];
@@ -1426,7 +1437,7 @@ def RequiresCapability : InheritableAttr {
 
 def NoThreadSafetyAnalysis : InheritableAttr {
   let Spellings = [GNU<"no_thread_safety_analysis">];
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1485,7 +1496,7 @@ def AssertExclusiveLock : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let DuplicatesAllowedWhileMerging = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1496,7 +1507,7 @@ def AssertSharedLock : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let DuplicatesAllowedWhileMerging = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1509,7 +1520,7 @@ def ExclusiveTrylockFunction : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let DuplicatesAllowedWhileMerging = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1522,7 +1533,7 @@ def SharedTrylockFunction : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let DuplicatesAllowedWhileMerging = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1532,7 +1543,7 @@ def LockReturned : InheritableAttr {
   let LateParsed = 1;
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1543,7 +1554,7 @@ def LocksExcluded : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let DuplicatesAllowedWhileMerging = 1;
-  let Subjects = SubjectList<[Function, FunctionTemplate]>;
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
@@ -1573,7 +1584,7 @@ def ConsumableSetOnRead : InheritableAttr {
 def CallableWhen : InheritableAttr {
   let Spellings = [GNU<"callable_when">];
   let Subjects = SubjectList<[CXXMethod]>;
-  let Args = [VariadicEnumArgument<"CallableState", "ConsumedState",
+  let Args = [VariadicEnumArgument<"CallableStates", "ConsumedState",
                                    ["unknown", "consumed", "unconsumed"],
                                    ["Unknown", "Consumed", "Unconsumed"]>];
   let Documentation = [CallableWhenDocs];
@@ -1651,16 +1662,15 @@ def MsStruct : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
-def DLLExport : InheritableAttr, TargetSpecificAttr<TargetX86Win> {
+def DLLExport : InheritableAttr, TargetSpecificAttr<TargetWindows> {
   let Spellings = [Declspec<"dllexport">, GCC<"dllexport">];
   let Subjects = SubjectList<[Function, Var]>;
   let Documentation = [Undocumented];
 }
 
-def DLLImport : InheritableAttr, TargetSpecificAttr<TargetX86Win> {
+def DLLImport : InheritableAttr, TargetSpecificAttr<TargetWindows> {
   let Spellings = [Declspec<"dllimport">, GCC<"dllimport">];
-  // Technically, the subjects for DllImport are Function and Var, but there is
-  // custom semantic handling required when MicrosoftExt is true.
+  let Subjects = SubjectList<[Function, Var]>;
   let Documentation = [Undocumented];
 }
 
@@ -1668,6 +1678,13 @@ def SelectAny : InheritableAttr {
   let Spellings = [Declspec<"selectany">];
   let LangOpts = [MicrosoftExt];
   let Documentation = [Undocumented];
+}
+
+def Thread : Attr {
+  let Spellings = [Declspec<"thread">];
+  let LangOpts = [MicrosoftExt];
+  let Documentation = [ThreadDocs];
+  let Subjects = SubjectList<[Var]>;
 }
 
 def Win64 : IgnoredAttr {
@@ -1702,6 +1719,7 @@ def MSInheritance : InheritableAttr {
                    Keyword<"__multiple_inheritance">,
                    Keyword<"__virtual_inheritance">,
                    Keyword<"__unspecified_inheritance">];
+  let Documentation = [SectionDocs];
   let AdditionalMembers = [{
   static bool hasVBPtrOffsetField(Spelling Inheritance) {
     return Inheritance == Keyword_unspecified_inheritance;
