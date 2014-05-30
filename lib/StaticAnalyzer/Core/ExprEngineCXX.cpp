@@ -113,14 +113,22 @@ static const MemRegion *getRegionForConstructedObject(
   // See if we're constructing an existing region by looking at the next
   // element in the CFG.
   const CFGBlock *B = CurrBldrCtx.getBlock();
-  if (CurrStmtIdx + 1 < B->size()) {
-    CFGElement Next = (*B)[CurrStmtIdx+1];
+  unsigned int NextStmtIdx = CurrStmtIdx + 1;
+  if (NextStmtIdx < B->size()) {
+    CFGElement Next = (*B)[NextStmtIdx];
+
+    // Is this a destructor? If so, we might be in the middle of an assignment
+    // to a local or member: look ahead one more element to see what we find.
+    while (Next.getAs<CFGImplicitDtor>() && NextStmtIdx + 1 < B->size()) {
+      ++NextStmtIdx;
+      Next = (*B)[NextStmtIdx];
+    }
 
     // Is this a constructor for a local variable?
     if (Optional<CFGStmt> StmtElem = Next.getAs<CFGStmt>()) {
       if (const DeclStmt *DS = dyn_cast<DeclStmt>(StmtElem->getStmt())) {
         if (const VarDecl *Var = dyn_cast<VarDecl>(DS->getSingleDecl())) {
-          if (Var->getInit()->IgnoreImplicit() == CE) {
+          if (Var->getInit() && Var->getInit()->IgnoreImplicit() == CE) {
             SVal LValue = State->getLValue(Var, LCtx);
             QualType Ty = Var->getType();
             LValue = makeZeroElementRegion(State, LValue, Ty);
@@ -172,7 +180,7 @@ void ExprEngine::VisitCXXConstructExpr(const CXXConstructExpr *CE,
   const LocationContext *LCtx = Pred->getLocationContext();
   ProgramStateRef State = Pred->getState();
 
-  const MemRegion *Target = 0;
+  const MemRegion *Target = nullptr;
 
   // FIXME: Handle arrays, which run the same constructor for every element.
   // For now, we just run the first constructor (which should still invalidate
@@ -254,7 +262,8 @@ void ExprEngine::VisitCXXConstructExpr(const CXXConstructExpr *CE,
         // since it's then possible to be initializing one part of a multi-
         // dimensional array.
         State = State->bindDefault(loc::MemRegionVal(Target), ZeroVal);
-        Bldr.generateNode(CE, *I, State, /*tag=*/0, ProgramPoint::PreStmtKind);
+        Bldr.generateNode(CE, *I, State, /*tag=*/nullptr,
+                          ProgramPoint::PreStmtKind);
       }
     }
   }
@@ -389,7 +398,7 @@ void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
   if (IsStandardGlobalOpNewFunction)
     symVal = svalBuilder.getConjuredHeapSymbolVal(CNE, LCtx, blockCount);
   else
-    symVal = svalBuilder.conjureSymbolVal(0, CNE, LCtx, CNE->getType(), 
+    symVal = svalBuilder.conjureSymbolVal(nullptr, CNE, LCtx, CNE->getType(),
                                           blockCount);
 
   ProgramStateRef State = Pred->getState();
