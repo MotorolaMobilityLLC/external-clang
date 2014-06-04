@@ -220,7 +220,7 @@ ifneq ($(findstring Options.inc,$(TBLGEN_TABLES)),)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Driver/Options.inc
 $(intermediates)/include/clang/Driver/Options.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
 $(intermediates)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(LLVM_ROOT_PATH)/include/llvm/Option/OptParser.td $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td \
-    | $(CLANG_TBLGEN) $(TBLGEN)
+    | $(CLANG_TBLGEN) $(LLVM_TBLGEN)
 	$(call transform-host-td-to-out,opt-parser-defs)
 endif
 
