@@ -61,13 +61,13 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMX86Desc \
   libLLVMX86AsmPrinter \
   libLLVMX86Utils \
-  libLLVMARM64Info \
-  libLLVMARM64AsmParser \
-  libLLVMARM64CodeGen \
-  libLLVMARM64Disassembler \
-  libLLVMARM64Desc \
-  libLLVMARM64AsmPrinter \
-  libLLVMARM64Utils \
+  libLLVMAArch64Info \
+  libLLVMAArch64AsmParser \
+  libLLVMAArch64CodeGen \
+  libLLVMAArch64Disassembler \
+  libLLVMAArch64Desc \
+  libLLVMAArch64AsmPrinter \
+  libLLVMAArch64Utils \
   libLLVMIRReader \
   libLLVMAsmParser \
   libLLVMAsmPrinter \
