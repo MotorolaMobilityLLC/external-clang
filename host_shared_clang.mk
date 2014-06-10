@@ -26,11 +26,12 @@ LOCAL_WHOLE_STATIC_LIBRARIES := \
 	libclangRewriteCore \
 	libclangSerialization
 
-LOCAL_SHARED_LIBRARIES := libLLVM libc++
 
 ifeq ($(HOST_OS),windows)
+  LOCAL_SHARED_LIBRARIES := libLLVM
   LOCAL_LDLIBS := -limagehlp -lpsapi
 else
+  LOCAL_SHARED_LIBRARIES := libLLVM libc++
   LOCAL_LDLIBS := -ldl -lpthread
 endif
 
