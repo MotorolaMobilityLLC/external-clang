@@ -619,7 +619,7 @@ public:
   /// constant.
   bool EvaluateWithSubstitution(APValue &Value, ASTContext &Ctx,
                                 const FunctionDecl *Callee,
-                                llvm::ArrayRef<const Expr*> Args) const;
+                                ArrayRef<const Expr*> Args) const;
 
   /// \brief Enumeration used to describe the kind of Null pointer constant
   /// returned from \c isNullPointerConstant().
@@ -3909,6 +3909,7 @@ public:
 
   // Iterators
   child_range children() {
+    // FIXME: This does not include the array filler expression.
     if (InitExprs.empty()) return child_range();
     return child_range(&InitExprs[0], &InitExprs[0] + InitExprs.size());
   }

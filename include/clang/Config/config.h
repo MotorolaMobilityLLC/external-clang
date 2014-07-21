@@ -22,4 +22,12 @@
 /* Directory where gcc is installed. */
 #define GCC_INSTALL_PREFIX ""
 
+/* Define if we have libxml2 */
+/* #undef CLANG_HAVE_LIBXML */
+
+#define PACKAGE_STRING "LLVM 3.5.0svn"
+
+/* The LLVM product name and version */
+#define BACKEND_PACKAGE_STRING PACKAGE_STRING
+
 #endif
