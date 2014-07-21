@@ -113,6 +113,8 @@ ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
     $(ALL_MODULES.$(LOCAL_MODULE).INSTALLED) $(CLANG_CXX)
 # the additional dependency is needed when you run mm/mmm.
 $(LOCAL_MODULE) : $(CLANG_CXX)
+CLANG_ARM_NEON_H := $(TARGET_OUT_HEADERS)/clang/arm_neon.h
+$(LOCAL_MODULE) : $(CLANG_ARM_NEON_H)
 
 # Symlink for clang++
 $(CLANG_CXX) : $(LOCAL_INSTALLED_MODULE)
