@@ -172,7 +172,7 @@ class FileManager : public RefCountedBase<FileManager> {
   std::unique_ptr<FileSystemStatCache> StatCache;
 
   bool getStatValue(const char *Path, FileData &Data, bool isFile,
-                    vfs::File **F);
+                    std::unique_ptr<vfs::File> *F);
 
   /// Add all ancestors of the given path (pointing to either a file
   /// or a directory) as virtual directories.
@@ -242,7 +242,8 @@ public:
   /// MemoryBuffer if successful, otherwise returning null.
   llvm::MemoryBuffer *getBufferForFile(const FileEntry *Entry,
                                        std::string *ErrorStr = nullptr,
-                                       bool isVolatile = false);
+                                       bool isVolatile = false,
+                                       bool ShouldCloseOpenFile = true);
   llvm::MemoryBuffer *getBufferForFile(StringRef Filename,
                                        std::string *ErrorStr = nullptr);
 

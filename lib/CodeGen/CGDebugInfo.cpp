@@ -375,9 +375,10 @@ void CGDebugInfo::CreateCompileUnit() {
   TheCU = DBuilder.createCompileUnit(
       LangTag, Filename, getCurrentDirname(), Producer, LO.Optimize,
       CGM.getCodeGenOpts().DwarfDebugFlags, RuntimeVers, SplitDwarfFilename,
-      DebugKind == CodeGenOptions::DebugLineTablesOnly
+      DebugKind <= CodeGenOptions::DebugLineTablesOnly
           ? llvm::DIBuilder::LineTablesOnly
-          : llvm::DIBuilder::FullDebug);
+          : llvm::DIBuilder::FullDebug,
+      DebugKind != CodeGenOptions::LocTrackingOnly);
 }
 
 /// CreateType - Get the Basic type from the cache or create a new
@@ -2341,7 +2342,7 @@ llvm::DIScope CGDebugInfo::getDeclarationOrDefinition(const Decl *D) {
 /// getFunctionDeclaration - Return debug info descriptor to describe method
 /// declaration for the given method definition.
 llvm::DISubprogram CGDebugInfo::getFunctionDeclaration(const Decl *D) {
-  if (!D || DebugKind == CodeGenOptions::DebugLineTablesOnly)
+  if (!D || DebugKind <= CodeGenOptions::DebugLineTablesOnly)
     return llvm::DISubprogram();
 
   const FunctionDecl *FD = dyn_cast<FunctionDecl>(D);
@@ -2386,7 +2387,7 @@ llvm::DISubprogram CGDebugInfo::getFunctionDeclaration(const Decl *D) {
 llvm::DICompositeType CGDebugInfo::getOrCreateFunctionType(const Decl *D,
                                                            QualType FnType,
                                                            llvm::DIFile F) {
-  if (!D || DebugKind == CodeGenOptions::DebugLineTablesOnly)
+  if (!D || DebugKind <= CodeGenOptions::DebugLineTablesOnly)
     // Create fake but valid subroutine type. Otherwise
     // llvm::DISubprogram::Verify() would return false, and
     // subprogram DIE will miss DW_AT_decl_file and
@@ -2579,14 +2580,11 @@ void CGDebugInfo::EmitLocation(CGBuilderTy &Builder, SourceLocation Loc,
 /// CreateLexicalBlock - Creates a new lexical block node and pushes it on
 /// the stack.
 void CGDebugInfo::CreateLexicalBlock(SourceLocation Loc) {
-  llvm::DIDescriptor D =
-    DBuilder.createLexicalBlock(LexicalBlockStack.empty() ?
-                                llvm::DIDescriptor() :
-                                llvm::DIDescriptor(LexicalBlockStack.back()),
-                                getOrCreateFile(CurLoc),
-                                getLineNumber(CurLoc),
-                                getColumnNumber(CurLoc),
-                                0);
+  llvm::DIDescriptor D = DBuilder.createLexicalBlock(
+      llvm::DIDescriptor(LexicalBlockStack.empty() ? nullptr
+                                                   : LexicalBlockStack.back()),
+      getOrCreateFile(CurLoc), getLineNumber(CurLoc), getColumnNumber(CurLoc),
+      0);
   llvm::MDNode *DN = D;
   LexicalBlockStack.push_back(DN);
 }
@@ -3188,32 +3186,6 @@ void CGDebugInfo::EmitGlobalVariable(llvm::GlobalVariable *Var,
         getOrCreateStaticDataMemberDeclarationOrNull(D));
   }
   DeclCache.insert(std::make_pair(D->getCanonicalDecl(), llvm::WeakVH(GV)));
-}
-
-/// EmitGlobalVariable - Emit information about an objective-c interface.
-void CGDebugInfo::EmitGlobalVariable(llvm::GlobalVariable *Var,
-                                     ObjCInterfaceDecl *ID) {
-  assert(DebugKind >= CodeGenOptions::LimitedDebugInfo);
-  // Create global variable debug descriptor.
-  llvm::DIFile Unit = getOrCreateFile(ID->getLocation());
-  unsigned LineNo = getLineNumber(ID->getLocation());
-
-  StringRef Name = ID->getName();
-
-  QualType T = CGM.getContext().getObjCInterfaceType(ID);
-  if (T->isIncompleteArrayType()) {
-
-    // CodeGen turns int[] into int[1] so we'll do the same here.
-    llvm::APInt ConstVal(32, 1);
-    QualType ET = CGM.getContext().getAsArrayType(T)->getElementType();
-
-    T = CGM.getContext().getConstantArrayType(ET, ConstVal,
-                                           ArrayType::Normal, 0);
-  }
-
-  DBuilder.createGlobalVariable(Name, Unit, LineNo,
-                                getOrCreateType(T, Unit),
-                                Var->hasInternalLinkage(), Var);
 }
 
 /// EmitGlobalVariable - Emit global variable's debug info.

@@ -11,12 +11,10 @@ TBLGEN_TABLES := \
   DiagnosticDriverKinds.inc \
   DiagnosticSemaKinds.inc \
   Options.inc \
-  CC1Options.inc \
-  CC1AsOptions.inc
+  CC1Options.inc
 
 clang_driver_SRC_FILES := \
   Action.cpp \
-  CC1AsOptions.cpp \
   Compilation.cpp \
   Driver.cpp \
   DriverOptions.cpp \

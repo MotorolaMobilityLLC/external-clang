@@ -44,6 +44,7 @@ clang_frontend_SRC_FILES := \
   LangStandards.cpp \
   LayoutOverrideSource.cpp \
   LogDiagnosticPrinter.cpp \
+  ModuleDependencyCollector.cpp \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
   SerializedDiagnosticPrinter.cpp \
