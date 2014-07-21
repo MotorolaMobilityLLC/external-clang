@@ -20,6 +20,7 @@
 #include "clang/Lex/CodeCompletionHandler.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/DeclSpec.h"
+#include "clang/Sema/LoopHint.h"
 #include "clang/Sema/Sema.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
@@ -161,6 +162,7 @@ class Parser : public CodeCompletionHandler {
   std::unique_ptr<PragmaHandler> MSCodeSeg;
   std::unique_ptr<PragmaHandler> MSSection;
   std::unique_ptr<PragmaHandler> OptimizeHandler;
+  std::unique_ptr<PragmaHandler> LoopHintHandler;
 
   std::unique_ptr<CommentHandler> CommentSemaHandler;
 
@@ -262,7 +264,7 @@ public:
   typedef clang::TypeResult        TypeResult;
 
   typedef Expr *ExprArg;
-  typedef llvm::MutableArrayRef<Stmt*> MultiStmtArg;
+  typedef MutableArrayRef<Stmt*> MultiStmtArg;
   typedef Sema::FullExprArg FullExprArg;
 
   ExprResult ExprError() { return ExprResult(true); }
@@ -518,6 +520,10 @@ private:
   /// \brief Handle the annotation token produced for
   /// #pragma clang __debug captured
   StmtResult HandlePragmaCaptured();
+
+  /// \brief Handle the annotation token produced for
+  /// #pragma vectorize...
+  LoopHint HandlePragmaLoopHint();
 
   /// GetLookAheadToken - This peeks ahead N tokens and returns that token
   /// without consuming any tokens.  LookAhead(0) returns 'Tok', LookAhead(1)
@@ -1601,6 +1607,9 @@ private:
   StmtResult ParseReturnStatement();
   StmtResult ParseAsmStatement(bool &msAsm);
   StmtResult ParseMicrosoftAsmStatement(SourceLocation AsmLoc);
+  StmtResult ParsePragmaLoopHint(StmtVector &Stmts, bool OnlyStatement,
+                                 SourceLocation *TrailingElseLoc,
+                                 ParsedAttributesWithRange &Attrs);
 
   /// \brief Describes the behavior that should be taken for an __if_exists
   /// block.
@@ -1659,6 +1668,7 @@ private:
   StmtResult ParseSEHTryBlockCommon(SourceLocation Loc);
   StmtResult ParseSEHExceptBlock(SourceLocation Loc);
   StmtResult ParseSEHFinallyBlock(SourceLocation Loc);
+  StmtResult ParseSEHLeaveStatement();
 
   //===--------------------------------------------------------------------===//
   // Objective-C Statements
@@ -1682,7 +1692,8 @@ private:
     DSC_type_specifier, // C++ type-specifier-seq or C specifier-qualifier-list
     DSC_trailing, // C++11 trailing-type-specifier in a trailing return type
     DSC_alias_declaration, // C++11 type-specifier-seq in an alias-declaration
-    DSC_top_level // top-level/namespace declaration context
+    DSC_top_level, // top-level/namespace declaration context
+    DSC_template_type_arg // template type argument context
   };
 
   /// Is this a context in which we are parsing just a type-specifier (or
@@ -1694,6 +1705,7 @@ private:
     case DSC_top_level:
       return false;
 
+    case DSC_template_type_arg:
     case DSC_type_specifier:
     case DSC_trailing:
     case DSC_alias_declaration:
@@ -1815,6 +1827,9 @@ private:
       return isCXXSimpleDeclaration(/*AllowForRangeDecl=*/true);
     return isDeclarationSpecifier(true);
   }
+
+  /// \brief Determine whether this is a C++1z for-range-identifier.
+  bool isForRangeIdentifier();
 
   /// \brief Determine whether we are currently at the start of an Objective-C
   /// class message that appears to be missing the open bracket '['.
@@ -1994,6 +2009,10 @@ private:
   // locations which standard permits but we don't supported yet, 
   // for example, attributes appertain to decl specifiers.
   void ProhibitCXX11Attributes(ParsedAttributesWithRange &attrs);
+
+  /// \brief Skip C++11 attributes and return the end location of the last one.
+  /// \returns SourceLocation() if there are no attributes.
+  SourceLocation SkipCXX11Attributes();
 
   /// \brief Diagnose and skip C++11 attributes that appear in syntactic
   /// locations where attributes are not allowed.
@@ -2196,6 +2215,7 @@ private:
          SmallVectorImpl<DeclaratorChunk::ParamInfo> &ParamInfo,
          SourceLocation &EllipsisLoc);
   void ParseBracketDeclarator(Declarator &D);
+  void ParseMisplacedBracketDeclarator(Declarator &D);
 
   //===--------------------------------------------------------------------===//
   // C++ 7: Declarations [dcl.dcl]
@@ -2327,6 +2347,17 @@ private:
   /// \param Kind Kind of current clause.
   ///
   OMPClause *ParseOpenMPSimpleClause(OpenMPClauseKind Kind);
+  /// \brief Parses clause with a single expression and an additional argument
+  /// of a kind \a Kind.
+  ///
+  /// \param Kind Kind of current clause.
+  ///
+  OMPClause *ParseOpenMPSingleExprWithArgClause(OpenMPClauseKind Kind);
+  /// \brief Parses clause without any additional arguments.
+  ///
+  /// \param Kind Kind of current clause.
+  ///
+  OMPClause *ParseOpenMPClause(OpenMPClauseKind Kind);
   /// \brief Parses clause with the list of variables of a kind \a Kind.
   ///
   /// \param Kind Kind of current clause.
@@ -2371,6 +2402,12 @@ private:
   Decl *ParseTypeParameter(unsigned Depth, unsigned Position);
   Decl *ParseTemplateTemplateParameter(unsigned Depth, unsigned Position);
   Decl *ParseNonTypeTemplateParameter(unsigned Depth, unsigned Position);
+  void DiagnoseMisplacedEllipsis(SourceLocation EllipsisLoc,
+                                 SourceLocation CorrectLoc,
+                                 bool AlreadyHasEllipsis,
+                                 bool IdentifierHasName);
+  void DiagnoseMisplacedEllipsisInDeclarator(SourceLocation EllipsisLoc,
+                                             Declarator &D);
   // C++ 14.3: Template arguments [temp.arg]
   typedef SmallVector<ParsedTemplateArgument, 16> TemplateArgList;
 
