@@ -2,6 +2,7 @@ LOCAL_PATH:= $(call my-dir)
 
 clang_codegen_TBLGEN_TABLES := \
   AttrList.inc \
+  AttrParsedAttrList.inc \
   Attrs.inc \
   AttrVisitor.inc \
   CommentCommandList.inc \
@@ -42,7 +43,6 @@ clang_codegen_SRC_FILES := \
   CGOpenCLRuntime.cpp \
   CGOpenMPRuntime.cpp \
   CGLoopInfo.cpp \
-  CGRTTI.cpp \
   CGRecordLayoutBuilder.cpp \
   CGStmt.cpp \
   CGStmtOpenMP.cpp \
@@ -57,8 +57,8 @@ clang_codegen_SRC_FILES := \
   CodeGenTypes.cpp \
   ItaniumCXXABI.cpp \
   MicrosoftCXXABI.cpp \
-  MicrosoftRTTI.cpp \
   ModuleBuilder.cpp \
+  SanitizerBlacklist.cpp \
   TargetInfo.cpp
 
 # For the host only

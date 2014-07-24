@@ -1566,7 +1566,7 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
   if (ArraySize && ArraySize->hasPlaceholderType()) {
     ExprResult Result = CheckPlaceholderExpr(ArraySize);
     if (Result.isInvalid()) return QualType();
-    ArraySize = Result.take();
+    ArraySize = Result.get();
   }
 
   // Do lvalue-to-rvalue conversions on the array size expression.
@@ -1575,7 +1575,7 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
     if (Result.isInvalid())
       return QualType();
 
-    ArraySize = Result.take();
+    ArraySize = Result.get();
   }
 
   // C99 6.7.5.2p1: The size expression shall have integer type.
@@ -1763,7 +1763,7 @@ bool Sema::CheckFunctionReturnType(QualType T, SourceLocation Loc) {
 }
 
 QualType Sema::BuildFunctionType(QualType T,
-                                 llvm::MutableArrayRef<QualType> ParamTypes,
+                                 MutableArrayRef<QualType> ParamTypes,
                                  SourceLocation Loc, DeclarationName Entity,
                                  const FunctionProtoType::ExtProtoInfo &EPI) {
   bool Invalid = false;
@@ -1989,17 +1989,14 @@ static void inferARCWriteback(TypeProcessingState &state,
   // TODO: mark whether we did this inference?
 }
 
-static void diagnoseIgnoredQualifiers(
-    Sema &S, unsigned Quals,
-    SourceLocation FallbackLoc,
-    SourceLocation ConstQualLoc = SourceLocation(),
-    SourceLocation VolatileQualLoc = SourceLocation(),
-    SourceLocation RestrictQualLoc = SourceLocation(),
-    SourceLocation AtomicQualLoc = SourceLocation()) {
+void Sema::diagnoseIgnoredQualifiers(unsigned DiagID, unsigned Quals,
+                                     SourceLocation FallbackLoc,
+                                     SourceLocation ConstQualLoc,
+                                     SourceLocation VolatileQualLoc,
+                                     SourceLocation RestrictQualLoc,
+                                     SourceLocation AtomicQualLoc) {
   if (!Quals)
     return;
-
-  const SourceManager &SM = S.getSourceManager();
 
   struct Qual {
     unsigned Mask;
@@ -2027,7 +2024,8 @@ static void diagnoseIgnoredQualifiers(
       SourceLocation QualLoc = QualKinds[I].Loc;
       if (!QualLoc.isInvalid()) {
         FixIts[NumQuals] = FixItHint::CreateRemoval(QualLoc);
-        if (Loc.isInvalid() || SM.isBeforeInTranslationUnit(QualLoc, Loc))
+        if (Loc.isInvalid() ||
+            getSourceManager().isBeforeInTranslationUnit(QualLoc, Loc))
           Loc = QualLoc;
       }
 
@@ -2035,19 +2033,20 @@ static void diagnoseIgnoredQualifiers(
     }
   }
 
-  S.Diag(Loc.isInvalid() ? FallbackLoc : Loc, diag::warn_qual_return_type)
+  Diag(Loc.isInvalid() ? FallbackLoc : Loc, DiagID)
     << QualStr << NumQuals << FixIts[0] << FixIts[1] << FixIts[2] << FixIts[3];
 }
 
 // Diagnose pointless type qualifiers on the return type of a function.
-static void diagnoseIgnoredFunctionQualifiers(Sema &S, QualType RetTy,
-                                              Declarator &D,
-                                              unsigned FunctionChunkIndex) {
+static void diagnoseRedundantReturnTypeQualifiers(Sema &S, QualType RetTy,
+                                                  Declarator &D,
+                                                  unsigned FunctionChunkIndex) {
   if (D.getTypeObject(FunctionChunkIndex).Fun.hasTrailingReturnType()) {
     // FIXME: TypeSourceInfo doesn't preserve location information for
     // qualifiers.
-    diagnoseIgnoredQualifiers(S, RetTy.getLocalCVRQualifiers(),
-                              D.getIdentifierLoc());
+    S.diagnoseIgnoredQualifiers(diag::warn_qual_return_type,
+                                RetTy.getLocalCVRQualifiers(),
+                                D.getIdentifierLoc());
     return;
   }
 
@@ -2061,8 +2060,9 @@ static void diagnoseIgnoredFunctionQualifiers(Sema &S, QualType RetTy,
 
     case DeclaratorChunk::Pointer: {
       DeclaratorChunk::PointerTypeInfo &PTI = OuterChunk.Ptr;
-      diagnoseIgnoredQualifiers(
-          S, PTI.TypeQuals,
+      S.diagnoseIgnoredQualifiers(
+          diag::warn_qual_return_type,
+          PTI.TypeQuals,
           SourceLocation(),
           SourceLocation::getFromRawEncoding(PTI.ConstQualLoc),
           SourceLocation::getFromRawEncoding(PTI.VolatileQualLoc),
@@ -2079,8 +2079,9 @@ static void diagnoseIgnoredFunctionQualifiers(Sema &S, QualType RetTy,
       // FIXME: We can't currently provide an accurate source location and a
       // fix-it hint for these.
       unsigned AtomicQual = RetTy->isAtomicType() ? DeclSpec::TQ_atomic : 0;
-      diagnoseIgnoredQualifiers(S, RetTy.getCVRQualifiers() | AtomicQual,
-                                D.getIdentifierLoc());
+      S.diagnoseIgnoredQualifiers(diag::warn_qual_return_type,
+                                  RetTy.getCVRQualifiers() | AtomicQual,
+                                  D.getIdentifierLoc());
       return;
     }
 
@@ -2095,12 +2096,13 @@ static void diagnoseIgnoredFunctionQualifiers(Sema &S, QualType RetTy,
 
   // Just parens all the way out to the decl specifiers. Diagnose any qualifiers
   // which are present there.
-  diagnoseIgnoredQualifiers(S, D.getDeclSpec().getTypeQualifiers(),
-                            D.getIdentifierLoc(),
-                            D.getDeclSpec().getConstSpecLoc(),
-                            D.getDeclSpec().getVolatileSpecLoc(),
-                            D.getDeclSpec().getRestrictSpecLoc(),
-                            D.getDeclSpec().getAtomicSpecLoc());
+  S.diagnoseIgnoredQualifiers(diag::warn_qual_return_type,
+                              D.getDeclSpec().getTypeQualifiers(),
+                              D.getIdentifierLoc(),
+                              D.getDeclSpec().getConstSpecLoc(),
+                              D.getDeclSpec().getVolatileSpecLoc(),
+                              D.getDeclSpec().getRestrictSpecLoc(),
+                              D.getDeclSpec().getAtomicSpecLoc());
 }
 
 static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
@@ -2393,9 +2395,9 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
   }
 
   if (FTI.NumParams > 0) {
-    // For a declaration with parameters, eg. "T var(T());", suggest adding parens
-    // around the first parameter to turn the declaration into a variable
-    // declaration.
+    // For a declaration with parameters, eg. "T var(T());", suggest adding
+    // parens around the first parameter to turn the declaration into a
+    // variable declaration.
     SourceRange Range = FTI.Params[0].Param->getSourceRange();
     SourceLocation B = Range.getBegin();
     SourceLocation E = S.getLocForEndOfToken(Range.getEnd());
@@ -2405,8 +2407,8 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
       << FixItHint::CreateInsertion(B, "(")
       << FixItHint::CreateInsertion(E, ")");
   } else {
-    // For a declaration without parameters, eg. "T var();", suggest replacing the
-    // parens with an initializer to turn the declaration into a variable
+    // For a declaration without parameters, eg. "T var();", suggest replacing
+    // the parens with an initializer to turn the declaration into a variable
     // declaration.
     const CXXRecordDecl *RD = RT->getAsCXXRecordDecl();
 
@@ -2788,7 +2790,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       if ((T.getCVRQualifiers() || T->isAtomicType()) &&
           !(S.getLangOpts().CPlusPlus &&
             (T->isDependentType() || T->isRecordType())))
-        diagnoseIgnoredFunctionQualifiers(S, T, D, chunkIndex);
+        diagnoseRedundantReturnTypeQualifiers(S, T, D, chunkIndex);
 
       // Objective-C ARC ownership qualifiers are ignored on the function
       // return type (by type canonicalization). Complain if this attribute
@@ -5127,7 +5129,7 @@ static bool hasVisibleDefinition(Sema &S, NamedDecl *D, NamedDecl **Suggested) {
       ED = NewED;
     if (ED->isFixed()) {
       // If the enum has a fixed underlying type, any declaration of it will do.
-      *Suggested = 0;
+      *Suggested = nullptr;
       for (auto *Redecl : ED->redecls()) {
         if (LookupResult::isVisible(S, Redecl))
           return true;
@@ -5147,6 +5149,45 @@ static bool hasVisibleDefinition(Sema &S, NamedDecl *D, NamedDecl **Suggested) {
   return LookupResult::isVisible(S, D);
 }
 
+/// Locks in the inheritance model for the given class and all of its bases.
+static void assignInheritanceModel(Sema &S, CXXRecordDecl *RD) {
+  RD = RD->getMostRecentDecl();
+  if (!RD->hasAttr<MSInheritanceAttr>()) {
+    MSInheritanceAttr::Spelling IM;
+
+    switch (S.MSPointerToMemberRepresentationMethod) {
+    case LangOptions::PPTMK_BestCase:
+      IM = RD->calculateInheritanceModel();
+      break;
+    case LangOptions::PPTMK_FullGeneralitySingleInheritance:
+      IM = MSInheritanceAttr::Keyword_single_inheritance;
+      break;
+    case LangOptions::PPTMK_FullGeneralityMultipleInheritance:
+      IM = MSInheritanceAttr::Keyword_multiple_inheritance;
+      break;
+    case LangOptions::PPTMK_FullGeneralityVirtualInheritance:
+      IM = MSInheritanceAttr::Keyword_unspecified_inheritance;
+      break;
+    }
+
+    RD->addAttr(MSInheritanceAttr::CreateImplicit(
+        S.getASTContext(), IM,
+        /*BestCase=*/S.MSPointerToMemberRepresentationMethod ==
+            LangOptions::PPTMK_BestCase,
+        S.ImplicitMSInheritanceAttrLoc.isValid()
+            ? S.ImplicitMSInheritanceAttrLoc
+            : RD->getSourceRange()));
+  }
+
+  if (RD->hasDefinition()) {
+    // Assign inheritance models to all of the base classes, because now we can
+    // form pointers to members of base classes without calling
+    // RequireCompleteType on the pointer to member of the base class type.
+    for (const CXXBaseSpecifier &BS : RD->bases())
+      assignInheritanceModel(S, BS.getType()->getAsCXXRecordDecl());
+  }
+}
+
 /// \brief The implementation of RequireCompleteType
 bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
                                    TypeDiagnoser &Diagnoser) {
@@ -5162,7 +5203,7 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
   NamedDecl *Def = nullptr;
   if (!T->isIncompleteType(&Def)) {
     // If we know about the definition but it is not visible, complain.
-    NamedDecl *SuggestedDef = 0;
+    NamedDecl *SuggestedDef = nullptr;
     if (!Diagnoser.Suppressed && Def &&
         !hasVisibleDefinition(*this, Def, &SuggestedDef)) {
       // Suppress this error outside of a SFINAE context if we've already
@@ -5185,36 +5226,7 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
       if (const MemberPointerType *MPTy = T->getAs<MemberPointerType>()) {
         if (!MPTy->getClass()->isDependentType()) {
           RequireCompleteType(Loc, QualType(MPTy->getClass(), 0), 0);
-
-          CXXRecordDecl *RD = MPTy->getMostRecentCXXRecordDecl();
-          if (!RD->hasAttr<MSInheritanceAttr>()) {
-            MSInheritanceAttr::Spelling InheritanceModel;
-
-            switch (MSPointerToMemberRepresentationMethod) {
-            case LangOptions::PPTMK_BestCase:
-              InheritanceModel = RD->calculateInheritanceModel();
-              break;
-            case LangOptions::PPTMK_FullGeneralitySingleInheritance:
-              InheritanceModel = MSInheritanceAttr::Keyword_single_inheritance;
-              break;
-            case LangOptions::PPTMK_FullGeneralityMultipleInheritance:
-              InheritanceModel =
-                  MSInheritanceAttr::Keyword_multiple_inheritance;
-              break;
-            case LangOptions::PPTMK_FullGeneralityVirtualInheritance:
-              InheritanceModel =
-                  MSInheritanceAttr::Keyword_unspecified_inheritance;
-              break;
-            }
-
-            RD->addAttr(MSInheritanceAttr::CreateImplicit(
-                getASTContext(), InheritanceModel,
-                /*BestCase=*/MSPointerToMemberRepresentationMethod ==
-                    LangOptions::PPTMK_BestCase,
-                ImplicitMSInheritanceAttrLoc.isValid()
-                    ? ImplicitMSInheritanceAttrLoc
-                    : RD->getSourceRange()));
-          }
+          assignInheritanceModel(*this, MPTy->getMostRecentCXXRecordDecl());
         }
       }
     }
@@ -5461,7 +5473,7 @@ QualType Sema::getElaboratedType(ElaboratedTypeKeyword Keyword,
 QualType Sema::BuildTypeofExprType(Expr *E, SourceLocation Loc) {
   ExprResult ER = CheckPlaceholderExpr(E);
   if (ER.isInvalid()) return QualType();
-  E = ER.take();
+  E = ER.get();
 
   if (!E->isTypeDependent()) {
     QualType T = E->getType();
@@ -5541,7 +5553,7 @@ static QualType getDecltypeForExpr(Sema &S, Expr *E) {
 QualType Sema::BuildDecltypeType(Expr *E, SourceLocation Loc) {
   ExprResult ER = CheckPlaceholderExpr(E);
   if (ER.isInvalid()) return QualType();
-  E = ER.take();
+  E = ER.get();
 
   return Context.getDecltypeType(E, getDecltypeForExpr(*this, E));
 }
@@ -5557,12 +5569,23 @@ QualType Sema::BuildUnaryTransformType(QualType BaseType,
     } else {
       QualType Underlying = BaseType;
       if (!BaseType->isDependentType()) {
+        // The enum could be incomplete if we're parsing its definition or
+        // recovering from an error.
+        NamedDecl *FwdDecl = nullptr;
+        if (BaseType->isIncompleteType(&FwdDecl)) {
+          Diag(Loc, diag::err_underlying_type_of_incomplete_enum) << BaseType;
+          Diag(FwdDecl->getLocation(), diag::note_forward_declaration) << FwdDecl;
+          return QualType();
+        }
+
         EnumDecl *ED = BaseType->getAs<EnumType>()->getDecl();
         assert(ED && "EnumType has no EnumDecl");
+
         DiagnoseUseOfDecl(ED, Loc);
+
         Underlying = ED->getIntegerType();
+        assert(!Underlying.isNull());
       }
-      assert(!Underlying.isNull());
       return Context.getUnaryTransformType(BaseType, Underlying,
                                         UnaryTransformType::EnumUnderlyingType);
     }
