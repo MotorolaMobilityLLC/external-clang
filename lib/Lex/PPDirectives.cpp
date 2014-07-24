@@ -101,14 +101,13 @@ Preprocessor::AllocateVisibilityMacroDirective(SourceLocation Loc,
 /// \brief Release the specified MacroInfo to be reused for allocating
 /// new MacroInfo objects.
 void Preprocessor::ReleaseMacroInfo(MacroInfo *MI) {
-  MacroInfoChain *MIChain = (MacroInfoChain*) MI;
+  MacroInfoChain *MIChain = (MacroInfoChain *)MI;
   if (MacroInfoChain *Prev = MIChain->Prev) {
     MacroInfoChain *Next = MIChain->Next;
     Prev->Next = Next;
     if (Next)
       Next->Prev = Prev;
-  }
-  else {
+  } else {
     assert(MIChainHead == MIChain);
     MIChainHead = MIChain->Next;
     MIChainHead->Prev = nullptr;
@@ -140,22 +139,21 @@ bool Preprocessor::CheckMacroName(Token &MacroNameTok, char isDefineUndef) {
     std::string Spelling = getSpelling(MacroNameTok, &Invalid);
     if (Invalid)
       return Diag(MacroNameTok, diag::err_pp_macro_not_identifier);
+    II = getIdentifierInfo(Spelling);
 
-    const IdentifierInfo &Info = Identifiers.get(Spelling);
+    if (!II->isCPlusPlusOperatorKeyword())
+      return Diag(MacroNameTok, diag::err_pp_macro_not_identifier);
 
-    // Allow #defining |and| and friends in microsoft mode.
-    if (Info.isCPlusPlusOperatorKeyword() && getLangOpts().MSVCCompat) {
-      MacroNameTok.setIdentifierInfo(getIdentifierInfo(Spelling));
-      return false;
-    }
+    // C++ 2.5p2: Alternative tokens behave the same as its primary token
+    // except for their spellings.
+    Diag(MacroNameTok, getLangOpts().MicrosoftExt
+                           ? diag::ext_pp_operator_used_as_macro_name
+                           : diag::err_pp_operator_used_as_macro_name)
+        << II << MacroNameTok.getKind();
 
-    if (Info.isCPlusPlusOperatorKeyword())
-      // C++ 2.5p2: Alternative tokens behave the same as its primary token
-      // except for their spellings.
-      return Diag(MacroNameTok, diag::err_pp_operator_used_as_macro_name)
-             << Spelling << MacroNameTok.getKind();
-
-    return Diag(MacroNameTok, diag::err_pp_macro_not_identifier);
+    // Allow #defining |and| and friends for Microsoft compatibility or
+    // recovery when legacy C headers are included in C++.
+    MacroNameTok.setIdentifierInfo(II);
   }
 
   if (isDefineUndef && II->getPPKeywordID() == tok::pp_defined) {
@@ -957,7 +955,7 @@ void Preprocessor::HandleLineDirective(Token &Tok) {
     return DiscardUntilEndOfDirective();
   } else {
     // Parse and validate the string, converting it into a unique ID.
-    StringLiteralParser Literal(&StrTok, 1, *this);
+    StringLiteralParser Literal(StrTok, *this);
     assert(Literal.isAscii() && "Didn't allow wide strings in");
     if (Literal.hadError)
       return DiscardUntilEndOfDirective();
@@ -1093,7 +1091,7 @@ void Preprocessor::HandleDigitDirective(Token &DigitTok) {
     return DiscardUntilEndOfDirective();
   } else {
     // Parse and validate the string, converting it into a unique ID.
-    StringLiteralParser Literal(&StrTok, 1, *this);
+    StringLiteralParser Literal(StrTok, *this);
     assert(Literal.isAscii() && "Didn't allow wide strings in");
     if (Literal.hadError)
       return DiscardUntilEndOfDirective();
@@ -2124,8 +2122,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
   // If we need warning for not using the macro, add its location in the
   // warn-because-unused-macro set. If it gets used it will be removed from set.
   if (getSourceManager().isInMainFile(MI->getDefinitionLoc()) &&
-      Diags->getDiagnosticLevel(diag::pp_macro_not_used,
-          MI->getDefinitionLoc()) != DiagnosticsEngine::Ignored) {
+      !Diags->isIgnored(diag::pp_macro_not_used, MI->getDefinitionLoc())) {
     MI->setIsWarnIfUnused(true);
     WarnUnusedMacroLocs.insert(MI->getDefinitionLoc());
   }

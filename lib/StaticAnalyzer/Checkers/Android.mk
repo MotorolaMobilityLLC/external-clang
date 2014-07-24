@@ -70,6 +70,7 @@ clang_static_analyzer_checkers_SRC_FILES := \
   StackAddrEscapeChecker.cpp \
   StreamChecker.cpp \
   TaintTesterChecker.cpp \
+  TestAfterDivZeroChecker.cpp \
   TraversalChecker.cpp \
   UndefBranchChecker.cpp \
   UndefCapturedBlockVarChecker.cpp \
