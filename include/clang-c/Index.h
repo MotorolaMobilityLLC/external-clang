@@ -2139,7 +2139,35 @@ enum CXCursorKind {
    */
   CXCursor_OMPSimdDirective              = 233,
 
-  CXCursor_LastStmt                      = CXCursor_OMPSimdDirective,
+  /** \brief OpenMP for directive.
+   */
+  CXCursor_OMPForDirective               = 234,
+
+  /** \brief OpenMP sections directive.
+   */
+  CXCursor_OMPSectionsDirective          = 235,
+
+  /** \brief OpenMP section directive.
+   */
+  CXCursor_OMPSectionDirective           = 236,
+
+  /** \brief OpenMP single directive.
+   */
+  CXCursor_OMPSingleDirective            = 237,
+
+  /** \brief OpenMP parallel for directive.
+   */
+  CXCursor_OMPParallelForDirective       = 238,
+
+  /** \brief OpenMP parallel sections directive.
+   */
+  CXCursor_OMPParallelSectionsDirective  = 239,
+
+  /** \brief Windows Structured Exception Handling's leave statement.
+   */
+  CXCursor_SEHLeaveStmt                  = 240,
+
+  CXCursor_LastStmt                      = CXCursor_SEHLeaveStmt,
 
   /**
    * \brief Cursor that represents the translation unit itself.
@@ -2168,8 +2196,12 @@ enum CXCursorKind {
   CXCursor_PureAttr                      = 409,
   CXCursor_ConstAttr                     = 410,
   CXCursor_NoDuplicateAttr               = 411,
-  CXCursor_LastAttr                      = CXCursor_NoDuplicateAttr,
-     
+  CXCursor_CUDAConstantAttr              = 412,
+  CXCursor_CUDADeviceAttr                = 413,
+  CXCursor_CUDAGlobalAttr                = 414,
+  CXCursor_CUDAHostAttr                  = 415,
+  CXCursor_LastAttr                      = CXCursor_CUDAHostAttr,
+
   /* Preprocessing */
   CXCursor_PreprocessingDirective        = 500,
   CXCursor_MacroDefinition               = 501,
