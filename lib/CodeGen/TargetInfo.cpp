@@ -3364,7 +3364,13 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty,
   // Handle illegal vector types here.
   if (isIllegalVectorType(Ty)) {
     uint64_t Size = getContext().getTypeSize(Ty);
-    if (Size <= 32) {
+    // Android promotes <2 x i8> to i16, not i32
+    if (Size <= 16) {
+      llvm::Type *ResType = llvm::Type::getInt16Ty(getVMContext());
+      AllocatedGPR++;
+      return ABIArgInfo::getDirect(ResType);
+    }
+    if (Size == 32) {
       llvm::Type *ResType = llvm::Type::getInt32Ty(getVMContext());
       AllocatedGPR++;
       return ABIArgInfo::getDirect(ResType);
