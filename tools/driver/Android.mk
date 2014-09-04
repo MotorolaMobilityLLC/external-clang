@@ -102,6 +102,9 @@ else
 LOCAL_LDLIBS += -lpthread -ldl
 endif
 
+# remove when we can use PIE binaries in all places again
+LOCAL_NO_FPIE := true
+
 include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(BUILD_HOST_EXECUTABLE)
