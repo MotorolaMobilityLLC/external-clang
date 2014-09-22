@@ -5,13 +5,7 @@ ifeq (,$(TARGET_BUILD_APPS))
 
 LOCAL_PATH:= $(call my-dir)
 
-LOCAL_IS_HOST_MODULE := true
-
-LOCAL_MODULE:= libclang
-
-LOCAL_MODULE_TAGS := optional
-
-LOCAL_WHOLE_STATIC_LIBRARIES := \
+clang_whole_static_libraries := \
 	libclangDriver \
 	libclangParse \
 	libclangSema \
@@ -26,6 +20,13 @@ LOCAL_WHOLE_STATIC_LIBRARIES := \
 	libclangRewriteCore \
 	libclangSerialization
 
+# host
+include $(CLEAR_VARS)
+
+LOCAL_IS_HOST_MODULE := true
+LOCAL_MODULE:= libclang
+LOCAL_MODULE_TAGS := optional
+LOCAL_WHOLE_STATIC_LIBRARIES := $(clang_whole_static_libraries)
 
 ifeq ($(HOST_OS),windows)
   LOCAL_SHARED_LIBRARIES := libLLVM
@@ -37,6 +38,19 @@ endif
 
 include $(CLANG_HOST_BUILD_MK)
 include $(BUILD_HOST_SHARED_LIBRARY)
+
+# device
+include $(CLEAR_VARS)
+
+LOCAL_MODULE:= libclang
+LOCAL_MODULE_TAGS := optional
+LOCAL_WHOLE_STATIC_LIBRARIES := $(clang_whole_static_libraries)
+
+LOCAL_SHARED_LIBRARIES := libLLVM libc++
+LOCAL_LDLIBS := -ldl
+
+include $(CLANG_DEVICE_BUILD_MK)
+include $(BUILD_SHARED_LIBRARY)
 
 endif # don't build in unbundled branches
 endif # don't build unless forced to
