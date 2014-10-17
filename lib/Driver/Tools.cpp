@@ -898,6 +898,19 @@ void Clang::AddAArch64TargetArgs(const ArgList &Args,
     CmdArgs.push_back("-aarch64-strict-align");
   }
 
+  if (Arg *A = Args.getLastArg(options::OPT_mfix_cortex_a53_835769,
+                               options::OPT_mno_fix_cortex_a53_835769)) {
+    CmdArgs.push_back("-backend-option");
+    if (A->getOption().matches(options::OPT_mfix_cortex_a53_835769))
+      CmdArgs.push_back("-aarch64-fix-cortex-a53-835769=1");
+    else
+      CmdArgs.push_back("-aarch64-fix-cortex-a53-835769=0");
+  } else if (Triple.getEnvironment() == llvm::Triple::Android) {
+    // Enabled A53 errata (835769) workaround by default on android
+    CmdArgs.push_back("-backend-option");
+    CmdArgs.push_back("-aarch64-fix-cortex-a53-835769=1");
+  }
+
   // Setting -mno-global-merge disables the codegen global merge pass. Setting
   // -mglobal-merge has no effect as the pass is enabled by default.
   if (Arg *A = Args.getLastArg(options::OPT_mglobal_merge,
