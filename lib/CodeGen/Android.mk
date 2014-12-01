@@ -21,35 +21,35 @@ clang_codegen_SRC_FILES := \
   CGAtomic.cpp \
   CGBlocks.cpp \
   CGBuiltin.cpp \
-  CGCUDANV.cpp \
-  CGCUDARuntime.cpp \
-  CGCXX.cpp \
-  CGCXXABI.cpp \
   CGCall.cpp \
   CGClass.cpp \
   CGCleanup.cpp \
+  CGCUDANV.cpp \
+  CGCUDARuntime.cpp \
+  CGCXXABI.cpp \
+  CGCXX.cpp \
   CGDebugInfo.cpp \
   CGDecl.cpp \
   CGDeclCXX.cpp \
   CGException.cpp \
-  CGExpr.cpp \
   CGExprAgg.cpp \
-  CGExprCXX.cpp \
   CGExprComplex.cpp \
   CGExprConstant.cpp \
+  CGExpr.cpp \
+  CGExprCXX.cpp \
   CGExprScalar.cpp \
+  CGLoopInfo.cpp \
   CGObjC.cpp \
   CGObjCGNU.cpp \
   CGObjCMac.cpp \
   CGObjCRuntime.cpp \
   CGOpenCLRuntime.cpp \
   CGOpenMPRuntime.cpp \
-  CGLoopInfo.cpp \
   CGRecordLayoutBuilder.cpp \
   CGStmt.cpp \
   CGStmtOpenMP.cpp \
-  CGVTT.cpp \
   CGVTables.cpp \
+  CGVTT.cpp \
   CodeGenABITypes.cpp \
   CodeGenAction.cpp \
   CodeGenFunction.cpp \
@@ -57,10 +57,11 @@ clang_codegen_SRC_FILES := \
   CodeGenPGO.cpp \
   CodeGenTBAA.cpp \
   CodeGenTypes.cpp \
+  CoverageMappingGen.cpp \
   ItaniumCXXABI.cpp \
   MicrosoftCXXABI.cpp \
   ModuleBuilder.cpp \
-  SanitizerBlacklist.cpp \
+  SanitizerMetadata.cpp \
   TargetInfo.cpp
 
 # For the host
