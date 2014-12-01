@@ -32,6 +32,8 @@ clang_basic_SRC_FILES := \
   ObjCRuntime.cpp \
   OpenMPKinds.cpp \
   OperatorPrecedence.cpp \
+  SanitizerBlacklist.cpp \
+  Sanitizers.cpp \
   SourceLocation.cpp \
   SourceManager.cpp \
   TargetInfo.cpp \

@@ -16,8 +16,8 @@ clang_whole_static_libraries := \
 	libclangLex \
 	libclangFrontend \
 	libclangBasic \
+	libclangRewrite \
 	libclangRewriteFrontend \
-	libclangRewriteCore \
 	libclangSerialization
 
 # host
