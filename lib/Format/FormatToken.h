@@ -13,9 +13,10 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_FORMAT_FORMAT_TOKEN_H
-#define LLVM_CLANG_FORMAT_FORMAT_TOKEN_H
+#ifndef LLVM_CLANG_LIB_FORMAT_FORMATTOKEN_H
+#define LLVM_CLANG_LIB_FORMAT_FORMATTOKEN_H
 
+#include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/OperatorPrecedence.h"
 #include "clang/Format/Format.h"
 #include "clang/Lex/Lexer.h"
@@ -46,7 +47,9 @@ enum TokenType {
   TT_ImplicitStringLiteral,
   TT_InheritanceColon,
   TT_InlineASMColon,
+  TT_JavaAnnotation,
   TT_LambdaLSquare,
+  TT_LeadingJavaAnnotation,
   TT_LineComment,
   TT_ObjCBlockLBrace,
   TT_ObjCBlockLParen,
@@ -268,28 +271,36 @@ struct FormatToken {
 
   bool is(tok::TokenKind Kind) const { return Tok.is(Kind); }
 
-  bool isOneOf(tok::TokenKind K1, tok::TokenKind K2) const {
+  bool is(const IdentifierInfo *II) const {
+    return II && II == Tok.getIdentifierInfo();
+  }
+
+  template <typename T>
+  bool isOneOf(T K1, T K2) const {
     return is(K1) || is(K2);
   }
 
-  bool isOneOf(tok::TokenKind K1, tok::TokenKind K2, tok::TokenKind K3) const {
+  template <typename T>
+  bool isOneOf(T K1, T K2, T K3) const {
     return is(K1) || is(K2) || is(K3);
   }
 
-  bool isOneOf(tok::TokenKind K1, tok::TokenKind K2, tok::TokenKind K3,
-               tok::TokenKind K4, tok::TokenKind K5 = tok::NUM_TOKENS,
-               tok::TokenKind K6 = tok::NUM_TOKENS,
-               tok::TokenKind K7 = tok::NUM_TOKENS,
-               tok::TokenKind K8 = tok::NUM_TOKENS,
-               tok::TokenKind K9 = tok::NUM_TOKENS,
-               tok::TokenKind K10 = tok::NUM_TOKENS,
-               tok::TokenKind K11 = tok::NUM_TOKENS,
-               tok::TokenKind K12 = tok::NUM_TOKENS) const {
+  template <typename T>
+  bool isOneOf(T K1, T K2, T K3, T K4, T K5 = tok::NUM_TOKENS,
+               T K6 = tok::NUM_TOKENS, T K7 = tok::NUM_TOKENS,
+               T K8 = tok::NUM_TOKENS, T K9 = tok::NUM_TOKENS,
+               T K10 = tok::NUM_TOKENS, T K11 = tok::NUM_TOKENS,
+               T K12 = tok::NUM_TOKENS) const {
     return is(K1) || is(K2) || is(K3) || is(K4) || is(K5) || is(K6) || is(K7) ||
            is(K8) || is(K9) || is(K10) || is(K11) || is(K12);
   }
 
-  bool isNot(tok::TokenKind Kind) const { return Tok.isNot(Kind); }
+  template <typename T>
+  bool isNot(T Kind) const {
+    return Tok.isNot(Kind);
+  }
+  bool isNot(IdentifierInfo *II) const { return II != Tok.getIdentifierInfo(); }
+
   bool isStringLiteral() const { return tok::isStringLiteral(Tok.getKind()); }
 
   bool isObjCAtKeyword(tok::ObjCKeywordKind Kind) const {
@@ -325,7 +336,8 @@ struct FormatToken {
   /// \brief Returns \c true if this is a "." or "->" accessing a member.
   bool isMemberAccess() const {
     return isOneOf(tok::arrow, tok::period, tok::arrowstar) &&
-           Type != TT_DesignatedInitializerPeriod;
+           Type != TT_DesignatedInitializerPeriod &&
+           Type != TT_TrailingReturnArrow;
   }
 
   bool isUnaryOperator() const {
@@ -350,7 +362,28 @@ struct FormatToken {
   }
 
   bool isTrailingComment() const {
-    return is(tok::comment) && (!Next || Next->NewlinesBefore > 0);
+    return is(tok::comment) &&
+           (Type == TT_LineComment || !Next || Next->NewlinesBefore > 0);
+  }
+
+  /// \brief Returns \c true if this is a keyword that can be used
+  /// like a function call (e.g. sizeof, typeid, ...).
+  bool isFunctionLikeKeyword() const {
+    switch (Tok.getKind()) {
+    case tok::kw_throw:
+    case tok::kw_typeid:
+    case tok::kw_return:
+    case tok::kw_sizeof:
+    case tok::kw_alignof:
+    case tok::kw_alignas:
+    case tok::kw_decltype:
+    case tok::kw_noexcept:
+    case tok::kw_static_assert:
+    case tok::kw___attribute:
+      return true;
+    default:
+      return false;
+    }
   }
 
   prec::Level getPrecedence() const {
@@ -499,7 +532,55 @@ private:
   bool HasNestedBracedList;
 };
 
+/// \brief Encapsulates keywords that are context sensitive or for languages not
+/// properly supported by Clang's lexer.
+struct AdditionalKeywords {
+  AdditionalKeywords(IdentifierTable &IdentTable) {
+    kw_in = &IdentTable.get("in");
+    kw_NS_ENUM = &IdentTable.get("NS_ENUM");
+
+    kw_finally = &IdentTable.get("finally");
+    kw_function = &IdentTable.get("function");
+    kw_var = &IdentTable.get("var");
+
+    kw_extends = &IdentTable.get("extends");
+    kw_implements = &IdentTable.get("implements");
+    kw_interface = &IdentTable.get("interface");
+    kw_synchronized = &IdentTable.get("synchronized");
+    kw_throws = &IdentTable.get("throws");
+
+    kw_option = &IdentTable.get("option");
+    kw_optional = &IdentTable.get("optional");
+    kw_repeated = &IdentTable.get("repeated");
+    kw_required = &IdentTable.get("required");
+    kw_returns = &IdentTable.get("returns");
+  }
+
+  // ObjC context sensitive keywords.
+  IdentifierInfo *kw_in;
+  IdentifierInfo *kw_NS_ENUM;
+
+  // JavaScript keywords.
+  IdentifierInfo *kw_finally;
+  IdentifierInfo *kw_function;
+  IdentifierInfo *kw_var;
+
+  // Java keywords.
+  IdentifierInfo *kw_extends;
+  IdentifierInfo *kw_implements;
+  IdentifierInfo *kw_interface;
+  IdentifierInfo *kw_synchronized;
+  IdentifierInfo *kw_throws;
+
+  // Proto keywords.
+  IdentifierInfo *kw_option;
+  IdentifierInfo *kw_optional;
+  IdentifierInfo *kw_repeated;
+  IdentifierInfo *kw_required;
+  IdentifierInfo *kw_returns;
+};
+
 } // namespace format
 } // namespace clang
 
-#endif // LLVM_CLANG_FORMAT_FORMAT_TOKEN_H
+#endif
