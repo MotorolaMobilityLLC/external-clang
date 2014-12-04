@@ -31,7 +31,7 @@ LOCAL_STATIC_LIBRARIES := \
   libclangSerialization \
   libclangCodeGen \
   libclangRewriteFrontend \
-  libclangRewriteCore \
+  libclangRewrite \
   libclangParse \
   libclangSema \
   libclangStaticAnalyzerFrontend \
@@ -90,10 +90,11 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMAnalysis \
   libLLVMCore \
   libLLVMOption \
-  libLLVMSupport \
   libLLVMTarget \
   libLLVMProfileData \
-  libLLVMObject
+  libLLVMObject \
+  libLLVMMCDisassembler \
+  libLLVMSupport
 
 LOCAL_LDLIBS += -lm
 ifdef USE_MINGW

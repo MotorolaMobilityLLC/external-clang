@@ -280,13 +280,13 @@ struct Ops {
   void *v;
 };
 
-// CHECK-LABEL: define nonnull %struct.Ops* @_ZN3OpsplERKS_
+// CHECK-LABEL: define dereferenceable({{[0-9]+}}) %struct.Ops* @_ZN3OpsplERKS_
 Ops& Ops::operator+(const Ops&) { return *this; }
-// CHECK-LABEL: define nonnull %struct.Ops* @_ZN3OpsmiERKS_
+// CHECK-LABEL: define dereferenceable({{[0-9]+}}) %struct.Ops* @_ZN3OpsmiERKS_
 Ops& Ops::operator-(const Ops&) { return *this; }
-// CHECK-LABEL: define nonnull %struct.Ops* @_ZN3OpsanERKS_
+// CHECK-LABEL: define dereferenceable({{[0-9]+}}) %struct.Ops* @_ZN3OpsanERKS_
 Ops& Ops::operator&(const Ops&) { return *this; }
-// CHECK-LABEL: define nonnull %struct.Ops* @_ZN3OpsmlERKS_
+// CHECK-LABEL: define dereferenceable({{[0-9]+}}) %struct.Ops* @_ZN3OpsmlERKS_
 Ops& Ops::operator*(const Ops&) { return *this; }
 
 // PR5861
@@ -990,4 +990,26 @@ namespace test48 {
   void f(union T::u *) {}
   template void f<S>(S::u *);
   // CHECK-LABEL: define weak_odr void @_ZN6test481fINS_1SEEEvPTuNT_1uE(%"union.test48::S::u"*)
+}
+
+namespace test49 {
+  template <int>
+  struct S {};
+
+  template <template <int> class T>
+  T<3> fin(T<3>);
+
+  auto v = fin<S>;
+  // CHECK-LABEL: declare void @_ZN6test493finINS_1SEEET_ILi3EES3_()
+}
+
+namespace test50 {
+  template <int>
+  struct S {};
+
+  template <template <int> class T>
+  T<3> fin(T<4>);
+
+  auto v = fin<S>;
+  // CHECK-LABEL: declare void @_ZN6test503finINS_1SEEET_ILi3EES2_ILi4EE()
 }

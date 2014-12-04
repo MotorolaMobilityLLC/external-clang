@@ -13,18 +13,19 @@ TBLGEN_TABLES := \
 clang_driver_SRC_FILES := \
   Action.cpp \
   Compilation.cpp \
+  CrossWindowsToolChain.cpp \
   Driver.cpp \
   DriverOptions.cpp \
   Job.cpp \
+  MSVCToolChain.cpp \
   Multilib.cpp \
   Phases.cpp \
   SanitizerArgs.cpp \
-  Tool.cpp \
   ToolChain.cpp \
   ToolChains.cpp \
+  Tool.cpp \
   Tools.cpp \
-  Types.cpp \
-  WindowsToolChain.cpp
+  Types.cpp
 
 # For the host
 # =====================================================

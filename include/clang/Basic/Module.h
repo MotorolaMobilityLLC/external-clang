@@ -55,17 +55,6 @@ public:
   /// \brief The parent of this module. This will be NULL for the top-level
   /// module.
   Module *Parent;
-
-  /// \brief The module map file that (along with the module name) uniquely
-  /// identifies this module.
-  ///
-  /// The particular module that \c Name refers to may depend on how the module
-  /// was found in header search. However, the combination of \c Name and
-  /// \c ModuleMap will be globally unique for top-level modules. In the case of
-  /// inferred modules, \c ModuleMap will contain the module map that allowed
-  /// the inference (e.g. contained 'Module *') rather than the virtual
-  /// inferred module map file.
-  const FileEntry *ModuleMap;
   
   /// \brief The umbrella header or directory.
   llvm::PointerUnion<const DirectoryEntry *, const FileEntry *> Umbrella;
@@ -95,11 +84,19 @@ public:
   /// \brief The headers that are part of this module.
   SmallVector<const FileEntry *, 2> NormalHeaders;
 
-  /// \brief The headers that are explicitly excluded from this module.
-  SmallVector<const FileEntry *, 2> ExcludedHeaders;
+  /// \brief The headers that are logically part of this module but
+  /// must be textually included.
+  SmallVector<const FileEntry *, 2> TextualHeaders;
 
   /// \brief The headers that are private to this module.
   SmallVector<const FileEntry *, 2> PrivateHeaders;
+
+  /// \brief The headers that are private to this module and are to be
+  /// included textually.
+  SmallVector<const FileEntry *, 2> PrivateTextualHeaders;
+
+  /// \brief The headers that are explicitly excluded from this module.
+  SmallVector<const FileEntry *, 2> ExcludedHeaders;
 
   /// \brief Information about a header directive as found in the module map
   /// file.
@@ -283,10 +280,8 @@ public:
   std::vector<Conflict> Conflicts;
 
   /// \brief Construct a new module or submodule.
-  ///
-  /// For an explanation of \p ModuleMap, see Module::ModuleMap.
   Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent,
-         const FileEntry *ModuleMap, bool IsFramework, bool IsExplicit);
+         bool IsFramework, bool IsExplicit);
   
   ~Module();
   
