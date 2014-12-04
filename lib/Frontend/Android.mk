@@ -26,6 +26,7 @@ clang_frontend_SRC_FILES := \
   CacheTokens.cpp \
   ChainedDiagnosticConsumer.cpp \
   ChainedIncludesSource.cpp \
+  CodeGenOptions.cpp \
   CompilerInstance.cpp \
   CompilerInvocation.cpp \
   CreateInvocationFromCommandLine.cpp \
@@ -45,8 +46,9 @@ clang_frontend_SRC_FILES := \
   MultiplexConsumer.cpp \
   PrintPreprocessedOutput.cpp \
   SerializedDiagnosticPrinter.cpp \
-  TextDiagnostic.cpp \
+  SerializedDiagnosticReader.cpp \
   TextDiagnosticBuffer.cpp \
+  TextDiagnostic.cpp \
   TextDiagnosticPrinter.cpp \
   VerifyDiagnosticConsumer.cpp
 
