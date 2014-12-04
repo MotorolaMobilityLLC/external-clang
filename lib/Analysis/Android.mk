@@ -21,6 +21,7 @@ clang_analysis_SRC_FILES := \
   CFGReachabilityAnalysis.cpp \
   CFGStmtMap.cpp \
   CocoaConventions.cpp \
+  CodeInjector.cpp \
   Consumed.cpp \
   Dominators.cpp \
   FormatString.cpp \
@@ -32,7 +33,10 @@ clang_analysis_SRC_FILES := \
   PseudoConstantAnalysis.cpp \
   ReachableCode.cpp \
   ScanfFormatString.cpp \
+  ThreadSafetyCommon.cpp \
   ThreadSafety.cpp \
+  ThreadSafetyLogical.cpp \
+  ThreadSafetyTIL.cpp \
   UninitializedValues.cpp
 
 # For the host
