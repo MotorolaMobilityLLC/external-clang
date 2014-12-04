@@ -87,6 +87,10 @@
 // RUN: %clang_cl /showIncludes -### -- %s 2>&1 | FileCheck -check-prefix=showIncludes %s
 // showIncludes: --show-includes
 
+// RUN: %clang_cl /E /showIncludes -### -- %s 2>&1 | FileCheck -check-prefix=showIncludes_E %s
+// RUN: %clang_cl /EP /showIncludes -### -- %s 2>&1 | FileCheck -check-prefix=showIncludes_E %s
+// showIncludes_E: warning: argument unused during compilation: '--show-includes'
+
 // RUN: %clang_cl /Umymacro -### -- %s 2>&1 | FileCheck -check-prefix=U %s
 // RUN: %clang_cl /U mymacro -### -- %s 2>&1 | FileCheck -check-prefix=U %s
 // U: "-U" "mymacro"
@@ -131,6 +135,12 @@
 // RUN: %clang_cl /w -### -- %s 2>&1 | FileCheck -check-prefix=w %s
 // w: -w
 
+// RUN: %clang_cl /Zp -### -- %s 2>&1 | FileCheck -check-prefix=ZP %s
+// ZP: -fpack-struct=1
+
+// RUN: %clang_cl /Zp2 -### -- %s 2>&1 | FileCheck -check-prefix=ZP2 %s
+// ZP2: -fpack-struct=2
+
 // RUN: %clang_cl /Zs -### -- %s 2>&1 | FileCheck -check-prefix=Zs %s
 // Zs: -fsyntax-only
 
@@ -162,6 +172,7 @@
 // (/Zs is for syntax-only)
 // RUN: %clang_cl /Zs \
 // RUN:    /analyze- \
+// RUN:    /d2Zi+ \
 // RUN:    /errorReport:foo \
 // RUN:    /FS \
 // RUN:    /GF \
@@ -180,8 +191,11 @@
 // RUN:    /Zc:wchar_t \
 // RUN:    /Zc:inline \
 // RUN:    /Zc:rvalueCast \
+// RUN:    /Zo \
+// RUN:    /Zo- \
 // RUN:    -### -- %s 2>&1 | FileCheck -check-prefix=IGNORED %s
 // IGNORED-NOT: argument unused during compilation
+// IGNORED-NOT: no such file or directory
 
 // Ignored options and compile-only options are ignored for link jobs.
 // RUN: touch %t.obj
@@ -198,10 +212,8 @@
 // (/Zs is for syntax-only)
 // RUN: %clang_cl /Zs \
 // RUN:     /AIfoo \
-// RUN:     /arch:sse2 \
 // RUN:     /clr:pure \
 // RUN:     /docname \
-// RUN:     /d2Zi+ \
 // RUN:     /EHsc \
 // RUN:     /F \
 // RUN:     /FA \
@@ -275,8 +287,6 @@
 // RUN:     /Zi \
 // RUN:     /ZI \
 // RUN:     /Zl \
-// RUN:     /Zp \
-// RUN:     /Zp1 \
 // RUN:     /ZW:nostdlib \
 // RUN:     -- %s 2>&1
 
@@ -285,10 +295,6 @@
 // Xclang: "-cc1"
 // Xclang: "hellocc1"
 
-// We support -m32 and -m64.
-// RUN: %clang_cl /Zs /WX -m32 -m64 -### -- 2>&1 %s | FileCheck -check-prefix=MFLAGS %s
-// MFLAGS-NOT: argument unused during compilation
-
 // RTTI is on by default. /GR- controls -fno-rtti-data.
 // RUN: %clang_cl /c /GR- -### -- %s 2>&1 | FileCheck -check-prefix=NoRTTI %s
 // NoRTTI: "-fno-rtti-data"
@@ -296,6 +302,18 @@
 // RUN: %clang_cl /c /GR -### -- %s 2>&1 | FileCheck -check-prefix=RTTI %s
 // RTTI-NOT: "-fno-rtti-data"
 // RTTI-NOT: "-fno-rtti"
+
+// Accept "core" clang options.
+// (/Zs is for syntax-only)
+// RUN: %clang_cl \
+// RUN:     --driver-mode=cl \
+// RUN:     -ferror-limit=10 \
+// RUN:     -fmsc-version=1800 \
+// RUN:     -fno-strict-aliasing \
+// RUN:     -fstrict-aliasing \
+// RUN:     -mllvm -disable-llvm-optzns \
+// RUN:     -Wunused-variables \
+// RUN:     /Zs -- %s 2>&1
 
 
 void f() { }

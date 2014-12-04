@@ -176,29 +176,6 @@ void pointer_to_integral_type_conv(char* ptr) {
    b = reinterpret_cast<bool>(ptr); // expected-error {{cast from pointer to smaller type 'bool' loses information}}
 }
 
-namespace friend_as_a_forward_decl {
-
-class A {
-  class Nested {
-    friend class B;
-    B* b;
-  };
-  B* b;
-};
-B* global_b;
-
-
-void f()
-{
-  class Local {
-    friend class Z;
-    Z* b;
-  };
-  Z* b;
-}
-
-}
-
 struct PR11150 {
   class X {
     virtual void f() = 0;
@@ -395,14 +372,15 @@ struct SomeBase {
 
   // expected-note@+2 {{overridden virtual function is here}}
   // expected-warning@+1 {{'sealed' keyword is a Microsoft extension}}
-  virtual void SealedFunction() sealed;
+  virtual void SealedFunction() sealed; // expected-note {{overridden virtual function is here}}
 };
 
 // expected-note@+2 {{'SealedType' declared here}}
 // expected-warning@+1 {{'sealed' keyword is a Microsoft extension}}
 struct SealedType sealed : SomeBase {
-  // expected-error@+1 {{declaration of 'SealedFunction' overrides a 'sealed' function}}
-  virtual void SealedFunction();
+  // expected-error@+2 {{declaration of 'SealedFunction' overrides a 'sealed' function}}
+  // FIXME. warning can be suppressed if we're also issuing error for overriding a 'final' function.
+  virtual void SealedFunction(); // expected-warning {{'SealedFunction' overrides a member function but is not marked 'override'}}
 
   // expected-warning@+1 {{'override' keyword is a C++11 extension}}
   virtual void OverrideMe() override;
