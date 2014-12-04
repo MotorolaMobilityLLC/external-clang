@@ -90,7 +90,8 @@ bool TemplateArgument::isDependent() const {
     llvm_unreachable("Should not have a NULL template argument");
 
   case Type:
-    return getAsType()->isDependentType();
+    return getAsType()->isDependentType() ||
+           isa<PackExpansionType>(getAsType());
 
   case Template:
     return getAsTemplate().isDependent();
@@ -111,14 +112,13 @@ bool TemplateArgument::isDependent() const {
     return false;
 
   case Expression:
-    return (getAsExpr()->isTypeDependent() || getAsExpr()->isValueDependent());
+    return (getAsExpr()->isTypeDependent() || getAsExpr()->isValueDependent() ||
+            isa<PackExpansionExpr>(getAsExpr()));
 
   case Pack:
-    for (pack_iterator P = pack_begin(), PEnd = pack_end(); P != PEnd; ++P) {
-      if (P->isDependent())
+    for (const auto &P : pack_elements())
+      if (P.isDependent())
         return true;
-    }
-
     return false;
   }
 
@@ -155,11 +155,9 @@ bool TemplateArgument::isInstantiationDependent() const {
     return getAsExpr()->isInstantiationDependent();
     
   case Pack:
-    for (pack_iterator P = pack_begin(), PEnd = pack_end(); P != PEnd; ++P) {
-      if (P->isInstantiationDependent())
+    for (const auto &P : pack_elements())
+      if (P.isInstantiationDependent())
         return true;
-    }
-    
     return false;
   }
 
@@ -214,8 +212,8 @@ bool TemplateArgument::containsUnexpandedParameterPack() const {
     break;
 
   case Pack:
-    for (pack_iterator P = pack_begin(), PEnd = pack_end(); P != PEnd; ++P)
-      if (P->containsUnexpandedParameterPack())
+    for (const auto &P : pack_elements())
+      if (P.containsUnexpandedParameterPack())
         return true;
 
     break;
@@ -298,8 +296,7 @@ bool TemplateArgument::structurallyEquals(const TemplateArgument &Other) const {
     return TypeOrValue.V == Other.TypeOrValue.V;
 
   case Declaration:
-    return getAsDecl() == Other.getAsDecl() && 
-           isDeclForReferenceParam() && Other.isDeclForReferenceParam();
+    return getAsDecl() == Other.getAsDecl();
 
   case Integral:
     return getIntegralType() == Other.getIntegralType() &&
@@ -392,14 +389,13 @@ void TemplateArgument::print(const PrintingPolicy &Policy,
   case Pack:
     Out << "<";
     bool First = true;
-    for (TemplateArgument::pack_iterator P = pack_begin(), PEnd = pack_end();
-         P != PEnd; ++P) {
+    for (const auto &P : pack_elements()) {
       if (First)
         First = false;
       else
         Out << ", ";
       
-      P->print(Policy, Out);
+      P.print(Policy, Out);
     }
     Out << ">";
     break;        

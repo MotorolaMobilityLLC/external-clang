@@ -1245,6 +1245,7 @@ protected:
 
   class FunctionTypeBitfields {
     friend class FunctionType;
+    friend class FunctionProtoType;
 
     unsigned : NumTypeBits;
 
@@ -1259,6 +1260,11 @@ protected:
     /// C++ 8.3.5p4: The return type, the parameter type list and the
     /// cv-qualifier-seq, [...], are part of the function type.
     unsigned TypeQuals : 3;
+
+    /// \brief The ref-qualifier associated with a \c FunctionProtoType.
+    ///
+    /// This is a value of type \c RefQualifierKind.
+    unsigned RefQualifier : 2;
   };
 
   class ObjCObjectTypeBitfields {
@@ -2765,7 +2771,7 @@ class FunctionType : public Type {
 
 protected:
   FunctionType(TypeClass tc, QualType res,
-               unsigned typeQuals, QualType Canonical, bool Dependent,
+               QualType Canonical, bool Dependent,
                bool InstantiationDependent,
                bool VariablyModified, bool ContainsUnexpandedParameterPack,
                ExtInfo Info)
@@ -2773,7 +2779,6 @@ protected:
            ContainsUnexpandedParameterPack),
       ResultType(res) {
     FunctionTypeBits.ExtInfo = Info.Bits;
-    FunctionTypeBits.TypeQuals = typeQuals;
   }
   unsigned getTypeQuals() const { return FunctionTypeBits.TypeQuals; }
 
@@ -2810,7 +2815,7 @@ public:
 /// no information available about its arguments.
 class FunctionNoProtoType : public FunctionType, public llvm::FoldingSetNode {
   FunctionNoProtoType(QualType Result, QualType Canonical, ExtInfo Info)
-    : FunctionType(FunctionNoProto, Result, 0, Canonical,
+    : FunctionType(FunctionNoProto, Result, Canonical,
                    /*Dependent=*/false, /*InstantiationDependent=*/false,
                    Result->isVariablyModifiedType(),
                    /*ContainsUnexpandedParameterPack=*/false, Info) {}
@@ -2844,33 +2849,51 @@ public:
 /// type.
 class FunctionProtoType : public FunctionType, public llvm::FoldingSetNode {
 public:
+  struct ExceptionSpecInfo {
+    ExceptionSpecInfo()
+        : Type(EST_None), NoexceptExpr(nullptr),
+          SourceDecl(nullptr), SourceTemplate(nullptr) {}
+
+    ExceptionSpecInfo(ExceptionSpecificationType EST)
+        : Type(EST), NoexceptExpr(nullptr), SourceDecl(nullptr),
+          SourceTemplate(nullptr) {}
+
+    /// The kind of exception specification this is.
+    ExceptionSpecificationType Type;
+    /// Explicitly-specified list of exception types.
+    ArrayRef<QualType> Exceptions;
+    /// Noexcept expression, if this is EST_ComputedNoexcept.
+    Expr *NoexceptExpr;
+    /// The function whose exception specification this is, for
+    /// EST_Unevaluated and EST_Uninstantiated.
+    FunctionDecl *SourceDecl;
+    /// The function template whose exception specification this is instantiated
+    /// from, for EST_Uninstantiated.
+    FunctionDecl *SourceTemplate;
+  };
+
   /// ExtProtoInfo - Extra information about a function prototype.
   struct ExtProtoInfo {
     ExtProtoInfo()
         : Variadic(false), HasTrailingReturn(false), TypeQuals(0),
-          ExceptionSpecType(EST_None), RefQualifier(RQ_None), NumExceptions(0),
-          Exceptions(nullptr), NoexceptExpr(nullptr),
-          ExceptionSpecDecl(nullptr), ExceptionSpecTemplate(nullptr),
-          ConsumedParameters(nullptr) {}
+          RefQualifier(RQ_None), ConsumedParameters(nullptr) {}
 
     ExtProtoInfo(CallingConv CC)
         : ExtInfo(CC), Variadic(false), HasTrailingReturn(false), TypeQuals(0),
-          ExceptionSpecType(EST_None), RefQualifier(RQ_None), NumExceptions(0),
-          Exceptions(nullptr), NoexceptExpr(nullptr),
-          ExceptionSpecDecl(nullptr), ExceptionSpecTemplate(nullptr),
-          ConsumedParameters(nullptr) {}
+          RefQualifier(RQ_None), ConsumedParameters(nullptr) {}
+
+    ExtProtoInfo withExceptionSpec(const ExceptionSpecInfo &O) {
+      ExtProtoInfo Result(*this);
+      Result.ExceptionSpec = O;
+      return Result;
+    }
 
     FunctionType::ExtInfo ExtInfo;
     bool Variadic : 1;
     bool HasTrailingReturn : 1;
     unsigned char TypeQuals;
-    ExceptionSpecificationType ExceptionSpecType;
     RefQualifierKind RefQualifier;
-    unsigned NumExceptions;
-    const QualType *Exceptions;
-    Expr *NoexceptExpr;
-    FunctionDecl *ExceptionSpecDecl;
-    FunctionDecl *ExceptionSpecTemplate;
+    ExceptionSpecInfo ExceptionSpec;
     const bool *ConsumedParameters;
   };
 
@@ -2896,7 +2919,7 @@ private:
   unsigned NumExceptions : 9;
 
   /// ExceptionSpecType - The type of exception specification this function has.
-  unsigned ExceptionSpecType : 3;
+  unsigned ExceptionSpecType : 4;
 
   /// HasAnyConsumedParams - Whether this function has any consumed parameters.
   unsigned HasAnyConsumedParams : 1;
@@ -2906,11 +2929,6 @@ private:
 
   /// HasTrailingReturn - Whether this function has a trailing return type.
   unsigned HasTrailingReturn : 1;
-
-  /// \brief The ref-qualifier associated with a \c FunctionProtoType.
-  ///
-  /// This is a value of type \c RefQualifierKind.
-  unsigned RefQualifier : 2;
 
   // ParamInfo - There is an variable size array after the class in memory that
   // holds the parameter types.
@@ -2952,7 +2970,7 @@ public:
     return param_type_begin()[i];
   }
   ArrayRef<QualType> getParamTypes() const {
-    return ArrayRef<QualType>(param_type_begin(), param_type_end());
+    return llvm::makeArrayRef(param_type_begin(), param_type_end());
   }
 
   ExtProtoInfo getExtProtoInfo() const {
@@ -2960,19 +2978,18 @@ public:
     EPI.ExtInfo = getExtInfo();
     EPI.Variadic = isVariadic();
     EPI.HasTrailingReturn = hasTrailingReturn();
-    EPI.ExceptionSpecType = getExceptionSpecType();
+    EPI.ExceptionSpec.Type = getExceptionSpecType();
     EPI.TypeQuals = static_cast<unsigned char>(getTypeQuals());
     EPI.RefQualifier = getRefQualifier();
-    if (EPI.ExceptionSpecType == EST_Dynamic) {
-      EPI.NumExceptions = NumExceptions;
-      EPI.Exceptions = exception_begin();
-    } else if (EPI.ExceptionSpecType == EST_ComputedNoexcept) {
-      EPI.NoexceptExpr = getNoexceptExpr();
-    } else if (EPI.ExceptionSpecType == EST_Uninstantiated) {
-      EPI.ExceptionSpecDecl = getExceptionSpecDecl();
-      EPI.ExceptionSpecTemplate = getExceptionSpecTemplate();
-    } else if (EPI.ExceptionSpecType == EST_Unevaluated) {
-      EPI.ExceptionSpecDecl = getExceptionSpecDecl();
+    if (EPI.ExceptionSpec.Type == EST_Dynamic) {
+      EPI.ExceptionSpec.Exceptions = exceptions();
+    } else if (EPI.ExceptionSpec.Type == EST_ComputedNoexcept) {
+      EPI.ExceptionSpec.NoexceptExpr = getNoexceptExpr();
+    } else if (EPI.ExceptionSpec.Type == EST_Uninstantiated) {
+      EPI.ExceptionSpec.SourceDecl = getExceptionSpecDecl();
+      EPI.ExceptionSpec.SourceTemplate = getExceptionSpecTemplate();
+    } else if (EPI.ExceptionSpec.Type == EST_Unevaluated) {
+      EPI.ExceptionSpec.SourceDecl = getExceptionSpecDecl();
     }
     if (hasAnyConsumedParams())
       EPI.ConsumedParameters = getConsumedParamsBuffer();
@@ -2995,6 +3012,8 @@ public:
   bool hasNoexceptExceptionSpec() const {
     return isNoexceptExceptionSpec(getExceptionSpecType());
   }
+  /// \brief Return whether this function has a dependent exception spec.
+  bool hasDependentExceptionSpec() const;
   /// \brief Result type of getNoexceptSpec().
   enum NoexceptResult {
     NR_NoNoexcept,  ///< There is no noexcept specifier.
@@ -3057,7 +3076,7 @@ public:
 
   /// \brief Retrieve the ref-qualifier associated with this function type.
   RefQualifierKind getRefQualifier() const {
-    return static_cast<RefQualifierKind>(RefQualifier);
+    return static_cast<RefQualifierKind>(FunctionTypeBits.RefQualifier);
   }
 
   typedef const QualType *param_type_iterator;
@@ -3074,10 +3093,9 @@ public:
   }
 
   typedef const QualType *exception_iterator;
-  typedef llvm::iterator_range<exception_iterator> exception_range;
 
-  exception_range exceptions() const {
-    return exception_range(exception_begin(), exception_end());
+  ArrayRef<QualType> exceptions() const {
+    return llvm::makeArrayRef(exception_begin(), exception_end());
   }
   exception_iterator exception_begin() const {
     // exceptions begin where arguments end
@@ -3416,6 +3434,7 @@ public:
     attr_stdcall,
     attr_thiscall,
     attr_pascal,
+    attr_vectorcall,
     attr_pnaclcall,
     attr_inteloclbicc,
     attr_ms_abi,
@@ -5231,8 +5250,8 @@ template <typename T> const T *Type::castAs() const {
   ArrayType_cannot_be_used_with_getAs<T> at;
   (void) at;
 
-  assert(isa<T>(CanonicalType));
   if (const T *ty = dyn_cast<T>(this)) return ty;
+  assert(isa<T>(CanonicalType));
   return cast<T>(getUnqualifiedDesugaredType());
 }
 
