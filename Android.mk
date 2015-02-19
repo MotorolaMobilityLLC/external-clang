@@ -6,6 +6,7 @@ include $(CLEAR_VARS)
 subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/Analysis \
   lib/AST \
+  lib/ASTMatchers \
   lib/ARCMigrate \
   lib/Basic \
   lib/CodeGen \
@@ -16,6 +17,7 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/Frontend/Rewrite \
   lib/FrontendTool \
   lib/Headers \
+  lib/Index \
   lib/Lex \
   lib/Parse \
   lib/Rewrite \
@@ -24,7 +26,9 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/StaticAnalyzer/Checkers \
   lib/StaticAnalyzer/Core \
   lib/StaticAnalyzer/Frontend \
+  lib/Tooling \
   tools/driver \
+  tools/libclang \
   utils/TableGen \
   ))
 
