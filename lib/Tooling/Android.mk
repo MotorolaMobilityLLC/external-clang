@@ -3,37 +3,32 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_TBLGEN_VARS)
 
 TBLGEN_TABLES := \
-  AttrHasAttributeImpl.inc \
-  DiagnosticASTKinds.inc \
-  DiagnosticAnalysisKinds.inc \
-  DiagnosticCommentKinds.inc \
+  AttrList.inc \
+  Attrs.inc \
+  CommentCommandList.inc \
+  DeclNodes.inc \
   DiagnosticCommonKinds.inc \
   DiagnosticDriverKinds.inc \
   DiagnosticFrontendKinds.inc \
-  DiagnosticGroups.inc \
-  DiagnosticIndexName.inc \
-  DiagnosticLexKinds.inc \
-  DiagnosticParseKinds.inc \
-  DiagnosticSemaKinds.inc \
-  DiagnosticSerializationKinds.inc \
-  arm_neon.inc
+  StmtNodes.inc \
 
-clang_format_SRC_FILES := \
-  BreakableToken.cpp \
-  ContinuationIndenter.cpp \
-  Format.cpp \
-  FormatToken.cpp \
-  TokenAnnotator.cpp \
-  UnwrappedLineFormatter.cpp \
-  UnwrappedLineParser.cpp \
-  WhitespaceManager.cpp
+clang_tooling_SRC_FILES := \
+  ArgumentsAdjusters.cpp \
+  CommonOptionsParser.cpp \
+  CompilationDatabase.cpp \
+  Core/Replacement.cpp \
+  FileMatchTrie.cpp \
+  JSONCompilationDatabase.cpp \
+  Refactoring.cpp \
+  RefactoringCallbacks.cpp \
+  Tooling.cpp \
 
 # For the host
 # =====================================================
 include $(CLEAR_VARS)
 
-LOCAL_SRC_FILES := $(clang_format_SRC_FILES)
-LOCAL_MODULE:= libclangFormat
+LOCAL_SRC_FILES := $(clang_tooling_SRC_FILES)
+LOCAL_MODULE:= libclangTooling
 LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_HOST_BUILD_MK)
@@ -45,8 +40,8 @@ include $(BUILD_HOST_STATIC_LIBRARY)
 # =====================================================
 include $(CLEAR_VARS)
 
-LOCAL_SRC_FILES := $(clang_format_SRC_FILES)
-LOCAL_MODULE:= libclangFormat
+LOCAL_SRC_FILES := $(clang_tooling_SRC_FILES)
+LOCAL_MODULE:= libclangTooling
 LOCAL_MODULE_TAGS := optional
 
 include $(CLANG_DEVICE_BUILD_MK)
