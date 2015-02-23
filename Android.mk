@@ -1,5 +1,6 @@
 LOCAL_PATH := $(call my-dir)
 CLANG_ROOT_PATH := $(LOCAL_PATH)
+CLANG_ENABLE_ASSERTION := false
 
 include $(CLEAR_VARS)
 
