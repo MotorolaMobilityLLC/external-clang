@@ -8,6 +8,13 @@ LOCAL_CPPFLAGS := \
 	-Wno-sign-promo \
 	$(LOCAL_CPPFLAGS)
 
+ifeq ($(CLANG_ENABLE_ASSERTION),true)
+LOCAL_CFLAGS :=	\
+	$(LOCAL_CFLAGS) \
+	-D_DEBUG	\
+	-UNDEBUG
+endif
+
 # Make sure bionic is first so we can include system headers.
 LOCAL_C_INCLUDES :=	\
 	$(CLANG_ROOT_PATH)/include	\
