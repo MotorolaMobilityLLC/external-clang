@@ -7,14 +7,14 @@
 /* Bug report URL. */
 #define BUG_REPORT_URL "http://llvm.org/bugs/"
 
+/* Multilib suffix for libdir. */
+#define CLANG_LIBDIR_SUFFIX ""
+
 /* Relative directory for resource files */
 #define CLANG_RESOURCE_DIR ""
 
 /* Directories clang will search for headers */
 #define C_INCLUDE_DIRS ""
-
-/* Linker version detected at compile time. */
-#define HOST_LINK_VERSION "2.22"
 
 /* Default <path> to all compiler invocations for --sysroot=<path>. */
 #define DEFAULT_SYSROOT ""
@@ -29,5 +29,8 @@
 
 /* The LLVM product name and version */
 #define BACKEND_PACKAGE_STRING PACKAGE_STRING
+
+/* Linker version detected at compile time. */
+#define HOST_LINK_VERSION "2.24"
 
 #endif

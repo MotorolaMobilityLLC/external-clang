@@ -16,6 +16,7 @@ TBLGEN_TABLES := \
   DiagnosticParseKinds.inc \
   DiagnosticSemaKinds.inc \
   DiagnosticSerializationKinds.inc \
+  arm_neon.h \
   arm_neon.inc
 
 clang_basic_SRC_FILES := \

@@ -685,9 +685,6 @@ void TypePrinter::printFunctionProtoAfter(const FunctionProtoType *T,
     case CC_AAPCS_VFP:
       OS << " __attribute__((pcs(\"aapcs-vfp\")))";
       break;
-    case CC_PnaclCall:
-      OS << " __attribute__((pnaclcall))";
-      break;
     case CC_IntelOclBicc:
       OS << " __attribute__((intel_ocl_bicc))";
       break;
@@ -696,6 +693,10 @@ void TypePrinter::printFunctionProtoAfter(const FunctionProtoType *T,
       break;
     case CC_X86_64SysV:
       OS << " __attribute__((sysv_abi))";
+      break;
+    case CC_SpirFunction:
+    case CC_SpirKernel:
+      // Do nothing. These CCs are not available as attributes.
       break;
     }
   }
@@ -1253,7 +1254,6 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
    OS << ')';
    break;
   }
-  case AttributedType::attr_pnaclcall: OS << "pnaclcall"; break;
   case AttributedType::attr_inteloclbicc: OS << "inteloclbicc"; break;
   }
   OS << "))";
@@ -1489,6 +1489,9 @@ void Qualifiers::print(raw_ostream &OS, const PrintingPolicy& Policy,
         break;
       case LangAS::opencl_constant:
         OS << "__constant";
+        break;
+      case LangAS::opencl_generic:
+        OS << "__generic";
         break;
       default:
         OS << "__attribute__((address_space(";

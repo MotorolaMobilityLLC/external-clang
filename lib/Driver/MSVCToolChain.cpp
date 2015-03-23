@@ -21,6 +21,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Process.h"
+#include <cstdio>
 
 // Include the necessary headers to interface with the Windows registry and
 // environment.
@@ -31,7 +32,9 @@
 #ifdef USE_WIN32
   #define WIN32_LEAN_AND_MEAN
   #define NOGDI
-  #define NOMINMAX
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
   #include <windows.h>
 #endif
 
@@ -43,6 +46,9 @@ using namespace llvm::opt;
 MSVCToolChain::MSVCToolChain(const Driver &D, const llvm::Triple& Triple,
                              const ArgList &Args)
   : ToolChain(D, Triple, Args) {
+  getProgramPaths().push_back(getDriver().getInstalledDir());
+  if (getDriver().getInstalledDir() != getDriver().Dir)
+    getProgramPaths().push_back(getDriver().Dir);
 }
 
 Tool *MSVCToolChain::buildLinker() const {
@@ -207,7 +213,7 @@ bool MSVCToolChain::getWindowsSDKDir(std::string &path, int &major,
       "SOFTWARE\\Microsoft\\Microsoft SDKs\\Windows\\$VERSION",
       "InstallationFolder", path, &sdkVersion);
   if (!sdkVersion.empty())
-    ::sscanf(sdkVersion.c_str(), "v%d.%d", &major, &minor);
+    std::sscanf(sdkVersion.c_str(), "v%d.%d", &major, &minor);
   return hasSDKDir && !path.empty();
 }
 
