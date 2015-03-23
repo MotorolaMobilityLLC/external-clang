@@ -411,7 +411,8 @@ void FinalOverriders::dump(raw_ostream &Out, BaseSubobject Base,
   for (const auto *MD : RD->methods()) {
     if (!MD->isVirtual())
       continue;
-  
+    MD = MD->getCanonicalDecl();
+
     OverriderInfo Overrider = getOverrider(MD, Base.getBaseOffset());
 
     Out << "  ";
@@ -695,6 +696,7 @@ void VCallAndVBaseOffsetBuilder::AddVCallOffsets(BaseSubobject Base,
   for (const auto *MD : RD->methods()) {
     if (!MD->isVirtual())
       continue;
+    MD = MD->getCanonicalDecl();
 
     CharUnits OffsetOffset = getCurrentOffsetOffset();
     
@@ -1514,6 +1516,7 @@ void ItaniumVTableBuilder::AddMethods(
   for (const auto *MD : RD->methods()) {
     if (!MD->isVirtual())
       continue;
+    MD = MD->getCanonicalDecl();
 
     // Get the final overrider.
     FinalOverriders::OverriderInfo Overrider = 
@@ -2196,6 +2199,7 @@ void ItaniumVTableBuilder::dumpLayout(raw_ostream &Out) {
     // We only want virtual member functions.
     if (!MD->isVirtual())
       continue;
+    MD = MD->getCanonicalDecl();
 
     std::string MethodName =
       PredefinedExpr::ComputeName(PredefinedExpr::PrettyFunctionNoVirtual,
@@ -2676,7 +2680,7 @@ static bool BaseInSet(const CXXBaseSpecifier *Specifier,
 // In this hierarchy, f() belongs to the vftable of A, so B::f() expects
 // "this" parameter to point at the A subobject, which is B+4.
 // In the B::f() prologue, it adjusts "this" back to B by subtracting 4,
-// peformed as a *static* adjustment.
+// performed as a *static* adjustment.
 //
 // Interesting thing happens when we alter the relative placement of A and B
 // subobjects in a class:
@@ -2930,6 +2934,7 @@ static void GroupNewVirtualOverloads(
   typedef llvm::DenseMap<DeclarationName, unsigned> VisitedGroupIndicesTy;
   VisitedGroupIndicesTy VisitedGroupIndices;
   for (const auto *MD : RD->methods()) {
+    MD = MD->getCanonicalDecl();
     VisitedGroupIndicesTy::iterator J;
     bool Inserted;
     std::tie(J, Inserted) = VisitedGroupIndices.insert(

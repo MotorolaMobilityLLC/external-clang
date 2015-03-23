@@ -13,6 +13,12 @@ $(if $(LOCAL_IS_HOST_MODULE),	\
 	$(call transform-device-clang-td-to-out,$(1)))
 endef
 
+define transform-td-to-out
+$(if $(LOCAL_IS_HOST_MODULE),	\
+	$(call transform-host-td-to-out,$(1)),	\
+	$(call transform-device-td-to-out,$(1)))
+endef
+
 generated_sources := $(call local-generated-sources-dir)
 
 ifneq ($(findstring AttrDump.inc,$(TBLGEN_TABLES)),)
@@ -228,6 +234,13 @@ $(generated_sources)/include/clang/Driver/Options.inc: TBLGEN_LOCAL_MODULE := $(
 $(generated_sources)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(LLVM_ROOT_PATH)/include/llvm/Option/OptParser.td $(CLANG_ROOT_PATH)/include/clang/Driver/CC1Options.td \
     $(CLANG_TBLGEN) $(LLVM_TBLGEN)
 	$(call transform-td-to-out,opt-parser-defs)
+endif
+
+ifneq ($(findstring arm_neon.h,$(TBLGEN_TABLES)),)
+LOCAL_GENERATED_SOURCES += $(generated_sources)/include/clang/Basic/arm_neon.h
+$(generated_sources)/include/clang/Basic/arm_neon.h: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(generated_sources)/include/clang/Basic/arm_neon.h: $(CLANG_ROOT_PATH)/include/clang/Basic/arm_neon.td $(CLANG_TBLGEN)
+	$(call transform-clang-td-to-out,arm-neon)
 endif
 
 LOCAL_C_INCLUDES += $(generated_sources)/include

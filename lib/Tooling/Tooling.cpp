@@ -123,17 +123,25 @@ getSyntaxOnlyToolArgs(const std::vector<std::string> &ExtraArgs,
 
 bool runToolOnCodeWithArgs(clang::FrontendAction *ToolAction, const Twine &Code,
                            const std::vector<std::string> &Args,
-                           const Twine &FileName) {
+                           const Twine &FileName,
+                           const FileContentMappings &VirtualMappedFiles) {
+
   SmallString<16> FileNameStorage;
   StringRef FileNameRef = FileName.toNullTerminatedStringRef(FileNameStorage);
   llvm::IntrusiveRefCntPtr<FileManager> Files(
       new FileManager(FileSystemOptions()));
-  ToolInvocation Invocation(getSyntaxOnlyToolArgs(Args, FileNameRef), ToolAction,
-                            Files.get());
+  ToolInvocation Invocation(getSyntaxOnlyToolArgs(Args, FileNameRef),
+                            ToolAction, Files.get());
 
   SmallString<1024> CodeStorage;
   Invocation.mapVirtualFile(FileNameRef,
                             Code.toNullTerminatedStringRef(CodeStorage));
+
+  for (auto &FilenameWithContent : VirtualMappedFiles) {
+    Invocation.mapVirtualFile(FilenameWithContent.first,
+                              FilenameWithContent.second);
+  }
+
   return Invocation.run();
 }
 
@@ -271,8 +279,8 @@ ClangTool::ClangTool(const CompilationDatabase &Compilations,
                      ArrayRef<std::string> SourcePaths)
     : Compilations(Compilations), SourcePaths(SourcePaths),
       Files(new FileManager(FileSystemOptions())), DiagConsumer(nullptr) {
-  appendArgumentsAdjuster(new ClangStripOutputAdjuster());
-  appendArgumentsAdjuster(new ClangSyntaxOnlyAdjuster());
+  appendArgumentsAdjuster(getClangStripOutputAdjuster());
+  appendArgumentsAdjuster(getClangSyntaxOnlyAdjuster());
 }
 
 ClangTool::~ClangTool() {}
@@ -281,12 +289,15 @@ void ClangTool::mapVirtualFile(StringRef FilePath, StringRef Content) {
   MappedFileContents.push_back(std::make_pair(FilePath, Content));
 }
 
-void ClangTool::appendArgumentsAdjuster(ArgumentsAdjuster *Adjuster) {
-  ArgsAdjusters.push_back(std::unique_ptr<ArgumentsAdjuster>(Adjuster));
+void ClangTool::appendArgumentsAdjuster(ArgumentsAdjuster Adjuster) {
+  if (ArgsAdjuster)
+    ArgsAdjuster = combineAdjusters(ArgsAdjuster, Adjuster);
+  else
+    ArgsAdjuster = Adjuster;
 }
 
 void ClangTool::clearArgumentsAdjusters() {
-  ArgsAdjusters.clear();
+  ArgsAdjuster = nullptr;
 }
 
 int ClangTool::run(ToolAction *Action) {
@@ -339,8 +350,8 @@ int ClangTool::run(ToolAction *Action) {
         llvm::report_fatal_error("Cannot chdir into \"" +
                                  Twine(CompileCommand.Directory) + "\n!");
       std::vector<std::string> CommandLine = CompileCommand.CommandLine;
-      for (const auto &Adjuster : ArgsAdjusters)
-        CommandLine = Adjuster->Adjust(CommandLine);
+      if (ArgsAdjuster)
+        CommandLine = ArgsAdjuster(CommandLine);
       assert(!CommandLine.empty());
       CommandLine[0] = MainExecutable;
       // FIXME: We need a callback mechanism for the tool writer to output a
