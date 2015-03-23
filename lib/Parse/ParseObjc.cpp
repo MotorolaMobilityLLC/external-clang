@@ -79,7 +79,7 @@ Parser::DeclGroupPtrTy Parser::ParseObjCAtDirectives() {
     SingleDecl = ParseObjCPropertyDynamic(AtLoc);
     break;
   case tok::objc_import:
-    if (getLangOpts().Modules)
+    if (getLangOpts().Modules || getLangOpts().DebuggerSupport)
       return ParseModuleImport(AtLoc);
     Diag(AtLoc, diag::err_atimport);
     SkipUntil(tok::semi);
@@ -2024,7 +2024,13 @@ StmtResult Parser::ParseObjCAtStatement(SourceLocation AtLoc) {
 
   if (Tok.isObjCAtKeyword(tok::objc_autoreleasepool))
     return ParseObjCAutoreleasePoolStmt(AtLoc);
-  
+
+  if (Tok.isObjCAtKeyword(tok::objc_import) &&
+      getLangOpts().DebuggerSupport) {
+    SkipUntil(tok::semi);
+    return Actions.ActOnNullStmt(Tok.getLocation());
+  }
+
   ExprResult Res(ParseExpressionWithLeadingAt(AtLoc));
   if (Res.isInvalid()) {
     // If the expression is invalid, skip ahead to the next semicolon. Not
@@ -2350,7 +2356,7 @@ ExprResult Parser::ParseObjCMessageExpression() {
   }
   
   // Otherwise, an arbitrary expression can be the receiver of a send.
-  ExprResult Res(ParseExpression());
+  ExprResult Res = Actions.CorrectDelayedTyposInExpr(ParseExpression());
   if (Res.isInvalid()) {
     SkipUntil(tok::r_square, StopAtSemi);
     return Res;
@@ -2509,6 +2515,8 @@ Parser::ParseObjCMessageExpressionBody(SourceLocation LBracLoc,
       SourceLocation commaLoc = ConsumeToken(); // Eat the ','.
       ///  Parse the expression after ','
       ExprResult Res(ParseAssignmentExpression());
+      if (Tok.is(tok::colon))
+        Res = Actions.CorrectDelayedTyposInExpr(Res);
       if (Res.isInvalid()) {
         if (Tok.is(tok::colon)) {
           Diag(commaLoc, diag::note_extra_comma_message_arg) <<

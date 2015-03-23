@@ -45,6 +45,7 @@
 #ifndef LLVM_CLANG_ASTMATCHERS_ASTMATCHERS_H
 #define LLVM_CLANG_ASTMATCHERS_ASTMATCHERS_H
 
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/ASTMatchers/ASTMatchersInternal.h"
@@ -141,6 +142,111 @@ typedef internal::Matcher<NestedNameSpecifierLoc> NestedNameSpecifierLocMatcher;
 ///
 /// Usable as: Any Matcher
 inline internal::TrueMatcher anything() { return internal::TrueMatcher(); }
+
+/// \brief Matches the top declaration context.
+///
+/// Given
+/// \code
+///   int X;
+///   namespace NS {
+///   int Y;
+///   }  // namespace NS
+/// \endcode
+/// decl(hasDeclContext(translationUnitDecl()))
+///   matches "int X", but not "int Y".
+const internal::VariadicDynCastAllOfMatcher<Decl, TranslationUnitDecl>
+    translationUnitDecl;
+
+/// \brief Matches typedef declarations.
+///
+/// Given
+/// \code
+///   typedef int X;
+/// \endcode
+/// typedefDecl()
+///   matches "typedef int X"
+const internal::VariadicDynCastAllOfMatcher<Decl, TypedefDecl> typedefDecl;
+
+/// \brief Matches AST nodes that were expanded within the main-file.
+///
+/// Example matches X but not Y (matcher = recordDecl(isExpansionInMainFile())
+/// \code
+///   #include <Y.h>
+///   class X {};
+/// \endcode
+/// Y.h:
+/// \code
+///   class Y {};
+/// \endcode
+///
+/// Usable as: Matcher<Decl>, Matcher<Stmt>, Matcher<TypeLoc>
+AST_POLYMORPHIC_MATCHER(isExpansionInMainFile,
+                        AST_POLYMORPHIC_SUPPORTED_TYPES_3(Decl, Stmt,
+                                                          TypeLoc)) {
+  auto &SourceManager = Finder->getASTContext().getSourceManager();
+  return SourceManager.isInMainFile(
+      SourceManager.getExpansionLoc(Node.getLocStart()));
+}
+
+/// \brief Matches AST nodes that were expanded within system-header-files.
+///
+/// Example matches Y but not X
+///     (matcher = recordDecl(isExpansionInSystemHeader())
+/// \code
+///   #include <SystemHeader.h>
+///   class X {};
+/// \endcode
+/// SystemHeader.h:
+/// \code
+///   class Y {};
+/// \endcode
+///
+/// Usable as: Matcher<Decl>, Matcher<Stmt>, Matcher<TypeLoc>
+AST_POLYMORPHIC_MATCHER(isExpansionInSystemHeader,
+                        AST_POLYMORPHIC_SUPPORTED_TYPES_3(Decl, Stmt,
+                                                          TypeLoc)) {
+  auto &SourceManager = Finder->getASTContext().getSourceManager();
+  auto ExpansionLoc = SourceManager.getExpansionLoc(Node.getLocStart());
+  if (ExpansionLoc.isInvalid()) {
+    return false;
+  }
+  return SourceManager.isInSystemHeader(ExpansionLoc);
+}
+
+/// \brief Matches AST nodes that were expanded within files whose name is
+/// partially matching a given regex.
+///
+/// Example matches Y but not X
+///     (matcher = recordDecl(isExpansionInFileMatching("AST.*"))
+/// \code
+///   #include "ASTMatcher.h"
+///   class X {};
+/// \endcode
+/// ASTMatcher.h:
+/// \code
+///   class Y {};
+/// \endcode
+///
+/// Usable as: Matcher<Decl>, Matcher<Stmt>, Matcher<TypeLoc>
+AST_POLYMORPHIC_MATCHER_P(isExpansionInFileMatching,
+                          AST_POLYMORPHIC_SUPPORTED_TYPES_3(Decl, Stmt,
+                                                            TypeLoc),
+                          std::string, RegExp) {
+  auto &SourceManager = Finder->getASTContext().getSourceManager();
+  auto ExpansionLoc = SourceManager.getExpansionLoc(Node.getLocStart());
+  if (ExpansionLoc.isInvalid()) {
+    return false;
+  }
+  auto FileEntry =
+      SourceManager.getFileEntryForID(SourceManager.getFileID(ExpansionLoc));
+  if (!FileEntry) {
+    return false;
+  }
+
+  auto Filename = FileEntry->getName();
+  llvm::Regex RE(RegExp);
+  return RE.match(Filename);
+}
 
 /// \brief Matches declarations.
 ///
@@ -1682,7 +1788,7 @@ AST_MATCHER_P(CXXRecordDecl, isDerivedFrom,
 }
 
 /// \brief Overloaded method as shortcut for \c isDerivedFrom(hasName(...)).
-AST_MATCHER_P_OVERLOAD(CXXRecordDecl, isDerivedFrom, StringRef, BaseName, 1) {
+AST_MATCHER_P_OVERLOAD(CXXRecordDecl, isDerivedFrom, std::string, BaseName, 1) {
   assert(!BaseName.empty());
   return isDerivedFrom(hasName(BaseName)).matches(Node, Finder, Builder);
 }
@@ -1697,8 +1803,8 @@ AST_MATCHER_P_OVERLOAD(CXXRecordDecl, isSameOrDerivedFrom,
 
 /// \brief Overloaded method as shortcut for
 /// \c isSameOrDerivedFrom(hasName(...)).
-AST_MATCHER_P_OVERLOAD(CXXRecordDecl, isSameOrDerivedFrom, StringRef, BaseName,
-                       1) {
+AST_MATCHER_P_OVERLOAD(CXXRecordDecl, isSameOrDerivedFrom, std::string,
+                       BaseName, 1) {
   assert(!BaseName.empty());
   return isSameOrDerivedFrom(hasName(BaseName)).matches(Node, Finder, Builder);
 }
@@ -3067,12 +3173,10 @@ AST_POLYMORPHIC_MATCHER(
 /// \endcode
 /// functionDecl(isInstantiated())
 ///   matches 'A(int) {...};' and 'A(unsigned) {...}'.
-AST_MATCHER(Decl, isInstantiated) {
+AST_MATCHER_FUNCTION(internal::Matcher<Decl>, isInstantiated) {
   auto IsInstantiation = decl(anyOf(recordDecl(isTemplateInstantiation()),
                                     functionDecl(isTemplateInstantiation())));
-  auto InnerMatcher =
-      decl(anyOf(IsInstantiation, hasAncestor(IsInstantiation)));
-  return InnerMatcher.matches(Node, Finder, Builder);
+  return decl(anyOf(IsInstantiation, hasAncestor(IsInstantiation)));
 }
 
 /// \brief Matches statements inside of a template instantiation.
@@ -3089,11 +3193,10 @@ AST_MATCHER(Decl, isInstantiated) {
 /// unless(stmt(isInTemplateInstantiation()))
 ///   will NOT match j += 42; as it's shared between the template definition and
 ///   instantiation.
-AST_MATCHER(Stmt, isInTemplateInstantiation) {
-  auto InnerMatcher =
-      stmt(hasAncestor(decl(anyOf(recordDecl(isTemplateInstantiation()),
-                                  functionDecl(isTemplateInstantiation())))));
-  return InnerMatcher.matches(Node, Finder, Builder);
+AST_MATCHER_FUNCTION(internal::Matcher<Stmt>, isInTemplateInstantiation) {
+  return stmt(
+      hasAncestor(decl(anyOf(recordDecl(isTemplateInstantiation()),
+                             functionDecl(isTemplateInstantiation())))));
 }
 
 /// \brief Matches explicit template specializations of function, class, or
@@ -3120,6 +3223,18 @@ AST_MATCHER_FUNCTION_P_OVERLOAD(internal::BindableMatcher<TypeLoc>, loc,
                                 internal::Matcher<QualType>, InnerMatcher, 0) {
   return internal::BindableMatcher<TypeLoc>(
       new internal::TypeLocTypeMatcher(InnerMatcher));
+}
+
+/// \brief Matches type \c void.
+///
+/// Given
+/// \code
+///  struct S { void func(); };
+/// \endcode
+/// functionDecl(returns(voidType()))
+///   matches "void func();"
+AST_MATCHER(Type, voidType) {
+  return Node.isVoidType();
 }
 
 /// \brief Matches builtin Types.

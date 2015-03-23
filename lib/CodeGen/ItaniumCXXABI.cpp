@@ -110,6 +110,8 @@ public:
                                llvm::Value *Ptr, QualType ElementType,
                                const CXXDestructorDecl *Dtor) override;
 
+  void emitRethrow(CodeGenFunction &CGF, bool isNoReturn) override;
+
   void EmitFundamentalRTTIDescriptor(QualType Type);
   void EmitFundamentalRTTIDescriptors();
   llvm::Constant *getAddrOfRTTIDescriptor(QualType Ty) override;
@@ -337,6 +339,9 @@ CodeGen::CGCXXABI *CodeGen::CreateItaniumCXXABI(CodeGenModule &CGM) {
     return new ItaniumCXXABI(CGM, /* UseARMMethodPtrABI = */ true,
                              /* UseARMGuardVarABI = */ true);
 
+  case TargetCXXABI::GenericMIPS:
+    return new ItaniumCXXABI(CGM, /* UseARMMethodPtrABI = */ true);
+
   case TargetCXXABI::GenericItanium:
     if (CGM.getContext().getTargetInfo().getTriple().getArch()
         == llvm::Triple::le32) {
@@ -358,7 +363,7 @@ llvm::Type *
 ItaniumCXXABI::ConvertMemberPointerType(const MemberPointerType *MPT) {
   if (MPT->isMemberDataPointer())
     return CGM.PtrDiffTy;
-  return llvm::StructType::get(CGM.PtrDiffTy, CGM.PtrDiffTy, NULL);
+  return llvm::StructType::get(CGM.PtrDiffTy, CGM.PtrDiffTy, nullptr);
 }
 
 /// In the Itanium and ARM ABIs, method pointers have the form:
@@ -887,6 +892,20 @@ void ItaniumCXXABI::emitVirtualObjectDelete(CodeGenFunction &CGF,
     CGF.PopCleanupBlock();
 }
 
+void ItaniumCXXABI::emitRethrow(CodeGenFunction &CGF, bool isNoReturn) {
+  // void __cxa_rethrow();
+
+  llvm::FunctionType *FTy =
+    llvm::FunctionType::get(CGM.VoidTy, /*IsVarArgs=*/false);
+
+  llvm::Constant *Fn = CGM.CreateRuntimeFunction(FTy, "__cxa_rethrow");
+
+  if (isNoReturn)
+    CGF.EmitNoreturnRuntimeCallOrInvoke(Fn, None);
+  else
+    CGF.EmitRuntimeCallOrInvoke(Fn);
+}
+
 static llvm::Constant *getItaniumDynamicCastFn(CodeGenFunction &CGF) {
   // void *__dynamic_cast(const void *sub,
   //                      const abi::__class_type_info *src,
@@ -1106,7 +1125,7 @@ void ItaniumCXXABI::EmitCXXConstructors(const CXXConstructorDecl *D) {
   CGM.EmitGlobal(GlobalDecl(D, Ctor_Base));
 
   // The constructor used for constructing this as a complete class;
-  // constucts the virtual bases, then calls the base constructor.
+  // constructs the virtual bases, then calls the base constructor.
   if (!D->getParent()->isAbstract()) {
     // We don't need to emit the complete ctor if the class is abstract.
     CGM.EmitGlobal(GlobalDecl(D, Ctor_Complete));
@@ -1240,6 +1259,9 @@ void ItaniumCXXABI::emitVTableDefinitions(CodeGenVTables &CGVT,
   // Set the correct linkage.
   VTable->setLinkage(Linkage);
 
+  if (CGM.supportsCOMDAT() && VTable->isWeakForLinker())
+    VTable->setComdat(CGM.getModule().getOrInsertComdat(VTable->getName()));
+
   // Set the right visibility.
   CGM.setGlobalVisibility(VTable, RD);
 
@@ -1259,6 +1281,8 @@ void ItaniumCXXABI::emitVTableDefinitions(CodeGenVTables &CGVT,
       cast<NamespaceDecl>(DC)->getIdentifier()->isStr("__cxxabiv1") &&
       DC->getParent()->isTranslationUnit())
     EmitFundamentalRTTIDescriptors();
+
+  CGM.EmitVTableBitSetEntries(VTable, VTLayout);
 }
 
 llvm::Value *ItaniumCXXABI::getVTableAddressPointInStructor(
@@ -1349,6 +1373,8 @@ llvm::Value *ItaniumCXXABI::getVirtualFunctionPointer(CodeGenFunction &CGF,
   GD = GD.getCanonicalDecl();
   Ty = Ty->getPointerTo()->getPointerTo();
   llvm::Value *VTable = CGF.GetVTablePtr(This, Ty);
+
+  CGF.EmitVTablePtrCheckForCall(cast<CXXMethodDecl>(GD.getDecl()), VTable);
 
   uint64_t VTableIndex = CGM.getItaniumVTableContext().getMethodVTableIndex(GD);
   llvm::Value *VFuncPtr =
@@ -1695,11 +1721,12 @@ void ItaniumCXXABI::EmitGuardedInit(CodeGenFunction &CGF,
 
     // The ABI says: It is suggested that it be emitted in the same COMDAT group
     // as the associated data object
-    if (!D.isLocalVarDecl() && var->isWeakForLinker() && CGM.supportsCOMDAT()) {
-      llvm::Comdat *C = CGM.getModule().getOrInsertComdat(var->getName());
+    llvm::Comdat *C = var->getComdat();
+    if (!D.isLocalVarDecl() && C) {
       guard->setComdat(C);
-      var->setComdat(C);
       CGF.CurFn->setComdat(C);
+    } else if (CGM.supportsCOMDAT() && guard->isWeakForLinker()) {
+      guard->setComdat(CGM.getModule().getOrInsertComdat(guard->getName()));
     }
 
     CGM.setStaticLocalDeclGuardAddress(&D, guard);
@@ -2699,9 +2726,13 @@ llvm::Constant *ItaniumRTTIBuilder::BuildTypeInfo(QualType Ty, bool Force) {
 
   llvm::Constant *Init = llvm::ConstantStruct::getAnon(Fields);
 
+  llvm::Module &M = CGM.getModule();
   llvm::GlobalVariable *GV =
-    new llvm::GlobalVariable(CGM.getModule(), Init->getType(),
-                             /*Constant=*/true, Linkage, Init, Name);
+      new llvm::GlobalVariable(M, Init->getType(),
+                               /*Constant=*/true, Linkage, Init, Name);
+
+  if (CGM.supportsCOMDAT() && GV->isWeakForLinker())
+    GV->setComdat(M.getOrInsertComdat(GV->getName()));
 
   // If there's already an old global variable, replace it with the new one.
   if (OldGV) {
@@ -3185,5 +3216,7 @@ void ItaniumCXXABI::emitCXXStructor(const CXXMethodDecl *MD,
       getMangleContext().mangleCXXCtorComdat(CD, Out);
     llvm::Comdat *C = CGM.getModule().getOrInsertComdat(Out.str());
     Fn->setComdat(C);
+  } else {
+    CGM.maybeSetTrivialComdat(*MD, *Fn);
   }
 }

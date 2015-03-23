@@ -437,7 +437,7 @@ bool Sema::CheckEquivalentExceptionSpec(const PartialDiagnostic &DiagID,
       OldNR != FunctionProtoType::NR_NoNoexcept &&
       NewNR != FunctionProtoType::NR_NoNoexcept) {
     Diag(NewLoc, DiagID);
-    if (NoteID.getDiagID() != 0)
+    if (NoteID.getDiagID() != 0 && OldLoc.isValid())
       Diag(OldLoc, NoteID);
     return true;
   }
@@ -518,7 +518,7 @@ bool Sema::CheckEquivalentExceptionSpec(const PartialDiagnostic &DiagID,
     }
 
     Diag(NewLoc, DiagID);
-    if (NoteID.getDiagID() != 0)
+    if (NoteID.getDiagID() != 0 && OldLoc.isValid())
       Diag(OldLoc, NoteID);
     return true;
   }
@@ -547,7 +547,7 @@ bool Sema::CheckEquivalentExceptionSpec(const PartialDiagnostic &DiagID,
     return false;
   }
   Diag(NewLoc, DiagID);
-  if (NoteID.getDiagID() != 0)
+  if (NoteID.getDiagID() != 0 && OldLoc.isValid())
     Diag(OldLoc, NoteID);
   return true;
 }
@@ -801,6 +801,11 @@ bool Sema::CheckExceptionSpecCompatibility(Expr *From, QualType ToType) {
 
 bool Sema::CheckOverridingFunctionExceptionSpec(const CXXMethodDecl *New,
                                                 const CXXMethodDecl *Old) {
+  // If the new exception specification hasn't been parsed yet, skip the check.
+  // We'll get called again once it's been parsed.
+  if (New->getType()->castAs<FunctionProtoType>()->getExceptionSpecType() ==
+      EST_Unparsed)
+    return false;
   if (getLangOpts().CPlusPlus11 && isa<CXXDestructorDecl>(New)) {
     // Don't check uninstantiated template destructors at all. We can only
     // synthesize correct specs after the template is instantiated.
@@ -809,16 +814,18 @@ bool Sema::CheckOverridingFunctionExceptionSpec(const CXXMethodDecl *New,
     if (New->getParent()->isBeingDefined()) {
       // The destructor might be updated once the definition is finished. So
       // remember it and check later.
-      DelayedDestructorExceptionSpecChecks.push_back(std::make_pair(
-        cast<CXXDestructorDecl>(New), cast<CXXDestructorDecl>(Old)));
+      DelayedExceptionSpecChecks.push_back(std::make_pair(New, Old));
       return false;
     }
   }
-  // If the exception specification hasn't been parsed yet, skip the check.
-  // We'll get called again once it's been parsed.
-  if (New->getType()->castAs<FunctionProtoType>()->getExceptionSpecType() ==
-      EST_Unparsed)
+  // If the old exception specification hasn't been parsed yet, remember that
+  // we need to perform this check when we get to the end of the outermost
+  // lexically-surrounding class.
+  if (Old->getType()->castAs<FunctionProtoType>()->getExceptionSpecType() ==
+      EST_Unparsed) {
+    DelayedExceptionSpecChecks.push_back(std::make_pair(New, Old));
     return false;
+  }
   unsigned DiagID = diag::err_override_exception_spec;
   if (getLangOpts().MicrosoftExt)
     DiagID = diag::ext_override_exception_spec;

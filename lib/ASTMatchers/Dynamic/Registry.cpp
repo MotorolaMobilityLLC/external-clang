@@ -242,7 +242,10 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(isExpr);
   REGISTER_MATCHER(isExternC);
   REGISTER_MATCHER(isImplicit);
+  REGISTER_MATCHER(isExpansionInFileMatching);
+  REGISTER_MATCHER(isExpansionInMainFile);
   REGISTER_MATCHER(isInstantiated);
+  REGISTER_MATCHER(isExpansionInSystemHeader);
   REGISTER_MATCHER(isInteger);
   REGISTER_MATCHER(isIntegral);
   REGISTER_MATCHER(isInTemplateInstantiation);
@@ -312,8 +315,10 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(throughUsingDecl);
   REGISTER_MATCHER(throwExpr);
   REGISTER_MATCHER(to);
+  REGISTER_MATCHER(translationUnitDecl);
   REGISTER_MATCHER(tryStmt);
   REGISTER_MATCHER(type);
+  REGISTER_MATCHER(typedefDecl);
   REGISTER_MATCHER(typedefType);
   REGISTER_MATCHER(typeLoc);
   REGISTER_MATCHER(unaryExprOrTypeTraitExpr);
@@ -328,6 +333,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(valueDecl);
   REGISTER_MATCHER(varDecl);
   REGISTER_MATCHER(variableArrayType);
+  REGISTER_MATCHER(voidType);
   REGISTER_MATCHER(whileStmt);
   REGISTER_MATCHER(withInitializer);
 }
