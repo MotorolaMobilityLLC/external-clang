@@ -6,19 +6,24 @@ ifeq (,$(TARGET_BUILD_APPS))
 LOCAL_PATH:= $(call my-dir)
 
 clang_whole_static_libraries := \
-	libclangDriver \
-	libclangParse \
-	libclangSema \
 	libclangAnalysis \
-	libclangCodeGen \
 	libclangAST \
-	libclangEdit \
-	libclangLex \
-	libclangFrontend \
+	libclangASTMatchers \
 	libclangBasic \
+	libclangCodeGen \
+	libclangDriver \
+	libclangEdit \
+	libclangFormat \
+	libclangFrontend \
+	libclangIndex \
+	libclangLex \
+	libclangLibclang \
+	libclangParse \
 	libclangRewrite \
 	libclangRewriteFrontend \
-	libclangSerialization
+	libclangSema \
+	libclangSerialization \
+	libclangTooling
 
 # host
 include $(CLEAR_VARS)
