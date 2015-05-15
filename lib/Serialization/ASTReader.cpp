@@ -3354,11 +3354,6 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
       break;
     }
 
-    case MACRO_TABLE: {
-      // FIXME: Not used yet.
-      break;
-    }
-
     case LATE_PARSED_TEMPLATE: {
       LateParsedTemplates.append(Record.begin(), Record.end());
       break;
@@ -6730,20 +6725,14 @@ ASTReader::FindExternalVisibleDeclsByName(const DeclContext *DC,
   // individually, because finding an entity in one of them doesn't imply that
   // we can't find a different entity in another one.
   if (isa<CXXRecordDecl>(DC)) {
-    auto Kind = Name.getNameKind();
-    if (Kind == DeclarationName::CXXConstructorName ||
-        Kind == DeclarationName::CXXDestructorName ||
-        (Kind == DeclarationName::CXXOperatorName &&
-         Name.getCXXOverloadedOperator() == OO_Equal)) {
-      auto Merged = MergedLookups.find(DC);
-      if (Merged != MergedLookups.end()) {
-        for (unsigned I = 0; I != Merged->second.size(); ++I) {
-          const DeclContext *Context = Merged->second[I];
-          LookUpInContexts(Context);
-          // We might have just added some more merged lookups. If so, our
-          // iterator is now invalid, so grab a fresh one before continuing.
-          Merged = MergedLookups.find(DC);
-        }
+    auto Merged = MergedLookups.find(DC);
+    if (Merged != MergedLookups.end()) {
+      for (unsigned I = 0; I != Merged->second.size(); ++I) {
+        const DeclContext *Context = Merged->second[I];
+        LookUpInContexts(Context);
+        // We might have just added some more merged lookups. If so, our
+        // iterator is now invalid, so grab a fresh one before continuing.
+        Merged = MergedLookups.find(DC);
       }
     }
   }
@@ -8679,7 +8668,10 @@ void ASTReader::pushExternalDeclIntoScope(NamedDecl *D, DeclarationName Name) {
     if (It != PendingFakeLookupResults.end()) {
       for (auto *ND : PendingFakeLookupResults[II])
         SemaObj->IdResolver.RemoveDecl(ND);
-      PendingFakeLookupResults.erase(It);
+      // FIXME: this works around module+PCH performance issue.
+      // Rather than erase the result from the map, which is O(n), just clear
+      // the vector of NamedDecls.
+      It->second.clear();
     }
   }
 
