@@ -1063,6 +1063,11 @@ def ObjCNSObject : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+def ObjCIndependentClass : InheritableAttr {
+  let Spellings = [GNU<"objc_independent_class">];
+  let Documentation = [Undocumented];
+}
+
 def ObjCPreciseLifetime : InheritableAttr {
   let Spellings = [GNU<"objc_precise_lifetime">];
   let Subjects = SubjectList<[Var], ErrorDiag>;

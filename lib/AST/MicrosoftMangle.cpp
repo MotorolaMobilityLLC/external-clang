@@ -94,6 +94,7 @@ class MicrosoftMangleContextImpl : public MicrosoftMangleContext {
   llvm::DenseMap<const NamedDecl *, unsigned> Uniquifier;
   llvm::DenseMap<const CXXRecordDecl *, unsigned> LambdaIds;
   llvm::DenseMap<const NamedDecl *, unsigned> SEHFilterIds;
+  llvm::DenseMap<const NamedDecl *, unsigned> SEHFinallyIds;
 
 public:
   MicrosoftMangleContextImpl(ASTContext &Context, DiagnosticsEngine &Diags)
@@ -122,8 +123,8 @@ public:
                               CXXCtorType CT, uint32_t Size, uint32_t NVOffset,
                               int32_t VBPtrOffset, uint32_t VBIndex,
                               raw_ostream &Out) override;
-  void mangleCXXHandlerMapEntry(QualType T, bool IsConst, bool IsVolatile,
-                                bool IsReference, raw_ostream &Out) override;
+  void mangleCXXCatchHandlerType(QualType T, uint32_t Flags,
+                                 raw_ostream &Out) override;
   void mangleCXXRTTI(QualType T, raw_ostream &Out) override;
   void mangleCXXRTTIName(QualType T, raw_ostream &Out) override;
   void mangleCXXRTTIBaseClassDescriptor(const CXXRecordDecl *Derived,
@@ -151,6 +152,8 @@ public:
                                      raw_ostream &Out) override;
   void mangleSEHFilterExpression(const NamedDecl *EnclosingDecl,
                                  raw_ostream &Out) override;
+  void mangleSEHFinallyBlock(const NamedDecl *EnclosingDecl,
+                             raw_ostream &Out) override;
   void mangleStringLiteral(const StringLiteral *SL, raw_ostream &Out) override;
   void mangleCXXVTableBitSet(const CXXRecordDecl *RD,
                              raw_ostream &Out) override;
@@ -1677,7 +1680,7 @@ void MicrosoftCXXNameMangler::mangleFunctionType(const FunctionType *T,
     Out << 'X';
   } else {
     // Happens for function pointer type arguments for example.
-    for (const QualType Arg : Proto->param_types())
+    for (const QualType &Arg : Proto->param_types())
       mangleArgumentType(Arg, Range);
     // <builtin-type>      ::= Z  # ellipsis
     if (Proto->isVariadic())
@@ -2345,20 +2348,13 @@ void MicrosoftMangleContextImpl::mangleCXXRTTIName(QualType T,
   Mangler.mangleType(T, SourceRange(), MicrosoftCXXNameMangler::QMM_Result);
 }
 
-void MicrosoftMangleContextImpl::mangleCXXHandlerMapEntry(QualType T,
-                                                          bool IsConst,
-                                                          bool IsVolatile,
-                                                          bool IsReference,
-                                                          raw_ostream &Out) {
+void MicrosoftMangleContextImpl::mangleCXXCatchHandlerType(QualType T,
+                                                           uint32_t Flags,
+                                                           raw_ostream &Out) {
   MicrosoftCXXNameMangler Mangler(*this, Out);
-  Mangler.getStream() << "llvm.eh.handlermapentry.";
-  if (IsConst)
-    Mangler.getStream() << "const.";
-  if (IsVolatile)
-    Mangler.getStream() << "volatile.";
-  if (IsReference)
-    Mangler.getStream() << "reference.";
+  Mangler.getStream() << "llvm.eh.handlertype.";
   Mangler.mangleType(T, SourceRange(), MicrosoftCXXNameMangler::QMM_Result);
+  Mangler.getStream() << '.' << Flags;
 }
 
 void MicrosoftMangleContextImpl::mangleCXXThrowInfo(QualType T,
@@ -2473,6 +2469,17 @@ void MicrosoftMangleContextImpl::mangleSEHFilterExpression(
   //
   // <mangled-name> ::= ?filt$ <filter-number> @0
   Mangler.getStream() << "\01?filt$" << SEHFilterIds[EnclosingDecl]++ << "@0@";
+  Mangler.mangleName(EnclosingDecl);
+}
+
+void MicrosoftMangleContextImpl::mangleSEHFinallyBlock(
+    const NamedDecl *EnclosingDecl, raw_ostream &Out) {
+  MicrosoftCXXNameMangler Mangler(*this, Out);
+  // The function body is in the same comdat as the function with the handler,
+  // so the numbering here doesn't have to be the same across TUs.
+  //
+  // <mangled-name> ::= ?fin$ <filter-number> @0
+  Mangler.getStream() << "\01?fin$" << SEHFinallyIds[EnclosingDecl]++ << "@0@";
   Mangler.mangleName(EnclosingDecl);
 }
 

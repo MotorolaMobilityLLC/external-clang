@@ -1226,8 +1226,7 @@ bool LookupResult::isVisibleSlow(Sema &SemaRef, NamedDecl *D) {
   DeclContext *DC = D->getLexicalDeclContext();
   if (!D->isModulePrivate() &&
       DC && !DC->isFileContext() && !isa<LinkageSpecDecl>(DC)) {
-    NamedDecl *Hidden;
-    if (SemaRef.hasVisibleDefinition(cast<NamedDecl>(DC), &Hidden)) {
+    if (SemaRef.hasVisibleDefinition(cast<NamedDecl>(DC))) {
       if (SemaRef.ActiveTemplateInstantiations.empty()) {
         // Cache the fact that this declaration is implicitly visible because
         // its parent has a visible definition.
@@ -3071,7 +3070,7 @@ static void LookupVisibleDecls(DeclContext *Ctx, LookupResult &Result,
     Result.getSema().ForceDeclarationOfImplicitMembers(Class);
 
   // Enumerate all of the results in this context.
-  for (const auto &R : Ctx->lookups()) {
+  for (DeclContextLookupResult R : Ctx->lookups()) {
     for (auto *D : R) {
       if (auto *ND = Result.getAcceptableDecl(D)) {
         Consumer.FoundDecl(ND, Visited.checkHidden(ND), Ctx, InBaseClass);
