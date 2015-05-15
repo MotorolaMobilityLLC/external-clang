@@ -799,7 +799,10 @@ SourceLocation Parser::ParseDecltypeSpecifier(DeclSpec &DS) {
       //   The operand of the decltype specifier is an unevaluated operand.
       EnterExpressionEvaluationContext Unevaluated(Actions, Sema::Unevaluated,
                                                    nullptr,/*IsDecltype=*/true);
-      Result = Actions.CorrectDelayedTyposInExpr(ParseExpression());
+      Result =
+          Actions.CorrectDelayedTyposInExpr(ParseExpression(), [](Expr *E) {
+            return E->hasPlaceholderType() ? ExprError() : E;
+          });
       if (Result.isInvalid()) {
         DS.SetTypeSpecError();
         if (SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch)) {
@@ -3527,7 +3530,9 @@ IdentifierInfo *Parser::TryParseCXX11AttributeIdentifier(SourceLocation &Loc) {
     // Alternative tokens do not have identifier info, but their spelling
     // starts with an alphabetical character.
     SmallString<8> SpellingBuf;
-    StringRef Spelling = PP.getSpelling(Tok.getLocation(), SpellingBuf);
+    SourceLocation SpellingLoc =
+        PP.getSourceManager().getSpellingLoc(Tok.getLocation());
+    StringRef Spelling = PP.getSpelling(SpellingLoc, SpellingBuf);
     if (isLetter(Spelling[0])) {
       Loc = ConsumeToken();
       return &PP.getIdentifierTable().get(Spelling);
