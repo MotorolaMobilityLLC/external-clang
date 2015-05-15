@@ -1451,13 +1451,13 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
     // anything here.
     if (!E->getType()->isVariableArrayType()) {
       assert(isa<llvm::PointerType>(V->getType()) && "Expected pointer");
+      llvm::Type *NewTy = ConvertType(E->getType());
       V = CGF.Builder.CreatePointerCast(
-          V, ConvertType(E->getType())->getPointerTo(
-            V->getType()->getPointerAddressSpace()));
+          V, NewTy->getPointerTo(V->getType()->getPointerAddressSpace()));
 
       assert(isa<llvm::ArrayType>(V->getType()->getPointerElementType()) &&
              "Expected pointer to array");
-      V = Builder.CreateStructGEP(V, 0, "arraydecay");
+      V = Builder.CreateStructGEP(NewTy, V, 0, "arraydecay");
     }
 
     // Make sure the array decay ends up being the right type.  This matters if
@@ -1845,10 +1845,9 @@ ScalarExprEmitter::EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
     llvm::BasicBlock *opBB = Builder.GetInsertBlock();
     llvm::BasicBlock *contBB = CGF.createBasicBlock("atomic_cont", CGF.CurFn);
     auto Pair = CGF.EmitAtomicCompareExchange(
-        LV, RValue::get(atomicPHI), RValue::get(CGF.EmitToMemory(value, type)),
-        E->getExprLoc());
-    llvm::Value *old = Pair.first.getScalarVal();
-    llvm::Value *success = Pair.second.getScalarVal();
+        LV, RValue::get(atomicPHI), RValue::get(value), E->getExprLoc());
+    llvm::Value *old = CGF.EmitToMemory(Pair.first.getScalarVal(), type);
+    llvm::Value *success = Pair.second;
     atomicPHI->addIncoming(old, opBB);
     Builder.CreateCondBr(success, contBB, opBB);
     Builder.SetInsertPoint(contBB);
@@ -2189,10 +2188,9 @@ LValue ScalarExprEmitter::EmitCompoundAssignLValue(
     llvm::BasicBlock *opBB = Builder.GetInsertBlock();
     llvm::BasicBlock *contBB = CGF.createBasicBlock("atomic_cont", CGF.CurFn);
     auto Pair = CGF.EmitAtomicCompareExchange(
-        LHSLV, RValue::get(atomicPHI),
-        RValue::get(CGF.EmitToMemory(Result, LHSTy)), E->getExprLoc());
-    llvm::Value *old = Pair.first.getScalarVal();
-    llvm::Value *success = Pair.second.getScalarVal();
+        LHSLV, RValue::get(atomicPHI), RValue::get(Result), E->getExprLoc());
+    llvm::Value *old = CGF.EmitToMemory(Pair.first.getScalarVal(), LHSTy);
+    llvm::Value *success = Pair.second;
     atomicPHI->addIncoming(old, opBB);
     Builder.CreateCondBr(success, contBB, opBB);
     Builder.SetInsertPoint(contBB);
