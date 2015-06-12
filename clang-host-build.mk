@@ -8,11 +8,17 @@ LOCAL_CPPFLAGS := \
 	-Wno-sign-promo \
 	$(LOCAL_CPPFLAGS)
 
-ifeq ($(CLANG_ENABLE_ASSERTION),true)
+ifeq ($(FORCE_BUILD_LLVM_DISABLE_NDEBUG),true)
 LOCAL_CFLAGS :=	\
 	$(LOCAL_CFLAGS) \
 	-D_DEBUG	\
 	-UNDEBUG
+endif
+
+ifeq ($(FORCE_BUILD_LLVM_DEBUG),true)
+LOCAL_CFLAGS := \
+	$(LOCAL_CFLAGS) \
+	-O0 -g
 endif
 
 # Make sure bionic is first so we can include system headers.
