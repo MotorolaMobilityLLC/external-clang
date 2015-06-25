@@ -1554,13 +1554,21 @@ static void handleTLSModelAttr(Sema &S, Decl *D,
 }
 
 static void handleKernelAttr(Sema &S, Decl *D, const AttributeList &Attr) {
-  if (S.LangOpts.Renderscript) {
-    D->addAttr(::new (S.Context) 
-               KernelAttr(Attr.getRange(), S.Context,
-                          Attr.getAttributeSpellingListIndex()));
-  } else {
-    S.Diag(Attr.getLoc(), diag::warn_attribute_ignored) << "kernel";
+  if (!S.LangOpts.Renderscript) {
+    S.Diag(Attr.getLoc(), diag::warn_attribute_ignored) << Attr.getName();
+    return;
   }
+
+  StringRef Kind;
+
+  if (Attr.getNumArgs() == 1 &&
+      !S.checkStringLiteralArgumentAttr(Attr, 0, Kind)) {
+    return;
+  }
+
+  D->addAttr(::new (S.Context)
+             KernelAttr(Attr.getRange(), S.Context, Kind,
+                        Attr.getAttributeSpellingListIndex()));
 }
 
 static void handleRestrictAttr(Sema &S, Decl *D, const AttributeList &Attr) {
