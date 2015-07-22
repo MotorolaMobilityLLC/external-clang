@@ -660,6 +660,8 @@ def OpenCLGenericAddressSpace : TypeAttr {
 
 def Kernel : Attr {
   let Spellings = [GNU<"kernel">];
+  let Args = [StringArgument<"KernelKind", 1>];
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
 }
 
