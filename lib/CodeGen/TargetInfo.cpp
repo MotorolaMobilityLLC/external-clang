@@ -30,6 +30,31 @@
 using namespace clang;
 using namespace CodeGen;
 
+// Helper for coercing an aggregate argument or return value into an
+// integer array of the same size (including padding).
+//
+// This is needed for RenderScript on ARM targets. The RenderScript
+// compiler assumes that the size of the argument / return value in
+// the IR is the same as the size of the corresponding qualified
+// type. It is necessary to coerce the aggregate type into an
+// array. We cannot pass a struct directly as an argument because
+// clang's struct passing logic breaks up the struct into its
+// constitutent fields.
+//
+// Ty          - The argument / return value type
+// Context     - The associated ASTContext
+// LLVMContext - The associated LLVMContext
+static ABIArgInfo coerceToIntArray(QualType Ty,
+                                   ASTContext &Context,
+                                   llvm::LLVMContext &LLVMContext) {
+  // Alignment and Size are measured in bits.
+  const uint64_t Size = Context.getTypeSize(Ty);
+  const uint64_t Alignment = Context.getTypeAlign(Ty);
+  llvm::Type *IntType = llvm::Type::getIntNTy(LLVMContext, Alignment);
+  const uint64_t NumElements = (Size + Alignment - 1) / Alignment;
+  return ABIArgInfo::getDirect(llvm::ArrayType::get(IntType, NumElements));
+}
+
 static void AssignToArrayRange(CodeGen::CGBuilderTy &Builder,
                                llvm::Value *Array,
                                llvm::Value *Value,
@@ -4044,6 +4069,9 @@ ABIArgInfo AArch64ABIInfo::classifyArgumentType(QualType Ty) const {
   // Aggregates <= 16 bytes are passed directly in registers or on the stack.
   uint64_t Size = getContext().getTypeSize(Ty);
   if (Size <= 128) {
+    if (getContext().getLangOpts().Renderscript) {
+      return coerceToIntArray(Ty, getContext(), getVMContext());
+    }
     unsigned Alignment = getContext().getTypeAlign(Ty);
     Size = 64 * ((Size + 63) / 64); // round up to multiple of 8 bytes
 
@@ -4089,6 +4117,9 @@ ABIArgInfo AArch64ABIInfo::classifyReturnType(QualType RetTy) const {
   // Aggregates <= 16 bytes are returned directly in registers or on the stack.
   uint64_t Size = getContext().getTypeSize(RetTy);
   if (Size <= 128) {
+    if (getContext().getLangOpts().Renderscript) {
+      return coerceToIntArray(RetTy, getContext(), getVMContext());
+    }
     unsigned Alignment = getContext().getTypeAlign(RetTy);
     Size = 64 * ((Size + 63) / 64); // round up to multiple of 8 bytes
 
@@ -4743,6 +4774,10 @@ ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty,
            /*Realign=*/TyAlign > ABIAlign);
   }
 
+  if (getContext().getLangOpts().Renderscript) {
+    return coerceToIntArray(Ty, getContext(), getVMContext());
+  }
+
   // Otherwise, pass by coercing to a structure of the appropriate size.
   llvm::Type* ElemTy;
   unsigned SizeRegs;
@@ -4913,6 +4948,9 @@ ABIArgInfo ARMABIInfo::classifyReturnType(QualType RetTy,
   // are returned indirectly.
   uint64_t Size = getContext().getTypeSize(RetTy);
   if (Size <= 32) {
+    if (getContext().getLangOpts().Renderscript) {
+      return coerceToIntArray(RetTy, getContext(), getVMContext());
+    }
     if (getDataLayout().isBigEndian())
       // Return in 32 bit integer integer type (as if loaded by LDR, AAPCS 5.4)
       return ABIArgInfo::getDirect(llvm::Type::getInt32Ty(getVMContext()));
