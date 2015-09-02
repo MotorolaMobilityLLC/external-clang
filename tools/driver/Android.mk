@@ -97,11 +97,9 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMSupport
 
 LOCAL_LDLIBS += -lm
-ifdef USE_MINGW
-LOCAL_LDLIBS += -limagehlp
-else
-LOCAL_LDLIBS += -lpthread -ldl
-endif
+LOCAL_LDLIBS_windows := -limagehlp
+LOCAL_LDLIBS_darwin := -lpthread -ldl
+LOCAL_LDLIBS_linux := -lpthread -ldl
 
 # remove when we can use PIE binaries in all places again
 LOCAL_NO_FPIE := true
