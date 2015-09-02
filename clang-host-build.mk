@@ -27,6 +27,8 @@ LOCAL_C_INCLUDES :=	\
 	$(CLANG_ROOT_PATH)/lib/CodeGen    \
 	$(LOCAL_C_INCLUDES)
 
+LOCAL_MODULE_HOST_OS := darwin linux windows
+
 LLVM_ROOT_PATH := external/llvm
 include $(LLVM_ROOT_PATH)/llvm.mk
 
