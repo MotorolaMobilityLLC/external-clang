@@ -46,16 +46,11 @@ include $(CLANG_HOST_BUILD_MK)
 # have prebuilts for windows.
 ifneq (true,$(FORCE_BUILD_LLVM_COMPONENTS))
 LOCAL_MODULE_HOST_OS := windows
-# BUILD_HOST_SHARED_LIBRARY can be moved out once
-# LOCAL_MODULE_HOST_OS is enforced.
-ifeq ($(HOST_OS),windows)
-include $(BUILD_HOST_SHARED_LIBRARY)
-endif
 else
 LOCAL_MODULE_HOST_OS := darwin linux windows
-include $(BUILD_HOST_SHARED_LIBRARY)
 endif
 
+include $(BUILD_HOST_SHARED_LIBRARY)
 
 # Don't build the library unless forced to.
 ifeq (true,$(FORCE_BUILD_LLVM_COMPONENTS))
