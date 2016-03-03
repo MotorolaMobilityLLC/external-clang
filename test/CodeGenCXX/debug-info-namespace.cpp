@@ -1,6 +1,6 @@
-// RUN: %clang_cc1 -g -fno-standalone-debug -S -emit-llvm %s -o - | FileCheck %s
-// RUN: %clang_cc1 -g -gline-tables-only    -S -emit-llvm %s -o - | FileCheck -check-prefix=CHECK-GMLT %s
-// RUN: %clang_cc1 -g -fstandalone-debug    -S -emit-llvm %s -o - | FileCheck -check-prefix=CHECK-NOLIMIT %s
+// RUN: %clang_cc1 -debug-info-kind=limited -S -emit-llvm %s -o - | FileCheck %s
+// RUN: %clang_cc1 -debug-info-kind=line-tables-only -S -emit-llvm %s -o - | FileCheck -check-prefix=CHECK-GMLT %s
+// RUN: %clang_cc1 -debug-info-kind=standalone -S -emit-llvm %s -o - | FileCheck -check-prefix=CHECK-NOLIMIT %s
 
 namespace A {
 #line 1 "foo.cpp"
@@ -55,7 +55,7 @@ void B::func_fwd() {}
 // This should work even if 'i' and 'func' were declarations & not definitions,
 // but it doesn't yet.
 
-// CHECK: [[CU:![0-9]+]] = !DICompileUnit(
+// CHECK: [[CU:![0-9]+]] = distinct !DICompileUnit(
 // CHECK-SAME:                            imports: [[MODULES:![0-9]*]]
 // CHECK: [[FOO:![0-9]+]] = !DICompositeType(tag: DW_TAG_structure_type, name: "foo",
 // CHECK-SAME:                               line: 5
@@ -67,10 +67,10 @@ void B::func_fwd() {}
 // CHECK: [[BAR:![0-9]+]] = !DICompositeType(tag: DW_TAG_structure_type, name: "bar",
 // CHECK-SAME:                               line: 6
 // CHECK-SAME:                               DIFlagFwdDecl
-// CHECK: [[F1:![0-9]+]] = !DISubprogram(name: "f1",{{.*}} line: 4
+// CHECK: [[F1:![0-9]+]] = distinct !DISubprogram(name: "f1",{{.*}} line: 4
 // CHECK-SAME:                           isDefinition: true
-// CHECK: [[FUNC:![0-9]+]] = !DISubprogram(name: "func",{{.*}} isDefinition: true
-// CHECK: [[FUNC_FWD:![0-9]+]] = !DISubprogram(name: "func_fwd",{{.*}} line: 47,{{.*}} isDefinition: true
+// CHECK: [[FUNC:![0-9]+]] = distinct !DISubprogram(name: "func",{{.*}} isDefinition: true
+// CHECK: [[FUNC_FWD:![0-9]+]] = distinct !DISubprogram(name: "func_fwd",{{.*}} line: 47,{{.*}} isDefinition: true
 // CHECK: [[I:![0-9]+]] = !DIGlobalVariable(name: "i",{{.*}} scope: [[NS]],
 // CHECK: [[VAR_FWD:![0-9]+]] = !DIGlobalVariable(name: "var_fwd",{{.*}} scope: [[NS]],
 // CHECK-SAME:                                    line: 44
@@ -102,14 +102,12 @@ void B::func_fwd() {}
 // CHECK: [[M16]] = !DIImportedEntity(tag: DW_TAG_imported_declaration, scope: [[FUNC]], entity: [[FUNC_FWD:![0-9]+]]
 // CHECK: [[M17]] = !DIImportedEntity(tag: DW_TAG_imported_declaration, scope: [[CTXT]], entity: [[I]]
 
-// CHECK-GMLT: [[CU:![0-9]+]] = !DICompileUnit(
+// CHECK-GMLT: [[CU:![0-9]+]] = distinct !DICompileUnit(
 // CHECK-GMLT-SAME:                            emissionKind: 2,
-// CHECK-GMLT-SAME:                            imports: [[MODULES:![0-9]+]]
-// CHECK-GMLT: [[MODULES]] = !{}
+// CHECK-GMLT-NOT:                             imports:
 
 // CHECK-NOLIMIT: !DICompositeType(tag: DW_TAG_structure_type, name: "bar",{{.*}} line: 6,
 // CHECK-NOLIMIT-NOT:              DIFlagFwdDecl
 // CHECK-NOLIMIT-SAME:             ){{$}}
 
-// REQUIRES: shell-preserves-root
 // REQUIRES: dw2
