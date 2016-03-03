@@ -24,6 +24,7 @@ Using Clang as a Compiler
    AddressSanitizer
    ThreadSanitizer
    MemorySanitizer
+   UndefinedBehaviorSanitizer
    DataFlowSanitizer
    LeakSanitizer
    SanitizerCoverage
@@ -32,6 +33,7 @@ Using Clang as a Compiler
    SafeStack
    Modules
    MSVCCompatibility
+   CommandGuide/index
    FAQ
 
 Using Clang as a Library
