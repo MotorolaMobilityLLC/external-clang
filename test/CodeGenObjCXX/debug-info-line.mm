@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fcxx-exceptions -fexceptions -gline-tables-only -fblocks -emit-llvm %s -o - | FileCheck %s
+// RUN: %clang_cc1 -fcxx-exceptions -fexceptions -debug-info-kind=line-tables-only -fblocks -emit-llvm %s -o - | FileCheck %s
 
 void fn();
 
@@ -15,7 +15,7 @@ void f1() {
   }();
 }
 
-// CHECK-LABEL: define internal i8* @"\01-[TNSObject init]"
+// CHECK-LABEL: define internal {{.*}}i8* @"\01-[TNSObject init]"
 @implementation TNSObject
 - (id)init
 {

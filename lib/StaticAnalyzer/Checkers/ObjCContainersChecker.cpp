@@ -133,19 +133,19 @@ void ObjCContainersChecker::checkPreStmt(const CallExpr *CE,
     if (IdxVal.isUnknownOrUndef())
       return;
     DefinedSVal Idx = IdxVal.castAs<DefinedSVal>();
-    
+
     // Now, check if 'Idx in [0, Size-1]'.
     const QualType T = IdxExpr->getType();
     ProgramStateRef StInBound = State->assumeInBound(Idx, *Size, true, T);
     ProgramStateRef StOutBound = State->assumeInBound(Idx, *Size, false, T);
     if (StOutBound && !StInBound) {
-      ExplodedNode *N = C.generateSink(StOutBound);
+      ExplodedNode *N = C.generateErrorNode(StOutBound);
       if (!N)
         return;
       initBugType();
-      BugReport *R = new BugReport(*BT, "Index is out of bounds", N);
+      auto R = llvm::make_unique<BugReport>(*BT, "Index is out of bounds", N);
       R->addRange(IdxExpr->getSourceRange());
-      C.emitReport(R);
+      C.emitReport(std::move(R));
       return;
     }
   }
