@@ -817,14 +817,6 @@ namespace {
     QualType TransformSubstTemplateTypeParmPackType(TypeLocBuilder &TLB,
                                            SubstTemplateTypeParmPackTypeLoc TL);
 
-    ExprResult TransformCallExpr(CallExpr *CE) {
-      getSema().CallsUndergoingInstantiation.push_back(CE);
-      ExprResult Result =
-          TreeTransform<TemplateInstantiator>::TransformCallExpr(CE);
-      getSema().CallsUndergoingInstantiation.pop_back();
-      return Result;
-    }
-
     ExprResult TransformLambdaExpr(LambdaExpr *E) {
       LocalInstantiationScope Scope(SemaRef, /*CombineWithOuterScope=*/true);
       return TreeTransform<TemplateInstantiator>::TransformLambdaExpr(E);
@@ -989,7 +981,7 @@ TemplateInstantiator::RebuildElaboratedType(SourceLocation KeywordLoc,
     if (Id && Keyword != ETK_None && Keyword != ETK_Typename) {
       TagTypeKind Kind = TypeWithKeyword::getTagTypeKindForKeyword(Keyword);
       if (!SemaRef.isAcceptableTagRedeclaration(TD, Kind, /*isDefinition*/false,
-                                                TagLocation, *Id)) {
+                                                TagLocation, Id)) {
         SemaRef.Diag(TagLocation, diag::err_use_with_wrong_tag)
           << Id
           << FixItHint::CreateReplacement(SourceRange(TagLocation),
@@ -1231,7 +1223,7 @@ TemplateInstantiator::TransformFunctionParmPackExpr(FunctionParmPackExpr *E) {
 
   // Transform each of the parameter expansions into the corresponding
   // parameters in the instantiation of the function decl.
-  SmallVector<Decl *, 8> Parms;
+  SmallVector<ParmVarDecl *, 8> Parms;
   Parms.reserve(E->getNumExpansions());
   for (FunctionParmPackExpr::iterator I = E->begin(), End = E->end();
        I != End; ++I) {
@@ -1680,11 +1672,26 @@ ParmVarDecl *Sema::SubstParmVarDecl(ParmVarDecl *OldParm,
   } else if (OldParm->hasUnparsedDefaultArg()) {
     NewParm->setUnparsedDefaultArg();
     UnparsedDefaultArgInstantiations[OldParm].push_back(NewParm);
-  } else if (Expr *Arg = OldParm->getDefaultArg())
-    // FIXME: if we non-lazily instantiated non-dependent default args for
-    // non-dependent parameter types we could remove a bunch of duplicate
-    // conversion warnings for such arguments.
-    NewParm->setUninstantiatedDefaultArg(Arg);
+  } else if (Expr *Arg = OldParm->getDefaultArg()) {
+    FunctionDecl *OwningFunc = cast<FunctionDecl>(OldParm->getDeclContext());
+    if (OwningFunc->isLexicallyWithinFunctionOrMethod()) {
+      // Instantiate default arguments for methods of local classes (DR1484)
+      // and non-defining declarations.
+      Sema::ContextRAII SavedContext(*this, OwningFunc);
+      LocalInstantiationScope Local(*this);
+      ExprResult NewArg = SubstExpr(Arg, TemplateArgs);
+      if (NewArg.isUsable()) {
+        // It would be nice if we still had this.
+        SourceLocation EqualLoc = NewArg.get()->getLocStart();
+        SetParamDefaultArgument(NewParm, NewArg.get(), EqualLoc);
+      }
+    } else {
+      // FIXME: if we non-lazily instantiated non-dependent default args for
+      // non-dependent parameter types we could remove a bunch of duplicate
+      // conversion warnings for such arguments.
+      NewParm->setUninstantiatedDefaultArg(Arg);
+    }
+  }
 
   NewParm->setHasInheritedDefaultArg(OldParm->hasInheritedDefaultArg());
   
@@ -2037,7 +2044,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
 
   // Default arguments are parsed, if not instantiated. We can go instantiate
   // default arg exprs for default constructors if necessary now.
-  ActOnFinishCXXMemberDefaultArgs(Instantiation);
+  ActOnFinishCXXNonNestedClass(Instantiation);
 
   // Instantiate late parsed attributes, and attach them to their decls.
   // See Sema::InstantiateAttrs
@@ -2269,33 +2276,6 @@ bool Sema::InstantiateClassTemplateSpecialization(
   // Perform the actual instantiation on the canonical declaration.
   ClassTemplateSpec = cast<ClassTemplateSpecializationDecl>(
                                          ClassTemplateSpec->getCanonicalDecl());
-
-  // Check whether we have already instantiated or specialized this class
-  // template specialization.
-  if (ClassTemplateSpec->getSpecializationKind() != TSK_Undeclared) {
-    if (ClassTemplateSpec->getSpecializationKind() == 
-          TSK_ExplicitInstantiationDeclaration &&
-        TSK == TSK_ExplicitInstantiationDefinition) {
-      // An explicit instantiation definition follows an explicit instantiation
-      // declaration (C++0x [temp.explicit]p10); go ahead and perform the
-      // explicit instantiation.
-      ClassTemplateSpec->setSpecializationKind(TSK);
-      
-      // If this is an explicit instantiation definition, mark the
-      // vtable as used.
-      if (TSK == TSK_ExplicitInstantiationDefinition &&
-          !ClassTemplateSpec->isInvalidDecl())
-        MarkVTableUsed(PointOfInstantiation, ClassTemplateSpec, true);
-
-      return false;
-    }
-    
-    // We can only instantiate something that hasn't already been
-    // instantiated or specialized. Fail without any diagnostics: our
-    // caller will provide an error message.    
-    return true;
-  }
-
   if (ClassTemplateSpec->isInvalidDecl())
     return true;
   
@@ -2820,14 +2800,14 @@ void LocalInstantiationScope::InstantiatedLocal(const Decl *D, Decl *Inst) {
 #endif
     Stored = Inst;
   } else if (DeclArgumentPack *Pack = Stored.dyn_cast<DeclArgumentPack *>()) {
-    Pack->push_back(Inst);
+    Pack->push_back(cast<ParmVarDecl>(Inst));
   } else {
     assert(Stored.get<Decl *>() == Inst && "Already instantiated this local");
   }
 }
 
-void LocalInstantiationScope::InstantiatedLocalPackArg(const Decl *D, 
-                                                       Decl *Inst) {
+void LocalInstantiationScope::InstantiatedLocalPackArg(const Decl *D,
+                                                       ParmVarDecl *Inst) {
   D = getCanonicalParmVarDecl(D);
   DeclArgumentPack *Pack = LocalDecls[D].get<DeclArgumentPack *>();
   Pack->push_back(Inst);

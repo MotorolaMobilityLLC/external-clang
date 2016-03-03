@@ -17,6 +17,7 @@ struct S {
 // CHECK-DAG: @"\01?$TSS0@?1??h@@YAAAUS@@_N@Z" = linkonce_odr global i32 0
 
 // CHECK-LABEL: define {{.*}} @"\01?f@@YAAAUS@@XZ"()
+// CHECK-SAME:  personality i8* bitcast (i32 (...)* @__CxxFrameHandler3 to i8*)
 extern inline S &f() {
   static thread_local S s;
 // CHECK:       %[[guard:.*]] = load i32, i32* @"\01??__J?1??f@@YAAAUS@@XZ@51"
@@ -38,15 +39,11 @@ extern inline S &f() {
 // CHECK-NEXT:  ret %struct.S* @"\01?s@?1??f@@YAAAUS@@XZ@4U2@A"
 
 // CHECK:     [[lpad:.*]]:
-// CHECK-NEXT:  landingpad { i8*, i32 } personality i8* bitcast (i32 (...)* @__CxxFrameHandler3 to i8*)
-// CHECK-NEXT:    cleanup
+// CHECK-NEXT: cleanuppad within none []
 // CHECK:       %[[guard:.*]] = load i32, i32* @"\01??__J?1??f@@YAAAUS@@XZ@51"
 // CHECK-NEXT:  %[[mask:.*]] = and i32 %[[guard]], -2
 // CHECK-NEXT:  store i32 %[[mask]], i32* @"\01??__J?1??f@@YAAAUS@@XZ@51"
-// CHECK-NEXT:  br label %[[eh_resume:.*]]
-//
-// CHECK:     [[eh_resume]]:
-// CHECK:       resume { i8*, i32 }
+// CHECK-NEXT:  cleanupret {{.*}} unwind to caller
   return s;
 }
 
@@ -78,11 +75,9 @@ extern inline S &g() {
 // CHECK-NEXT:  ret %struct.S* @"\01?s@?1??g@@YAAAUS@@XZ@4U2@A"
 //
 // CHECK:     [[lpad]]:
+// CHECK-NEXT: cleanuppad within none []
 // CHECK:       call void @_Init_thread_abort(i32* @"\01?$TSS0@?1??g@@YAAAUS@@XZ")
-// CHECK-NEXT:  br label %[[eh_resume:.*]]
-//
-// CHECK:     [[eh_resume]]:
-// CHECK:       resume { i8*, i32 }
+// CHECK-NEXT:  cleanupret {{.*}} unwind to caller
   return s;
 }
 
