@@ -39,7 +39,7 @@ class OMPExecutableDirective;
 class VarDecl;
 
 namespace CodeGen {
-
+class Address;
 class CodeGenFunction;
 class CodeGenModule;
 
@@ -62,12 +62,17 @@ private:
     // Call to void __kmpc_critical(ident_t *loc, kmp_int32 global_tid,
     // kmp_critical_name *crit);
     OMPRTL__kmpc_critical,
+    // Call to void __kmpc_critical_with_hint(ident_t *loc, kmp_int32
+    // global_tid, kmp_critical_name *crit, uintptr_t hint);
+    OMPRTL__kmpc_critical_with_hint,
     // Call to void __kmpc_end_critical(ident_t *loc, kmp_int32 global_tid,
     // kmp_critical_name *crit);
     OMPRTL__kmpc_end_critical,
     // Call to kmp_int32 __kmpc_cancel_barrier(ident_t *loc, kmp_int32
     // global_tid);
     OMPRTL__kmpc_cancel_barrier,
+    // Call to void __kmpc_barrier(ident_t *loc, kmp_int32 global_tid);
+    OMPRTL__kmpc_barrier,
     // Call to void __kmpc_for_static_fini(ident_t *loc, kmp_int32 global_tid);
     OMPRTL__kmpc_for_static_fini,
     // Call to void __kmpc_serialized_parallel(ident_t *loc, kmp_int32
@@ -131,6 +136,35 @@ private:
     // Call to kmp_int32 __kmpc_omp_taskwait(ident_t *loc, kmp_int32
     // global_tid);
     OMPRTL__kmpc_omp_taskwait,
+    // Call to void __kmpc_taskgroup(ident_t *loc, kmp_int32 global_tid);
+    OMPRTL__kmpc_taskgroup,
+    // Call to void __kmpc_end_taskgroup(ident_t *loc, kmp_int32 global_tid);
+    OMPRTL__kmpc_end_taskgroup,
+    // Call to void __kmpc_push_proc_bind(ident_t *loc, kmp_int32 global_tid,
+    // int proc_bind);
+    OMPRTL__kmpc_push_proc_bind,
+    // Call to kmp_int32 __kmpc_omp_task_with_deps(ident_t *loc_ref, kmp_int32
+    // gtid, kmp_task_t * new_task, kmp_int32 ndeps, kmp_depend_info_t
+    // *dep_list, kmp_int32 ndeps_noalias, kmp_depend_info_t *noalias_dep_list);
+    OMPRTL__kmpc_omp_task_with_deps,
+    // Call to void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32
+    // gtid, kmp_int32 ndeps, kmp_depend_info_t *dep_list, kmp_int32
+    // ndeps_noalias, kmp_depend_info_t *noalias_dep_list);
+    OMPRTL__kmpc_omp_wait_deps,
+    // Call to kmp_int32 __kmpc_cancellationpoint(ident_t *loc, kmp_int32
+    // global_tid, kmp_int32 cncl_kind);
+    OMPRTL__kmpc_cancellationpoint,
+    // Call to kmp_int32 __kmpc_cancel(ident_t *loc, kmp_int32 global_tid,
+    // kmp_int32 cncl_kind);
+    OMPRTL__kmpc_cancel,
+
+    //
+    // Offloading related calls
+    //
+    // Call to int32_t __tgt_target(int32_t device_id, void *host_ptr, int32_t
+    // arg_num, void** args_base, void **args, size_t *arg_sizes, int32_t
+    // *arg_types);
+    OMPRTL__tgt_target,
   };
 
   /// \brief Values for bit flags used in the ident_t to describe the fields.
@@ -161,7 +195,9 @@ private:
   /// \brief Map of flags and corresponding default locations.
   typedef llvm::DenseMap<unsigned, llvm::Value *> OpenMPDefaultLocMapTy;
   OpenMPDefaultLocMapTy OpenMPDefaultLocMap;
-  llvm::Value *getOrCreateDefaultLocation(OpenMPLocationFlags Flags);
+  Address getOrCreateDefaultLocation(OpenMPLocationFlags Flags);
+
+public:
   /// \brief Describes ident structure that describes a source location.
   /// All descriptions are taken from
   /// http://llvm.org/svn/llvm-project/openmp/trunk/runtime/src/kmp.h
@@ -202,6 +238,7 @@ private:
     /// and a pair of line numbers that delimit the construct.
     IdentField_PSource
   };
+private:
   llvm::StructType *IdentTy;
   /// \brief Map for SourceLocation and OpenMP runtime library debug locations.
   typedef llvm::DenseMap<unsigned, llvm::Value *> OpenMPDebugLocMapTy;
@@ -242,6 +279,16 @@ private:
   ///    deconstructors of firstprivate C++ objects */
   /// } kmp_task_t;
   QualType KmpTaskTQTy;
+  /// \brief Type typedef struct kmp_depend_info {
+  ///    kmp_intptr_t               base_addr;
+  ///    size_t                     len;
+  ///    struct {
+  ///             bool                   in:1;
+  ///             bool                   out:1;
+  ///    } flags;
+  /// } kmp_depend_info_t;
+  QualType KmpDependInfoTy;
+
 
   /// \brief Build type kmp_routine_entry_t (if not built yet).
   void emitKmpRoutineEntryT(QualType KmpInt32Ty);
@@ -288,8 +335,7 @@ private:
 
   /// \brief Emits address of the word in a memory where current thread id is
   /// stored.
-  virtual llvm::Value *emitThreadIDAddress(CodeGenFunction &CGF,
-                                           SourceLocation Loc);
+  virtual Address emitThreadIDAddress(CodeGenFunction &CGF, SourceLocation Loc);
 
   /// \brief Gets thread id value for the current thread.
   ///
@@ -313,7 +359,7 @@ private:
   /// \param CopyCtor Pointer to a global copy function for \a VD.
   /// \param Dtor Pointer to a global destructor function for \a VD.
   /// \param Loc Location of threadprivate declaration.
-  void emitThreadPrivateVarInit(CodeGenFunction &CGF, llvm::Value *VDAddr,
+  void emitThreadPrivateVarInit(CodeGenFunction &CGF, Address VDAddr,
                                 llvm::Value *Ctor, llvm::Value *CopyCtor,
                                 llvm::Value *Dtor, SourceLocation Loc);
 
@@ -334,22 +380,25 @@ public:
   /// kmp_int32 BoundID, struct context_vars*).
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
+  /// \param InnermostKind Kind of innermost directive (for simple directives it
+  /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
-  virtual llvm::Value *
-  emitParallelOutlinedFunction(const OMPExecutableDirective &D,
-                               const VarDecl *ThreadIDVar,
-                               const RegionCodeGenTy &CodeGen);
+  virtual llvm::Value *emitParallelOutlinedFunction(
+      const OMPExecutableDirective &D, const VarDecl *ThreadIDVar,
+      OpenMPDirectiveKind InnermostKind, const RegionCodeGenTy &CodeGen);
 
   /// \brief Emits outlined function for the OpenMP task directive \a D. This
   /// outlined function has type void(*)(kmp_int32 ThreadID, kmp_int32
   /// PartID, struct context_vars*).
   /// \param D OpenMP directive.
   /// \param ThreadIDVar Variable for thread id in the current OpenMP region.
+  /// \param InnermostKind Kind of innermost directive (for simple directives it
+  /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
   ///
-  virtual llvm::Value *emitTaskOutlinedFunction(const OMPExecutableDirective &D,
-                                                const VarDecl *ThreadIDVar,
-                                                const RegionCodeGenTy &CodeGen);
+  virtual llvm::Value *emitTaskOutlinedFunction(
+      const OMPExecutableDirective &D, const VarDecl *ThreadIDVar,
+      OpenMPDirectiveKind InnermostKind, const RegionCodeGenTy &CodeGen);
 
   /// \brief Cleans up references to the objects in finished function.
   ///
@@ -360,23 +409,25 @@ public:
   /// CapturedStruct.
   /// \param OutlinedFn Outlined function to be run in parallel threads. Type of
   /// this function is void(*)(kmp_int32 *, kmp_int32, struct context_vars*).
-  /// \param CapturedStruct A pointer to the record with the references to
+  /// \param CapturedVars A pointer to the record with the references to
   /// variables used in \a OutlinedFn function.
   /// \param IfCond Condition in the associated 'if' clause, if it was
   /// specified, nullptr otherwise.
   ///
   virtual void emitParallelCall(CodeGenFunction &CGF, SourceLocation Loc,
                                 llvm::Value *OutlinedFn,
-                                llvm::Value *CapturedStruct,
+                                ArrayRef<llvm::Value *> CapturedVars,
                                 const Expr *IfCond);
 
   /// \brief Emits a critical region.
   /// \param CriticalName Name of the critical region.
   /// \param CriticalOpGen Generator for the statement associated with the given
   /// critical region.
+  /// \param Hint Value of the 'hint' clause (optional).
   virtual void emitCriticalRegion(CodeGenFunction &CGF, StringRef CriticalName,
                                   const RegionCodeGenTy &CriticalOpGen,
-                                  SourceLocation Loc);
+                                  SourceLocation Loc,
+                                  const Expr *Hint = nullptr);
 
   /// \brief Emits a master region.
   /// \param MasterOpGen Generator for the statement associated with the given
@@ -387,6 +438,13 @@ public:
 
   /// \brief Emits code for a taskyield directive.
   virtual void emitTaskyieldCall(CodeGenFunction &CGF, SourceLocation Loc);
+
+  /// \brief Emit a taskgroup region.
+  /// \param TaskgroupOpGen Generator for the statement associated with the
+  /// given taskgroup region.
+  virtual void emitTaskgroupRegion(CodeGenFunction &CGF,
+                                   const RegionCodeGenTy &TaskgroupOpGen,
+                                   SourceLocation Loc);
 
   /// \brief Emits a single region.
   /// \param SingleOpGen Generator for the statement associated with the given
@@ -401,17 +459,23 @@ public:
 
   /// \brief Emit an ordered region.
   /// \param OrderedOpGen Generator for the statement associated with the given
-  /// critical region.
+  /// ordered region.
   virtual void emitOrderedRegion(CodeGenFunction &CGF,
                                  const RegionCodeGenTy &OrderedOpGen,
-                                 SourceLocation Loc);
+                                 SourceLocation Loc, bool IsThreads);
 
   /// \brief Emit an implicit/explicit barrier for OpenMP threads.
   /// \param Kind Directive for which this implicit barrier call must be
   /// generated. Must be OMPD_barrier for explicit barrier generation.
+  /// \param EmitChecks true if need to emit checks for cancellation barriers.
+  /// \param ForceSimpleCall true simple barrier call must be emitted, false if
+  /// runtime class decides which one to emit (simple or with cancellation
+  /// checks).
   ///
   virtual void emitBarrierCall(CodeGenFunction &CGF, SourceLocation Loc,
-                               OpenMPDirectiveKind Kind);
+                               OpenMPDirectiveKind Kind,
+                               bool EmitChecks = true,
+                               bool ForceSimpleCall = false);
 
   /// \brief Check if the specified \a ScheduleKind is static non-chunked.
   /// This kind of worksharing directive is emitted without outer loop.
@@ -426,6 +490,12 @@ public:
   /// \param ScheduleKind Schedule Kind specified in the 'schedule' clause.
   ///
   virtual bool isDynamic(OpenMPScheduleClauseKind ScheduleKind) const;
+
+  virtual void emitForDispatchInit(CodeGenFunction &CGF, SourceLocation Loc,
+                                   OpenMPScheduleClauseKind SchedKind,
+                                   unsigned IVSize, bool IVSigned,
+                                   bool Ordered, llvm::Value *UB,
+                                   llvm::Value *Chunk = nullptr);
 
   /// \brief Call the appropriate runtime routine to initialize it before start
   /// of loop.
@@ -451,11 +521,12 @@ public:
   /// \param Chunk Value of the chunk for the static_chunked scheduled loop.
   /// For the default (nullptr) value, the chunk 1 will be used.
   ///
-  virtual void emitForInit(CodeGenFunction &CGF, SourceLocation Loc,
-                           OpenMPScheduleClauseKind SchedKind, unsigned IVSize,
-                           bool IVSigned, bool Ordered, llvm::Value *IL,
-                           llvm::Value *LB, llvm::Value *UB, llvm::Value *ST,
-                           llvm::Value *Chunk = nullptr);
+  virtual void emitForStaticInit(CodeGenFunction &CGF, SourceLocation Loc,
+                                 OpenMPScheduleClauseKind SchedKind,
+                                 unsigned IVSize, bool IVSigned, bool Ordered,
+                                 Address IL, Address LB,
+                                 Address UB, Address ST,
+                                 llvm::Value *Chunk = nullptr);
 
   /// \brief Call the appropriate runtime routine to notify that we finished
   /// iteration of the ordered loop with the dynamic scheduling.
@@ -493,8 +564,8 @@ public:
   /// returned.
   virtual llvm::Value *emitForNext(CodeGenFunction &CGF, SourceLocation Loc,
                                    unsigned IVSize, bool IVSigned,
-                                   llvm::Value *IL, llvm::Value *LB,
-                                   llvm::Value *UB, llvm::Value *ST);
+                                   Address IL, Address LB,
+                                   Address UB, Address ST);
 
   /// \brief Emits call to void __kmpc_push_num_threads(ident_t *loc, kmp_int32
   /// global_tid, kmp_int32 num_threads) to generate code for 'num_threads'
@@ -504,16 +575,22 @@ public:
                                     llvm::Value *NumThreads,
                                     SourceLocation Loc);
 
+  /// \brief Emit call to void __kmpc_push_proc_bind(ident_t *loc, kmp_int32
+  /// global_tid, int proc_bind) to generate code for 'proc_bind' clause.
+  virtual void emitProcBindClause(CodeGenFunction &CGF,
+                                  OpenMPProcBindClauseKind ProcBind,
+                                  SourceLocation Loc);
+
   /// \brief Returns address of the threadprivate variable for the current
   /// thread.
   /// \param VD Threadprivate variable.
   /// \param VDAddr Address of the global variable \a VD.
   /// \param Loc Location of the reference to threadprivate var.
   /// \return Address of the threadprivate variable for the current thread.
-  virtual llvm::Value *getAddrOfThreadPrivate(CodeGenFunction &CGF,
-                                              const VarDecl *VD,
-                                              llvm::Value *VDAddr,
-                                              SourceLocation Loc);
+  virtual Address getAddrOfThreadPrivate(CodeGenFunction &CGF,
+                                         const VarDecl *VD,
+                                         Address VDAddr,
+                                         SourceLocation Loc);
 
   /// \brief Emit a code for initialization of threadprivate variable. It emits
   /// a call to runtime library which adds initial value to the newly created
@@ -524,7 +601,7 @@ public:
   /// \param Loc Location of threadprivate declaration.
   /// \param PerformInit true if initialization expression is not constant.
   virtual llvm::Function *
-  emitThreadPrivateVarDefinition(const VarDecl *VD, llvm::Value *VDAddr,
+  emitThreadPrivateVarDefinition(const VarDecl *VD, Address VDAddr,
                                  SourceLocation Loc, bool PerformInit,
                                  CodeGenFunction *CGF = nullptr);
 
@@ -560,7 +637,7 @@ public:
   /// \param TaskFunction An LLVM function with type void (*)(i32 /*gtid*/, i32
   /// /*part_id*/, captured_struct */*__context*/);
   /// \param SharedsTy A type which contains references the shared variables.
-  /// \param Shareds Context with the list of shared variables from the \a
+  /// \param Shareds Context with the list of shared variables from the \p
   /// TaskFunction.
   /// \param IfCond Not a nullptr if 'if' clause was specified, nullptr
   /// otherwise.
@@ -575,22 +652,30 @@ public:
   /// \param FirstprivateInits List of references to auto generated variables
   /// used for initialization of a single array element. Used if firstprivate
   /// variable is of array type.
-  virtual void emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
-                            const OMPExecutableDirective &D, bool Tied,
-                            llvm::PointerIntPair<llvm::Value *, 1, bool> Final,
-                            llvm::Value *TaskFunction, QualType SharedsTy,
-                            llvm::Value *Shareds, const Expr *IfCond,
-                            const ArrayRef<const Expr *> PrivateVars,
-                            const ArrayRef<const Expr *> PrivateCopies,
-                            const ArrayRef<const Expr *> FirstprivateVars,
-                            const ArrayRef<const Expr *> FirstprivateCopies,
-                            const ArrayRef<const Expr *> FirstprivateInits);
+  /// \param Dependences List of dependences for the 'task' construct, including
+  /// original expression and dependency type.
+  virtual void emitTaskCall(
+      CodeGenFunction &CGF, SourceLocation Loc, const OMPExecutableDirective &D,
+      bool Tied, llvm::PointerIntPair<llvm::Value *, 1, bool> Final,
+      llvm::Value *TaskFunction, QualType SharedsTy, Address Shareds,
+      const Expr *IfCond, ArrayRef<const Expr *> PrivateVars,
+      ArrayRef<const Expr *> PrivateCopies,
+      ArrayRef<const Expr *> FirstprivateVars,
+      ArrayRef<const Expr *> FirstprivateCopies,
+      ArrayRef<const Expr *> FirstprivateInits,
+      ArrayRef<std::pair<OpenMPDependClauseKind, const Expr *>> Dependences);
 
   /// \brief Emit code for the directive that does not require outlining.
   ///
+  /// \param InnermostKind Kind of innermost directive (for simple directives it
+  /// is a directive itself, for combined - its innermost directive).
   /// \param CodeGen Code generation sequence for the \a D directive.
+  /// \param HasCancel true if region has inner cancel directive, false
+  /// otherwise.
   virtual void emitInlinedDirective(CodeGenFunction &CGF,
-                                    const RegionCodeGenTy &CodeGen);
+                                    OpenMPDirectiveKind InnermostKind,
+                                    const RegionCodeGenTy &CodeGen,
+                                    bool HasCancel = false);
   /// \brief Emit a code for reduction clause. Next code should be emitted for
   /// reduction:
   /// \code
@@ -622,6 +707,7 @@ public:
   /// }
   /// \endcode
   ///
+  /// \param Privates List of private copies for original reduction arguments.
   /// \param LHSExprs List of LHS in \a ReductionOps reduction operations.
   /// \param RHSExprs List of RHS in \a ReductionOps reduction operations.
   /// \param ReductionOps List of reduction operations in form 'LHS binop RHS'
@@ -629,13 +715,54 @@ public:
   /// \param WithNowait true if parent directive has also nowait clause, false
   /// otherwise.
   virtual void emitReduction(CodeGenFunction &CGF, SourceLocation Loc,
+                             ArrayRef<const Expr *> Privates,
                              ArrayRef<const Expr *> LHSExprs,
                              ArrayRef<const Expr *> RHSExprs,
                              ArrayRef<const Expr *> ReductionOps,
-                             bool WithNowait);
+                             bool WithNowait, bool SimpleReduction);
 
   /// \brief Emit code for 'taskwait' directive.
   virtual void emitTaskwaitCall(CodeGenFunction &CGF, SourceLocation Loc);
+
+  /// \brief Emit code for 'cancellation point' construct.
+  /// \param CancelRegion Region kind for which the cancellation point must be
+  /// emitted.
+  ///
+  virtual void emitCancellationPointCall(CodeGenFunction &CGF,
+                                         SourceLocation Loc,
+                                         OpenMPDirectiveKind CancelRegion);
+
+  /// \brief Emit code for 'cancel' construct.
+  /// \param IfCond Condition in the associated 'if' clause, if it was
+  /// specified, nullptr otherwise.
+  /// \param CancelRegion Region kind for which the cancel must be emitted.
+  ///
+  virtual void emitCancelCall(CodeGenFunction &CGF, SourceLocation Loc,
+                              const Expr *IfCond,
+                              OpenMPDirectiveKind CancelRegion);
+
+  /// \brief Emit outilined function for 'target' directive.
+  /// \param D Directive to emit.
+  /// \param CodeGen Code generation sequence for the \a D directive.
+  virtual llvm::Value *
+  emitTargetOutlinedFunction(const OMPExecutableDirective &D,
+                             const RegionCodeGenTy &CodeGen);
+
+  /// \brief Emit the target offloading code associated with \a D. The emitted
+  /// code attempts offloading the execution to the device, an the event of
+  /// a failure it executes the host version outlined in \a OutlinedFn.
+  /// \param D Directive to emit.
+  /// \param OutlinedFn Host version of the code to be offloaded.
+  /// \param IfCond Expression evaluated in if clause associated with the target
+  /// directive, or null if no if clause is used.
+  /// \param Device Expression evaluated in device clause associated with the
+  /// target directive, or null if no device clause is used.
+  /// \param CapturedVars Values captured in the current region.
+  virtual void emitTargetCall(CodeGenFunction &CGF,
+                              const OMPExecutableDirective &D,
+                              llvm::Value *OutlinedFn, const Expr *IfCond,
+                              const Expr *Device,
+                              ArrayRef<llvm::Value *> CapturedVars);
 };
 
 } // namespace CodeGen

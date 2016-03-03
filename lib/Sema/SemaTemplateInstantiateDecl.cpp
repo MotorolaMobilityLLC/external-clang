@@ -813,6 +813,14 @@ Decl *TemplateDeclInstantiator::VisitEnumDecl(EnumDecl *D) {
   Enum->setAccess(D->getAccess());
   // Forward the mangling number from the template to the instantiated decl.
   SemaRef.Context.setManglingNumber(Enum, SemaRef.Context.getManglingNumber(D));
+  // See if the old tag was defined along with a declarator.
+  // If it did, mark the new tag as being associated with that declarator.
+  if (DeclaratorDecl *DD = SemaRef.Context.getDeclaratorForUnnamedTagDecl(D))
+    SemaRef.Context.addDeclaratorForUnnamedTagDecl(Enum, DD);
+  // See if the old tag was defined along with a typedef.
+  // If it did, mark the new tag as being associated with that typedef.
+  if (TypedefNameDecl *TND = SemaRef.Context.getTypedefNameForUnnamedTagDecl(D))
+    SemaRef.Context.addTypedefNameForUnnamedTagDecl(Enum, TND);
   if (SubstQualifier(D, Enum)) return nullptr;
   Owner->addDecl(Enum);
 
@@ -827,7 +835,8 @@ Decl *TemplateDeclInstantiator::VisitEnumDecl(EnumDecl *D) {
         SemaRef.SubstType(TI->getType(), TemplateArgs,
                           UnderlyingLoc, DeclarationName());
       SemaRef.CheckEnumRedeclaration(Def->getLocation(), Def->isScoped(),
-                                     DefnUnderlying, Enum);
+                                     DefnUnderlying,
+                                     /*EnumUnderlyingIsImplicit=*/false, Enum);
     }
   }
 
@@ -911,6 +920,11 @@ void TemplateDeclInstantiator::InstantiateEnumDefinition(
 
 Decl *TemplateDeclInstantiator::VisitEnumConstantDecl(EnumConstantDecl *D) {
   llvm_unreachable("EnumConstantDecls can only occur within EnumDecls.");
+}
+
+Decl *
+TemplateDeclInstantiator::VisitBuiltinTemplateDecl(BuiltinTemplateDecl *D) {
+  llvm_unreachable("BuiltinTemplateDecls cannot be instantiated.");
 }
 
 Decl *TemplateDeclInstantiator::VisitClassTemplateDecl(ClassTemplateDecl *D) {
@@ -1143,6 +1157,7 @@ Decl *TemplateDeclInstantiator::VisitVarTemplateDecl(VarTemplateDecl *D) {
   VarDecl *VarInst =
       cast_or_null<VarDecl>(VisitVarDecl(Pattern,
                                          /*InstantiatingVarTemplate=*/true));
+  if (!VarInst) return nullptr;
 
   DeclContext *DC = Owner;
 
@@ -1296,6 +1311,16 @@ Decl *TemplateDeclInstantiator::VisitCXXRecordDecl(CXXRecordDecl *D) {
   // Forward the mangling number from the template to the instantiated decl.
   SemaRef.Context.setManglingNumber(Record,
                                     SemaRef.Context.getManglingNumber(D));
+
+  // See if the old tag was defined along with a declarator.
+  // If it did, mark the new tag as being associated with that declarator.
+  if (DeclaratorDecl *DD = SemaRef.Context.getDeclaratorForUnnamedTagDecl(D))
+    SemaRef.Context.addDeclaratorForUnnamedTagDecl(Record, DD);
+
+  // See if the old tag was defined along with a typedef.
+  // If it did, mark the new tag as being associated with that typedef.
+  if (TypedefNameDecl *TND = SemaRef.Context.getTypedefNameForUnnamedTagDecl(D))
+    SemaRef.Context.addTypedefNameForUnnamedTagDecl(Record, TND);
 
   Owner->addDecl(Record);
 
@@ -1657,7 +1682,7 @@ TemplateDeclInstantiator::VisitCXXMethodDecl(CXXMethodDecl *D,
   SmallVector<TemplateParameterList *, 4> TempParamLists;
   unsigned NumTempParamLists = 0;
   if (isFriend && (NumTempParamLists = D->getNumTemplateParameterLists())) {
-    TempParamLists.set_size(NumTempParamLists);
+    TempParamLists.resize(NumTempParamLists);
     for (unsigned I = 0; I != NumTempParamLists; ++I) {
       TemplateParameterList *TempParams = D->getTemplateParameterList(I);
       TemplateParameterList *InstParams = SubstTemplateParams(TempParams);
@@ -1809,9 +1834,9 @@ TemplateDeclInstantiator::VisitCXXMethodDecl(CXXMethodDecl *D,
   // context (which will be a namespace scope) as the template.
   if (isFriend) {
     if (NumTempParamLists)
-      Method->setTemplateParameterListsInfo(SemaRef.Context,
-                                            NumTempParamLists,
-                                            TempParamLists.data());
+      Method->setTemplateParameterListsInfo(
+          SemaRef.Context,
+          llvm::makeArrayRef(TempParamLists.data(), NumTempParamLists));
 
     Method->setLexicalDeclContext(Owner);
     Method->setObjectOfFriendDecl();
@@ -1922,7 +1947,7 @@ Decl *TemplateDeclInstantiator::VisitTemplateTypeParmDecl(
                                  D->isParameterPack());
   Inst->setAccess(AS_public);
 
-  if (D->hasDefaultArgument()) {
+  if (D->hasDefaultArgument() && !D->defaultArgumentWasInherited()) {
     TypeSourceInfo *InstantiatedDefaultArg =
         SemaRef.SubstType(D->getDefaultArgumentInfo(), TemplateArgs,
                           D->getDefaultArgumentLoc(), D->getDeclName());
@@ -2078,7 +2103,7 @@ Decl *TemplateDeclInstantiator::VisitNonTypeTemplateParmDecl(
   if (Invalid)
     Param->setInvalidDecl();
 
-  if (D->hasDefaultArgument()) {
+  if (D->hasDefaultArgument() && !D->defaultArgumentWasInherited()) {
     ExprResult Value = SemaRef.SubstExpr(D->getDefaultArgument(), TemplateArgs);
     if (!Value.isInvalid())
       Param->setDefaultArgument(Value.get());
@@ -2094,14 +2119,13 @@ static void collectUnexpandedParameterPacks(
     Sema &S,
     TemplateParameterList *Params,
     SmallVectorImpl<UnexpandedParameterPack> &Unexpanded) {
-  for (TemplateParameterList::const_iterator I = Params->begin(),
-                                             E = Params->end(); I != E; ++I) {
-    if ((*I)->isTemplateParameterPack())
+  for (const auto &P : *Params) {
+    if (P->isTemplateParameterPack())
       continue;
-    if (NonTypeTemplateParmDecl *NTTP = dyn_cast<NonTypeTemplateParmDecl>(*I))
+    if (NonTypeTemplateParmDecl *NTTP = dyn_cast<NonTypeTemplateParmDecl>(P))
       S.collectUnexpandedParameterPacks(NTTP->getTypeSourceInfo()->getTypeLoc(),
                                         Unexpanded);
-    if (TemplateTemplateParmDecl *TTP = dyn_cast<TemplateTemplateParmDecl>(*I))
+    if (TemplateTemplateParmDecl *TTP = dyn_cast<TemplateTemplateParmDecl>(P))
       collectUnexpandedParameterPacks(S, TTP->getTemplateParameters(),
                                       Unexpanded);
   }
@@ -2205,7 +2229,7 @@ TemplateDeclInstantiator::VisitTemplateTemplateParmDecl(
                                              D->getPosition(),
                                              D->isParameterPack(),
                                              D->getIdentifier(), InstParams);
-  if (D->hasDefaultArgument()) {
+  if (D->hasDefaultArgument() && !D->defaultArgumentWasInherited()) {
     NestedNameSpecifierLoc QualifierLoc =
         D->getDefaultArgument().getTemplateQualifierLoc();
     QualifierLoc =
@@ -2731,9 +2755,8 @@ TemplateDeclInstantiator::SubstTemplateParams(TemplateParameterList *L) {
   typedef SmallVector<NamedDecl *, 8> ParamVector;
   ParamVector Params;
   Params.reserve(N);
-  for (TemplateParameterList::iterator PI = L->begin(), PE = L->end();
-       PI != PE; ++PI) {
-    NamedDecl *D = cast_or_null<NamedDecl>(Visit(*PI));
+  for (auto &P : *L) {
+    NamedDecl *D = cast_or_null<NamedDecl>(Visit(P));
     Params.push_back(D);
     Invalid = Invalid || !D || D->isInvalidDecl();
   }
@@ -3246,10 +3269,13 @@ TemplateDeclInstantiator::InitFunctionInstantiation(FunctionDecl *New,
 
     // DR1330: In C++11, defer instantiation of a non-trivial
     // exception specification.
+    // DR1484: Local classes and their members are instantiated along with the
+    // containing function.
     if (SemaRef.getLangOpts().CPlusPlus11 &&
         EPI.ExceptionSpec.Type != EST_None &&
         EPI.ExceptionSpec.Type != EST_DynamicNone &&
-        EPI.ExceptionSpec.Type != EST_BasicNoexcept) {
+        EPI.ExceptionSpec.Type != EST_BasicNoexcept &&
+        !Tmpl->isLexicallyWithinFunctionOrMethod()) {
       FunctionDecl *ExceptionSpecTemplate = Tmpl;
       if (EPI.ExceptionSpec.Type == EST_Uninstantiated)
         ExceptionSpecTemplate = EPI.ExceptionSpec.SourceTemplate;
@@ -3611,19 +3637,6 @@ void Sema::BuildVariableInstantiation(
     if (OldVar->isUsed(false))
       NewVar->setIsUsed();
     NewVar->setReferenced(OldVar->isReferenced());
-  }
-
-  // See if the old variable had a type-specifier that defined an anonymous tag.
-  // If it did, mark the new variable as being the declarator for the new
-  // anonymous tag.
-  if (const TagType *OldTagType = OldVar->getType()->getAs<TagType>()) {
-    TagDecl *OldTag = OldTagType->getDecl();
-    if (OldTag->getDeclaratorForAnonDecl() == OldVar) {
-      TagDecl *NewTag = NewVar->getType()->castAs<TagType>()->getDecl();
-      assert(!NewTag->hasNameForLinkage() &&
-             !NewTag->hasDeclaratorForAnonDecl());
-      NewTag->setDeclaratorForAnonDecl(NewVar);
-    }
   }
 
   InstantiateAttrs(TemplateArgs, OldVar, NewVar, LateAttrs, StartingScope);
