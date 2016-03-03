@@ -14,6 +14,7 @@
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include "clang/Frontend/MultiplexConsumer.h"
 #include "clang/Frontend/Utils.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Pragma.h"
@@ -79,18 +80,26 @@ std::unique_ptr<ASTConsumer>
 GeneratePCHAction::CreateASTConsumer(CompilerInstance &CI, StringRef InFile) {
   std::string Sysroot;
   std::string OutputFile;
-  raw_ostream *OS =
+  raw_pwrite_stream *OS =
       ComputeASTConsumerArguments(CI, InFile, Sysroot, OutputFile);
   if (!OS)
     return nullptr;
 
   if (!CI.getFrontendOpts().RelocatablePCH)
     Sysroot.clear();
-  return llvm::make_unique<PCHGenerator>(CI.getPreprocessor(), OutputFile,
-                                         nullptr, Sysroot, OS);
+
+  auto Buffer = std::make_shared<PCHBuffer>();
+  std::vector<std::unique_ptr<ASTConsumer>> Consumers;
+  Consumers.push_back(llvm::make_unique<PCHGenerator>(
+                        CI.getPreprocessor(), OutputFile, nullptr, Sysroot,
+                        Buffer, CI.getFrontendOpts().ModuleFileExtensions));
+  Consumers.push_back(CI.getPCHContainerWriter().CreatePCHContainerGenerator(
+      CI, InFile, OutputFile, OS, Buffer));
+
+  return llvm::make_unique<MultiplexConsumer>(std::move(Consumers));
 }
 
-raw_ostream *GeneratePCHAction::ComputeASTConsumerArguments(
+raw_pwrite_stream *GeneratePCHAction::ComputeASTConsumerArguments(
     CompilerInstance &CI, StringRef InFile, std::string &Sysroot,
     std::string &OutputFile) {
   Sysroot = CI.getHeaderSearchOpts().Sysroot;
@@ -102,7 +111,7 @@ raw_ostream *GeneratePCHAction::ComputeASTConsumerArguments(
   // We use createOutputFile here because this is exposed via libclang, and we
   // must disable the RemoveFileOnSignal behavior.
   // We use a temporary to avoid race conditions.
-  raw_ostream *OS =
+  raw_pwrite_stream *OS =
       CI.createOutputFile(CI.getFrontendOpts().OutputFile, /*Binary=*/true,
                           /*RemoveFileOnSignal=*/false, InFile,
                           /*Extension=*/"", /*useTemporary=*/true);
@@ -118,13 +127,23 @@ GenerateModuleAction::CreateASTConsumer(CompilerInstance &CI,
                                         StringRef InFile) {
   std::string Sysroot;
   std::string OutputFile;
-  raw_ostream *OS =
+  raw_pwrite_stream *OS =
       ComputeASTConsumerArguments(CI, InFile, Sysroot, OutputFile);
   if (!OS)
     return nullptr;
 
-  return llvm::make_unique<PCHGenerator>(CI.getPreprocessor(), OutputFile,
-                                         Module, Sysroot, OS);
+  auto Buffer = std::make_shared<PCHBuffer>();
+  std::vector<std::unique_ptr<ASTConsumer>> Consumers;
+
+  Consumers.push_back(llvm::make_unique<PCHGenerator>(
+                        CI.getPreprocessor(), OutputFile, Module, Sysroot,
+                        Buffer, CI.getFrontendOpts().ModuleFileExtensions,
+                        /*AllowASTWithErrors=*/false,
+                        /*IncludeTimestamps=*/
+                          +CI.getFrontendOpts().BuildingImplicitModule));
+  Consumers.push_back(CI.getPCHContainerWriter().CreatePCHContainerGenerator(
+      CI, InFile, OutputFile, OS, Buffer));
+  return llvm::make_unique<MultiplexConsumer>(std::move(Consumers));
 }
 
 static SmallVectorImpl<char> &
@@ -249,14 +268,26 @@ collectModuleHeaderIncludes(const LangOptions &LangOpts, FileManager &FileMgr,
 
 bool GenerateModuleAction::BeginSourceFileAction(CompilerInstance &CI, 
                                                  StringRef Filename) {
-  // Find the module map file.  
-  const FileEntry *ModuleMap = CI.getFileManager().getFile(Filename);
+  // Find the module map file.
+  const FileEntry *ModuleMap =
+      CI.getFileManager().getFile(Filename, /*openFile*/true);
   if (!ModuleMap)  {
     CI.getDiagnostics().Report(diag::err_module_map_not_found)
       << Filename;
     return false;
   }
   
+  // Set up embedding for any specified files. Do this before we load any
+  // source files, including the primary module map for the compilation.
+  for (const auto &F : CI.getFrontendOpts().ModulesEmbedFiles) {
+    if (const auto *FE = CI.getFileManager().getFile(F, /*openFile*/true))
+      CI.getSourceManager().setFileIsTransient(FE);
+    else
+      CI.getDiagnostics().Report(diag::err_modules_embed_file_not_found) << F;
+  }
+  if (CI.getFrontendOpts().ModulesEmbedAllFiles)
+    CI.getSourceManager().setAllFilesAreTransient(true);
+
   // Parse the module map file.
   HeaderSearch &HS = CI.getPreprocessor().getHeaderSearchInfo();
   if (HS.loadModuleMapFile(ModuleMap, IsSystem))
@@ -348,7 +379,7 @@ bool GenerateModuleAction::BeginSourceFileAction(CompilerInstance &CI,
   return true;
 }
 
-raw_ostream *GenerateModuleAction::ComputeASTConsumerArguments(
+raw_pwrite_stream *GenerateModuleAction::ComputeASTConsumerArguments(
     CompilerInstance &CI, StringRef InFile, std::string &Sysroot,
     std::string &OutputFile) {
   // If no output file was provided, figure out where this module would go
@@ -363,7 +394,7 @@ raw_ostream *GenerateModuleAction::ComputeASTConsumerArguments(
   // We use createOutputFile here because this is exposed via libclang, and we
   // must disable the RemoveFileOnSignal behavior.
   // We use a temporary to avoid race conditions.
-  raw_ostream *OS =
+  raw_pwrite_stream *OS =
       CI.createOutputFile(CI.getFrontendOpts().OutputFile, /*Binary=*/true,
                           /*RemoveFileOnSignal=*/false, InFile,
                           /*Extension=*/"", /*useTemporary=*/true,
@@ -395,13 +426,14 @@ void VerifyPCHAction::ExecuteAction() {
   CompilerInstance &CI = getCompilerInstance();
   bool Preamble = CI.getPreprocessorOpts().PrecompiledPreambleBytes.first != 0;
   const std::string &Sysroot = CI.getHeaderSearchOpts().Sysroot;
-  std::unique_ptr<ASTReader> Reader(
-      new ASTReader(CI.getPreprocessor(), CI.getASTContext(),
-                    Sysroot.empty() ? "" : Sysroot.c_str(),
-                    /*DisableValidation*/ false,
-                    /*AllowPCHWithCompilerErrors*/ false,
-                    /*AllowConfigurationMismatch*/ true,
-                    /*ValidateSystemInputs*/ true));
+  std::unique_ptr<ASTReader> Reader(new ASTReader(
+      CI.getPreprocessor(), CI.getASTContext(), CI.getPCHContainerReader(),
+      CI.getFrontendOpts().ModuleFileExtensions,
+      Sysroot.empty() ? "" : Sysroot.c_str(),
+      /*DisableValidation*/ false,
+      /*AllowPCHWithCompilerErrors*/ false,
+      /*AllowConfigurationMismatch*/ true,
+      /*ValidateSystemInputs*/ true));
 
   Reader->ReadAST(getCurrentFile(),
                   Preamble ? serialization::MK_Preamble
@@ -451,6 +483,13 @@ namespace {
 #define BENIGN_LANGOPT(Name, Bits, Default, Description)
 #define BENIGN_ENUM_LANGOPT(Name, Type, Bits, Default, Description)
 #include "clang/Basic/LangOptions.def"
+
+      if (!LangOpts.ModuleFeatures.empty()) {
+        Out.indent(4) << "Module features:\n";
+        for (StringRef Feature : LangOpts.ModuleFeatures)
+          Out.indent(6) << Feature << "\n";
+      }
+
       return false;
     }
 
@@ -533,6 +572,20 @@ namespace {
       }
       return false;
     }
+
+    /// Indicates that a particular module file extension has been read.
+    void readModuleFileExtension(
+           const ModuleFileExtensionMetadata &Metadata) override {
+      Out.indent(2) << "Module file extension '"
+                    << Metadata.BlockName << "' " << Metadata.MajorVersion
+                    << "." << Metadata.MinorVersion;
+      if (!Metadata.UserInfo.empty()) {
+        Out << ": ";
+        Out.write_escaped(Metadata.UserInfo);
+      }
+
+      Out << "\n";
+    }
 #undef DUMP_BOOLEAN
   };
 }
@@ -550,9 +603,10 @@ void DumpModuleInfoAction::ExecuteAction() {
 
   Out << "Information for module file '" << getCurrentFile() << "':\n";
   DumpModuleInfoListener Listener(Out);
-  ASTReader::readASTFileControlBlock(getCurrentFile(),
-                                     getCompilerInstance().getFileManager(),
-                                     Listener);
+  ASTReader::readASTFileControlBlock(
+      getCurrentFile(), getCompilerInstance().getFileManager(),
+      getCompilerInstance().getPCHContainerReader(),
+      /*FindModuleFileExtensions=*/true, Listener);
 }
 
 //===----------------------------------------------------------------------===//

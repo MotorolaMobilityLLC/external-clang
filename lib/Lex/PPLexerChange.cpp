@@ -18,6 +18,7 @@
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/LexDiagnostic.h"
 #include "clang/Lex/MacroInfo.h"
+#include "clang/Lex/PTHManager.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -120,7 +121,7 @@ void Preprocessor::EnterSourceFileWithLexer(Lexer *TheLexer,
   CurSubmodule = nullptr;
   if (CurLexerKind != CLK_LexAfterModuleImport)
     CurLexerKind = CLK_Lexer;
-  
+
   // Notify the client, if desired, that we are in a new source file.
   if (Callbacks && !CurLexer->Is_PragmaLexer) {
     SrcMgr::CharacteristicKind FileType =
@@ -300,8 +301,7 @@ bool Preprocessor::HandleEndOfFile(Token &Result, bool isEndOfMacro) {
     if (const IdentifierInfo *ControllingMacro =
           CurPPLexer->MIOpt.GetControllingMacroAtEndOfFile()) {
       // Okay, this has a controlling macro, remember in HeaderFileInfo.
-      if (const FileEntry *FE =
-            SourceMgr.getFileEntryForID(CurPPLexer->getFileID())) {
+      if (const FileEntry *FE = CurPPLexer->getFileEntry()) {
         HeaderInfo.SetFileControllingMacro(FE, ControllingMacro);
         if (MacroInfo *MI =
               getMacroInfo(const_cast<IdentifierInfo*>(ControllingMacro))) {
@@ -353,6 +353,17 @@ bool Preprocessor::HandleEndOfFile(Token &Result, bool isEndOfMacro) {
 
     // Recover by leaving immediately.
     PragmaARCCFCodeAuditedLoc = SourceLocation();
+  }
+
+  // Complain about reaching a true EOF within assume_nonnull.
+  // We don't want to complain about reaching the end of a macro
+  // instantiation or a _Pragma.
+  if (PragmaAssumeNonNullLoc.isValid() &&
+      !isEndOfMacro && !(CurLexer && CurLexer->Is_PragmaLexer)) {
+    Diag(PragmaAssumeNonNullLoc, diag::err_pp_eof_in_assume_nonnull);
+
+    // Recover by leaving immediately.
+    PragmaAssumeNonNullLoc = SourceLocation();
   }
 
   // If this is a #include'd file, pop it off the include stack and continue
@@ -633,11 +644,20 @@ void Preprocessor::EnterSubmodule(Module *M, SourceLocation ImportLoc) {
   if (FirstTime) {
     // Determine the set of starting macros for this submodule; take these
     // from the "null" module (the predefines buffer).
+    //
+    // FIXME: If we have local visibility but not modules enabled, the
+    // NullSubmoduleState is polluted by #defines in the top-level source
+    // file.
     auto &StartingMacros = NullSubmoduleState.Macros;
 
     // Restore to the starting state.
     // FIXME: Do this lazily, when each macro name is first referenced.
     for (auto &Macro : StartingMacros) {
+      // Skip uninteresting macros.
+      if (!Macro.second.getLatest() &&
+          Macro.second.getOverriddenMacros().empty())
+        continue;
+
       MacroState MS(Macro.second.getLatest());
       MS.setOverriddenMacros(*this, Macro.second.getOverriddenMacros());
       State.Macros.insert(std::make_pair(Macro.first, std::move(MS)));
@@ -721,6 +741,11 @@ void Preprocessor::LeaveSubmodule() {
     }
   }
 
+  // FIXME: Before we leave this submodule, we should parse all the other
+  // headers within it. Otherwise, we're left with an inconsistent state
+  // where we've made the module visible but don't yet have its complete
+  // contents.
+
   // Put back the outer module's state, if we're tracking it.
   if (getLangOpts().ModulesLocalVisibility)
     CurSubmoduleState = Info.OuterSubmoduleState;
@@ -728,6 +753,5 @@ void Preprocessor::LeaveSubmodule() {
   BuildingSubmoduleStack.pop_back();
 
   // A nested #include makes the included submodule visible.
-  if (!BuildingSubmoduleStack.empty() || !getLangOpts().ModulesLocalVisibility)
-    makeModuleVisible(LeavingMod, ImportLoc);
+  makeModuleVisible(LeavingMod, ImportLoc);
 }
