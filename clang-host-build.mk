@@ -29,6 +29,9 @@ LOCAL_C_INCLUDES :=	\
 
 LOCAL_MODULE_HOST_OS := darwin linux windows
 
+# This triggers an assertion on cross Windows builds.
+LOCAL_CFLAGS_windows := -Wno-error=uninitialized
+
 LLVM_ROOT_PATH := external/llvm
 include $(LLVM_ROOT_PATH)/llvm.mk
 

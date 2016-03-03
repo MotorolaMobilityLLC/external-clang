@@ -21,14 +21,14 @@ void test1() {
   // CHECK-1: %struct.anon = type { i32* }
   // CHECK-1: {{.+}} global float 3.0
   //
-  // CHECK-1: test1
+  // CHECK-1: @test1(
   // CHECK-1: alloca %struct.anon
   // CHECK-1: getelementptr inbounds %struct.anon, %struct.anon*
   // CHECK-1: store i32* %i
   // CHECK-1: call void @[[HelperName:__captured_stmt[\.0-9]+]]
 }
 
-// CHECK-1: define internal void @[[HelperName]](%struct.anon
+// CHECK-1: define internal {{.*}}void @[[HelperName]](%struct.anon
 // CHECK-1:   getelementptr inbounds %struct.anon{{.*}}, i32 0, i32 0
 // CHECK-1:   load i32*, i32**
 // CHECK-1:   load i32, i32*
@@ -43,12 +43,12 @@ void test2(int x) {
     for (i = 0; i < x; i++)
       foo();
   }
-  // CHECK-2: test2
+  // CHECK-2: @test2(
   // CHECK-2-NOT: %i
   // CHECK-2: call void @[[HelperName:__captured_stmt[\.0-9]+]]
 }
 
-// CHECK-2: define internal void @[[HelperName]]
+// CHECK-2: define internal {{.*}}void @[[HelperName]]
 // CHECK-2-NOT: }
 // CHECK-2:   %i = alloca i32
 
@@ -60,7 +60,7 @@ void test3(int size) {
   {
     arr[2] = vla_arr[size - 1];
   }
-  // CHECK-3: test3
+  // CHECK-3: @test3(
   // CHECK-3: alloca [5 x i32]
   // CHECK-3: call void @__captured_stmt
 }
@@ -93,7 +93,7 @@ void dont_capture_global() {
   // CHECK-GLOBALS: call void @__captured_stmt[[HelperName:[\.0-9]+]](%[[Capture]]
 }
 
-// CHECK-GLOBALS: define internal void @__captured_stmt[[HelperName]]
+// CHECK-GLOBALS: define internal {{.*}}void @__captured_stmt[[HelperName]]
 // CHECK-GLOBALS-NOT: ret
 // CHECK-GLOBALS:   load i32, i32* @global
 // CHECK-GLOBALS:   load i32, i32* @

@@ -7,9 +7,9 @@
 // RUN: %clang_cc1 -x c++ %s -triple %itanium_abi_triple -main-file-name cxx-rangefor.cpp -std=c++11 -o - -emit-llvm -fprofile-instr-use=%t.profdata > %tuse
 // RUN: FileCheck --input-file=%tuse -check-prefix=CHECK -check-prefix=PGOUSE %s
 
-// PGOGEN: @[[RFC:__llvm_profile_counters__Z9range_forv]] = private global [5 x i64] zeroinitializer
+// PGOGEN: @[[RFC:__profc__Z9range_forv]] = private global [5 x i64] zeroinitializer
 
-// CHECK-LABEL: define void @_Z9range_forv()
+// CHECK-LABEL: define {{.*}}void @_Z9range_forv()
 // PGOGEN: store {{.*}} @[[RFC]], i64 0, i64 0
 void range_for() {
   int arr[] = {1, 2, 3, 4, 5};
