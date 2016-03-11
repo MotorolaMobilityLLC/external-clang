@@ -4773,7 +4773,7 @@ public:
 
   bool isAndroid() const {
     return (getTarget().getTriple().getEnvironment() ==
-            llvm::Triple::Android);
+            llvm::Triple::Android || getContext().getLangOpts().Renderscript);
   }
 
   ABIKind getABIKind() const { return Kind; }
