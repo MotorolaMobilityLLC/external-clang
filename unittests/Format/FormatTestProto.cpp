@@ -63,11 +63,21 @@ TEST_F(FormatTestProto, FormatsMessages) {
                "}");
 }
 
+TEST_F(FormatTestProto, KeywordsInOtherLanguages) {
+  verifyFormat("optional string operator = 1;");
+}
+
 TEST_F(FormatTestProto, FormatsEnums) {
   verifyFormat("enum Type {\n"
                "  UNKNOWN = 0;\n"
                "  TYPE_A = 1;\n"
                "  TYPE_B = 2;\n"
+               "};");
+  verifyFormat("enum Type {\n"
+               "  UNKNOWN = 0 [(some_options) = {\n"
+               "    a: aa,\n"
+               "    b: bb\n"
+               "  }];\n"
                "};");
 }
 
@@ -150,6 +160,11 @@ TEST_F(FormatTestProto, FormatsService) {
                "    option foo = true;\n"
                "  }\n"
                "};");
+}
+
+TEST_F(FormatTestProto, ExtendingMessage) {
+  verifyFormat("extend .foo.Bar {\n"
+               "}");
 }
 
 } // end namespace tooling

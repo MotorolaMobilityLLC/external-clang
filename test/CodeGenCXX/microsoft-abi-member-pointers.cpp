@@ -119,7 +119,7 @@ void (UnspecSingle::*us_f_mp)() = &UnspecSingle::foo;
 // CHECK: @"\01?v_f_mp@Const@@3P8Virtual@@AEXXZQ2@" =
 // CHECK:   global { i8*, i32, i32 } { i8* bitcast ({{.*}} @"\01?foo@Virtual@@QAEXXZ" to i8*), i32 0, i32 0 }, align 4
 // CHECK: @"\01?u_f_mp@Const@@3P8Unspecified@@AEXXZQ2@" =
-// CHECK:   global { i8*, i32, i32, i32 } { i8* bitcast ({{.*}} @"\01?foo@Unspecified@@QAEXXZ" to i8*), i32 0, i32 12, i32 0 }, align 4
+// CHECK:   global { i8*, i32, i32, i32 } { i8* bitcast ({{.*}} @"\01?foo@Unspecified@@QAEXXZ" to i8*), i32 0, i32 0, i32 0 }, align 4
 // CHECK: @"\01?us_f_mp@Const@@3P8UnspecSingle@@AEXXZQ2@" =
 // CHECK:   global { i8*, i32, i32, i32 } { i8* bitcast ({{.*}} @"\01?foo@UnspecSingle@@QAEXXZ" to i8*), i32 0, i32 0, i32 0 }, align 4
 }
@@ -191,11 +191,11 @@ void EmitNonVirtualMemberPointers() {
 // CHECK:     { i8* bitcast (void (%{{.*}}*)* @"\01?foo@Virtual@@QAEXXZ" to i8*), i32 0, i32 0 },
 // CHECK:     { i8*, i32, i32 }* %{{.*}}, align 4
 // CHECK:   store { i8*, i32, i32, i32 }
-// CHECK:     { i8* bitcast (void (%{{.*}}*)* @"\01?foo@Unspecified@@QAEXXZ" to i8*), i32 0, i32 12, i32 0 },
+// CHECK:     { i8* bitcast (void (%{{.*}}*)* @"\01?foo@Unspecified@@QAEXXZ" to i8*), i32 0, i32 0, i32 0 },
 // CHECK:     { i8*, i32, i32, i32 }* %{{.*}}, align 4
 // CHECK:   store { i8*, i32, i32, i32 }
 // CHECK:     { i8* bitcast (void (%{{.*}}*)* @"\01?foo@UnspecWithVBPtr@@QAEXXZ" to i8*),
-// CHECK:       i32 0, i32 4, i32 0 },
+// CHECK:       i32 0, i32 0, i32 0 },
 // CHECK:     { i8*, i32, i32, i32 }* %{{.*}}, align 4
 // CHECK:   ret void
 // CHECK: }
@@ -541,9 +541,13 @@ void (D::*convertCToD(void (C::*mp)()))() {
 //
 //        memptr.convert:                                   ; preds = %entry
 // CHECK:   extractvalue { i8*, i32, i32 } %{{.*}}, 0
-// CHECK:   extractvalue { i8*, i32, i32 } %{{.*}}, 1
-// CHECK:   extractvalue { i8*, i32, i32 } %{{.*}}, 2
-// CHECK:   %[[adj:.*]] = add nsw i32 %{{.*}}, 4
+// CHECK:   %[[nvoff:.*]] = extractvalue { i8*, i32, i32 } %{{.*}}, 1
+// CHECK:   %[[vbidx:.*]] = extractvalue { i8*, i32, i32 } %{{.*}}, 2
+// CHECK:   %[[is_nvbase:.*]] = icmp eq i32 %[[vbidx]], 0
+// CHECK:   %[[nv_disp:.*]] = add nsw i32 %[[nvoff]], 4
+// CHECK:   %[[nv_adj:.*]] = select i1 %[[is_nvbase]], i32 %[[nv_disp]], i32 0
+// CHECK:   %[[dst_adj:.*]] = select i1 %[[is_nvbase]], i32 4, i32 0
+// CHECK:   %[[adj:.*]] = sub nsw i32 %[[nv_adj]], %[[dst_adj]]
 // CHECK:   insertvalue { i8*, i32, i32 } undef, i8* {{.*}}, 0
 // CHECK:   insertvalue { i8*, i32, i32 } {{.*}}, i32 %[[adj]], 1
 // CHECK:   insertvalue { i8*, i32, i32 } {{.*}}, i32 {{.*}}, 2
@@ -712,3 +716,66 @@ int foo(A *a, int A::*mp) {
 }
 #endif
 #endif
+
+namespace pr23878 {
+struct A { virtual void g(); };
+struct B { virtual void f(); };
+struct C : virtual B { void f(); };
+struct D : A, C {};
+
+typedef void (D::*DMemPtrTy)();
+
+// CHECK-LABEL: define void @"\01?get_memptr@pr23878@@YAP8D@1@AEXXZXZ"
+// CHECK: @"\01??_9C@pr23878@@$BA@AE" to i8*), i32 0, i32 4
+DMemPtrTy get_memptr() { return &D::f; }
+}
+
+class C {};
+
+typedef void (C::*f)();
+
+class CA : public C {
+public:
+  void OnHelp(void);
+  int OnHelp(int);
+};
+
+// CHECK-LABEL: foo_fun
+void foo_fun() {
+  // CHECK: store i8* bitcast (void (%class.CA*)* @"\01?OnHelp@CA@@QAEXXZ" to i8*), i8**
+  f func = (f)&CA::OnHelp;
+}
+namespace PR24703 {
+struct S;
+
+void f(int S::*&p) {}
+// CHECK-LABEL: define void @"\01?f@PR24703@@YAXAAPQS@1@H@Z"(
+}
+
+namespace ReferenceToMPTWithIncompleteClass {
+struct S;
+struct J;
+struct K;
+extern K *k;
+
+// CHECK-LABEL: @"\01?f@ReferenceToMPTWithIncompleteClass@@YAIAAPQS@1@H@Z"(
+// CHECK: ret i32 12
+unsigned f(int S::*&p) { return sizeof p; }
+
+// CHECK-LABEL: @"\01?g@ReferenceToMPTWithIncompleteClass@@YA_NAAPQJ@1@H0@Z"(
+bool g(int J::*&p, int J::*&q) { return p == q; }
+
+// CHECK-LABEL: @"\01?h@ReferenceToMPTWithIncompleteClass@@YAHAAPQK@1@H@Z"(
+int h(int K::*&p) { return k->*p; }
+}
+
+namespace PMFInTemplateArgument {
+template <class C, int (C::*M)(int)>
+void JSMethod();
+class A {
+  int printd(int);
+  void printd();
+};
+void A::printd() { JSMethod<A, &A::printd>(); }
+// CHECK-LABEL: @"\01??$JSMethod@VA@PMFInTemplateArgument@@$1?printd@12@AAEHH@Z@PMFInTemplateArgument@@YAXXZ"(
+}
