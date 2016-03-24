@@ -113,6 +113,7 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/StaticAnalyzer/Core \
   lib/StaticAnalyzer/Frontend \
   lib/Tooling \
+  lib/Tooling/Core \
   tools/driver \
   tools/libclang \
   utils/TableGen \
