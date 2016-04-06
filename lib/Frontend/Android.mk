@@ -17,6 +17,7 @@ TBLGEN_TABLES := \
   DiagnosticLexKinds.inc \
   DiagnosticSemaKinds.inc \
   DeclNodes.inc \
+  Options.inc \
   StmtNodes.inc
 
 clang_frontend_SRC_FILES := \
