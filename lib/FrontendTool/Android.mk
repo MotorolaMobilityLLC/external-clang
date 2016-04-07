@@ -15,6 +15,7 @@ TBLGEN_TABLES := \
   DiagnosticFrontendKinds.inc \
   CC1Options.inc \
   CommentCommandList.inc \
+  Options.inc \
   StmtNodes.inc
 
 clang_frontend_tool_SRC_FILES := \
