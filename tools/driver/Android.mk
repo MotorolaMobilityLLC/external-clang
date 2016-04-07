@@ -14,7 +14,8 @@ TBLGEN_TABLES := \
   DiagnosticDriverKinds.inc \
   DiagnosticFrontendKinds.inc \
   CC1Options.inc \
-  CC1AsOptions.inc
+  CC1AsOptions.inc \
+  Options.inc
 
 clang_SRC_FILES := \
   cc1_main.cpp \
