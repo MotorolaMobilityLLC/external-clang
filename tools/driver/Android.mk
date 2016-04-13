@@ -114,4 +114,12 @@ include $(CLANG_HOST_BUILD_MK)
 include $(CLANG_TBLGEN_RULES_MK)
 include $(LLVM_GEN_ATTRIBUTES_MK)
 include $(LLVM_GEN_INTRINSICS_MK)
+
+# Don't build both versions by default (to speed up local builds).
+ifeq (true,$(FORCE_BUILD_LLVM_COMPONENTS))
+LOCAL_MULTILIB := both
+LOCAL_MODULE_STEM_32 := $(LOCAL_MODULE)_32
+LOCAL_MODULE_STEM_64 := $(LOCAL_MODULE)
+endif
+
 include $(BUILD_HOST_EXECUTABLE)
