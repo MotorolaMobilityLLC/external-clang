@@ -159,7 +159,11 @@ def install_built_host_files(build_dir, install_dir, host):
         'bin/clang' + bin_ext,
         'bin/clang++' + bin_ext,
     ]
-    if host != 'windows-x86':
+    if is_windows:
+        built_files.extend([
+            'bin/clang_32' + bin_ext,
+        ])
+    else:
         built_files.extend([
             'bin/FileCheck' + bin_ext,
             'bin/llvm-as' + bin_ext,
