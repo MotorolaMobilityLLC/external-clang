@@ -68,6 +68,7 @@ llvm-tools: \
 ifneq ($(HOST_OS),darwin)
 clang-toolchain: \
     host_cross_clang \
+    host_cross_clang_64 \
     libasan \
     libasan_32 \
     libasan_cxx \
@@ -113,6 +114,7 @@ subdirs := $(addprefix $(LOCAL_PATH)/,$(addsuffix /Android.mk, \
   lib/StaticAnalyzer/Core \
   lib/StaticAnalyzer/Frontend \
   lib/Tooling \
+  lib/Tooling/Core \
   tools/driver \
   tools/libclang \
   utils/TableGen \
