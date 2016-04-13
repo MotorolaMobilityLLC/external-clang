@@ -1,6 +1,9 @@
 Updating RenderScript
 =====================
 
+For the latest version of this doc, please make sure to visit:
+[Android RenderScript Prebuilts Doc](https://android.googlesource.com/platform/external/clang/+/dev/RenderScriptPrebuilts.md)
+
 Updating LLVM Libraries
 -----------------------
 
