@@ -30,6 +30,10 @@ LOCAL_IS_HOST_MODULE := true
 LOCAL_MODULE:= libclang
 LOCAL_MODULE_TAGS := optional
 LOCAL_WHOLE_STATIC_LIBRARIES := $(clang_whole_static_libraries)
+LOCAL_EXPORT_C_INCLUDE_DIRS += \
+  $(LOCAL_PATH)/include \
+  external/llvm/include \
+  external/llvm/device/include
 
 LOCAL_SHARED_LIBRARIES := libLLVM
 
