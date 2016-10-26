@@ -16,30 +16,7 @@ TBLGEN_TABLES :=    \
   DeclNodes.inc \
   StmtNodes.inc \
 
-clang_libclang_SRC_FILES := \
-  ARCMigrate.cpp \
-  BuildSystem.cpp \
-  CIndex.cpp \
-  CIndexCXX.cpp \
-  CIndexCodeCompletion.cpp \
-  CIndexDiagnostic.cpp \
-  CIndexHigh.cpp \
-  CIndexInclusionStack.cpp \
-  CIndexUSRs.cpp \
-  CIndexer.cpp \
-  CXComment.cpp \
-  CXCompilationDatabase.cpp \
-  CXCursor.cpp \
-  CXLoadedDiagnostic.cpp \
-  CXSourceLocation.cpp \
-  CXStoredDiagnostic.cpp \
-  CXString.cpp \
-  CXType.cpp \
-  IndexBody.cpp \
-  IndexDecl.cpp \
-  IndexTypeSourceInfo.cpp \
-  Indexing.cpp \
-  IndexingContext.cpp \
+clang_libclang_SRC_FILES := $(sort $(notdir $(wildcard $(LOCAL_PATH)/*.cpp)))
 
 # For the host
 # =====================================================
