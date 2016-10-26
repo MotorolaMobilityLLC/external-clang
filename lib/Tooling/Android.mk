@@ -12,16 +12,7 @@ TBLGEN_TABLES := \
   DiagnosticFrontendKinds.inc \
   StmtNodes.inc \
 
-clang_tooling_SRC_FILES := \
-  ArgumentsAdjusters.cpp \
-  CommonOptionsParser.cpp \
-  CompilationDatabase.cpp \
-  Core/Replacement.cpp \
-  FileMatchTrie.cpp \
-  JSONCompilationDatabase.cpp \
-  Refactoring.cpp \
-  RefactoringCallbacks.cpp \
-  Tooling.cpp \
+clang_tooling_SRC_FILES := $(sort $(notdir $(wildcard $(LOCAL_PATH)/*.cpp)))
 
 # For the host
 # =====================================================
