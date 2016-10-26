@@ -21,6 +21,7 @@ import logging
 import multiprocessing
 import os
 import pprint
+import subprocess
 import sys
 
 import version
@@ -336,12 +337,14 @@ def install_analyzer_scripts(install_dir):
         with open(analyzer_file_path, 'w') as analyzer_file:
             analyzer_file.write(
                 analyzer_text.format(clang_suffix='', target=target))
+        subprocess.check_call(['chmod', 'a+x', analyzer_file_path])
 
         analyzerpp_file_path = os.path.join(arch_path, 'analyzer++')
         logger().info('Creating %s', analyzerpp_file_path)
         with open(analyzerpp_file_path, 'w') as analyzerpp_file:
             analyzerpp_file.write(
                 analyzer_text.format(clang_suffix='++', target=target))
+        subprocess.check_call(['chmod', 'a+x', analyzerpp_file_path])
 
 
 def install_scan_scripts(install_dir):
