@@ -37,6 +37,7 @@ LOCAL_STATIC_LIBRARIES := \
   libclangSema \
   libclangStaticAnalyzerFrontend \
   libclangStaticAnalyzerCheckers \
+  libclangStaticAnalyzerMPIChecker \
   libclangStaticAnalyzerCore \
   libclangAnalysis \
   libclangEdit \
@@ -79,6 +80,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMInstCombine \
   libLLVMInstrumentation \
   libLLVMCodeGen \
+  libLLVMDebugInfoCodeView \
   libLLVMObject \
   libLLVMLinker \
   libLLVMMC \
@@ -91,13 +93,15 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMCore \
   libLLVMOption \
   libLLVMTarget \
+  libLLVMGlobalISel \
   libLLVMProfileData \
+  libLLVMProfileDataCoverage \
   libLLVMObject \
   libLLVMMCDisassembler \
   libLLVMSupport
 
 LOCAL_LDLIBS += -lm
-LOCAL_LDLIBS_windows := -limagehlp
+LOCAL_LDLIBS_windows := -limagehlp -lversion
 LOCAL_LDLIBS_darwin := -lpthread -ldl
 LOCAL_LDLIBS_linux := -lpthread -ldl
 
