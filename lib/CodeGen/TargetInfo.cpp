@@ -183,7 +183,10 @@ const TargetInfo &ABIInfo::getTarget() const {
   return CGT.getTarget();
 }
 
-bool ABIInfo:: isAndroid() const { return getTarget().getTriple().isAndroid(); }
+bool ABIInfo:: isAndroid() const {
+  return getTarget().getTriple().isAndroid() ||
+         getContext().getLangOpts().RenderScript;
+}
 
 bool ABIInfo::isHomogeneousAggregateBaseType(QualType Ty) const {
   return false;
