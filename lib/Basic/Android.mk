@@ -19,32 +19,7 @@ TBLGEN_TABLES := \
   arm_neon.h \
   arm_neon.inc
 
-clang_basic_SRC_FILES := \
-  Attributes.cpp \
-  Builtins.cpp \
-  CharInfo.cpp \
-  Diagnostic.cpp \
-  DiagnosticIDs.cpp \
-  DiagnosticOptions.cpp \
-  FileManager.cpp \
-  FileSystemStatCache.cpp \
-  IdentifierTable.cpp \
-  LangOptions.cpp \
-  Module.cpp \
-  ObjCRuntime.cpp \
-  OpenMPKinds.cpp \
-  OperatorPrecedence.cpp \
-  SanitizerBlacklist.cpp \
-  Sanitizers.cpp \
-  SourceLocation.cpp \
-  SourceManager.cpp \
-  TargetInfo.cpp \
-  Targets.cpp \
-  TokenKinds.cpp \
-  Version.cpp \
-  VersionTuple.cpp \
-  VirtualFileSystem.cpp \
-  Warnings.cpp
+clang_basic_SRC_FILES := $(sort $(notdir $(wildcard $(LOCAL_PATH)/*.cpp)))
 
 # For the host
 # =====================================================
