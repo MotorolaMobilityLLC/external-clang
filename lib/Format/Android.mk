@@ -18,15 +18,7 @@ TBLGEN_TABLES := \
   DiagnosticSerializationKinds.inc \
   arm_neon.inc
 
-clang_format_SRC_FILES := \
-  BreakableToken.cpp \
-  ContinuationIndenter.cpp \
-  Format.cpp \
-  FormatToken.cpp \
-  TokenAnnotator.cpp \
-  UnwrappedLineFormatter.cpp \
-  UnwrappedLineParser.cpp \
-  WhitespaceManager.cpp
+clang_format_SRC_FILES := $(sort $(notdir $(wildcard $(LOCAL_PATH)/*.cpp)))
 
 # For the host
 # =====================================================
