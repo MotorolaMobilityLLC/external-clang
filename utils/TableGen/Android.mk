@@ -25,7 +25,7 @@ LOCAL_STATIC_LIBRARIES := \
   libLLVMSupport
 
 LOCAL_LDLIBS += -lm
-LOCAL_LDLIBS_windows := -limagehlp -lpsapi
+LOCAL_LDLIBS_windows := -limagehlp -lpsapi -lversion
 LOCAL_LDLIBS_darwin := -lpthread -ldl
 LOCAL_LDLIBS_linux := -lpthread -ldl
 
