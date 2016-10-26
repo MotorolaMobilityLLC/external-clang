@@ -16,9 +16,8 @@ LOCAL_CFLAGS :=	\
 endif
 
 ifeq ($(FORCE_BUILD_LLVM_DEBUG),true)
-LOCAL_CFLAGS := \
-	$(LOCAL_CFLAGS) \
-	-O0 -g
+LOCAL_CFLAGS_linux += -O0 -g
+LOCAL_CFLAGS_darwin += -O0 -g
 endif
 
 # Make sure bionic is first so we can include system headers.
