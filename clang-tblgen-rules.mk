@@ -1,3 +1,24 @@
+###########################################################
+## Commands for running LLVM tblgen to compile a td file
+##########################################################
+define transform-llvm-td-to-out
+$(if $(LOCAL_IS_HOST_MODULE),	\
+	$(call transform-host-td-to-out,$(1)),	\
+	$(call transform-device-td-to-out,$(1)))
+endef
+
+# $(1): an output file
+# $(2): an input .td file
+# $(3): a parameter passed to transform-td-to-out
+# You must call this with $(eval).
+define define-llvm-tblgen-rule
+LOCAL_GENERATED_SOURCES += $(1)
+$(1): TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
+$(1): $(2) $(LLVM_TBLGEN)
+	$$(call transform-llvm-td-to-out,$(3))
+$$(call include-depfile, $(1).d, $(1))
+endef
+
 ###################################4########################
 ## TableGen: Compile .td files to .inc.
 ###########################################################
@@ -190,16 +211,9 @@ $(eval $(call define-clang-tblgen-rule, \
 endif
 
 ifneq ($(filter Options.inc,$(TBLGEN_TABLES)),)
-LOCAL_GENERATED_SOURCES += $(generated_sources)/include/clang/Driver/Options.inc
-# We cannot use define-tblgen-rule in external/llvm/llvm-tblgen-rules.mk
-# as define-tblgen-rule may be not yet. We use transform-td-to-out,
-# which is evaluated at recipe-evaluation-time and is always available.
-$(generated_sources)/include/clang/Driver/Options.inc: TBLGEN_LOCAL_MODULE := $(LOCAL_MODULE)
-$(generated_sources)/include/clang/Driver/Options.inc: $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td $(CLANG_TBLGEN) $(LLVM_TBLGEN)
-	$(call transform-td-to-out,opt-parser-defs)
-$(call include-depfile, \
-    $(generated_sources)/include/clang/Driver/Options.inc.d, \
-    $(generated_sources)/include/clang/Driver/Options.inc)
+$(eval $(call define-llvm-tblgen-rule, \
+    $(generated_sources)/include/clang/Driver/Options.inc, \
+    $(CLANG_ROOT_PATH)/include/clang/Driver/Options.td,opt-parser-defs))
 endif
 
 ifneq ($(filter arm_neon.h,$(TBLGEN_TABLES)),)
