@@ -11,7 +11,7 @@ intermediates := $(call local-generated-sources-dir)
 # (from include/clang/Basic/Makefile)
 LOCAL_GENERATED_SOURCES += $(intermediates)/include/clang/Basic/Version.inc
 $(intermediates)/include/clang/Basic/Version.inc: $(CLANG_ROOT_PATH)/include/clang/Basic/Version.inc.in \
-  $(LLVM_ROOT_PATH)/host/include/llvm/Config/config.h $(CLANG_ROOT_PATH)/clang-version-inc.sh
+  $(CLANG_ROOT_PATH)/clang-version-inc.py $(CLANG_ROOT_PATH)/version.py
 	@echo "Updating Clang version info."
 	@mkdir -p $(dir $@)
-	$(hide) $(CLANG_ROOT_PATH)/clang-version-inc.sh $(LLVM_ROOT_PATH)/host/include/llvm/Config/config.h <$< >$@
+	$(hide) $(CLANG_ROOT_PATH)/clang-version-inc.py $< >$@
