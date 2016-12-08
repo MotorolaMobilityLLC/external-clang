@@ -378,11 +378,10 @@ def install_headers(build_dir, install_dir, host):
 
     install_file(android_path('bionic/libc/include/stdatomic.h'), headers_dst)
 
-    # arm_neon.h gets produced as part of external/clang/lib/Basic/Android.mk.
+    # arm_neon.h gets produced as part of external/clang/Android.bp.
     # We must bundle the resulting file as part of the official Clang headers.
     arm_neon_h = os.path.join(
-        build_dir, 'host', host, 'obj/STATIC_LIBRARIES/'
-        'libclangBasic_intermediates/include/clang/Basic/arm_neon.h')
+        build_dir, 'soong/.intermediates/external/clang/clang-gen-arm-neon/gen/clang/Basic/arm_neon.h')
     install_file(arm_neon_h, headers_dst)
 
     symlink(short_version(),
