@@ -165,9 +165,12 @@ genrule {
     out: ["clang/Basic/Version.inc"],
 }
 
-llvm_cc_library_shared {
+cc_library_shared {
     name: "libclang",
-    defaults: ["clang-defaults"],
+    defaults: [
+        "clang-defaults",
+        "force_build_llvm_components",
+    ],
 
     host_supported: true,
 
