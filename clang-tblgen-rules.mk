@@ -2,9 +2,7 @@
 ## Commands for running LLVM tblgen to compile a td file
 ##########################################################
 define transform-llvm-td-to-out
-$(if $(LOCAL_IS_HOST_MODULE),	\
-	$(call transform-host-td-to-out,$(1)),	\
-	$(call transform-device-td-to-out,$(1)))
+	$(call transform-host-td-to-out,$(1))
 endef
 
 # $(1): an output file
@@ -29,9 +27,7 @@ endif
 ifneq ($(strip $(TBLGEN_TABLES)),)
 
 define transform-clang-td-to-out
-$(if $(LOCAL_IS_HOST_MODULE),	\
-	$(call transform-host-clang-td-to-out,$(1)),	\
-	$(call transform-device-clang-td-to-out,$(1)))
+	$(call transform-host-clang-td-to-out,$(1))
 endef
 
 # $(1): an output file
