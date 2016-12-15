@@ -2,9 +2,10 @@ cc_defaults {
     name: "clang-defaults",
     defaults: [
         "llvm-defaults",
-        "clang-generated-headers",
     ],
     clang: true,
+
+    header_libs: ["clang-headers"],
 
     cflags: [
         "-pedantic",
@@ -29,24 +30,34 @@ cc_defaults {
 
 }
 
-cc_defaults {
-    name: "clang-generated-headers",
-    generated_headers: [
-        "clang-gen-options",
-        "clang-gen-attributes",
-        "clang-gen-checkers",
-        "clang-gen-comment-commands",
-        "clang-gen-comment-html-named-character-references",
-        "clang-gen-html-tags",
-        "clang-gen-comment-nodes",
-        "clang-gen-diagnostics",
-        "clang-gen-declnodes",
-        "clang-gen-statnodes",
-        "clang-gen-arm-neon",
-        "clang-version",
-        "llvm-gen-attributes",
-        "llvm-gen-intrinsics",
-    ],
+clang_generated_headers = [
+    "clang-gen-options",
+    "clang-gen-attributes",
+    "clang-gen-checkers",
+    "clang-gen-comment-commands",
+    "clang-gen-comment-html-named-character-references",
+    "clang-gen-html-tags",
+    "clang-gen-comment-nodes",
+    "clang-gen-diagnostics",
+    "clang-gen-declnodes",
+    "clang-gen-statnodes",
+    "clang-gen-arm-neon",
+    "clang-version",
+    "llvm-gen-attributes",
+    "llvm-gen-intrinsics",
+]
+
+cc_library_headers {
+    name: "clang-headers",
+    host_supported: true,
+    generated_headers: clang_generated_headers,
+    export_include_dirs: ["include"],
+    export_generated_headers: clang_generated_headers,
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
 }
 
 llvm_tblgen {
@@ -196,9 +207,9 @@ cc_library_shared {
         "libclangToolingCore",
     ],
 
-    export_include_dirs: ["include"],
     export_shared_lib_headers: ["libLLVM"],
     shared_libs: ["libLLVM"],
+    export_header_lib_headers: ["clang-headers"],
 
     target: {
         windows: {
