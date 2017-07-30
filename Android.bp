@@ -176,8 +176,8 @@ genrule {
     out: ["clang/Basic/Version.inc"],
 }
 
-cc_library_shared {
-    name: "libclang",
+cc_defaults {
+    name: "libclang-defaults",
     defaults: [
         "clang-defaults",
         "force_build_llvm_components",
@@ -207,8 +207,6 @@ cc_library_shared {
         "libclangToolingCore",
     ],
 
-    export_shared_lib_headers: ["libLLVM"],
-    shared_libs: ["libLLVM"],
     export_header_lib_headers: ["clang-headers"],
 
     target: {
@@ -243,6 +241,20 @@ cc_library_shared {
             enabled: false,
         },
     },
+}
+
+cc_library_shared {
+    name: "libclang",
+    defaults: ["libclang-defaults"],
+    export_shared_lib_headers: ["libLLVM"],
+    shared_libs: ["libLLVM"],
+}
+
+cc_library_shared {
+    name: "libclang_android",
+    defaults: ["libclang-defaults"],
+    export_shared_lib_headers: ["libLLVM_android"],
+    shared_libs: ["libLLVM_android"],
 }
 
 subdirs = [
