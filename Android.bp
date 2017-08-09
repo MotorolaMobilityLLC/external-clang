@@ -11,11 +11,16 @@ cc_defaults {
         "-pedantic",
         "-Wcast-qual",
         "-Wno-long-long",
+        "-Wno-unused-lambda-capture",
     ],
 
     include_dirs: [
         "external/clang/include",
         "external/clang/lib/CodeGen",
+    ],
+
+    tidy_checks: [
+        "-google-runtime-member-string-references",
     ],
 
     target: {
