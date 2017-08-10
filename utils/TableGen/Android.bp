@@ -8,6 +8,9 @@ cc_binary_host {
         "libLLVMSupport",
     ],
 
+    tidy_checks: [
+        "-google-runtime-member-string-references",
+    ],
     host_ldlibs: ["-lm"],
     target: {
         windows: {
