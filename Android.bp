@@ -3,7 +3,6 @@ cc_defaults {
     defaults: [
         "llvm-defaults",
     ],
-    clang: true,
 
     header_libs: ["clang-headers"],
 
