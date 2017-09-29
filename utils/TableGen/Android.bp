@@ -11,25 +11,12 @@ cc_binary_host {
     tidy_checks: [
         "-google-runtime-member-string-references",
     ],
-    host_ldlibs: ["-lm"],
     target: {
         windows: {
             host_ldlibs: [
                 "-limagehlp",
                 "-lpsapi",
                 "-lversion",
-            ],
-        },
-        darwin: {
-            host_ldlibs: [
-                "-lpthread",
-                "-ldl",
-            ],
-        },
-        linux: {
-            host_ldlibs: [
-                "-lpthread",
-                "-ldl",
             ],
         },
     },
