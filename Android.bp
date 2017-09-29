@@ -221,21 +221,8 @@ cc_defaults {
                 "-lversion",
             ],
         },
-        darwin: {
+        not_windows: {
             shared_libs: ["libc++"],
-
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
-        },
-        linux: {
-            shared_libs: ["libc++"],
-
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
         },
     },
 
