@@ -91,19 +91,5 @@ clang_binary_host {
                 "-lversion",
             ],
         },
-        darwin: {
-            host_ldlibs: [
-                "-lm",
-                "-lpthread",
-                "-ldl",
-            ],
-        },
-        linux: {
-            host_ldlibs: [
-                "-lm",
-                "-lpthread",
-                "-ldl",
-            ],
-        },
     },
 }
