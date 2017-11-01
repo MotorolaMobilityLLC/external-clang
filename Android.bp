@@ -10,7 +10,6 @@ cc_defaults {
         "-pedantic",
         "-Wcast-qual",
         "-Wno-long-long",
-        "-Wno-unused-lambda-capture",
     ],
 
     include_dirs: [
@@ -28,6 +27,11 @@ cc_defaults {
             cflags: [
                 // This triggers an assertion on cross Windows builds.
                 "-Wno-error=uninitialized",
+            ],
+        },
+        not_windows: {
+            cflags: [
+                "-Wno-unused-lambda-capture",
             ],
         },
     },
