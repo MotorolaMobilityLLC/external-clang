@@ -37,7 +37,7 @@ func clangForceBuildLlvmComponents(ctx android.LoadHookContext) {
 		}
 		Multilib struct {
 			Lib32 struct {
-				Suffix string
+				Suffix *string
 			}
 		}
 	}
@@ -45,7 +45,7 @@ func clangForceBuildLlvmComponents(ctx android.LoadHookContext) {
 
 	if ctx.AConfig().IsEnvTrue("FORCE_BUILD_LLVM_COMPONENTS") {
 		p.Target.Host.Compile_multilib = proptools.StringPtr("both")
-		p.Multilib.Lib32.Suffix = "_32"
+		p.Multilib.Lib32.Suffix = proptools.StringPtr("_32")
 	}
 
 	ctx.AppendProperties(p)
