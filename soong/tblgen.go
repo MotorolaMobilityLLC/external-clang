@@ -22,6 +22,7 @@ import (
 	"android/soong/genrule"
 
 	"github.com/google/blueprint"
+	"github.com/google/blueprint/proptools"
 )
 
 func init() {
@@ -43,7 +44,7 @@ var (
 )
 
 type tblgenProperties struct {
-	In   string
+	In   *string
 	Outs []string
 }
 
@@ -59,7 +60,7 @@ type tblgen struct {
 var _ genrule.SourceFileGenerator = (*tblgen)(nil)
 
 func (t *tblgen) GenerateAndroidBuildActions(ctx android.ModuleContext) {
-	in := android.PathForModuleSrc(ctx, t.properties.In)
+	in := android.PathForModuleSrc(ctx, proptools.String(t.properties.In))
 
 	includes := []string{
 		"-I " + ctx.ModuleDir(),
