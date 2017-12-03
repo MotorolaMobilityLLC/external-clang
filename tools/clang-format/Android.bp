@@ -2,6 +2,7 @@
 // =====================================================
 clang_binary_host {
     name: "clang-format",
+    enabled: false,
     defaults: ["clang-defaults"],
     srcs: ["ClangFormat.cpp"],
 
