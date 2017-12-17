@@ -37,10 +37,10 @@ var (
 	tblgenRule = pctx.StaticRule("tblgenRule", blueprint.RuleParams{
 		Depfile:     "${out}.d",
 		Deps:        blueprint.DepsGCC,
-		Command:     "${clangTblgen} ${includes} ${generator} -d ${depfile} -o ${out} ${in}",
+		Command:     "${clangTblgen} ${includes} ${genopt} -d ${depfile} -o ${out} ${in}",
 		CommandDeps: []string{"${clangTblgen}"},
 		Description: "Clang TableGen $in => $out",
-	}, "includes", "depfile", "generator")
+	}, "includes", "depfile", "genopt")
 )
 
 type tblgenProperties struct {
@@ -79,8 +79,8 @@ func (t *tblgen) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			Input:  in,
 			Output: out,
 			Args: map[string]string{
-				"includes":  strings.Join(includes, " "),
-				"generator": generator,
+				"includes": strings.Join(includes, " "),
+				"genopt":   generator,
 			},
 		})
 		t.generatedHeaders = append(t.generatedHeaders, out)
