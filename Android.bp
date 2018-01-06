@@ -8,7 +8,7 @@ cc_defaults {
 
     cflags: [
         "-pedantic",
-        "-Wcast-qual",
+        "-Wno-cast-qual",
         "-Wno-long-long",
     ],
 
