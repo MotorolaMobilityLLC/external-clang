@@ -10,8 +10,9 @@ cc_defaults {
         "-pedantic",
         "-Wno-cast-qual",
         "-Wno-long-long",
-        "-Wno-unused-private-field",
+        "-Wno-unreachable-code-loop-increment",
         "-Wno-unused-lambda-capture",
+        "-Wno-unused-private-field",
     ],
 
     include_dirs: [
